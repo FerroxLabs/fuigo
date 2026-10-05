@@ -135,6 +135,13 @@ struct Inner {
     fetches_in_flight: AtomicUsize,
     /// Model-switch signal: a generation counter bumped when the current model id changes.
     model_switch_watch: tokio::sync::watch::Sender<u64>,
+    /// P121 (K6): bumped every time the catalog's model list is replaced (a fetch applied, a config
+    /// reload, a reset to the bundled catalog), so helper clients resolved against the old list are
+    /// rebuilt. Not a model-id change: [`Self::model_switch_watch`] covers that.
+    catalog_reload_watch: tokio::sync::watch::Sender<u64>,
+    /// P132: how many times a session switched its own model. Moves the helper epoch (that session's classifier
+    /// route is rebuilt lazily) without waking the catalog-reload watcher, which rebuilds EVERY session's title client.
+    session_switches: std::sync::atomic::AtomicU64,
     /// Progress of the first real-catalog load, watched by bounded waits.
     catalog_progress: tokio::sync::watch::Sender<CatalogProgress>,
     /// Set once the user explicitly picks a model (`/model`); guards the first-catalog reselect from clobbering that choice.
@@ -281,6 +288,8 @@ impl ModelsManagerBuilder {
                 refresh_in_flight: AtomicBool::new(false),
                 fetches_in_flight: AtomicUsize::new(0),
                 model_switch_watch: tokio::sync::watch::channel(0u64).0,
+                catalog_reload_watch: tokio::sync::watch::channel(0u64).0,
+                session_switches: std::sync::atomic::AtomicU64::new(0),
                 catalog_progress: tokio::sync::watch::channel(CatalogProgress::Pending).0,
                 user_selected_model: AtomicBool::new(false),
             }),
@@ -301,6 +310,37 @@ impl ModelsManager {
 
     pub(crate) fn subscribe_model_switch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.model_switch_watch.subscribe()
+    }
+
+    /// P121 (K6): signal bumped whenever the catalog's model list is replaced.
+    pub(crate) fn subscribe_catalog_reload(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.catalog_reload_watch.subscribe()
+    }
+
+    /// P121 (K6): how many times the catalog's model list has been replaced.
+    pub(crate) fn catalog_reload_generation(&self) -> u64 {
+        *self.inner.catalog_reload_watch.borrow()
+    }
+
+    /// P121 (K6): what a helper client resolved now is resolved against.
+    pub(crate) fn helper_epoch(&self) -> crate::agent::helper_epoch::HelperEpoch {
+        crate::agent::helper_epoch::HelperEpoch {
+            model_switch: self.model_switch_generation(),
+            catalog_reload: self.catalog_reload_generation(),
+            session_switches: self.inner.session_switches.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// P121 (K6): a session switched model. Leader mode leaves the process-wide current model alone
+    /// (`model_switch_watch` does not move), so helper clients resolved lazily from the epoch are told through their
+    /// own counter. It is NOT a catalog reload (P132): the caller rebuilds the switching session's title client
+    /// directly, and the all-sessions rebuild stays with real reloads.
+    pub(crate) fn note_session_model_switch(&self) {
+        self.inner.session_switches.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn note_catalog_reload(&self) {
+        self.inner.catalog_reload_watch.send_modify(|generation| *generation += 1);
     }
 
     /// Cheap snapshot of the current model-switch generation, for the laziness-check poll loop.
@@ -409,6 +449,7 @@ impl ModelsManager {
             }
             cat.models = new_catalog;
         }
+        self.note_catalog_reload();
 
         let preferred_changed = new_preferred != old_preferred && new_preferred.is_some();
         let mut campaign_defaults = std::collections::HashSet::new();
@@ -656,6 +697,26 @@ impl ModelsManager {
         self.inner.cfg.read().prompt_suggest_model_pin.clone()
     }
 
+    /// Publishes a re-resolved config's helper-model fields (P90 F6). A settings refresh
+    /// re-resolves the agent config AFTER the manager received its snapshot, and image
+    /// description reads its helper from here, so the refreshed choice must reach it.
+    pub(crate) fn publish_helper_models(&self, resolved: &config::Config) {
+        let mut cfg = self.inner.cfg.write();
+        cfg.image_description_model = resolved.image_description_model.clone();
+        cfg.explicit_helper_models = resolved.explicit_helper_models.clone();
+    }
+
+    /// The image-description helper slug and how it was chosen, from one config snapshot
+    /// (P90 F6). `None` when the config carries no helper slug.
+    pub(crate) fn image_description_helper(
+        &self,
+    ) -> Option<(String, crate::agent::config::HelperModelChoice)> {
+        let cfg = self.inner.cfg.read();
+        let slug = cfg.image_description_model.clone()?;
+        let choice = cfg.explicit_helper_models.image_description_choice(&slug);
+        Some((slug, choice))
+    }
+
     /// Whether `model_id` resolves in the current catalog, as a config key or a routing slug.
     pub(crate) fn model_in_catalog(&self, model_id: &str) -> bool {
         let cat = self.inner.catalog.read();
@@ -712,6 +773,7 @@ impl ModelsManager {
 
     fn rebuild(&self, cfg: &config::Config, prefetched: Option<IndexMap<String, ModelEntry>>) {
         self.inner.catalog.write().models = resolve_model_catalog(cfg, prefetched);
+        self.note_catalog_reload();
     }
 
     /// Reset to this identity's bundled catalog and reselect a valid default.
@@ -1037,6 +1099,7 @@ impl ModelsManager {
             let generation = cat.generation + 1;
             *cat = CatalogState::default();
             cat.generation = generation;
+            self.note_catalog_reload();
             self.inner
                 .catalog_progress
                 .send_replace(CatalogProgress::Pending);
@@ -1272,6 +1335,7 @@ impl ModelsManager {
             cat.has_fetched_real_catalog = true;
             cat.prefetched = Some(models);
             cat.models = resolve_model_catalog(cfg, cat.prefetched.clone());
+            self.note_catalog_reload();
             cat.etag = new_etag;
             cat.allowlist_excludes_all = allowlist_matches_nothing(cfg, &cat.models);
             // In the lock: the flag and its mirror can't desync vs `clear()`.

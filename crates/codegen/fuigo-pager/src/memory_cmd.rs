@@ -30,6 +30,8 @@ pub enum MemoryCommand {
     },
 }
 
+const WORKSPACE_LABEL: &str = "workspace memory";
+
 struct ClearTarget {
     label: &'static str,
     path: PathBuf,
@@ -38,7 +40,7 @@ struct ClearTarget {
 
 fn workspace_target(storage: &MemoryStorage) -> ClearTarget {
     ClearTarget {
-        label: "workspace memory",
+        label: WORKSPACE_LABEL,
         path: storage.workspace_dir().to_path_buf(),
         clear: |s| s.clear_workspace(),
     }
@@ -49,6 +51,25 @@ fn global_target(storage: &MemoryStorage) -> ClearTarget {
         label: "global MEMORY.md",
         path: storage.global_memory_file(),
         clear: |s| s.clear_global(),
+    }
+}
+
+/// What `fuigo memory clear` says about a legacy memory folder an older version left beside the
+/// workspace folder (P124). Empty when there is none. `clear` never touches that folder; this names it.
+pub fn not_cleared_lines(storage: &MemoryStorage) -> Vec<String> {
+    storage
+        .stranded_legacy_clear_notice()
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// Only for a run that targets workspace memory: the legacy folders are workspace memory of an older version.
+fn print_not_cleared(storage: &MemoryStorage, targets: &[ClearTarget]) {
+    if !targets.iter().any(|t| t.label == WORKSPACE_LABEL) {
+        return;
+    }
+    for line in not_cleared_lines(storage) {
+        fuigo_tty_utils::cli_println!("{line}");
     }
 }
 
@@ -77,23 +98,24 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
     let existing: Vec<_> = targets.iter().filter(|t| t.path.exists()).collect();
 
     if existing.is_empty() {
-        println!("Nothing to clear: no memory files found.");
+        fuigo_tty_utils::cli_println!("Nothing to clear: no memory files found.");
+        print_not_cleared(storage, targets);
         return Ok(());
     }
 
-    println!("The following will be deleted:");
+    fuigo_tty_utils::cli_println!("The following will be deleted:");
     for t in &existing {
-        println!("  {}: {}", t.label, t.path.display());
+        fuigo_tty_utils::cli_println!("  {}: {}", t.label, t.path.display());
     }
 
     if !skip_confirm {
-        print!("\nAre you sure? [y/N] ");
+        fuigo_tty_utils::cli_print!("\nAre you sure? [y/N] ");
         std::io::stdout().flush()?;
 
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if !matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-            println!("Cancelled.");
+            fuigo_tty_utils::cli_println!("Cancelled.");
             return Ok(());
         }
     }
@@ -104,7 +126,7 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
         match (t.clear)(storage) {
             Ok(true) => {
                 cleared = true;
-                println!("  Cleared: {}", t.label);
+                fuigo_tty_utils::cli_println!("  Cleared: {}", t.label);
             }
             Ok(false) => {} // nothing to clear for this scope
             Err(e) => {
@@ -114,18 +136,22 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
     }
 
     if cleared && errors.is_empty() {
-        println!("Memory cleared.");
+        fuigo_tty_utils::cli_println!("Memory cleared.");
+        print_not_cleared(storage, targets);
     } else if cleared {
-        println!("Memory partially cleared. Errors:");
+        fuigo_tty_utils::cli_println!("Memory partially cleared. Errors:");
         for e in &errors {
-            eprintln!("  {e}");
+            fuigo_tty_utils::cli_eprintln!("  {e}");
         }
+        print_not_cleared(storage, targets);
     } else if !errors.is_empty() {
-        eprintln!("Failed to clear memory:");
+        fuigo_tty_utils::cli_eprintln!("Failed to clear memory:");
         for e in &errors {
-            eprintln!("  {e}");
+            fuigo_tty_utils::cli_eprintln!("  {e}");
         }
         return Err(anyhow::anyhow!("clear failed"));
+    } else {
+        print_not_cleared(storage, targets);
     }
 
     Ok(())

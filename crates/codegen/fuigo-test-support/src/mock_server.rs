@@ -290,6 +290,15 @@ impl MockInferenceServer {
         models: Vec<MockModelEntry>,
         required_token: Option<String>,
     ) -> anyhow::Result<Self> {
+        // Not a fixed `127.0.0.1`: paused-clock tests need loopback I/O visible to the next poll (see `loopback`).
+        Self::start_inner_on(crate::loopback::loopback_ip(), models, required_token).await
+    }
+
+    async fn start_inner_on(
+        bind_ip: std::net::IpAddr,
+        models: Vec<MockModelEntry>,
+        required_token: Option<String>,
+    ) -> anyhow::Result<Self> {
         let log = Arc::new(RequestLog::new());
         let models_json: Vec<Value> = models.iter().map(MockModelEntry::to_json).collect();
         let shared_models = Arc::new(std::sync::RwLock::new(models_json));
@@ -318,7 +327,7 @@ impl MockInferenceServer {
             user_tier.clone(),
         );
 
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind(SocketAddr::new(bind_ip, 0))
             .await
             .context("bind mock inference server")?;
         let addr = listener.local_addr().context("local_addr")?;
@@ -476,12 +485,12 @@ impl MockInferenceServer {
         self.overrides.release_completions();
     }
 
-    /// e.g. `http://127.0.0.1:12345/v1`
+    /// e.g. `http://127.0.0.1:12345/v1`, or `http://[::1]:12345/v1` where IPv4 loopback is asynchronous ([`crate::loopback_ip`])
     pub fn url(&self) -> String {
         format!("http://{}/v1", self.addr)
     }
 
-    /// Origin without the `/v1` inference prefix (`http://127.0.0.1:PORT`).
+    /// Origin without the `/v1` inference prefix (`http://127.0.0.1:PORT`, or `http://[::1]:PORT`).
     pub fn origin(&self) -> String {
         format!("http://{}", self.addr)
     }
@@ -1250,6 +1259,70 @@ mod tests {
             InferenceEndpoint::Messages => "messages",
         };
         format!("{}/{suffix}", server.url())
+    }
+
+    /// The shell turn-loop suites' shape: a paused clock, a 10 s connect timeout, a test deadline, one request.
+    /// Where the mock binds a loopback whose I/O lags the zero-timeout poll (WSL2 mirrored `127.0.0.1`), the
+    /// auto-advance fires the connect timeout first and this fails with `deadline has elapsed`.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_paused_clock_request_reaches_the_mock_before_its_timers() {
+        let server = MockInferenceServer::start().await.expect("mock server");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("client");
+        let url = format!("{}/models", server.url());
+        let exchange = async {
+            let response = client.get(&url).send().await?;
+            let status = response.status();
+            response.text().await.map(|body| (status, body))
+        };
+        let (status, body) = tokio::time::timeout(Duration::from_secs(60), exchange)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("GET {url} outlived the 60 s test deadline on the paused clock")
+            })
+            .unwrap_or_else(|e| panic!("GET {url} failed on the paused clock: {e:?}"));
+        assert!(status.is_success(), "GET {url}: {status} {body}");
+        assert!(body.contains("test-model"), "GET {url} body: {body}");
+    }
+
+    /// The fallback path itself, on any host: a `::1` mock serves, and its URLs bracket the address.
+    #[tokio::test]
+    async fn an_ipv6_loopback_mock_serves_bracketed_urls() {
+        let v6 = std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST);
+        let Ok(server) =
+            MockInferenceServer::start_inner_on(v6, vec![MockModelEntry::new("test-model")], None)
+                .await
+        else {
+            // No IPv6 loopback on this host (e.g. a container with IPv6 disabled): the probe never picks it here.
+            assert!(std::net::TcpListener::bind((v6, 0)).is_err());
+            return;
+        };
+        assert_eq!(server.addr.ip(), v6);
+        let port = server.addr.port();
+        assert_eq!(server.url(), format!("http://[::1]:{port}/v1"));
+        assert_eq!(server.origin(), format!("http://[::1]:{port}"));
+        let body = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client")
+            .get(format!("{}/models", server.url()))
+            .send()
+            .await
+            .expect("GET /v1/models over ::1")
+            .text()
+            .await
+            .expect("body");
+        assert!(body.contains("test-model"), "{body}");
+    }
+
+    /// The default path binds whatever `loopback_ip` chose.
+    #[tokio::test]
+    async fn the_mock_binds_the_chosen_loopback() {
+        let server = MockInferenceServer::start().await.expect("mock server");
+        assert_eq!(server.addr.ip(), crate::loopback_ip());
     }
 
     async fn post_chat(server: &MockInferenceServer, content: &str) -> reqwest::Response {

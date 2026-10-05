@@ -11,7 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::agent::{QueueEntryKind, QueuedPrompt};
 use crate::app::prompt_queue::QueueEntryWire;
 use crate::render::line_utils::truncate_str;
-use crate::theme::{Theme, ThemeKind};
+use crate::theme::Theme;
 
 use super::list_pane::ListItem;
 
@@ -481,7 +481,7 @@ pub struct QueuePane {
     list_style: ListPaneStyle,
     /// Theme kind at the last render. Used to detect a theme switch and refresh `list_style`, whose `selection_bg` is captured from the theme.
     /// (Otherwise the focused-row highlight keeps the previous theme's `bg_highlight`, e.g. FuigoNight's dark band leaking into FuigoDay.)
-    last_theme: ThemeKind,
+    last_theme: crate::theme::cache::RenderKey,
     /// Shared visibility/focus state.
     pub overlay: OverlayState,
     /// Previous queue length, used for auto-show detection.
@@ -524,7 +524,7 @@ impl QueuePane {
             entries: Vec::new(),
             list_state,
             list_style: ListPaneStyle::default(),
-            last_theme: Theme::current_kind(),
+            last_theme: crate::theme::cache::render_key(),
             overlay: OverlayState::hidden(),
             prev_len: 0,
             send_now: RowActionButton::default(),
@@ -909,7 +909,7 @@ impl QueuePane {
         // Its `selection_bg` (the focused-row highlight) is captured from the theme's `bg_highlight`
         // Without this it would keep the theme active at construction (default FuigoNight, dark) after the user switches
         // That paints a dark band on a light FuigoDay canvas
-        let current_theme = Theme::current_kind();
+        let current_theme = crate::theme::cache::render_key();
         if current_theme != self.last_theme {
             self.last_theme = current_theme;
             self.list_style = ListPaneStyle::default();
@@ -1126,6 +1126,33 @@ mod tests {
 
     fn local_prompt(id: u64, text: &str) -> QueuedPrompt {
         QueuedPrompt::plain(id, text, QueueEntryKind::Prompt)
+    }
+
+    /// `current_kind()` is a nominal FuigoNight under the terminal-native lock, so the pane must watch the lock too
+    /// or a live /minimal <-> /fullscreen switch keeps the other mode's list style.
+    #[test]
+    fn list_style_refreshes_when_the_terminal_native_lock_toggles() {
+        struct Unlock;
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                crate::theme::cache::set_terminal_native_lock(false);
+            }
+        }
+        let _theme = crate::theme::cache::pin_theme();
+        crate::theme::cache::set_terminal_native_lock(false);
+        let _unlock = Unlock;
+        let mut pane = QueuePane::new();
+        assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+        let area = Rect::new(0, 0, 40, 6);
+        for locked in [true, false] {
+            // A sentinel no theme produces: it survives unless the refresh really replaced the style
+            pane.list_style.selection_bg = ratatui::style::Color::Rgb(1, 2, 3);
+            crate::theme::cache::set_terminal_native_lock(locked);
+            let mut buf = Buffer::empty(area);
+            pane.render(area, &mut buf, false, &LayoutConfig::default(), None, false);
+            assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+            assert_ne!(pane.list_style.selection_bg, ratatui::style::Color::Rgb(1, 2, 3), "lock={locked}: list style not refreshed");
+        }
     }
 
     #[test]
@@ -1952,6 +1979,7 @@ mod tests {
     /// Hovering a row paints the dim hover bg across that row (matching the scrollback tool-call hover), and only that row.
     #[test]
     fn hover_paints_dim_hover_bg_on_hovered_row() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut pane = QueuePane::new();
         let mut local = std::collections::VecDeque::new();
         local.push_back(local_prompt(1, "first"));
@@ -1990,6 +2018,7 @@ mod tests {
     /// It is plain `gray` otherwise.
     #[test]
     fn interject_button_brightens_fg_on_hover() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut pane = QueuePane::new();
         let mut local = std::collections::VecDeque::new();
         local.push_back(local_prompt(1, "first"));

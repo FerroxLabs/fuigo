@@ -595,6 +595,53 @@ impl HistorySearchState {
 }
 
 // ---------------------------------------------------------------------------
+// Test support
+// ---------------------------------------------------------------------------
+
+/// How long a test waits for the matcher thread before declaring it dead.
+/// It bounds a hang and nothing else: a wait returns as soon as the snapshot it names is published, so no passing run depends on this value.
+#[cfg(test)]
+const MATCHER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[cfg(test)]
+impl HistorySearchState {
+    /// Poll until the matcher thread has published a snapshot for which `done` holds.
+    ///
+    /// Matching runs on another thread, so when its answer lands is a scheduling question, not a property under test.
+    /// Tests must wait on the state they are about to assert, never on a fixed number of polls: a wait that expires silently hands the caller the snapshot from before the answer.
+    /// Panics, naming `what`, if the matcher has not got there by [`MATCHER_DEADLINE`].
+    #[track_caller]
+    pub(crate) fn poll_until(&mut self, what: &str, done: impl FnMut(&Self) -> bool) {
+        self.poll_until_within(MATCHER_DEADLINE, what, done);
+    }
+
+    /// [`Self::poll_until`] with an explicit deadline, for the test of the failure path.
+    #[track_caller]
+    fn poll_until_within(
+        &mut self,
+        limit: std::time::Duration,
+        what: &str,
+        mut done: impl FnMut(&Self) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            self.poll();
+            if done(self) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "history matcher never published {what} within {limit:?}: generation {}, {} result(s), selected {:?}",
+                self.last_gen,
+                self.result_count(),
+                self.selected_text(),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -611,27 +658,69 @@ mod tests {
             .collect()
     }
 
-    /// Helper: activate and poll until results arrive.
+    /// Helper: activate a fresh state and wait for the matcher thread to publish the opening list.
+    /// That list is the non-empty entries, capped at `MAX_RESULTS`, most recent last.
     fn activate_and_poll(state: &mut HistorySearchState, history: &[HistoryEntry], saved: &str) {
+        // Fresh states only: on a reused one the matcher may still owe the reset from `deactivate`, and `query_and_poll` would take that generation for its answer.
+        assert!(
+            state.daemon.is_none(),
+            "activate_and_poll is for a state that has never been activated"
+        );
         assert!(state.activate(history, saved));
-        // The daemon runs on another thread; spin-poll briefly.
-        for _ in 0..100 {
-            if state.poll() && state.result_count() > 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        let mut expected: Vec<&str> = history
+            .iter()
+            .map(|e| e.text.as_str())
+            .filter(|t| !t.is_empty())
+            .take(MAX_RESULTS)
+            .collect();
+        expected.reverse();
+        state.poll_until("the opening list", |s| {
+            s.snapshot
+                .items
+                .iter()
+                .map(|r| r.text.as_str())
+                .eq(expected.iter().copied())
+        });
     }
 
-    /// Helper: send a query and poll until results update.
+    /// Helper: send a query and wait for the matcher thread to publish its answer (the next generation).
     fn query_and_poll(state: &mut HistorySearchState, query: &str) {
+        let before = state.last_gen;
         state.update_query(query);
-        for _ in 0..100 {
-            if state.poll() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        state.poll_until("the answer to a query", |s| s.last_gen != before);
+    }
+
+    /// The flake this guards (P78): the helpers above used to give the matcher thread 100 one-millisecond polls and then return silently.
+    /// On a loaded host the thread was not scheduled inside that window, and the caller asserted on the snapshot from before the answer (`result_count() == 0`).
+    /// Here the answer is late on purpose: the query reaches the matcher only after a delay several times the old window, so a wait that gives up early returns the unfiltered list.
+    #[test]
+    fn poll_until_waits_for_an_answer_that_arrives_late() {
+        let mut state = HistorySearchState::new();
+        activate_and_poll(&mut state, &entries(&["match1", "match2", "zzz"]), "");
+        assert_eq!(state.result_count(), 3);
+
+        let tx = state.daemon.as_ref().unwrap().tx.clone();
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            tx.send(Msg::SetQuery("match".into())).unwrap();
+        });
+        let before = state.last_gen;
+        state.poll_until("the late answer", |s| s.last_gen != before);
+        late.join().unwrap();
+        assert_eq!(state.result_count(), 2);
+    }
+
+    /// A matcher that never answers fails the wait with a message naming what was missing; it does not return as if the answer had arrived.
+    #[test]
+    #[should_panic(expected = "history matcher never published an answer that cannot come")]
+    fn poll_until_reports_a_matcher_that_never_answers() {
+        let mut state = HistorySearchState::new();
+        activate_and_poll(&mut state, &entries(&["a"]), "");
+        state.poll_until_within(
+            std::time::Duration::from_millis(50),
+            "an answer that cannot come",
+            |s| s.result_count() == 2,
+        );
     }
 
     /// The leak regression this module's laziness exists for: construction (one state per `PromptWidget`) must not spawn the matcher thread.
@@ -668,15 +757,9 @@ mod tests {
         state.refresh_items(&entries(&["alpha", "beta"]));
         state.update_query("beta");
 
-        let mut delivered = false;
-        for _ in 0..100 {
-            if state.poll() && state.result_count() == 1 && state.selected_text() == Some("beta") {
-                delivered = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert!(delivered);
+        state.poll_until("the refreshed items filtered by the query", |s| {
+            s.result_count() == 1 && s.selected_text() == Some("beta")
+        });
     }
 
     #[test]

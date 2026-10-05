@@ -8,7 +8,9 @@
 //! ```text
 //! cargo test -p fuigo-sandbox --test read_write_trailing_glob_e2e -- --nocapture
 //! ```
-
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg(all(unix, feature = "enforce"))]
 
 use std::fs;

@@ -39,6 +39,116 @@ fn product_analytics_insert_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
 
+/// Mixpanel's API origin: `fuigo_mixpanel` posts `/track` and `/engage` here, directly from the client.
+const MIXPANEL_API_ORIGIN: &str = "https://api.mixpanel.com";
+
+/// Event and profile properties that name *who* is calling (P54). Mixpanel is a third-party
+/// vendor called directly from the client, so these never reach it: the persisted machine id,
+/// team, deployment and organisation ids, the account id (`Login.user_id`,
+/// `ManualAuth.principal`) and any e-mail. The product-events path (`events_url`, which only an
+/// operator or user configures) still receives them.
+const MIXPANEL_WITHHELD_KEYS: [&str; 10] = [
+    "agent_id",
+    "team_id",
+    "deployment_id",
+    "organization_id",
+    "user_id",
+    "principal",
+    "email",
+    "user_email",
+    "device_id",
+    "api_key_id",
+];
+
+/// Mixpanel's `distinct_id` (P54). Mixpanel needs a stable key per user to count users and join a
+/// profile to its events, so the account id (or the machine id it falls back to) is replaced by a
+/// pseudonym scoped to Mixpanel's origin (`IdentityDisclosure::body_key_for`): stable, one-way,
+/// and unrelated to the key any other destination sees. `/track` and `/engage` share the origin,
+/// so a profile and its events still join.
+fn mixpanel_distinct_id(user_id: &str) -> String {
+    fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for(MIXPANEL_API_ORIGIN, user_id)
+}
+
+/// The identity Mixpanel's `distinct_id` is derived from (P54-K): the account id when there is
+/// one, else the machine id. An EMPTY account id counts as none: an external-auth record starts
+/// with `user_id: ""` (`fuigo-shell` `auth/external_auth.rs`), and before P54-K that empty string
+/// was hashed into one valid-looking pseudonym shared by every such user at the same Mixpanel
+/// project, merging them into a single "user". The machine id keeps them apart.
+fn mixpanel_key_source<'a>(user_id: Option<&'a str>, agent_id: &'a str) -> &'a str {
+    user_id.filter(|id| !id.trim().is_empty()).unwrap_or(agent_id)
+}
+
+/// Remove the identity-bearing properties before anything goes to Mixpanel (P54). Decided by the
+/// shared disclosure gate on Mixpanel's origin, which is never FluxRouter-operated.
+fn withhold_identity_from_mixpanel(
+    props: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(MIXPANEL_API_ORIGIN)
+        .is_permitted()
+    {
+        return;
+    }
+    for key in MIXPANEL_WITHHELD_KEYS {
+        props.remove(key);
+    }
+}
+
+/// The `/track` properties for one event (P54: identity withheld, pseudonymous `distinct_id`).
+/// The key source is decided HERE from the client's account id and the machine id
+/// (`mixpanel_key_source`), the same way `mixpanel_profile` decides it, so an event and the
+/// profile can never diverge and the decision is under test through the production path.
+fn mixpanel_track_props(
+    metadata: Metadata,
+    client: &TelemetryClient,
+    agent_id: &str,
+    ctx: &UserContext,
+    time_secs: i64,
+    insert_id: String,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut props: std::collections::HashMap<String, serde_json::Value> =
+        metadata.into_iter().collect();
+    withhold_identity_from_mixpanel(&mut props);
+    let user_id = mixpanel_key_source(client.user_id.as_deref(), agent_id);
+    props.insert("distinct_id".into(), json!(mixpanel_distinct_id(user_id)));
+    props.insert("time".into(), json!(time_secs));
+    props.insert("$insert_id".into(), json!(insert_id));
+    props.insert("app_name".into(), json!("Fuigo Code"));
+    props.insert("user_type".into(), json!("LoggedIn"));
+    props.insert("country".into(), json!(ctx.country));
+    props.insert("language".into(), json!(ctx.language));
+    props.insert("locale".into(), json!("English"));
+    props
+}
+
+/// The `/engage` profile: `(distinct_id, properties)` (P54: identity withheld, pseudonymous id).
+fn mixpanel_profile(
+    client: &TelemetryClient,
+    agent_id: &str,
+) -> (String, std::collections::HashMap<String, serde_json::Value>) {
+    let user_id = mixpanel_key_source(client.user_id.as_deref(), agent_id);
+    let mut props = std::collections::HashMap::new();
+    props.insert("agent_id".into(), json!(agent_id));
+    props.insert("shell_version".into(), json!(client.shell_version));
+    props.insert("app_name".into(), json!("Fuigo Code"));
+    if let Some(ref client_type) = client.client_type {
+        props.insert("client_type".into(), json!(client_type));
+    }
+    if let Some(ref client_version) = client.client_version {
+        props.insert("client_version".into(), json!(client_version));
+    }
+    if let Some(ref deployment_id) = client.deployment_id {
+        props.insert("deployment_id".into(), json!(deployment_id));
+    }
+    if let Some(ref team_id) = client.team_id {
+        props.insert("team_id".into(), json!(team_id));
+    }
+    if let Some(ref subscription_tier) = client.subscription_tier {
+        props.insert("subscription_tier".into(), json!(subscription_tier));
+    }
+    withhold_identity_from_mixpanel(&mut props);
+    (mixpanel_distinct_id(user_id), props)
+}
+
 #[derive(Clone)]
 pub struct TelemetryClient {
     mode: TelemetryMode,
@@ -355,19 +465,14 @@ pub async fn track(event_name: &str, request_id: &str, ctx: &UserContext, mut me
 
     // Mixpanel path
     if let Some(ref mixpanel) = client.mixpanel {
-        let time_secs = chrono::Utc::now().timestamp();
-        let insert_id = product_analytics_insert_id();
-
-        let mut props: std::collections::HashMap<String, serde_json::Value> =
-            metadata.into_iter().collect();
-        props.insert("distinct_id".into(), json!(user_id));
-        props.insert("time".into(), json!(time_secs));
-        props.insert("$insert_id".into(), json!(insert_id));
-        props.insert("app_name".into(), json!("Fuigo Code"));
-        props.insert("user_type".into(), json!("LoggedIn"));
-        props.insert("country".into(), json!(ctx.country));
-        props.insert("language".into(), json!(ctx.language));
-        props.insert("locale".into(), json!("English"));
+        let props = mixpanel_track_props(
+            metadata,
+            &client,
+            &agent_id,
+            ctx,
+            chrono::Utc::now().timestamp(),
+            product_analytics_insert_id(),
+        );
 
         match mixpanel.track(event_name, Some(props)).await {
             Ok(()) => {
@@ -415,27 +520,8 @@ pub fn sync_profile() {
 
     tokio::spawn(async move {
         let agent_id = crate::id::agent_id_async().await;
-        let user_id = client.user_id.as_deref().unwrap_or(&agent_id).to_owned();
-        let mut props = std::collections::HashMap::new();
-        props.insert("agent_id".into(), json!(agent_id));
-        props.insert("shell_version".into(), json!(client.shell_version));
-        props.insert("app_name".into(), json!("Fuigo Code"));
-        if let Some(ref client_type) = client.client_type {
-            props.insert("client_type".into(), json!(client_type));
-        }
-        if let Some(ref client_version) = client.client_version {
-            props.insert("client_version".into(), json!(client_version));
-        }
-        if let Some(ref deployment_id) = client.deployment_id {
-            props.insert("deployment_id".into(), json!(deployment_id));
-        }
-        if let Some(ref team_id) = client.team_id {
-            props.insert("team_id".into(), json!(team_id));
-        }
-        if let Some(ref subscription_tier) = client.subscription_tier {
-            props.insert("subscription_tier".into(), json!(subscription_tier));
-        }
-        let _ = mixpanel.engage(&user_id, props).await;
+        let (distinct_id, props) = mixpanel_profile(&client, &agent_id);
+        let _ = mixpanel.engage(&distinct_id, props).await;
     });
 }
 
@@ -580,6 +666,107 @@ mod tests {
             "client must be live for session metrics"
         );
         assert!(!is_enabled(), "product analytics must stay off");
+    }
+
+    fn identity_client() -> TelemetryClient {
+        TelemetryClient::from_config(
+            TelemetryConfig::default(),
+            TelemetryMode::Enabled,
+            Some("acct-7f3e".into()),
+            Some("team-9c1".into()),
+            Some("deploy-key-should-hash".into()),
+            None,
+            "0.0.0-test".into(),
+            Some("superfuigo_heavy".into()),
+            reqwest::Client::new(),
+        )
+    }
+
+    /// P54 hostile: Mixpanel is a third-party vendor called directly from the client. Neither an
+    /// event nor the profile may carry the account id, the machine id, the team, the deployment or
+    /// an event-level identity field (`principal`, `user_id`); the `distinct_id` is an
+    /// origin-scoped pseudonym, the same for `/track` and `/engage`. The product-events body (the
+    /// operator-configured path) still carries the identity: `tests/manual_auth_emit.rs` pins
+    /// `principal` and `agent_id` arriving there.
+    #[test]
+    fn mixpanel_receives_no_identity_and_a_pseudonymous_distinct_id() {
+        let client = identity_client();
+        let deployment_id = client.deployment_id.clone().expect("deployment id derived");
+        let agent_id = "a9e1c0de-0000-4000-8000-000000000042";
+        let ctx = UserContext {
+            country: "US".into(),
+            language: "en-US".into(),
+            timestamp: "t".into(),
+        };
+        let mut metadata = Metadata::new();
+        metadata.insert("agent_id".into(), json!(agent_id));
+        metadata.insert("team_id".into(), json!("team-9c1"));
+        metadata.insert("deployment_id".into(), json!(deployment_id));
+        metadata.insert("principal".into(), json!("acct-7f3e"));
+        metadata.insert("user_id".into(), json!("acct-7f3e"));
+        metadata.insert("session_id".into(), json!("sess-1"));
+        let track = mixpanel_track_props(metadata, &client, agent_id, &ctx, 1, "ins".into());
+        let (profile_id, profile) = mixpanel_profile(&client, agent_id);
+
+        let distinct = track["distinct_id"].as_str().expect("distinct_id").to_owned();
+        assert_eq!(distinct, profile_id, "a profile must still join its events");
+        assert_eq!(
+            distinct,
+            fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, "acct-7f3e")
+        );
+        let wire = serde_json::to_string(&(&track, &profile_id, &profile)).unwrap();
+        for secret in [agent_id, "acct-7f3e", "team-9c1", deployment_id.as_str()] {
+            assert!(!wire.contains(secret), "Mixpanel received {secret}: {wire}");
+        }
+        for key in MIXPANEL_WITHHELD_KEYS {
+            assert!(!track.contains_key(key) && !profile.contains_key(key), "{key}");
+        }
+        // Non-identity analytics still flow.
+        assert_eq!(track["session_id"], json!("sess-1"));
+        assert_eq!(profile["subscription_tier"], json!("superfuigo_heavy"));
+        assert_eq!(profile["shell_version"], json!("0.0.0-test"));
+        // A user with no account id falls back to the machine id, which is pseudonymised too.
+        let mut anon = identity_client();
+        anon.user_id = None;
+        let (anon_id, _) = mixpanel_profile(&anon, agent_id);
+        assert_ne!(anon_id, agent_id);
+        assert_eq!(
+            anon_id,
+            fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, agent_id)
+        );
+    }
+
+    /// P54-K hostile: an EMPTY account id is not a Mixpanel key. An external-auth record carries
+    /// `user_id: ""` until enrichment fills it; hashing that empty string gave every such user one
+    /// shared, valid-looking `distinct_id`. Both the event and the profile must fall back to the
+    /// machine id (pseudonymised), exactly as for a user with no account id at all, and never emit
+    /// the pseudonym of the empty string.
+    #[test]
+    fn an_empty_account_id_is_not_a_mixpanel_key() {
+        let agent_id = "a9e1c0de-0000-4000-8000-000000000042";
+        let empty_key = fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, "");
+        let machine_key = fuigo_extra_ca::fluxrouter::destination_pseudonym(MIXPANEL_API_ORIGIN, agent_id);
+        assert_ne!(empty_key, machine_key);
+        for empty in ["", "  ", "\t"] {
+            assert_eq!(mixpanel_key_source(Some(empty), agent_id), agent_id, "{empty:?}");
+            let mut client = identity_client();
+            client.user_id = Some(empty.into());
+            let (profile_id, _) = mixpanel_profile(&client, agent_id);
+            assert_eq!(profile_id, machine_key, "profile for user_id {empty:?}");
+            assert_ne!(profile_id, empty_key);
+            let ctx = UserContext {
+                country: "US".into(),
+                language: "en-US".into(),
+                timestamp: "t".into(),
+            };
+            // Through the production event path: the selector runs inside `mixpanel_track_props`.
+            let track = mixpanel_track_props(Metadata::new(), &client, agent_id, &ctx, 1, "ins".into());
+            assert_eq!(track["distinct_id"], json!(machine_key), "event for user_id {empty:?}");
+            assert_eq!(track["distinct_id"], json!(profile_id), "event and profile diverge for {empty:?}");
+        }
+        // A real account id and a missing one are unchanged.
+        assert_eq!(mixpanel_key_source(Some("acct-7f3e"), agent_id), "acct-7f3e");
+        assert_eq!(mixpanel_key_source(None, agent_id), agent_id);
     }
 
     /// Names without a known emitter prefix pass through unchanged.

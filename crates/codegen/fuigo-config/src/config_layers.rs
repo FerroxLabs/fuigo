@@ -34,6 +34,8 @@ pub struct ConfigLayers {
     /// The allowlist holds the `models` and `features` tables, a narrowed `toolset`, and a filtered `shell_environment_policy`.
     /// `toolset` keeps only `[toolset.bash] login_shell_capture` and the `[toolset.web_search]` domain lists.
     /// `shell_environment_policy` keeps only its filter fields (`inherit`, `exclude`, `include_only`, `ignore_default_excludes`).
+    /// `plugins` keeps only `auto_discover`, and only when it is `false`: the overlay can turn implicit plugin discovery off,
+    /// never on (a host embedding Fuigo uses it to keep the machine owner's plugins out of its sessions).
     /// Every other table, plus the shell-env `set` field, is dropped at the choke point.
     /// This is fail-closed: every code-exec, auth, egress, trust, or discovery table is absent from the allowlist and dropped by default.
     /// A newly added dangerous table stays out until it is explicitly allowlisted.
@@ -274,7 +276,13 @@ impl ConfigLayers {
 
 /// `FUIGO_CAMPAIGNS=0` or `[features] campaigns = false` on pre-campaign base.
 pub fn campaigns_application_disabled(base_effective: &toml::Value) -> bool {
-    if crate::env_bool("FUIGO_CAMPAIGNS") == Some(false) {
+    campaigns_application_disabled_for(crate::env_bool("FUIGO_CAMPAIGNS"), base_effective)
+}
+
+/// [`campaigns_application_disabled`] with the parsed `FUIGO_CAMPAIGNS` value passed in, so the
+/// rule is testable without writing the process environment (every campaign test reads it).
+fn campaigns_application_disabled_for(env: Option<bool>, base_effective: &toml::Value) -> bool {
+    if env == Some(false) {
         return true;
     }
     base_effective
@@ -340,27 +348,20 @@ mod tests {
     }
 
     /// `FUIGO_CAMPAIGNS=0` disables campaign application regardless of config.
-    /// `FUIGO_CAMPAIGNS` is process-global, so this test serializes itself with a module-local mutex and save/restores the prior value.
-    /// (This crate has no `serial_test` dev-dep and no other test reads this var, so a local guard is sufficient.)
+    ///
+    /// Through the pure core, not by writing `FUIGO_CAMPAIGNS`: the old version set the variable
+    /// process-wide under a module-local mutex on the claim that no other test reads it, but every
+    /// `effective_config_with_campaigns` test reads it, so `campaigns::tests::effective_config_
+    /// honors_dismiss` saw the kill switch and its managed campaign never applied.
     #[test]
     fn kill_switch_env_var_disables() {
-        static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = ENV_GUARD.lock().unwrap_or_else(|p| p.into_inner());
-        let prior = std::env::var_os("FUIGO_CAMPAIGNS");
         let empty = toml::Value::Table(Default::default());
-
-        // SAFETY: ENV_GUARD serializes this against itself; no other test in the
-        // crate mutates or reads FUIGO_CAMPAIGNS concurrently.
-        unsafe { std::env::set_var("FUIGO_CAMPAIGNS", "0") };
-        assert!(campaigns_application_disabled(&empty));
-
-        unsafe { std::env::remove_var("FUIGO_CAMPAIGNS") };
-        assert!(!campaigns_application_disabled(&empty));
-
-        match prior {
-            Some(v) => unsafe { std::env::set_var("FUIGO_CAMPAIGNS", v) },
-            None => unsafe { std::env::remove_var("FUIGO_CAMPAIGNS") },
-        }
+        assert!(campaigns_application_disabled_for(Some(false), &empty));
+        assert!(!campaigns_application_disabled_for(None, &empty));
+        assert!(!campaigns_application_disabled_for(Some(true), &empty));
+        let feature_off: toml::Value = toml::from_str("[features]\ncampaigns = false\n").unwrap();
+        assert!(campaigns_application_disabled_for(None, &feature_off));
+        assert!(campaigns_application_disabled_for(Some(true), &feature_off));
     }
 
     #[test]

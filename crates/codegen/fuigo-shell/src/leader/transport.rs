@@ -27,6 +27,60 @@ pub fn listener_is_ready(path: &std::path::Path) -> bool {
 #[cfg(windows)]
 pub(super) use windows_impl::{LeaderListener, LeaderStream};
 
+/// A listening pipe instance that waits for one client: `NamedPipeServer` on Windows, a fake in the tests.
+#[cfg(any(windows, test))]
+pub(crate) trait PendingInstance {
+    /// Wait for a client. Must be cancellation safe: dropping the future loses no connection (tokio documents this
+    /// for `NamedPipeServer::connect`; a client that connected meanwhile is reported by the next call).
+    fn wait_for_client(&self) -> impl std::future::Future<Output = std::io::Result<()>> + '_;
+}
+
+/// Accept one client on the instance held in `slot`, cancellation safe (P145).
+///
+/// The leader polls `accept()` inside a `select!` with its event channels, so the accept future is dropped whenever an
+/// event (a client registering or leaving) wins the race. The old Windows accept TOOK the pending instance out of the
+/// slot before awaiting it: a drop destroyed that listening instance, so a client that had just opened it saw its pipe
+/// close before it could register ("Protocol error: Connection closed"). This is what made `fuigo leader info` fail on
+/// Windows right after the discovery connection it makes first had disconnected. The instance now stays in the slot
+/// until a client is connected; only then is it taken and its successor created.
+#[cfg(any(windows, test))]
+pub(crate) async fn accept_from_slot<S: PendingInstance>(
+    slot: &mut Option<S>,
+    create: impl Fn() -> std::io::Result<S>,
+    max_attempts: usize,
+    backoff: std::time::Duration,
+) -> std::io::Result<S> {
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0..max_attempts {
+        if slot.is_none() {
+            *slot = Some(create()?);
+        }
+        let result = match slot.as_ref() {
+            Some(instance) => instance.wait_for_client().await,
+            None => continue,
+        };
+        match result {
+            Ok(()) => {
+                let connected = slot.take().ok_or_else(|| std::io::Error::other("pending instance vanished"))?;
+                // Best effort: if creating the successor fails here, the next accept creates it.
+                *slot = create().ok();
+                return Ok(connected);
+            }
+            Err(e) => {
+                // A failed instance is dropped and replaced on the next attempt.
+                tracing::debug!(attempt, error = %e, "named-pipe accept connect failed; retrying");
+                *slot = None;
+                last_err = Some(e);
+                tokio::time::sleep(backoff).await;
+            }
+        }
+    }
+    if slot.is_none() {
+        *slot = create().ok();
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("LeaderListener: accept exhausted retries")))
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::io;
@@ -36,7 +90,6 @@ mod windows_impl {
     use std::time::Duration;
 
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use tracing::debug;
 
     /// Bidirectional IPC stream wrapping a connected named pipe (server- or client-side, depending on how it was created).
     pub(crate) struct LeaderStream {
@@ -134,47 +187,34 @@ mod windows_impl {
 
         /// Wait for the next incoming connection.
         /// Mirrors `UnixListener::accept`, returning a connected stream and a unit placeholder for the peer address (named pipes don't carry one).
+        /// Cancellation safe (P145): see [`super::accept_from_slot`].
         pub(crate) async fn accept(&self) -> io::Result<(LeaderStream, ())> {
             use tokio::net::windows::named_pipe::ServerOptions;
 
-            // Take the pending instance (or create one), await a client, then pre-create the next
-            // On connect() error, drop the instance and retry with a fresh one; returning early would leave the slot empty and the listener unusable
             // Bounded with a backoff so a persistently failing connect() can't busy-spin
             const MAX_ACCEPT_ATTEMPTS: usize = 10;
             const RETRY_BACKOFF: Duration = Duration::from_millis(20);
 
             let mut slot = self.next_server.lock().await;
-            let mut last_err: Option<io::Error> = None;
-            for attempt in 0..MAX_ACCEPT_ATTEMPTS {
-                let server = match slot.take() {
-                    Some(server) => server,
-                    None => ServerOptions::new().create(&self.pipe_name)?,
-                };
-                match server.connect().await {
-                    Ok(()) => {
-                        *slot = Some(ServerOptions::new().create(&self.pipe_name)?);
-                        return Ok((
-                            LeaderStream {
-                                inner: StreamInner::Server(server),
-                            },
-                            (),
-                        ));
-                    }
-                    Err(e) => {
-                        // Failed `server` drops here, freeing the instance.
-                        debug!(attempt, error = %e, "named-pipe accept connect failed; retrying");
-                        last_err = Some(e);
-                        tokio::time::sleep(RETRY_BACKOFF).await;
-                    }
-                }
-            }
+            let server = super::accept_from_slot(
+                &mut slot,
+                || ServerOptions::new().create(&self.pipe_name),
+                MAX_ACCEPT_ATTEMPTS,
+                RETRY_BACKOFF,
+            )
+            .await?;
+            Ok((
+                LeaderStream {
+                    inner: StreamInner::Server(server),
+                },
+                (),
+            ))
+        }
+    }
 
-            // Best-effort refill of the slot; take-or-create above still recovers if this fails
-            if let Ok(fresh) = ServerOptions::new().create(&self.pipe_name) {
-                *slot = Some(fresh);
-            }
-            Err(last_err
-                .unwrap_or_else(|| io::Error::other("LeaderListener: accept exhausted retries")))
+    impl super::PendingInstance for tokio::net::windows::named_pipe::NamedPipeServer {
+        fn wait_for_client(&self) -> impl std::future::Future<Output = io::Result<()>> + '_ {
+            self.connect()
         }
     }
 
@@ -280,5 +320,87 @@ mod windows_impl {
             drop(listener);
             assert!(!listener_is_ready(&path));
         }
+    }
+}
+
+/// P145: the cancellation-safety rule of the Windows accept, exercised with a fake instance on every platform.
+#[cfg(test)]
+mod accept_slot_tests {
+    use super::{PendingInstance, accept_from_slot};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A fake listening instance: `wait_for_client` completes once `connected` is set.
+    struct Fake {
+        id: usize,
+        connected: Arc<tokio::sync::Notify>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl PendingInstance for Fake {
+        async fn wait_for_client(&self) -> std::io::Result<()> {
+            while !self.ready.load(Ordering::SeqCst) {
+                self.connected.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    /// An accept that is dropped mid-wait (another select! branch won) must leave the SAME instance pending, so the
+    /// client that connects to it is served by the next accept instead of having its pipe destroyed.
+    #[tokio::test]
+    async fn p145_a_cancelled_accept_keeps_the_pending_instance() {
+        let created = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let create = {
+            let (created, notify, ready) = (created.clone(), notify.clone(), ready.clone());
+            move || {
+                let id = created.fetch_add(1, Ordering::SeqCst);
+                Ok(Fake { id, connected: notify.clone(), ready: ready.clone() })
+            }
+        };
+        let mut slot = Some(create().unwrap());
+        // Cancelled: the timeout wins, as an event branch would in the leader's select!.
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(20), accept_from_slot(&mut slot, &create, 3, Duration::ZERO)).await;
+        assert!(cancelled.is_err(), "nobody connected yet");
+        assert_eq!(slot.as_ref().map(|f| f.id), Some(0), "the pending instance survived the cancellation");
+        assert_eq!(created.load(Ordering::SeqCst), 1, "no instance was destroyed and recreated");
+
+        // The client connects to that instance; the next accept returns it and pre-creates the successor.
+        ready.store(true, Ordering::SeqCst);
+        notify.notify_waiters();
+        let got = accept_from_slot(&mut slot, &create, 3, Duration::ZERO).await.unwrap();
+        assert_eq!(got.id, 0, "the client is served on the instance it connected to");
+        assert_eq!(slot.as_ref().map(|f| f.id), Some(1), "successor pending");
+    }
+
+    /// A failing instance is replaced, and the attempts are bounded.
+    #[tokio::test]
+    async fn p145_failed_instances_are_replaced_and_bounded() {
+        struct Broken;
+        impl PendingInstance for Broken {
+            async fn wait_for_client(&self) -> std::io::Result<()> {
+                Err(std::io::Error::other("broken"))
+            }
+        }
+        let created = AtomicUsize::new(0);
+        let mut slot: Option<Broken> = None;
+        let err = accept_from_slot(
+            &mut slot,
+            || {
+                created.fetch_add(1, Ordering::SeqCst);
+                Ok(Broken)
+            },
+            3,
+            Duration::ZERO,
+        )
+        .await
+        .err()
+        .expect("all attempts fail");
+        assert_eq!(err.to_string(), "broken");
+        assert_eq!(created.load(Ordering::SeqCst), 4, "one per attempt plus the refill");
+        assert!(slot.is_some(), "the slot is refilled for the next accept");
     }
 }

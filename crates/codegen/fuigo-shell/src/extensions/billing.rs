@@ -198,6 +198,8 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
 
     // Fetch the credits balance and usage (new billing system) via the CLI proxy, which forwards to the backend `GetFuigoCreditsConfig`
     let credits_url = format!("{}/billing?format=credits", base);
+    crate::auth::session_delivery::service_session_gate(&auth, &credits_url, Some(base), "billing")
+        .map_err(|refused| crate::acp_error::internal_error(refused.to_string()))?;
     let credits_resp = crate::http::shared_client()
         .get(&credits_url)
         .header("Authorization", format!("Bearer {}", &auth.key))
@@ -205,8 +207,13 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
             "X-XAI-Token-Auth",
             crate::auth::FuigoComConfig::default().token_header,
         )
-        .header("x-userid", &auth.user_id)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity only to a FluxRouter-operated destination.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&credits_url).header_map([
+                ("x-userid", auth.user_id.as_str()),
+                ("x-fuigo-client-version", fuigo_version::VERSION),
+            ]),
+        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -290,6 +297,8 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
 
     // Fetch the auto top-up rule via the CLI proxy, which forwards to the backend `GetAutoTopupRule`
     let url = format!("{}/auto-topup-rule", base);
+    crate::auth::session_delivery::service_session_gate(&auth, &url, Some(base), "auto_topup")
+        .map_err(|refused| crate::acp_error::internal_error(refused.to_string()))?;
     let response = crate::http::shared_client()
         .get(&url)
         .header("Authorization", format!("Bearer {}", &auth.key))
@@ -297,8 +306,13 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
             "X-XAI-Token-Auth",
             crate::auth::FuigoComConfig::default().token_header,
         )
-        .header("x-userid", &auth.user_id)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity only to a FluxRouter-operated destination.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&url).header_map([
+                ("x-userid", auth.user_id.as_str()),
+                ("x-fuigo-client-version", fuigo_version::VERSION),
+            ]),
+        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),

@@ -251,6 +251,7 @@ pub(crate) async fn apply(
             model.map(|e| &e.info),
         )
     };
+    let summary_primary = model_sampling.clone();
     let (tx, rx) = oneshot::channel();
     let _ = handle.cmd_tx.send(SessionCommand::SetSessionModel {
         sampling_config: model_sampling,
@@ -270,6 +271,9 @@ pub(crate) async fn apply(
         handle.agent_name =
             agent_name_after_model_switch(did_rebuild, &required_agent_type, &handle.agent_name);
     });
+    // P121 (K6): the title client follows the model the session now runs on.
+    agent.models_manager.note_session_model_switch();
+    agent.send_summary_helper(&handle, &summary_primary);
     notify_model_changed(
         agent,
         &session_id,

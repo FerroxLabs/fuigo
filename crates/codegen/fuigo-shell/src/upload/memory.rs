@@ -105,6 +105,24 @@ async fn await_memory_archive(build: &mut MemoryArchiveBuild) -> MemoryArchiveRe
     }
 }
 
+/// Why this turn must not build or upload `memory.tar.gz`, if it must not.
+///
+/// A session with memory off (`--no-memory`, `memory.enabled = false`) has no memory of its own: the
+/// archive is built from `~/.fuigo/memory` regardless of the session, so without the second clause a
+/// `--no-memory` agent would still tar the user's memory files and send them upstream.
+pub(crate) fn memory_upload_skip_reason(
+    session_registry_enabled: bool,
+    memory_enabled: bool,
+) -> Option<&'static str> {
+    if !session_registry_enabled {
+        Some("session_registry_disabled")
+    } else if !memory_enabled {
+        Some("memory_disabled")
+    } else {
+        None
+    }
+}
+
 /// Upload memory .md files as `memory.tar.gz` alongside the per-turn trace.
 /// Only runs when session registry is enabled via remote settings or config.toml.
 ///
@@ -112,13 +130,10 @@ async fn await_memory_archive(build: &mut MemoryArchiveBuild) -> MemoryArchiveRe
 /// (the `UploadWait` contract): past it the turn records a miss while the
 /// build finishes detached and uploads best-effort.
 pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWait) {
-    if !ctx.session_registry_enabled {
-        tracing::debug!("memory upload skipped: session_registry_enabled=false");
-        super::manifest::skip_artifact(
-            &ctx.artifact_tracker,
-            "memory.tar.gz",
-            "session_registry_disabled",
-        );
+    if let Some(reason) = memory_upload_skip_reason(ctx.session_registry_enabled, ctx.memory_enabled)
+    {
+        tracing::debug!(reason, "memory upload skipped");
+        super::manifest::skip_artifact(&ctx.artifact_tracker, "memory.tar.gz", reason);
         return;
     }
     let mut build =
@@ -190,7 +205,7 @@ pub(crate) async fn upload_memory_state(ctx: &PromptTraceContext, wait: UploadWa
 /// same [`UploadWait`] contract as the sibling turn artifacts: durable queue
 /// accept (or a deadline-bounded direct attempt) on `Defer`, an awaited
 /// direct upload on `Confirm`.
-async fn upload_built_memory_archive(
+pub(crate) async fn upload_built_memory_archive(
     ctx: &PromptTraceContext,
     result: MemoryArchiveResult,
     wait: UploadWait,
@@ -209,6 +224,16 @@ async fn upload_built_memory_archive(
         super::manifest::skip_artifact(&ctx.artifact_tracker, "memory.tar.gz", "empty_archive");
         return;
     }
+    // P149 (S14/K16): the memory files leave the machine scrubbed like every other trace artifact. An archive the
+    // scrub cannot read is not uploaded at all.
+    let archive = match super::feedback_archive::scrub_upload_tar_gz(&archive) {
+        Ok(archive) => archive,
+        Err(e) => {
+            tracing::warn!(error = %e, "memory archive: could not scrub it for upload; not uploading it");
+            super::manifest::skip_artifact(&ctx.artifact_tracker, "memory.tar.gz", "scrub_failed");
+            return;
+        }
+    };
     let prefix = ctx.gcs_config.gcs_prefix.as_deref().unwrap_or("");
     let gcs_path = format!("{prefix}/memory.tar.gz");
     upload_small_artifact(

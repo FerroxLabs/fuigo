@@ -106,11 +106,50 @@ pub struct DownloadSessionQuery {
     pub turn: Option<i32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadSessionResponse {
     pub download_url: String,
     pub expires_in_seconds: u64,
     pub file: String,
     pub turn: i32,
+}
+
+/// Hand-written `Debug` (P70a): a pre-signed download URL is a bearer capability, so it prints as `<redacted>`.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for DownloadSessionResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            download_url: _,
+            expires_in_seconds,
+            file,
+            turn,
+        } = self;
+        f.debug_struct("DownloadSessionResponse")
+            .field("download_url", &"<redacted>")
+            .field("expires_in_seconds", expires_in_seconds)
+            .field("file", file)
+            .field("turn", turn)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod p70a_redacted_debug {
+    use super::*;
+
+    /// P70a (Astra r1): a pre-signed download URL never reaches a `{:?}`.
+    #[test]
+    fn download_session_response_debug_redacts_the_download_url() {
+        let response = DownloadSessionResponse {
+            download_url: "https://storage.p70.invalid/o?X-Goog-Signature=p70ds-FAKE-3e4f5a6b".into(),
+            expires_in_seconds: 60,
+            file: "p70.jsonl".into(),
+            turn: 1,
+        };
+        for out in [format!("{response:?}"), format!("{response:#?}")] {
+            assert!(out.contains("<redacted>") && out.contains("p70.jsonl"), "control: {out}");
+            assert!(!out.contains("p70ds-FAKE") && !out.contains("storage.p70.invalid"), "Debug holds the URL: {out}");
+        }
+    }
 }

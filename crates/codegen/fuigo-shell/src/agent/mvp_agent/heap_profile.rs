@@ -55,8 +55,7 @@ impl MvpAgent {
             return;
         }
         self.reconfigure_heap_profile_monitor();
-        let agent_ref = LocalRef::new(self);
-        tokio::task::spawn_local(async move {
+        self.spawn_bound(|agent_ref| Box::pin(async move {
             let mut last_kill_switch = tokio::time::Instant::now();
             loop {
                 let poll_interval = {
@@ -112,7 +111,7 @@ impl MvpAgent {
                     tracing::error!("heap_profile: poll tick panicked; continuing");
                 }
             }
-        });
+        }));
     }
 
     async fn heap_profile_poll_tick_once(&self) {

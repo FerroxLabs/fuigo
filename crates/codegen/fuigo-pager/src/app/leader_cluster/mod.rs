@@ -405,7 +405,8 @@ impl PagerLeaderCluster {
                 name,
                 ClientMode::Stdio,
                 LeaderClientCapabilities {
-                    client_version: Some("0.0.0-test".to_string()),
+                    // The release a real pager sends: since P151 the leader warns any other release (F17).
+                    client_version: Some(fuigo_version::VERSION.to_string()),
                     user_message_echo: true,
                     ..Default::default()
                 },
@@ -426,7 +427,8 @@ impl PagerLeaderCluster {
                     fuigo_ws_origin: String::new(),
                 },
                 LeaderClientCapabilities {
-                    client_version: Some("0.0.0-test".to_string()),
+                    // The release a real pager sends: since P151 the leader warns any other release (F17).
+                    client_version: Some(fuigo_version::VERSION.to_string()),
                     user_message_echo: true,
                     ..Default::default()
                 },

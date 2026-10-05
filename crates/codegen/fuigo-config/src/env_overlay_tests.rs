@@ -194,6 +194,18 @@ fn overlay_still_sets_soft_settings() {
     assert_eq!(overlay, expected);
 }
 
+/// P115: an embedding host turns implicit plugin discovery off through the real `FUIGO_CONFIG` path; a `true`, and the
+/// discovery-adding `paths` / `enabled`, never get through.
+#[test]
+fn overlay_can_turn_plugin_discovery_off_only() {
+    let off = r#"{"plugins": {"auto_discover": false, "paths": ["/tmp/evil"], "enabled": ["evil"]}}"#;
+    let overlay = resolve_overlay(Some(off), None).unwrap();
+    let expected: toml::Value = toml::from_str("[plugins]\nauto_discover = false\n").unwrap();
+    assert_eq!(overlay, expected);
+    let on = r#"{"plugins": {"auto_discover": true}}"#;
+    assert!(resolve_overlay(Some(on), None).is_none(), "an overlay must not turn discovery back on");
+}
+
 #[test]
 fn malformed_overlay_parse_errors_do_not_carry_the_value() {
     let secret = "sk-secret-token";
@@ -210,4 +222,39 @@ fn malformed_overlay_parse_errors_do_not_carry_the_value() {
 
     let bad_json = format!("{{\"models\": \"{secret}\",}}");
     assert!(parse_overlay(&bad_json, OverlayFormat::Json, FUIGO_CONFIG_ENV).is_none());
+}
+
+/// P118 round 3 (N6): a file named by `FUIGO_CONFIG_PATH` that is not an allowlisted user-level file may not name the
+/// saved key (an exported key would otherwise be expanded into a global model header, and an unexported one left as a
+/// reference for a late binder).
+#[test]
+fn an_untrusted_overlay_file_cannot_name_the_saved_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overlay.toml");
+    std::fs::write(&path, "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\nX-Other = \"plain\"\n").unwrap();
+    let overlay = resolve_overlay(None, Some(&path)).expect("overlay resolves");
+    let headers = &overlay["models"]["extra_headers"];
+    assert_eq!(headers["X-Key"].as_str(), Some("Bearer "), "{overlay:?}");
+    assert_eq!(headers["X-Other"].as_str(), Some("plain"));
+}
+
+/// P136 (Astra r3 #4): a shared `FUIGO_CONFIG_PATH` file (here `/opt/shared/.fuigo/config.toml`-shaped, which the old path
+/// heuristic took for another project's file) is refused in every session that loads it, and each is told.
+#[test]
+fn a_shared_overlay_file_refusal_reaches_every_session_that_loads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared = dir.path().join("opt").join("shared").join(".fuigo");
+    std::fs::create_dir_all(&shared).unwrap();
+    let path = shared.join("config.toml");
+    std::fs::write(&path, "[models.extra_headers]\nX-Key = \"Bearer ${FUIGO_API_KEY}\"\n").unwrap();
+    let label = path.display().to_string();
+    let sessions = [crate::key_naming::NoticeScope::new(), crate::key_naming::NoticeScope::new()];
+    for session in sessions {
+        let overlay = session.run(|| resolve_overlay(None, Some(&path))).expect("overlay resolves");
+        assert_eq!(overlay["models"]["extra_headers"]["X-Key"].as_str(), Some("Bearer "));
+    }
+    for session in sessions {
+        let notes = session.notes();
+        assert!(notes.iter().any(|n| n.starts_with(&label) && n.contains("FUIGO_API_KEY")), "{notes:?}");
+    }
 }

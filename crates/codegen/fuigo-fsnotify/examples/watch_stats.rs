@@ -18,6 +18,9 @@
 //! - `large`: a wide multi-language monorepo — 44 top-level dirs, ~52k
 //!   non-ignored dirs, ~7k nested-ignored, a large top-level `target/`, and
 //!   a `.git` with 13k+ internal dirs (objects/modules/logs/refs-remotes).
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -291,6 +291,9 @@ pub enum SkillsError {
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+    /// P47: the destination may not receive the session token, so the request was not made.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for SkillsError {
@@ -310,13 +313,14 @@ impl SkillsError {
             SkillsError::NoAuth
             | SkillsError::NotConfigured
             | SkillsError::Parse(_)
-            | SkillsError::Policy(_) => false,
+            | SkillsError::Policy(_)
+            | SkillsError::SessionDestinationRefused(_) => false,
         }
     }
 }
 
 /// One credential to try for product Skills REST.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct SkillsAuthCandidate {
     key: String,
     user_id: String,
@@ -324,6 +328,25 @@ struct SkillsAuthCandidate {
     /// Untagged same-user alt used when primary is tenant-tagged (OIDC 403 recovery).
     /// The catalog is still cached on success under the **primary** team/org identity so the same team session can hit the TTL.
     untagged_recovery: bool,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SkillsAuthCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            key: _,
+            user_id,
+            email,
+            untagged_recovery,
+        } = self;
+        f.debug_struct("SkillsAuthCandidate")
+            .field("key", &"<redacted>")
+            .field("user_id", user_id)
+            .field("email", email)
+            .field("untagged_recovery", untagged_recovery)
+            .finish()
+    }
 }
 
 fn primary_is_tenant_tagged(auth: &crate::auth::FuigoAuth) -> bool {
@@ -417,34 +440,38 @@ impl SkillsClient {
         self.base_url.as_deref().ok_or(SkillsError::NotConfigured)
     }
 
+    /// P47: every key this client sends (the primary and the `auth.json` alternates) is treated as a session token:
+    /// `url` must be admitted by the service-endpoint trust class with the configured catalog base, or the request
+    /// is not made.
     fn apply_auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
+        url: &str,
         key: &str,
         user_id: &str,
         email: Option<&str>,
-    ) -> reqwest::RequestBuilder {
-        let mut builder = builder
+    ) -> Result<reqwest::RequestBuilder, SkillsError> {
+        crate::auth::session_delivery::service_session_url_gate(
+            url,
+            self.base_url.as_deref(),
+            "skills",
+        )
+        .map_err(|refused| SkillsError::SessionDestinationRefused(refused.to_string()))?;
+        // P43: identity only to a FluxRouter-operated destination.
+        let identity = super::account_identity_headers(self.base_url.as_deref().unwrap_or_default(), user_id, email);
+        let builder = builder
             .header("Authorization", format!("Bearer {key}"))
             .header(
                 "X-XAI-Token-Auth",
                 self.auth.fuigo_com_config().token_header.clone(),
             )
-            .header("x-userid", user_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
+            .headers(identity)
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
             )
             .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(email) = email {
-            builder = builder.header("x-email", email);
-        }
-        fuigo_file_utils::trace_context::inject_trace_context_into_request(builder)
+        Ok(fuigo_file_utils::trace_context::inject_trace_context_into_request(builder))
     }
 
     /// Fuigo.com product Skills require first-party session auth (the same gate as managed MCP and sibling grok.com clients), not plain BYOK API keys.
@@ -523,7 +550,7 @@ impl SkillsClient {
         let url = format!("{}/rest/skills", self.base()?);
         let body = serde_json::json!({ "locale": locale });
         let builder = self
-            .apply_auth_headers(self.http.post(&url).json(&body), key, user_id, email)
+            .apply_auth_headers(self.http.post(&url).json(&body), &url, key, user_id, email)?
             .timeout(LIST_REQUEST_TIMEOUT);
         let response = builder.send_checked().await?;
         let status = response.status();
@@ -544,7 +571,7 @@ impl SkillsClient {
     ) -> Result<ListUserSkillsResponse, SkillsError> {
         let url = format!("{}/rest/user-skills", self.base()?);
         let builder = self
-            .apply_auth_headers(self.http.get(&url), key, user_id, email)
+            .apply_auth_headers(self.http.get(&url), &url, key, user_id, email)?
             .timeout(LIST_REQUEST_TIMEOUT);
         let response = builder.send_checked().await?;
         let status = response.status();
@@ -747,6 +774,24 @@ impl SkillsClient {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// P43 hostile: a skills catalog host that is not FluxRouter-operated gets no identity.
+    #[tokio::test(flavor = "current_thread")]
+    async fn skills_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::skills_client::tests::skills_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock(r#"{"skills":[]}"#).await;
+            let base = front.front_service(&base);
+        let client = SkillsClient::with_base_url(test_auth_manager(), base);
+        let _ = client.try_list_catalog("en").await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "skills");
+    }
     use super::*;
 
     #[test]
@@ -928,8 +973,14 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn empty_rest_200_is_authoritative() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::skills_client::tests::empty_rest_200_is_authoritative",
+        ) else {
+            return;
+        };
         let (base, handle) =
             spawn_skills_mock(200, r#"{"skills":[]}"#, 200, r#"{"skills":[]}"#).await;
+            let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let (catalog, recovery) = client.try_list_catalog("en").await.expect("ok empty");
         assert!(catalog.bundled.is_empty());
@@ -941,8 +992,14 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rest_error_after_retries_is_err_not_fallback_names() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::skills_client::tests::rest_error_after_retries_is_err_not_fallback_names",
+        ) else {
+            return;
+        };
         let (base, handle) =
             spawn_skills_mock(503, r#"{"error":"unavailable"}"#, 200, r#"{"skills":[]}"#).await;
+            let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let err = client
             .try_list_catalog("en")
@@ -965,8 +1022,14 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn success_bundled_skills_pass_through() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::skills_client::tests::success_bundled_skills_pass_through",
+        ) else {
+            return;
+        };
         let body = r#"{"skills":[{"name":"docx","description":"Word","displayName":"Word Documents","icon":"file-text"}]}"#;
         let (base, handle) = spawn_skills_mock(200, body, 200, r#"{"skills":[]}"#).await;
+        let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let (catalog, _) = client.try_list_catalog("en").await.unwrap();
         let infos = catalog.to_skill_infos();
@@ -978,9 +1041,15 @@ pub(crate) mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn user_list_failure_sets_flag_keeps_bundled() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::skills_client::tests::user_list_failure_sets_flag_keeps_bundled",
+        ) else {
+            return;
+        };
         let bundled = r#"{"skills":[{"name":"docx","description":"Word"}]}"#;
         let (base, handle) =
             spawn_skills_mock(200, bundled, 503, r#"{"error":"unavailable"}"#).await;
+            let base = front.front(&base);
         let client = SkillsClient::with_base_url(test_auth_manager(), base);
         let (catalog, _) = client.try_list_catalog("en").await.expect("bundled ok");
         assert!(catalog.user_list_failed);
@@ -1401,6 +1470,9 @@ pub(crate) mod tests {
     #[test]
     #[serial_test::serial]
     fn skills_auth_candidates_without_a_host_are_primary_only() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
         let client = client_at(auth_manager_with_same_user_alt_key(), None);
@@ -1417,6 +1489,9 @@ pub(crate) mod tests {
     #[test]
     #[serial_test::serial]
     fn skills_auth_candidates_with_a_configured_host_include_same_user_alts() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
         let client = client_at(
@@ -1436,6 +1511,9 @@ pub(crate) mod tests {
     #[test]
     #[serial_test::serial]
     fn skills_auth_candidates_do_not_privilege_the_former_vendor_host() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let _p = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let _i = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH");
         let auth = auth_manager_with_same_user_alt_key();

@@ -247,7 +247,7 @@ pub struct WorkspaceOpen {
     pub projects: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Default)]
 pub struct LspServerConfig {
     pub command: String,
     #[serde(default)]
@@ -278,6 +278,43 @@ pub struct LspServerConfig {
     pub restart_on_crash: Option<bool>,
     #[serde(default, alias = "maxRestarts")]
     pub max_restarts: Option<u32>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for LspServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            command,
+            args,
+            transport,
+            env,
+            extensions,
+            initialization_options,
+            settings,
+            workspace_folder,
+            workspace_open,
+            startup_timeout,
+            shutdown_timeout,
+            restart_on_crash,
+            max_restarts,
+        } = self;
+        f.debug_struct("LspServerConfig")
+            .field("command", command)
+            .field("args", &format_args!("<{} args redacted>", args.len()))
+            .field("transport", transport)
+            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("extensions", extensions)
+            .field("initialization_options", initialization_options)
+            .field("settings", settings)
+            .field("workspace_folder", workspace_folder)
+            .field("workspace_open", workspace_open)
+            .field("startup_timeout", startup_timeout)
+            .field("shutdown_timeout", shutdown_timeout)
+            .field("restart_on_crash", restart_on_crash)
+            .field("max_restarts", max_restarts)
+            .finish()
+    }
 }
 
 impl LspServerConfig {

@@ -1,0 +1,530 @@
+================================================================
+ROUND 1 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 0a5577e2..c15cc0e9` (P75's own commits; the commits below 0a5577e2 down to 0d89295d are cherry-picks of packet P68 and are out of scope except as context).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: APPROVE`, `VERDICT: APPROVE WITH CHANGES — ...` or `VERDICT: REJECT — ...`.
+
+--- FINAL REPORT ---
+Reviewed `0a5577e2..c15cc0e9` read-only. No files changed, cargo commands, or runtime tests executed.
+
+1. **HIGH — Update tests can escape the offline fixture and invoke the real installer.**  
+   [dead_output_sweep.rs:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs:153) removes `FUIGO_*`, `OTEL_*`, and `RUST_LOG`, but retains `npm_config_user_agent`. Its presence selects the npm installer at [auto_update.rs:464](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-update/src/auto_update.rs:464). That path ignores `FUIGO_CLI_BASE_URL` and runs `npm view`; the non-check case can subsequently execute `npm i -g` at line 2427. A temporary HOME does not isolate npm’s global installation prefix. Inherited proxy settings also undermine the claim that loopback requests cannot leave the machine.
+
+   **Required:** explicitly set `FUIGO_INSTALLER=internal` after environment sanitization and disable inherited proxies for the fixture. The released ephemeral port also has a smaller reuse race.
+
+2. **MEDIUM — The print deny is not workspace-wide, and a production macro remains.**  
+   [Cargo.toml:482](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/Cargo.toml:482) does not reach six workspace members: `dagre_rust`, `graphlib_rust`, `mermaid-to-svg`, `ordered_hashmap`, `gcloud-auth`, and `gcloud-metadata`. They neither inherit workspace lints nor declare equivalent print/debug denies.
+
+   The Mermaid dependency chain ships in `fuigo-pager`, and [acyclic.rs:13](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/dagre_rust/src/layout/acyclic.rs:13) still contains `println!("greedy_fas")`. Fuigo’s current layout caller leaves `acyclicer=None`, so this is **not evidence of a currently triggerable crash**; it nevertheless violates the requested production-source sweep and leaves a regression hole.
+
+   **Required:** apply the three denies to these members and remove or safely route the remaining diagnostic.
+
+3. **MEDIUM — The console OTEL test does not exercise metric writes.**  
+   [dead_output_sweep.rs:103](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs:103) enables both exporters but triggers and checks only `plugin_loaded`. [schema.rs:1058](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/external/schema.rs:1058) maps that event without metric increments. Consequently, the print inside `StderrMetricExporter` can remain unexercised while every test passes.
+
+   **Required:** add an offline real-binary case that records a metric, asserts its `[external-otel] metric=...` output in the live control, and repeats with dead/full stderr.
+
+The remaining requested checks look sound by source inspection:
+
+- No additional first-party production print macros or stdout/stderr write unwraps found, including cfg-gated source. The added first-party allows are confined to tests, build helpers, and separate development targets.
+- `fuigo-markdown`’s crate-level deny covers its shipped library. The test settings are appropriate; build-script stdout printing is specially exempted by [Clippy’s implementation](https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/write/mod.rs).
+- Swept branches preserve their return/exit behavior. `update --check` reaches pager’s hard-stdout check; workspace capabilities explicitly exits 1 on hard failure.
+- `valid_directives` preserves EnvFilter’s environment name, empty/unset handling, default directive, ordering, and regex parsing under the pinned configuration.
+- Rhai callbacks match 1.25.1 and cover both production Engine constructors. The unit test checks both callbacks.
+- Both integration fixtures drop dead-pipe readers before spawn and genuinely attach `/dev/full` on Linux. Their live controls substantiate the targeted output paths, subject to the metric gap above.
+
+VERDICT: REJECT — isolate the update tests, close the workspace lint gaps, and exercise console metric output.
+
+================================================================
+ROUND 2 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 0a5577e2..8c5238bb` (P75's own commits; the commits below 0a5577e2 down to 0d89295d are cherry-picks of packet P68 and are out of scope except as context).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: APPROVE`, `VERDICT: APPROVE WITH CHANGES — ...` or `VERDICT: REJECT — ...`.
+
+ROUND 2. Round 1 (on 0a5577e2..c15cc0e9) was REJECT with: HIGH update tests could select the npm installer via inherited npm_config_user_agent and proxies; MEDIUM the six vendored workspace members (dagre_rust, graphlib_rust, mermaid-to-svg, ordered_hashmap, gcloud-auth, gcloud-metadata) were outside the deny and dagre_rust/src/layout/acyclic.rs kept println!("greedy_fas"); MEDIUM the console metric exporter was never exercised. Commit 8c5238bb addresses these (FUIGO_INSTALLER=internal + npm_*/*_proxy scrub; [lints.clippy] denies on the vendored crates and fuigo-markdown; dagre print removed; new crates/codegen/fuigo-telemetry/tests/external_console_dead_stderr.rs). Verify each fix, then audit the WHOLE diff 0a5577e2..8c5238bb again. Note: the ephemeral-port bind-then-drop race was judged acceptable (single-digit-ms window on loopback); say so if you disagree.
+
+--- FINAL REPORT ---
+Reviewed `0a5577e2..8c5238bb` read-only. No cargo or runtime tests were run.
+
+1. **HIGH — Shipped Wayland diagnostics still panic on failed stderr.**  
+   [clipboard.rs:1458](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-shared/src/clipboard.rs:1458) calls `wl_clipboard_rs`, which reaches the pinned `wayland-backend 0.3.12` debug writer. With `WAYLAND_DEBUG=1` or `client`, it uses raw `eprint!`/`eprintln!`, including [debug.rs:83](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.12/src/debug.rs:83). On Linux with a reachable compositor, `WAYLAND_DEBUG=1 fuigo doctor --json 2>/dev/full` reaches this through the standalone clipboard probe, before TUI stderr redirection. The write failure therefore panics and aborts release builds. Patch the dependency’s diagnostic writes and cover this path with dead/full stderr.
+
+2. **MEDIUM — Logging-worker shutdown retains a panicking stdout diagnostic.**  
+   [appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39) drops `tracing-appender 0.2.4` worker guards. If a stalled writer leaves the queue full for the shutdown send’s 100 ms timeout, `WorkerGuard::drop` calls raw `println!`. Dead/full stdout then aborts during cleanup; live stdout receives unexpected logging diagnostics. Wrapping the underlying file does not intercept this print. Replace or patch that diagnostic and test shutdown with a deliberately blocked writer and saturated queue. [Pinned dependency source](https://docs.rs/tracing-appender/0.2.4/src/tracing_appender/non_blocking.rs.html#282-300).
+
+3. **MEDIUM — Metric coverage now exercises the exporter, but not the required product binary.**  
+   [external_console_dead_stderr.rs:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/tests/external_console_dead_stderr.rs:30) re-executes the **test executable**. At line 80 it supplies configuration through a closure, then manually emits `SessionNew`. Its live control makes the metric test meaningful, and the abort hook tests failure containment. However, it bypasses `fuigo-pager` startup, actual environment resolution, and production metric emission. The existing pager test exercises only console logs. The literal real-product-binary metric requirement remains open.
+
+The remaining checks were satisfactory by source inspection:
+
+- Installer selection and npm/proxy scrubbing address the Round 1 fixture issue. The loopback port race remains acceptable.
+- All workspace members now inherit or locally declare the three denies; the vendored `greedy_fas` print is removed. No unjustified shipped-code allows or additional workspace-owned production print macros were found.
+- Swept control flow is preserved; hard stdout failures reach exit 1 for both requested result commands.
+- `valid_directives` preserves the pinned parser’s valid-input behavior, default directive, environment handling, and regex mode.
+- Both production Rhai engines receive the handlers; runtime host-log overrides remain intact. Callback signatures match [Rhai’s documented API](https://rhai.rs/book/language/print-debug.html).
+- Pipe readers are dropped before spawn, `/dev/full` is opened correctly, and live controls establish relevant output.
+
+VERDICT: REJECT — two reachable third-party panic paths remain, and product-binary metric-exporter coverage is incomplete.
+
+================================================================
+ROUND 3 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 0a5577e2..7f4861fd` (P75's own commits; the commits below 0a5577e2 down to 0d89295d are cherry-picks of packet P68 and are out of scope except as context).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: APPROVE`, `VERDICT: APPROVE WITH CHANGES — ...` or `VERDICT: REJECT — ...`.
+
+ROUND 3. Round 1 REJECT (npm installer in the update fixture; vendored crates outside the deny + dagre println; console metric exporter unexercised) was addressed in 8c5238bb. Round 2 (0a5577e2..8c5238bb) REJECT findings:
+ (1) HIGH wayland-backend WAYLAND_DEBUG raw eprint! reachable via the fuigo-shared clipboard data-control probe (fuigo doctor 2>/dev/full). Commit 7f4861fd: WAYLAND_DEBUG=1|client (wayland-backend's own test) now trips the existing data-control kill switch, so the in-process probe and arboard's Wayland backend stand down and copies ride the CLI tools; unit test + a mutant that kills it.
+ (2) MEDIUM tracing-appender 0.2.4 WorkerGuard::drop println! on a 100 ms shutdown-send timeout. Not fixed in-packet: the print is inside the dependency (no option disables it); fixing it means vendoring/patching tracing-appender or replacing the non-blocking writer. It needs a writer stalled long enough to fill the queue at the moment of shutdown. Recorded as a proposal. Say whether you consider that acceptable as a proposal (not a HIGH).
+ (3) MEDIUM metric coverage is not via the product binary. No offline fuigo-pager command records a metric: every external metric comes from session events, and the agent/headless entrypoints suppress console export; the TUI redirects fd 2 to /dev/null. The log exporter is covered by the product binary (plugin install); the metric exporter by the real pipeline in a child process (external_console_dead_stderr.rs). Recorded as a proposal.
+Verify (1), assess (2)/(3), and audit the WHOLE diff 0a5577e2..7f4861fd again for anything new. Only BLOCKER/HIGH block this packet.
+
+--- FINAL REPORT ---
+Reviewed `0a5577e2..7f4861fd` at HEAD `7f4861fd`. **One HIGH remains.** No files modified, Cargo invoked, or runtime tests executed.
+
+1. **HIGH — Wayland errors still invoke raw `eprintln!` without `WAYLAND_DEBUG`.**  
+   [clipboard.rs:1156](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-shared/src/clipboard.rs:1156), [fuigo-shared/Cargo.toml:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-shared/Cargo.toml:55).
+
+   The new guard correctly blocks the original `WAYLAND_DEBUG=1|client` protocol-trace path, including the probe and arboard paths. However, `wayland-backend` also prints ordinary connection/protocol errors:
+   
+   - Its disabled `log` feature makes `log_error!` an alias for `eprintln!` at [lib.rs:76](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.12/src/lib.rs:76). The locked dependency does not enable that feature.
+   - [client_impl/mod.rs:550](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wayland-backend-0.3.12/src/rs/client_impl/mod.rs:550) invokes this alias on socket errors, compositor protocol errors and malformed messages, independently of `WAYLAND_DEBUG`.
+   - Fuigo’s data-control probe performs a Wayland roundtrip. A compositor that accepts the connection and then disconnects reaches this printer. With dead/full stderr, the otherwise recoverable probe failure becomes a release-process abort.
+
+   **Correction:** enable `wayland-backend`’s `log` feature for the Linux dependency graph, retaining the new guard for protocol traces. Add a real-binary regression with a local Wayland socket that accepts and closes, `WAYLAND_DEBUG` unset, and dead/full stderr. This finding is established from source; I did not reproduce it here.
+
+2. **MEDIUM — `WorkerGuard::drop` shutdown-timeout printing remains; acceptable as a deferred proposal.**  
+   [appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39), dependency [non_blocking.rs:296](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-appender-0.2.4/src/non_blocking.rs:296).
+
+   Confirmed: the 100 ms shutdown-send timeout uses `println!`. The full-queue/stalled-worker shutdown prerequisite supports MEDIUM rather than HIGH. Deferring a dependency patch or writer replacement is acceptable under this round’s blocking threshold.
+
+3. **MEDIUM — Console metric coverage remains pipeline-level, not product-binary coverage; acceptable as a deferred proposal.**  
+   [external_console_dead_stderr.rs:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/tests/external_console_dead_stderr.rs:30).
+
+   The child re-executes the test executable. Nevertheless, it initializes the real pipeline, emits a metric-bearing event, flushes/shuts down, and aborts on worker-thread panic. The live control requires both exporter outputs. This is meaningful coverage, accurately distinguished from the product-binary log-exporter test. Keep the product-binary metric criterion explicitly deferred.
+
+4. **LOW — Closed-loopback-port fixture has a port-reuse race.**  
+   [dead_output_sweep.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs:49).
+
+   Dropping the listener releases the port before the child connects. Another process can acquire it, changing the expected refusal. The internal-installer override and proxy scrubbing fix the previous npm problem, but the endpoint is not strictly hermetic. An owned local failure responder would remove this race.
+
+The remaining checks found no additional blocking issue:
+
+- No remaining workspace-owned shipped raw-print site, stdout/stderr write unwrap, or improperly placed print allowance found, including platform-gated source. Test/build-helper exclusions are supported by their dependency roles.
+- Workspace inheritance and explicit markdown/vendor denies cover the relevant crates. Vendor `all=allow` has lower priority. Build-script stdout is specially exempted by [Clippy’s implementation](https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/write/mod.rs); no build-script stderr/debug macro issue found.
+- Swept exit behavior is preserved. `update --check` and workspace-server capabilities account for hard stdout failure and exit 1.
+- `valid_directives` preserves the current builder’s environment, default, ordering and regex semantics. Its parser does not print; no static tracing-level cap enabling the builder’s separate warning path was found.
+- Rhai callback signatures match 1.25.1. Both production engine constructors install routing; execution subsequently retains its host-log callbacks.
+- Both binary fixtures drop dead readers before spawn, use actual `/dev/full` on Linux, and have meaningful live controls. `git diff --check` passed.
+
+VERDICT: REJECT — Wayland’s ordinary error logger still reaches raw eprintln! with dead/full stderr.
+
+================================================================
+ROUND 4 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 0a5577e2..3b272060` (P75's own commits; the commits below 0a5577e2 down to 0d89295d are cherry-picks of packet P68 and are out of scope except as context).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: APPROVE`, `VERDICT: APPROVE WITH CHANGES — ...` or `VERDICT: REJECT — ...`.
+
+ROUND 4. Rounds 1-3 were REJECT. Round 3 (0a5577e2..7f4861fd) found: HIGH wayland-backend without its `log` feature aliases log_error! to eprintln!, reachable from the clipboard data-control probe when a compositor hangs up; MEDIUM tracing-appender WorkerGuard::drop println! (you accepted it as a proposal); MEDIUM metric exporter covered at pipeline level, not via the product binary (accepted as a proposal); LOW the closed loopback port could be reused.
+Commit 3b272060: fuigo-shared depends on wayland-backend with features = ["log"] (Cargo.lock: wayland-backend gains `log`); dead_output_sweep.rs gains a real-binary case `doctor --json` against a fake Wayland socket at $XDG_RUNTIME_DIR/wayland-r077 that accepts and closes (reproduced at the parent: signal 6 with stderr dead/full; at the tip exit 0; a mutant dropping the feature brings signal 6 back); the update base is now a loopback listener the test owns that hangs up on every request; WAYLAND_*/DISPLAY/XDG_RUNTIME_DIR are scrubbed from the host env. `doctor` exits 1 on a dead stdout ("Error: Broken pipe") at both parent and tip — pre-existing, pinned by a per-case dead_stdout_code and recorded as a proposal.
+Verify the fix and audit the WHOLE diff 0a5577e2..3b272060 again. Only BLOCKER/HIGH block this packet.
+
+--- FINAL REPORT ---
+**One new HIGH remains.** The Round 4 Wayland fix is correct, but the full P75 sweep still misses a reachable third-party `dbg!`.
+
+1. **HIGH — TIFF decoding can still abort on failed stderr writes.**  
+   Locked `tiff 0.11.3` contains `return Err(dbg!(TiffError::LimitsExceeded));` at [decoder/ifd.rs:723](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tiff-0.11.3/src/decoder/ifd.rs:723). TIFF is enabled in shipped [fuigo-tools/Cargo.toml:35](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-tools/Cargo.toml:35).
+
+   This is reachable through [image_validate.rs:319](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-tools/src/util/image_validate.rs:319): header probing constructs the TIFF decoder, which reads `ImageWidth` through `Entry::val` before validating its numeric type. An ASCII-typed width tag declaring more than 256 MiB reaches the `dbg!` before reading that payload or reaching Fuigo’s pixel-budget check. A small malformed header therefore suffices; the input need not contain a huge image.
+
+   With dead/full stderr, that diagnostic panics and release builds abort instead of returning the image-validation error. This is a pre-existing omission within P75’s explicitly requested third-party sweep. Patch the dependency to return the error without `dbg!`, and add a regression covering live/dead/full stderr through the image-input path. **Source-confirmed; not runtime-reproduced in this audit.**
+
+2. **MEDIUM — previously accepted proposal: logging-worker shutdown still contains `println!`.**  
+   [tracing-appender/non_blocking.rs:296](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-appender-0.2.4/src/non_blocking.rs:296) prints when sending the shutdown message times out. Fuigo drops those guards at [appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39). Unchanged from Round 3; remains non-blocking under your decision.
+
+3. **MEDIUM — previously accepted proposal: product-binary metric-export proof remains absent.**  
+   [dead_output_sweep.rs:148](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs:148) exercises console **logs** through the product binary. Metrics are positively asserted in the separate pipeline child at [external_console_dead_stderr.rs:145](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/tests/external_console_dead_stderr.rs:145). That is meaningful coverage, but remains the accepted product-binary coverage gap.
+
+The remaining requested checks passed source review:
+
+- **Wayland:** the single locked backend gains `log`; its error macros consequently avoid `eprintln!`. The existing bypass covers the separate `WAYLAND_DEBUG=1|client` protocol-print path.
+- **Workspace sweep/lints:** no additional shipped workspace print macros, output-write unwraps, or falsely justified allows found. Markdown’s explicit denies cover its non-inheriting manifest. Build-script stdout prints are deliberately exempted by [Clippy’s implementation](https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/write/mod.rs).
+- **Behavior:** swept sites retain control flow and exit decisions. Update result output reaches pager’s hard-failure exit check; capabilities checks it directly. Doctor’s existing EPIPE exit 1 is preserved.
+- **RUST_LOG:** environment name, unset/empty handling, DEBUG fallback, directive ordering and regex parsing match the original behavior. Invalid-directive diagnostics are eliminated; no current static-level restriction enables the upstream filter-warning prints.
+- **Rhai:** signatures match locked 1.25.1; both production engines are covered. Runtime host-log callbacks remain intact, and the capture test meaningfully verifies both callbacks.
+- **Fixtures:** dead readers are dropped before spawn; Linux `/dev/full` is real; live controls check output. The owned loopback listener removes the port-reuse race.
+
+Reviewed `0a5577e2..3b272060`, with HEAD confirmed at `3b272060`. No files modified, Cargo invoked, or binaries executed; your parent/tip/mutant runtime results were not independently rerun.
+
+VERDICT: REJECT — reachable TIFF `dbg!` remains a HIGH failed-stderr abort path.
+
+================================================================
+ROUND 5 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 0a5577e2..54ed6f61` (P75's own commits; the commits below 0a5577e2 down to 0d89295d are cherry-picks of packet P68 and are out of scope except as context).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: APPROVE`, `VERDICT: APPROVE WITH CHANGES — ...` or `VERDICT: REJECT — ...`.
+
+ROUND 5. Rounds 1-4 were REJECT; each round found one more third-party print. Round 4 (0a5577e2..3b272060): HIGH tiff 0.11.3 `dbg!(TiffError::LimitsExceeded)` reachable from fuigo-tools image header probing. Commit 54ed6f61 vendors tiff 0.11.3 (dbg removed) and usvg 0.47.0 (two COLR println! -> log::warn!) under third_party/ via [patch.crates-io], with the print deny in their [lints.clippy]; new test crates/codegen/fuigo-tools/tests/tiff_dead_stderr.rs (26-byte header; mutant restoring the dbg! fails all three cases).
+
+To converge, here is the COMPLETE inventory of std::io::stdio::_print/_eprint callers left in the tip's debug fuigo-pager binary (objdump of every direct and GOT-indirect call; at the parent the same inventory also listed 55 fuigo_pager, 22 fuigo_shell, 10 fuigo_update, 7 fuigo_telemetry, 2 fuigo_sandbox functions; at the tip no fuigo_* function calls them), with my triage. Please rule on each, and flag anything you consider reachable in a shipped default configuration as HIGH with a concrete trigger:
+- tracing_subscriber fmt_layer on_event/on_new_span (writer-error and field-format-error eprintln!): writer-error prints are gated by log_internal_errors, default false (pinned false on the two stderr/channel layers); field formatting into a String cannot fail short of a panicking Debug impl.
+- tracing_subscriber EnvFilter Builder::parse_lossy/from_directives: invalid directives now pre-filtered (valid_directives) for the only env-driven filter; all other filters are constant strings; the static-max-level warning needs a tracing max_level_* feature, which nothing enables.
+- sentry / sentry_core / sentry_types (sentry_debug!): print only with ClientOptions.debug = true; fuigo never sets it.
+- sharded_slab (test_println!/panic-in-drop paths): internal invariant diagnostics.
+- wayland_backend::debug::* : only with WAYLAND_DEBUG=1|client, which now trips the data-control kill switch (7f4861fd); log_error! now routes to `log` (3b272060).
+- fancy_regex::vm (trace option), html5ever Tokenizer::dump_profile (profile option): options fuigo never sets.
+- tiff Entry::val: fixed (54ed6f61). usvg colr: fixed (54ed6f61). rhai Engine::new default print/debug closures: still linked but overridden on both engines (c15cc0e9).
+- zlib_rs inflate reset_with_config "invalid windowBits": callers (flate2) always pass valid window bits.
+- tracing_appender WorkerGuard::drop println! on shutdown-send timeout: accepted MEDIUM proposal (rounds 3/4).
+- tracing_chrome FlushGuard::drop "Trace writing thread panicked": only after the writer thread already panicked, which BestEffortFile (P68) prevents.
+- arboard x11 Clipboard::drop eprintln!: only when stderr is a terminal AND the clipboard is dropped <100 ms after a write; fuigo's arboard instance is a process-lifetime static (never dropped).
+- tokio AbortOnPanic / rayon AbortIfPanic: print then abort by design (only after a panic).
+- dagre_rust acyclic: removed (8c5238bb).
+Verify 54ed6f61 and audit the WHOLE diff 0a5577e2..54ed6f61 again. Only BLOCKER/HIGH block this packet.
+
+--- FINAL REPORT ---
+No BLOCKER/HIGH finding in `0a5577e2..54ed6f61`. The TIFF/usvg fixes are correct. Two MEDIUM items remain; neither establishes a default-configuration abort requiring rejection.
+
+Read-only review completed at `54ed6f61463ca0d9b405525df6274199dadcb113`. No files changed, no Cargo commands or binaries executed. I checked the supplied caller inventory against dependency sources; I did not regenerate the disassembly or rerun the reported mutant tests.
+
+**Findings**
+
+- **MEDIUM — Wayland kill-switch predicate does not exactly match arboard.** [fuigo-shared/src/clipboard.rs:1165](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-shared/src/clipboard.rs:1165) requires a **nonempty** `WAYLAND_DISPLAY`; arboard 3.6.1 checks `var_os(...).is_some()`. With `WAYLAND_DEBUG=client`, an empty-but-set `WAYLAND_DISPLAY`, and a valid inherited `WAYLAND_SOCKET`, arboard can enter Wayland despite the kill switch. `wayland-client` consumes that socket before consulting the display name. Align the bypass predicate with arboard, or bypass unconditionally for debug tracing. This is a source-confirmed gate mismatch; I have not demonstrated a real-binary dead-stderr abort from this unusual configuration.
+
+- **MEDIUM — accepted WorkerGuard shutdown diagnostic remains.** [fuigo-telemetry/src/appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39) drops guards whose [tracing-appender 0.2.4 destructor:296](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-appender-0.2.4/src/non_blocking.rs:296) uses `println!` when enqueueing shutdown times out after 100 ms. A stalled worker plus a saturated queue and failed stdout can still panic. Retain the previously accepted MEDIUM follow-up; ordinary EPIPE/ENOSPC alone does not establish that trigger.
+
+**Caller-inventory rulings**
+
+| Caller | Ruling |
+|---|---|
+| `tracing_subscriber::fmt_layer` | Accept. Writer diagnostics are disabled by default and explicitly pinned off on the two identified layers. Minor correction: a custom formatter can return `fmt::Error` without panicking; I found no concrete shipped formatter triggering the unguarded span diagnostic. |
+| `EnvFilter` lossy parsing | Accept. Prefilter removes invalid directives before lossy parsing. No enabled static-max-level restriction found. Other environment-driven **strict** parsers also exist, but return errors instead of printing invalid-directive diagnostics. |
+| Sentry debug macros | Accept. Fuigo leaves `ClientOptions.debug` at `false`. |
+| `sharded_slab` | Accept. Test diagnostics are gated; remaining diagnostics concern existing panic/invariant-failure paths. |
+| Wayland debug/logging | Accept for normal configurations. `log` feature fixes connection-error printing; debug kill switch has the MEDIUM edge above. |
+| `fancy_regex` trace | Accept. Normal matching uses the non-tracing path. |
+| html5ever profiling | Accept. Profiling defaults off; no enabling caller found. |
+| TIFF | Fixed. Vendored library differs from cached upstream only by removing the `dbg!` wrapper. |
+| usvg COLR | Fixed. Both warnings use `log::warn!`; cached-upstream comparison confirms the changes. |
+| Rhai default closures | Accept. Both production engines are routed before evaluation. Execution subsequently installs the existing safe host-log callbacks. |
+| zlib-rs invalid window bits | Accept. No input-controlled invalid-window configuration found through Fuigo’s callers. |
+| `tracing_appender::WorkerGuard` | Accepted MEDIUM above. |
+| `tracing_chrome::FlushGuard` | Accept. `BestEffortFile` prevents ordinary write/flush errors from panicking its writer thread. |
+| arboard X11 drop warning | Accept, with clarification: read instances are short-lived, but writes use the persistent lease. The warning also requires terminal stderr and recent clipboard ownership. |
+| Tokio/Rayon abort guards | Accept. Already-panic termination paths, not independent failed-write triggers. |
+| dagre acyclic print | Fixed; removed. |
+
+**Sweep, behaviour, and tests**
+
+- No executable raw print macro or stdout/stderr write-error unwrap was found in shipped Fuigo code, including platform-gated source. The print allowances are confined to tests, build helpers, and separate development binaries. `fuigo-test-support` does not enter the production pager graph.
+- All 101 workspace members inherit the denies or declare equivalent local denies. `fuigo-markdown`’s local lint table is valid. Vendored `clippy::all = allow` does not override explicit print denies. Test settings are valid; Clippy exempts build-script stdout itself, while the build-helper library has its explicit allowance. [Clippy implementation](https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/write/mod.rs)
+- Swept diagnostics retain their control flow and exit codes. `update --check` reaches pager’s hard-stdout-failure exit handling; `workspace-server --capabilities` explicitly exits 1. I found no new lost required-result reporting.
+- `valid_directives` preserves the pinned parser’s valid-input semantics: `RUST_LOG`, unset/empty/non-Unicode handling, DEBUG fallback, directive order, comma splitting, and regex-enabled parsing. It introduces no print path.
+- Rhai signatures match 1.25.1. The callback test genuinely observes both events, although it tests the helper rather than complete workflow execution.
+- Dead pipe readers are dropped **before spawn**. `/dev/full` tests are Linux-gated. Live controls establish expected output. Update requests use an owned loopback listener and scrub proxy/npm steering; there is no closed-port allocation race.
+- OTEL **logs** have real-pager coverage. Logs and **metrics** additionally have genuine exporter-pipeline subprocess coverage with an aborting panic hook and positive live-output assertions. Metrics coverage is not a real-pager invocation.
+- The TIFF fixture reaches production image-validation/transcode paths and checks child completion in the dead/full cases. Its structure supports the reported mutation result.
+
+VERDICT: APPROVE WITH CHANGES — non-blocking Wayland predicate alignment; retain the accepted MEDIUM WorkerGuard follow-up.
+
+
+================================================================
+ROUND 6 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null   (codex-cli 0.160.0; restacked branch strike/p75-s19 at 0ff88ea6; exit 0; 191,049 tokens)
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Review the diff `git diff 37a5b9d4..0ff88ea6` (branch strike/p75-s19: P75's seven commits, RESTACKED onto the newer base strike/p73-s18 = 37a5b9d4, which already contains packet P68 and 157 further commits that P75 was not developed against).
+
+Context: release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE dead pipe, ENOSPC /dev/full), so one print on a dead fd turns a command into SIGABRT. P05b/P68 introduced fuigo_tty_utils::cli_println!/cli_eprintln! (best effort; stdout hard failure recorded in best_effort_stdout::hard_failure(), pager main exits 1 on it; stderr failures change nothing) and swept pager/pager-bin/shell/telemetry. P75's job: (1) sweep EVERY other workspace crate shipped in the fuigo-pager binary for print macros, std stdout/stderr writes that unwrap, and third-party writers that panic on write errors; move each to the best-effort helpers; enable print_stdout/print_stderr/dbg_macro deny workspace-wide ([workspace.lints.clippy]) with justified allows only for tests, build scripts and unshipped dev tools; (2) real-binary tests with dead stdout pipe, dead stderr, /dev/full and a live control; (3) a real-binary test of the console OTEL exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console).
+
+Check specifically:
+- Is any print macro left in shipped (non-test) code of a crate in the fuigo-pager dependency graph, including cfg-gated code (macOS/Windows/feature-gated) that a Linux clippy run would not see? Is any allow attribute placed on shipped code, or is any justification false (e.g. a crate marked dev-only/test-only that actually ships)?
+- Are the workspace lint and clippy.toml settings correct and effective (crates without `[lints] workspace = true`, fuigo-markdown's crate-level deny, build scripts)?
+- Behaviour of each swept site: exit codes preserved; result output on stdout (update --check, workspace-server --capabilities) exits 1 on a hard stdout failure; no new silent-failure for something that must be reported.
+- The RUST_LOG pre-filter in fuigo-telemetry/src/debug_log.rs (`valid_directives`): equivalence with EnvFilter::from_env_lossy for valid input (env var name, empty/unset, default directive, regex parsing), and that it cannot print.
+- fuigo-workflow route_script_output: correct rhai 1.25 on_print/on_debug signatures, applied to every Engine the crate builds, test validity.
+- The tests (crates/codegen/fuigo-pager-bin/tests/dead_output_sweep.rs, crates/codegen/fuigo-workspace/tests/workspace_server_dead_output.rs): do they really exercise the failure (dead read end dropped before spawn, /dev/full), are they hermetic/offline (closed loopback port), flaky, or vacuous?
+- Anything else in the class (third-party writers reachable from fuigo code that unwrap/print on write errors) that P75 should fix in-packet.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with a single line `VERDICT: LAND`, `VERDICT: LAND-WITH-FOLLOWUPS — ...` or `VERDICT: DO-NOT-LAND — ...`.
+
+ROUND 6. Round 5 (0a5577e2..54ed6f61 on the old base) was APPROVE WITH CHANGES: MEDIUM the arboard bypass required a NON-EMPTY WAYLAND_DISPLAY while arboard 3.6.1 tests var_os("WAYLAND_DISPLAY").is_some(); MEDIUM tracing-appender WorkerGuard::drop println! on shutdown-send timeout (kept as a written proposal, not fixed). All caller-inventory rulings were Accept/Fixed.
+
+Since round 5:
+(a) RESTACK. The six P75 commits were rebased from 0a5577e2 onto 37a5b9d4 (`git rebase --onto strike/p73-s18 0a5577e2`). One conflict: crates/codegen/fuigo-fast-worktree/src/bin/worktree_lifecycle_bench.rs was deleted by the new base (P66, 770bda9a) and P75 had only added a `#![allow(clippy::print_stdout, clippy::print_stderr)]` header to it; resolved by keeping the deletion. Cargo.lock/Cargo.toml and four source files auto-merged. `git range-diff 0a5577e2..54ed6f61 37a5b9d4..0ff88ea6~1` shows only that file dropped.
+(b) New commit 0ff88ea6: `arboard_wayland_bypassed` now calls `arboard_bypass_from(kill_switch, var_os("WAYLAND_DISPLAY"))` = `kill_switch_set && wayland_display.is_some()` (arboard's own predicate) with a unit test; third_party/NOTICE gains entries for the modified tiff 0.11.3 / usvg 0.47.0 copies.
+(c) On the build box at 0ff88ea6: `cargo clippy --locked --workspace --all-targets --keep-going` reports NO print_stdout/print_stderr/dbg_macro error anywhere (the only error is clippy::unused_io_amount in third_party/gcloud-policy/gcloud-metadata-1.0.2/src/transport.rs:88, a test, which exists at the base too); `-p fuigo-shell --all-targets --features test-support,config-docs` and `-p fuigo-auth --all-targets --features middleware` exit 0. A script confirms all 101 workspace members carry `[lints] workspace = true` or an explicit deny of the three lints.
+
+What I need from this round, in priority order:
+1. THE NEW BASE. The lint only sees print MACROS on the Linux cfg. Search the code that 0a5577e2..37a5b9d4 added or changed (`git diff 0a5577e2..37a5b9d4`) and the tip as a whole for what the lint cannot see in SHIPPED code of the fuigo-pager graph: writes to std::io::stdout()/stderr() whose error is unwrapped/expect-ed/`?`-propagated into a panic, `writeln!(io::stdout()...)`.unwrap(), new print macros under cfg(windows)/cfg(target_os = "macos")/non-default features, new third-party dependencies or newly reached third-party code that prints raw (compare Cargo.lock between 0a5577e2 and 37a5b9d4), and any new `#[allow(clippy::print_*)]`. My own grep of the added lines found only fuigo-proto-build (build helper, crate-level allow) and one `tprintln!` in fuigo-shell/src/agent/relay.rs (a tracing macro, crates/codegen/fuigo-tracing-macros/src/timestamp.rs). Confirm or refute.
+2. Semantic conflicts of the restack: does any P75 hunk now sit on code the new base changed in a way that breaks its intent (fuigo-update auto_update.rs, fuigo-sandbox lib.rs, fuigo-pager-bin Cargo.toml/tests, fuigo-proto-build, startup_tui_probe.rs, deny_paths_e2e.rs auto-merged)? Do the tests added by P75 still target live code paths on the new base?
+3. Verify 0ff88ea6: predicate equals arboard's; no other in-process Wayland leg can be reached with the kill switch set (the data-control probe is gated by `data_control_kill_switch_set() || !env_present("WAYLAND_DISPLAY")`); the test is not vacuous.
+4. The vendored crates. State precisely: (i) every difference between third_party/tiff-0.11.3 and third_party/usvg-0.47.0 and the crates.io sources (compare with ~/.cargo/registry/src/*/tiff-0.11.3 and usvg-0.47.0 if present); (ii) how they are wired ([patch.crates-io] path entries AND workspace members in the root Cargo.toml) and whether workspace membership changes feature resolution or what is compiled into the shipped fuigo-pager binary (Cargo.lock now lists image-webp and zstd under tiff: are those optional deps activated in any shipped build?); (iii) licence obligations (tiff MIT; usvg Apache-2.0 OR MIT): licence files present, modification notice adequate, THIRD-PARTY-NOTICES / third_party/NOTICE consistent; (iv) any risk that a future `cargo update` silently drops the patch (version pinning of [patch]).
+5. Anything else in the class. Only BLOCKER/HIGH block this packet; say explicitly whether the WorkerGuard MEDIUM is still acceptable as a follow-up.
+--- FINAL REPORT ---
+No BLOCKER/HIGH finding in `37a5b9d4..0ff88ea6`. The restack preserves P75’s intent, and `0ff88ea6` fixes the Round 5 arboard predicate mismatch.
+
+Reviewed at `0ff88ea617636c9a67a0dd75c9558b763b351799`, read-only. No files changed, Cargo commands run, or binaries executed. The supplied build-box results remain reported evidence, not independently rerun evidence.
+
+1. **MEDIUM — WorkerGuard shutdown print remains; acceptable follow-up.**  
+   [appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39) drops guards whose [tracing-appender destructor:296](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-appender-0.2.4/src/non_blocking.rs:296) calls `println!` when sending shutdown times out after 100 ms. A stalled worker, saturated queue, and failed stdout can still abort. Ordinary dead/full output alone does not establish that combined trigger. **The previously accepted MEDIUM disposition remains appropriate.**
+
+2. **MEDIUM — newly included TIFF doctests reference an absent fixture.**  
+   [decoder/mod.rs:1439](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/tiff-0.11.3/src/decoder/mod.rs:1439), repeated at line 1459, uses `include_bytes!` for `tests/images/tiled-gray-i1.tif`. That file is absent, and doctests remain enabled. Adding TIFF as a workspace member exposes these examples to workspace doc testing; `autotests = false` does not disable doctests. This is a source-established compilation failure for those doctests, not a reproduced Cargo result or shipped-binary defect. Supply a suitable fixture or make the examples self-contained.
+
+3. **LOW — patches lack protection against dependency-update bypass.**  
+   [Cargo.toml:8](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/Cargo.toml:8) patches particular package versions; it does not constrain every future resolution to them. A future update can select a newer compatible registry TIFF/usvg and bypass these fixes. Merely adding `version = "=…"` inside `[patch]` would validate the patch’s version, not constrain consumers’ requirements. Add an update/release check that the pager graph resolves both crates to the intended local sources. The current lockfile correctly selects them. [Cargo patch semantics](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html)
+
+4. **LOW — aggregate TIFF notice remains stale.**  
+   [THIRD-PARTY-NOTICES:13540](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/THIRD-PARTY-NOTICES:13540) lists TIFF 0.9.1 and 0.10.3, but not 0.11.3. [third_party/NOTICE:61](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/NOTICE:61) now correctly identifies the modified 0.11.3 copy. This is existing aggregate-inventory drift; the TIFF copyright and MIT permission text are retained. Synchronize the version inventory.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round 6 source audit completed; no blocking finding. |
+| New base and restack | ✅ Done | No newly exposed shipped output-panic path found. |
+| Sweep and lint configuration | ✅ Done | Source and manifest checks support the supplied Clippy results. |
+| Arboard correction | ✅ Done | Predicate, callers, probe gates, and regression assertions checked. |
+| Vendored dependencies | ✅ Done | Compared against cached crates.io sources; differences detailed below. |
+| Runtime verification | ⬜ Pending | Not executed in this read-only audit. |
+
+The new-base review confirms your inventory: added raw print macros occur in the build helper and tests; `fuigo-shell/src/agent/relay.rs`’s `tprintln!` expands to `tracing::info!`. The base’s lockfile introduces **no new registry packages or versions**. Its changes add existing workspace/test dependencies and remove obsolete benchmark dependencies.
+
+Across the tip’s workspace source, including Windows, macOS, and feature-gated code, I found no remaining executable raw print macro or standard-stream write-error unwrap in shipped Fuigo code. The print allowances belong to test code, build helpers, and separate development binaries. In particular, `fuigo-test-support` reaches the pager through dev dependencies; its normal dependent, the PTY harness, is not a production pager dependency.
+
+All **101 workspace members** inherit the three denies or declare them explicitly. `fuigo-markdown` correctly uses its own manifest lint table alongside its existing Rust lint configuration. Vendored `clippy::all = allow` has lower priority than the explicit denies. The test configuration keys are valid. Build-script stdout is exempted by Clippy itself; `fuigo-proto-build` needs—and has—its separate justified allowance because it is a library build helper. [Clippy implementation](https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/write/mod.rs)
+
+The range-diff confirms the deleted lifecycle benchmark allowance is the only substantive dropped change. The auto-merged areas remain compatible:
+
+- `auto_update.rs`: the base adds `dismissed.clone()` for the configuration callback; P75’s diagnostic substitutions preserve it.
+- Sandbox diagnostics retain their refusal/error returns. The base’s `/data`-dependent test correction remains intact.
+- Pager manifest changes retain the base’s removal of `local-workspace`; P75 only adds lint inheritance.
+- `startup_tui_probe.rs` has import ordering plus the development-tool allowance.
+- The updated proto helper remains build-only.
+- The new headless interrupt handling does not bypass the existing successful-command hard-stdout check.
+
+`update --check` still reaches [main.rs:2177](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-pager-bin/src/main.rs:2177), producing exit 1 for a hard stdout failure. `workspace-server --capabilities` checks that state explicitly at [workspace_server.rs:259](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-workspace/src/bin/workspace_server.rs:259). Swept stderr diagnostics retain their original control flow and exit codes. I found no new silent loss of required result reporting.
+
+`valid_directives` matches the pinned tracing-subscriber 0.3.23 semantics: `RUST_LOG`, unset/empty/non-Unicode fallback, DEBUG default, directive order, comma splitting, and regex-enabled parsing. `Directive::from_str` calls the same parser with regex enabled; rejected directives never reach the printing lossy-parser branch. One qualification: upstream filter construction also has raw diagnostics for statically disabled trace levels. No enabling static-max-level restriction was found in this dependency configuration, so that branch does not invalidate the current fix.
+
+Rhai’s callbacks match 1.25.1: `Fn(&str)` and `Fn(&str, Option<&str>, Position)`. Both production `Engine::new()` sites install routing before evaluation. Execution subsequently installs the existing host-log callbacks, preserving workflow-visible output. The unit test actually observes both tracing events; it tests the helper rather than complete workflow execution.
+
+The corrected arboard predicate is exactly `kill_switch_set && wayland_display.is_some()`. Its six assertions cover absent, empty, and nonempty display values with both switch states; the empty-value assertion would catch the old defect. Both clipboard constructors and both data-control probe entry points are gated. I found no other in-process Wayland entry in Fuigo that bypasses those gates.
+
+The process tests remain meaningful on the new base. Readers are dropped **before spawn**; Linux full-output cases open `/dev/full`; live controls check expected output and exit codes. Update requests use an owned accept-and-close loopback listener, avoiding a closed-port reuse race, with npm/proxy steering removed. Workspace-server cases return before normal service startup. The Wayland reproduction is meaningful on Linux; its macOS execution does not prove the Linux backend.
+
+OTEL **logs** have real-pager coverage through `plugin install`. **Logs and metrics** additionally have exporter-pipeline subprocess coverage, positive live-output assertions, and an aborting panic hook. Metrics coverage remains **not a real-pager invocation**.
+
+The cached crates.io comparison found exactly these vendor differences:
+
+| Copy | Modified files | Omitted upstream files |
+|---|---|---|
+| TIFF 0.11.3 | `src/decoder/ifd.rs`: removes `dbg!`, adds explanation. `Cargo.toml`: removes example/test/benchmark targets and `crc32fast`/`criterion` dev dependencies; adds modification comments and lint rules. | `Cargo.lock`, `Cargo.toml.orig`, `benches/lzw.rs`, `examples/{decode,tiff-ls}.rs`, `tests/COPYRIGHT`, `tests/benches/README.md`, `tests/decodedata-rgb-3c-8b.tiff`, and `tests/{decode_bigtiff_images,decode_fp16_images,decode_geotiff_images,decode_images,decode_planes,encode_images,encode_images_with_compression,fuzz_tests,predict,subsubifds}.rs`. |
+| usvg 0.47.0 | `src/text/colr.rs`: replaces two warnings with `log::warn!`, adds explanations. `Cargo.toml`: removes the CLI target and `once_cell` dev dependency; adds modification comments and lint rules. | `Cargo.lock`, `Cargo.toml.orig`, `docs/post-processing.md`, `docs/spec.adoc`, `src/main.rs`. |
+
+Every other retained file is byte-identical to its cached upstream counterpart.
+
+Both copies are wired through `[patch.crates-io]` **and** workspace membership. Membership explains TIFF’s extra optional lockfile edges: Cargo resolves lockfiles as though all workspace-member features were enabled, then separately selects compilation features. TIFF’s `webp` and `zstd` features are not enabled by the inspected shipped pager configurations; its normal defaults remain deflate/fax/jpeg/lzw. Those dependencies already occur elsewhere in the graph. Workspace-wide builds can additionally unify usvg’s default system-font/memmap features; the release workflow builds `-p fuigo-pager-bin`, so membership alone does not enable those defaults there. [Cargo feature resolution](https://doc.rust-lang.org/cargo/reference/resolver.html#features)
+
+TIFF’s MIT licence and usvg’s MIT/Apache licence files are present and unchanged. Modified source files and manifests identify the edits, and `third_party/NOTICE` records both. The aggregate notices elect MIT for usvg, consistently with its dual licence. Apart from the TIFF version inventory above, I found no missing licence or modification notice.
+
+VERDICT: LAND-WITH-FOLLOWUPS — retain WorkerGuard MEDIUM; repair TIFF doctest packaging, guard patch resolution during updates, and synchronize TIFF notices.
+
+================================================================
+ROUND 7 — codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null   (codex-cli 0.160.0; strike/p75-s19 at 4d53aa4d; exit 0; 100,979 tokens)
+================================================================
+--- BRIEF ---
+You are auditing packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75 (read-only; do not modify anything; do not run cargo). Branch strike/p75-s19, tip 4d53aa4d, base 37a5b9d4 (strike/p73-s18). Context: release builds are panic = "abort"; println!/eprintln!/dbg! panic when the stream is a dead pipe or a full disk; P75 swept the workspace to best-effort writers, denies clippy print_stdout/print_stderr/dbg_macro workspace-wide, and vendors tiff 0.11.3 and usvg 0.47.0 (third_party/, [patch.crates-io] + workspace members) with their raw prints removed.
+
+ROUND 7. Your round 6 (37a5b9d4..0ff88ea6) was LAND-WITH-FOLLOWUPS: (1) MEDIUM tracing-appender WorkerGuard::drop println! — retained as a written follow-up, as you ruled; (2) MEDIUM the vendored tiff's doctests read tests/images/tiled-gray-i1.tif, absent from the crates.io package; (3) LOW nothing stops a future `cargo update` from resolving tiff/usvg back to crates.io; (4) LOW THIRD-PARTY-NOTICES lists tiff 0.9.1/0.10.3, not 0.11.3 (existing drift; left as a proposal to the notice generator's owner, not changed here).
+
+I verified (2) on the build box at 0ff88ea6: `cargo test --locked --no-fail-fast -p tiff -p usvg` failed with THREE tiff failures — the two doctests (compile error: fixture missing) and the unit test decoder::tests::equivalence_of_tag_readers (opens tests/images/int8_rgb.tif) — 16 other tiff unit tests and 4 doctests passed; usvg: 0 unit tests, 1 doctest, passed.
+
+Review `git diff 0ff88ea6..4d53aa4d` (commits fcfa8b66 and 4d53aa4d):
+- third_party/tiff-0.11.3/Cargo.toml: `[lib] test = false, doctest = false` with a comment; footer updated. Rationale: the crates.io package cannot pass its own tests (fixtures are not packaged); every other vendored crate in third_party/ already has `doctest = false`; fuigo's coverage of the patched path is crates/codegen/fuigo-tools/tests/tiff_dead_stderr.rs. At 4d53aa4d `cargo test --locked --no-fail-fast -p tiff -p usvg` exits 0 (tiff: no test targets; usvg: 1 doctest).
+- crates/codegen/fuigo-tools/tests/tiff_dead_stderr.rs: new `lock_entries` + test `tiff_and_usvg_resolve_to_the_print_free_vendored_copies`, which reads the workspace Cargo.lock and fails if any `tiff` or `usvg` package entry has a `source` line (registry/git), with an in-test positive control. Mutants: replacing the `source = ` check with `false` fails the test (control assertion); adding a registry `source` line under usvg 0.47.0 in Cargo.lock fails the test.
+- third_party/README.md: wiring and re-vendor rule.
+
+Questions:
+1. Is turning the vendored tiff's lib tests and doctests off correct and sufficient (does anything else in third_party/tiff-0.11.3 or third_party/usvg-0.47.0 still need absent files at test/doc/clippy/build time)? Is it a loss of meaningful coverage that should instead be solved by adding fixtures? Does `test = false` change what is compiled into dependents or the shipped binary?
+2. Is the lockfile guard correct: can it be bypassed (two versions of tiff in the lock, one local and one registry; a renamed package; a git source), can it false-fail (path to Cargo.lock from the test's CARGO_MANIFEST_DIR; packaging; Windows — the file is `#![cfg(unix)]`), is the parser robust to the real Cargo.lock format?
+3. Anything in the whole packet diff `git diff 37a5b9d4..4d53aa4d` that you now consider BLOCKER or HIGH.
+
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, a concrete scenario, and whether a test catches it. End with a single line `VERDICT: LAND`, `VERDICT: LAND-WITH-FOLLOWUPS — ...` or `VERDICT: DO-NOT-LAND — ...`.
+--- FINAL REPORT ---
+No **BLOCKER or HIGH** finding in `37a5b9d4..4d53aa4d`. The round-7 changes are acceptable for landing, with the qualifications below.
+
+Reviewed tip `4d53aa4dc48584aac52b247f714be1681d522fdf` read-only. No files modified or Cargo commands run. Build-box passes and Rust mutation results are your supplied evidence; I independently checked source, manifests, upstream-copy differences, and lockfile parsing using an in-memory Python equivalent.
+
+1. **MEDIUM — retained WorkerGuard shutdown-print exposure.**  
+   [appender.rs:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-telemetry/src/appender.rs:39) drops guards whose [upstream destructor:296](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tracing-appender-0.2.4/src/non_blocking.rs:296) uses `println!` after a shutdown-send timeout. A stalled worker plus saturated queue plus failed stdout can still abort. **Tests:** P75’s ordinary dead/full-stream cases do not force this combined condition. The previously accepted written-follow-up disposition remains appropriate.
+
+2. **LOW — TIFF tests are disabled by default, not made universally runnable.**  
+   [Cargo.toml:61](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/tiff-0.11.3/Cargo.toml:61) fixes the stated default command. Explicit `cargo test -p tiff --lib`, including selection through `--all-targets`, can still run `equivalence_of_tag_readers`, which opens the absent fixture at [decoder/mod.rs:1918](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/tiff-0.11.3/src/decoder/mod.rs:1918). **Tests:** that explicitly selected test exposes the failure; the supplied default command intentionally omits it. This is a command-support limitation, not a shipped-code defect. Cargo documents the distinction between default test selection and explicit targets. [Cargo target selection](https://doc.rust-lang.org/cargo/commands/cargo-test.html#target-selection)
+
+3. **LOW — lock guard has portability and text-format boundaries.**  
+   [tiff_dead_stderr.rs:11](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-tools/tests/tiff_dead_stderr.rs:11) excludes the guard on Windows. A Windows-only dependency-update check therefore misses registry reintroduction. At [line 140](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/crates/codegen/fuigo-tools/tests/tiff_dead_stderr.rs:140), an indented `  source = "registry+…"` is valid TOML but escapes `starts_with("source = ")`. I confirmed that discrepancy in memory. Cargo’s normal generated formatting is handled correctly. **Tests:** neither existing positive control covers these cases. Moving the guard outside the Unix-only module and parsing TOML would remove these limitations; neither is a landing requirement for the stated Unix/Cargo-update workflow.
+
+4. **LOW — aggregate TIFF notice remains stale; unchanged owner follow-up.**  
+   [THIRD-PARTY-NOTICES:13540](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/THIRD-PARTY-NOTICES:13540) still lists older TIFF versions. [third_party/NOTICE:61](/Volumes/Mando/WaylandBots/Fuigo/wt-p75/third_party/NOTICE:61) correctly identifies the modified 0.11.3 copy. **Tests:** the new guard does not check notices. Keep the existing proposal with the notice-generator owner.
+
+**On disabling TIFF tests:** this is correct and sufficient for the stated default test command and the packet’s narrow vendor patch. It does remove meaningful upstream coverage—the 16 passing unit tests and four passing doctests—but those cover broader TIFF behavior, and the registry dependency’s own suite was not part of Fuigo’s baseline workspace testing. Adding fixtures would preserve that coverage; it is not necessary to establish the one-line `dbg!` removal, whose affected Fuigo paths have dedicated regression coverage.
+
+The TIFF source contains only the three known fixture-dependent examples/tests. Both manifests disable build scripts and automatic example/test/benchmark discovery; their explicit library paths exist. I found no additional absent-file requirement affecting ordinary build, documentation generation, or Clippy compilation. The missing unit-test fixture is opened at runtime, so compiling that test under Clippy does not require it. usvg’s remaining Rust doctest is self-contained and marked `no_run`.
+
+`test = false` changes test-target selection. It does **not** remove TIFF’s library from dependents, change its production `cfg`, or alter the shipped binary’s library implementation. Likewise, `doctest = false` disables doctesting rather than documentation generation. [Cargo target fields](https://doc.rust-lang.org/cargo/reference/cargo-targets.html)
+
+**On the lock guard:** the implementation handles the requested normal-resolution cases:
+
+- Two TIFF versions, one local and one registry: **caught**; every matching block is checked.
+- Git source: **caught**; the source value is irrelevant.
+- Dependency alias such as `foo = { package = "tiff", … }`: **caught**; the package identity remains TIFF. [Cargo dependency renaming](https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#renaming-dependencies-in-cargotoml)
+- Current checkout path: **correct**; three parents from `crates/codegen/fuigo-tools` reaches this workspace’s Cargo.lock, independently of runtime working directory.
+- Extracted/package-only test execution: **not supported reliably**; the fixed ancestor path assumes the repository layout. Ordinary packaging does not execute this integration test.
+- Windows: **skipped, not falsely failed**.
+
+The current lock contains exactly one source-less entry for each package. My structural checks also confirmed detection of an additional registry or git TIFF entry. Absence of `source` proves a local package, **not its exact directory or print-free contents**; the current manifest wiring and inspected source establish those additional facts.
+
+The full-packet review found no reason to upgrade the verdict: all 101 workspace members carry the print denies, the retained vendor source differences match the declared print removals, and the changed production paths preserve their intended control flow and output-failure handling.
+
+VERDICT: LAND-WITH-FOLLOWUPS — retain WorkerGuard MEDIUM and notice-owner follow-up; record explicit TIFF test-selection and lock-guard portability/parser limitations.
+
+================================================================
+ROUND 8 (restack s28): codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+================================================================
+--- BRIEF ---
+You are auditing the RESTACK of packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75r (branch strike/p75-s28). Read-only: do not modify anything, do not run cargo, do not build.
+
+Context. Release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE, ENOSPC), so one print on a dead fd is a SIGABRT. P75 (receipt docs/strike/receipts/R077-p75.md) swept the shipped crates to fuigo_tty_utils::cli_println!/cli_eprintln!, denies clippy::print_stdout / print_stderr / dbg_macro in every workspace member ([workspace.lints.clippy] in the root Cargo.toml, clippy.toml allow-print-in-tests / allow-dbg-in-tests), and vendors print-free tiff 0.11.3 and usvg 0.47.0 through [patch.crates-io]. P75 itself was audited in seven earlier rounds and is NOT in scope again.
+
+What happened in the restack. The twelve P75 commits were rebased from the old base 37a5b9d4 onto the current integration e3139a996d1b4df22a0f54e5f58314a42351bd86 with no conflict (`git range-diff 37a5b9d4..strike/p75-s19 e3139a99..97bf8891` shows 12 identical commits; Cargo.lock auto-merged, `cargo metadata --locked` exit 0 on the build box). One new commit sits on top: e2858d22 (two test-only flake fixes).
+
+SCOPE OF THIS AUDIT, two parts.
+
+Part A: the re-sweep claim. 209 commits landed between 37a5b9d4 and e3139a99 (163 .rs files changed). My claim: they add NO site that P75 has to convert. Evidence I have: (1) `cargo clippy --locked --workspace --all-targets --keep-going` at the rebased tip exits 0 with 0 print/dbg lint errors on Linux, and `-p fuigo-shell --all-targets --features test-support,config-docs` and `-p fuigo-auth --all-targets --features middleware` exit 0; (2) a grep of the lines added by `git diff 37a5b9d4..e3139a99 -- '*.rs'` for print macros and for io::stdout()/io::stderr() finds only test code: crates/codegen/fuigo-config/src/fs_atomic_p79_tests.rs, crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs, crates/codegen/fuigo-shell/tests/compacted_resume_history_acp.rs; (3) no new workspace member (101 members, every manifest carries the three denies); (4) Cargo.lock gains no package in that range, only dependency edges (fuigo-memory now depends on regex, unicode-normalization, fuigo-secrets, fuigo-file-utils; fuigo-file-utils on fuigo-tty-utils; fuigo-config on unicode-normalization).
+Try to refute it. Look in `git diff 37a5b9d4..e3139a99` for what the Linux clippy run cannot see: print macros or dbg! under cfg(windows) / cfg(target_os = "macos") / non-default features in shipped (non-test) code; write!/writeln! to std::io::stdout()/stderr() (or a lock of them) whose Result is unwrapped/expect-ed in shipped code; a panic hook, std::process::exit path or logger that writes to stderr with unwrap; third-party code newly REACHED from fuigo code that prints with println!/eprintln!/dbg! (for example through the new regex / unicode-normalization edges of fuigo-memory, or any API first called in that range); an #[allow(clippy::print_stdout)] / print_stderr / dbg_macro added in that range on shipped code. Also check that the three test files named above really are test-only (how they are included, and whether a Windows or macOS clippy run would treat their prints as test code).
+
+Part B: commit e2858d22 (`git show e2858d22`), two test-only changes.
+  - crates/codegen/fuigo-memory/src/dream_lock.rs: tests exclusion_and_cancellation_preserve_success and marker_failure_keeps_retry_open failed under load at the statement that re-takes the lock right after releasing it (sightings: `called Option::unwrap() on a None value` at dream_lock.rs:140 and `assertion failed: lock.acquire(0).unwrap().is_some()` at :153). My diagnosis: DreamLock is a flock (std File::try_lock) on an open file description; a child forked by a concurrent test in the same test binary (cross_process_lock_released_after_exit spawns one) holds a copy of the descriptor until it execs (O_CLOEXEC), so the lock outlives the guard's drop for that window. Fix: new test helper acquire_once_released polls acquire for up to 10 s in real time at the four re-acquire-after-release sites.
+  - crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs: a_session_live_in_another_process_is_left_alone failed once at "once the owner is gone the same turn is recoverable" for the same reason (TurnOwnerLock is an fs2 flock; the neighbouring tests already use eventually_recoverable, commit aa30617a). Fix: after drop(live_owner) the test polls recover_with for up to 10 s; every refused attempt must have appended nothing and left the events log untouched; after success exactly one append.
+Questions: is the diagnosis right (would an F_OFD_SETLK lock behave any differently)? Does either change weaken what the test proves or hide a real product defect (for example a product bug where a release is genuinely late, or a first recovery that fails for a reason other than the lock)? Is any remaining statement in those two tests, or in the other tests of those two files, still exposed to the same window? Is there a product-side consequence of the same mechanism that deserves a proposal (fuigo itself forks children while holding these locks)? Is the polling loop in the async test correct on a current_thread tokio runtime?
+
+Report format: findings, each with severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a concrete scenario, and whether an existing test catches it. Say explicitly which parts of the claims you verified and how. End with one line: LAND / LAND-WITH-FOLLOWUPS / DO-NOT-LAND.
+
+--- FINAL REPORT ---
+No BLOCKER or HIGH finding in the requested scope. I found three follow-ups.
+
+1. **MEDIUM — Inherited descriptors can suppress real recovery after the owner is gone.**  
+   Locations: [turn_owner_lock.rs:70](crates/codegen/fuigo-shell/src/session/turn_owner_lock.rs:70), [dream_lock.rs:12](crates/codegen/fuigo-memory/src/dream_lock.rs:12), [interrupted_turn.rs:335](crates/codegen/fuigo-shell/src/session/interrupted_turn.rs:335).
+
+   Both guards release by closing their `File`, without explicit unlocking. A child stalled before exec can therefore retain the lock after guard destruction. Production recovery returns `None` on that contention; its caller does not retry. A reload can consequently miss the interrupted marker, and a subsequent turn can obscure the older interruption. Dream consolidation can likewise report “another consolidation is already running” after it finished.
+
+   **Existing coverage:** the reviewed tests do not deliberately hold an inherited descriptor before exec. The polling changes tolerate this mechanism without resolving its product consequence.
+
+   **Proposal:** qualify explicit unlocking on orderly guard destruction, preserving ownership transfer through `RecoveryGuard::into_shared`, and add a controlled inherited-descriptor regression. Explicit unlocking would address normal destruction; abrupt process death still needs separate consideration. This predates `e2858d22`.
+
+2. **LOW — The new recovery loop retries more than lock contention.**  
+   Location: [interrupted_turn_tests.rs:453](crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs:453).
+
+   `recover_with()` also returns `None` for unavailable locking, failed detection, and unreadable updates. For example, a transient lock-file open error followed by success passes the new loop: no append occurred and the events log stayed unchanged. Thus the test proves eventual recovery, while no longer distinguishing the first non-contention failure.
+
+   **Existing coverage:** the ordinary one-shot recovery test still checks straightforward success. The new assertions catch refusals that invoke append or alter the events log; they do not identify a refusal’s cause.
+
+   **Follow-up:** expose the refusal reason through a test seam and retry only observed contention.
+
+3. **LOW — Some existing negative assertions can pass because the previous lock remains inherited.**  
+   Locations: [interrupted_turn_tests.rs:591](crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs:591), [:963](crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs:963), [:1039](crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs:1039).
+
+   If a concurrent child inherits the preceding recovery’s lock, the immediate second recovery can return `None` at the contention check. That satisfies “second load records nothing” without exercising the intended closed-turn/idempotency decision.
+
+   **Existing coverage:** separate event-log assertions still catch missing closure. They do not prove the second recovery acquired its lock and inspected the closed turn. This is an existing coverage weakness, not an additional positive-acquisition flake.
+
+Part A’s claim survived the source audit:
+
+- Confirmed **209 commits**, **163 changed Rust files**, and **12 identical commits** in the supplied range-diff.
+- Scanned additions, relevant surrounding output paths, platform/feature gates, and changed conditional compilation. Found no added shipped raw print/debug macro, panicking stdout/stderr write, print-lint exemption, or stderr-unwrapping hook/logger/exit path.
+- New upload notices reach `best_effort_stderr`; new CLI diagnostics already use the safe macros. The added `write!` calls examined format into `Formatter`.
+- Parsed manifests and lockfiles: unchanged base workspace membership; **101/101 tip members have effective three-lint denies**; no package identity/version/source/checksum changes in the base delta; the six dependency edges match your account.
+- Inspected the new regex/Unicode-normalization paths and their relevant cached dependencies, `fuigo-secrets::redact_secrets`, the file-utils notice path, and other newly referenced APIs. No newly reached production print surfaced. This is source evidence, without a regenerated binary caller inventory.
+
+The three print-bearing files are test-only:
+
+| File | Inclusion and platform treatment |
+|---|---|
+| `fs_atomic_p79_tests.rs` | Included through `#[cfg(test)]` and `#[path]` at `fs_atomic.rs:3692`. Its prints, including Windows-only cases, are inside `#[test]` functions. |
+| `p83_teardown_tests.rs` | Descends from `mvp_agent::tests`, gated at `mod.rs:2649`. Both prints are inside one `#[cfg(unix)] #[test]` function: included on macOS, excluded on Windows. |
+| `compacted_resume_history_acp.rs` | Cargo integration-test target; both prints are inside the async closure of its `#[test]` function at line 262. |
+
+Their applicable prints qualify for `allow-print-in-tests` on Windows/macOS as well. This follows the actual test-function placement and Clippy’s test detection, rather than filenames alone. [Clippy configuration](https://doc.rust-lang.org/clippy/lint_configuration.html#allow-print-in-tests), [test detection implementation](https://raw.githubusercontent.com/rust-lang/rust-clippy/rust-1.94.0/clippy_utils/src/lib.rs).
+
+Part B’s diagnosis is technically sound. Rust 1.94’s `File::try_lock` and the inspected fs2 implementation use `flock` on Linux/macOS. Forked descriptors share its open-file description; close-on-exec does not prevent that temporary inheritance. Release requires explicit unlocking or the last descriptor closing. **`F_OFD_SETLK` has the same inheritance/last-close issue.** I verified the mechanism; attributing each historical sighting to a particular concurrent spawn still requires tracing. [Rust implementation](https://raw.githubusercontent.com/rust-lang/rust/1.94.0/library/std/src/sys/fs/unix.rs), [flock semantics](https://man7.org/linux/man-pages/man2/flock.2.html), [OFD-lock semantics](https://man7.org/linux/man-pages/man2/F_OFD_SETLK.2const.html).
+
+The DreamLock helper retries only `WouldBlock`-derived `None`; I/O errors still fail immediately. All four immediate reacquisitions were replaced. Exclusion and marker-preservation assertions remain. These tests now tolerate release delays within the polling budget, so they cannot establish prompt release. The remaining direct acquisition after `child.kill()`/`wait()` is safe against this particular window: that helper acquired after exec, spawns no descendants, and has exited.
+
+The new async loop is correct on `current_thread`: `tokio::time::sleep(...).await` yields, and `std::time::Instant` measures real elapsed time. The ten-second deadline bounds retry decisions, not a blocking filesystem syscall. The final counter checks exactly one append **invocation**. [Tokio test runtime](https://docs.rs/tokio/latest/tokio/attr.test.html).
+
+No files were modified, and no Cargo, build, or test commands were run. Your Linux Clippy and locked-metadata results remain supplied evidence. During the audit, HEAD advanced to `b484a512`, changing only `dead_output_sweep.rs`; this verdict covers the requested base delta and `e2858d22`.
+
+LAND-WITH-FOLLOWUPS

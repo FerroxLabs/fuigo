@@ -2041,6 +2041,7 @@ mod tests {
     }
     #[test]
     fn render_follow_ups_emits_clickable_chips() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();
@@ -2055,6 +2056,7 @@ mod tests {
     }
     #[test]
     fn render_follow_ups_drops_chips_that_do_not_fit() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();
@@ -2064,6 +2066,7 @@ mod tests {
     }
     #[test]
     fn render_follow_ups_zero_area_is_noop() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 1));
         let theme = Theme::current();
         let rects = render_follow_ups(
@@ -2077,6 +2080,7 @@ mod tests {
     }
     #[test]
     fn render_follow_ups_clamps_long_label() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 120, 1);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();
@@ -2091,6 +2095,7 @@ mod tests {
     }
     #[test]
     fn render_follow_ups_applies_hover_style() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
         let theme = Theme::current();

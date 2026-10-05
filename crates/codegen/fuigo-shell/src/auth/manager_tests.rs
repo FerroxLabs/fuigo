@@ -476,16 +476,15 @@ fn manager_collection_predicates_fail_directions() {
     );
 }
 #[test]
-fn token_suffix_matrix() {
-    let cases: &[(&str, &str)] = &[
-        ("abcdefghijklmnop", "efghijklmnop"),
-        ("short", "short"),
-        ("", ""),
-        ("123456789012", "123456789012"),
-    ];
-    for (input, expected) in cases {
-        assert_eq!(bearer_suffix(input), *expected, "input={input:?}");
+fn token_fingerprint_matrix() {
+    // P70: the auth logs record a fingerprint, never characters of the token (a short token used to be logged whole).
+    for input in ["abcdefghijklmnop", "short", "123456789012"] {
+        let fp = bearer_fingerprint(input);
+        assert!(fp.starts_with("sha256:"), "input={input:?} fp={fp}");
+        assert!(fp.ends_with(&format!("/len={}", input.chars().count())), "input={input:?} fp={fp}");
+        assert!(!fp.contains(&input[..4]) && !fp.contains(&input[input.len() - 4..]), "input={input:?} fp={fp}");
     }
+    assert_eq!(bearer_fingerprint(""), "sha256:e3b0/len=0");
 }
 #[test]
 fn hot_swap_updates_in_memory_without_disk() {
@@ -1134,7 +1133,7 @@ async fn verdict_not_keyed_on_in_mem_bearer() {
 }
 /// A refresh that obtains a fresh token but cannot write it to disk must return `Transient` AND still swap the in-memory bearer to the fresh token.
 /// That is the "always update in-memory even if the disk write failed" invariant; without it a disk hiccup strands the session.
-/// The write is failed deterministically (root-safe) via the path-scoped `WRITE_FAULT_PATH` injection in `storage.rs`.
+/// The write is failed deterministically (root-safe) via the path-scoped `inject_write_fault` in `storage.rs`.
 /// The auth.json read (file absent) and the file lock still succeed.
 #[tokio::test]
 async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
@@ -1147,18 +1146,7 @@ async fn refresh_persist_failure_is_transient_but_swaps_in_memory() {
         expires_at: Some(Utc::now() - Duration::hours(1)),
         ..FuigoAuth::test_default()
     });
-    struct FaultGuard;
-    impl Drop for FaultGuard {
-        fn drop(&mut self) {
-            *crate::auth::storage::WRITE_FAULT_PATH
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()) = None;
-        }
-    }
-    let _fault = FaultGuard;
-    *crate::auth::storage::WRITE_FAULT_PATH
-        .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(dir.path().join("auth.json"));
+    let _fault = crate::auth::storage::inject_write_fault(&dir.path().join("auth.json"));
     mgr.set_refresher(Arc::new(CountingRefresher {
         call_count: Arc::new(AtomicU32::new(0)),
         delay: StdDuration::ZERO,
@@ -2424,6 +2412,11 @@ async fn auth_returns_cached_token_when_refresh_fails_within_real_expiry() {
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn update_writes_disk_before_user_enrichment() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::update_writes_disk_before_user_enrichment",
+    ) else {
+        return;
+    };
     let release = Arc::new(tokio::sync::Notify::new());
     let release_for_handler = Arc::clone(&release);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2446,7 +2439,7 @@ async fn update_writes_disk_before_user_enrichment() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
+        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let new_auth = FuigoAuth {
         key: "rotated-key".into(),
@@ -2478,18 +2471,16 @@ async fn update_writes_disk_before_user_enrichment() {
         "enrichment must not have landed yet"
     );
     release.notify_one();
+    // Wait for the enrichment task to finish, not for a clock: how fast it lands on a loaded host is not the property.
+    wait_enrichments(&mgr, 1).await;
     let auth_path = dir.path().join("auth.json");
-    let mut enriched = None;
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let store = read_auth_json(&auth_path).unwrap();
-        let entry = store.values().next().unwrap().clone();
-        if entry.team_id.is_some() {
-            enriched = Some(entry);
-            break;
-        }
-    }
-    let enriched = enriched.expect("enrichment must land within 5s");
+    let enriched = read_auth_json(&auth_path)
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(enriched.team_id.is_some(), "enrichment must land");
     assert_eq!(enriched.key, "rotated-key", "tokens preserved");
     assert_eq!(
         enriched.refresh_token.as_deref(),
@@ -2500,29 +2491,86 @@ async fn update_writes_disk_before_user_enrichment() {
     assert_eq!(enriched.user_id, "enriched-user-id");
     server.abort();
 }
-/// Regression: back-to-back `update()` calls with different `refresh_token`s must converge to the LATEST token on disk.
-/// Both spawned enrichment tasks read-modify-write disk concurrently; the spawn-task file lock is what keeps them ordered.
-/// Without it an interleaved enrichment write can resurrect the older `refresh_token`, re-opening the `invalid_grant` race.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn enrichment_task_preserves_interleaved_token_rotation() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let app = axum::Router::new().route(
+/// Arm a one-shot [`enrichment::EnrichmentGate`] on `mgr`; returns (arrived, release).
+fn arm_enrichment_gate(
+    mgr: &AuthManager,
+    point: enrichment::GatePoint,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *mgr.enrichment_gate.lock() = Some(enrichment::EnrichmentGate {
+        point,
+        arrived: arrived_tx,
+        release: release_rx,
+    });
+    (arrived_rx, release_tx)
+}
+
+/// Wait (off the runtime) for a gated enrichment to park.
+async fn wait_arrived(arrived: std::sync::mpsc::Receiver<()>) {
+    tokio::task::spawn_blocking(move || {
+        arrived
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("the gated enrichment must reach its gate")
+    })
+    .await
+    .unwrap();
+}
+
+/// Wait for `n` spawned enrichments to finish: a completion count, not a clock, so host load only makes this slower.
+/// The bound exists only so a lost task fails instead of hanging.
+async fn wait_enrichments(mgr: &AuthManager, n: u32) {
+    let waited = std::time::Instant::now();
+    while mgr.enrichments_finished() < n {
+        assert!(
+            waited.elapsed() < std::time::Duration::from_secs(120),
+            "{n} enrichment tasks must finish (finished {})",
+            mgr.enrichments_finished()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+fn user_info_server_app(delay_ms: u64) -> axum::Router {
+    axum::Router::new().route(
         "/user",
-        axum::routing::get(|| async {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        axum::routing::get(move || async move {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
             axum::Json(serde_json::json!({
                 "userId": "stable-user",
                 "email": "user@corp.com",
                 "teamId": "team-alpha",
             }))
         }),
-    );
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    )
+}
+
+/// Regression: back-to-back `update()` calls with different `refresh_token`s must converge to the LATEST token on disk.
+/// v1's enrichment is parked after it has read the entry and passed every staleness check, just before its write;
+/// only then does `update(v2)` run. That is the interleaving that reverted v2: `update`'s callers (the login paths, and
+/// this test) did not hold the `auth.json` file lock, so v2 landed inside v1's read-to-write window and v1's write-back
+/// restored `key-v1`/`rt-v1` (seen under host load in full-suite runs). Now `update` takes the file lock itself, waits
+/// for v1's merge to finish, and then replaces it; v2's own enrichment adds the profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enrichment_task_preserves_interleaved_token_rotation() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrichment_task_preserves_interleaved_token_rotation",
+    ) else {
+        return;
+    };
+    // Parks an enrichment holding the process-wide auth-state lock: alone in its own process, so that park can
+    // never stall another test's `update` or in-memory write.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, user_info_server_app(50))
+            .await
+            .unwrap()
+    });
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
+        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let auth_v1 = FuigoAuth {
         key: "key-v1".into(),
@@ -2536,20 +2584,43 @@ async fn enrichment_task_preserves_interleaved_token_rotation() {
         user_id: "stable-user".into(),
         ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
     };
+    let (arrived, release) = arm_enrichment_gate(&mgr, enrichment::GatePoint::BeforeWrite);
     mgr.update(auth_v1).await.unwrap();
-    mgr.update(auth_v2).await.unwrap();
-    let auth_path = dir.path().join("auth.json");
-    let mut final_state = None;
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let store = read_auth_json(&auth_path).unwrap();
-        let entry = store.values().next().unwrap().clone();
-        if entry.refresh_token.as_deref() == Some("rt-v2") && entry.team_id.is_some() {
-            final_state = Some(entry);
-            break;
-        }
+    wait_arrived(arrived).await;
+    // v1's merge has read v1 and is about to write it back. `update(v2)` must not land inside that window: release v1
+    // only once v2 is provably blocked on the `auth.json` lock v1 holds (a recorded wait, not a sleep). Without that
+    // lock around both the merge and `update`'s read-modify-write, v2 never waits, this wait fails, and so does the test.
+    let waits_before = mgr.update_lock_waits();
+    let writer = {
+        let mgr = Arc::clone(&mgr);
+        tokio::spawn(async move { mgr.update(auth_v2).await.unwrap() })
+    };
+    let waited = std::time::Instant::now();
+    while mgr.update_lock_waits() == waits_before {
+        assert!(
+            waited.elapsed() < std::time::Duration::from_secs(120),
+            "update(v2) must block on the auth.json lock held by v1's parked merge"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let final_state = final_state.expect("v2 + enrichment must land within 3s");
+    assert!(
+        !writer.is_finished(),
+        "update(v2) must not complete while v1's merge holds the lock"
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(120), writer)
+        .await
+        .expect("update(v2) must finish once v1's merge is released")
+        .unwrap();
+    wait_enrichments(&mgr, 2).await;
+
+    let auth_path = dir.path().join("auth.json");
+    let final_state = read_auth_json(&auth_path)
+        .unwrap()
+        .values()
+        .next()
+        .unwrap()
+        .clone();
     assert_eq!(
         final_state.refresh_token.as_deref(),
         Some("rt-v2"),
@@ -2561,19 +2632,82 @@ async fn enrichment_task_preserves_interleaved_token_rotation() {
     );
     assert_eq!(final_state.team_id.as_deref(), Some("team-alpha"));
     assert_eq!(final_state.user_id, "stable-user");
+    let in_memory = mgr.current_or_expired().expect("in-memory credential");
+    assert_eq!(
+        (in_memory.key.as_str(), in_memory.refresh_token.as_deref()),
+        ("key-v2", Some("rt-v2")),
+        "memory must hold v2 too"
+    );
+    server.abort();
+}
+/// An enrichment whose credential was cleared from memory while its `/user` call was in flight must not put it back.
+/// The disk still holds the credential (`clear_in_memory` does not touch disk), so the disk check alone passes; only the
+/// in-memory check stops the merge from resurrecting a session the process dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn enrichment_does_not_resurrect_a_credential_cleared_from_memory() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrichment_does_not_resurrect_a_credential_cleared_from_memory",
+    ) else {
+        return;
+    };
+    // Parks an enrichment holding the process-wide auth-state lock: alone in its own process, so that park can
+    // never stall another test's `update` or in-memory write.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, user_info_server_app(0))
+            .await
+            .unwrap()
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = FuigoComConfig::default();
+    let mgr = Arc::new(
+        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
+    );
+    let auth = FuigoAuth {
+        key: "key-cleared".into(),
+        refresh_token: Some("rt-cleared".into()),
+        user_id: "stable-user".into(),
+        ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
+    };
+    let (arrived, release) = arm_enrichment_gate(&mgr, enrichment::GatePoint::BeforeMerge);
+    mgr.update(auth).await.unwrap();
+    wait_arrived(arrived).await;
+    mgr.clear_in_memory();
+    release.send(()).unwrap();
+    wait_enrichments(&mgr, 1).await;
+
+    assert!(
+        mgr.current_or_expired().is_none(),
+        "the merge must not restore a credential cleared from memory"
+    );
+    let disk = read_auth_json(&dir.path().join("auth.json")).unwrap();
+    let entry = disk.values().next().unwrap();
+    assert_eq!(
+        entry.team_id, None,
+        "and must not write its merge to disk either"
+    );
     server.abort();
 }
 /// Regression for the user-switch abort path: disk's `user_id` changes during an in-flight `/user` call.
 /// That happens when a different user signs in via a sibling process.
 /// The spawned enrichment must abort cleanly rather than overlay a previous user's team/org/profile fields onto the new user's entry.
+///
+/// Event-driven: the enrichment is parked after its `/user` fetch and before it takes any lock, the intruder entry is
+/// written, and only then is the merge released. The test then waits for the enrichment to finish (a completion
+/// count, not a clock) and checks the outcome once. No timing assumption about how long `/user` takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrichment_aborts_when_disk_user_changes_mid_flight",
+    ) else {
+        return;
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = axum::Router::new().route(
         "/user",
         axum::routing::get(|| async {
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             axum::Json(serde_json::json!({
                 "userId": "fetched-user",
                 "email": "fetched@corp.com",
@@ -2587,7 +2721,7 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
     let scope = cfg.auth_scope();
     let mgr = Arc::new(
         AuthManager::new(dir.path(), cfg.clone())
-            .with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
+            .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let initial = FuigoAuth {
         key: "initial-key".into(),
@@ -2595,8 +2729,10 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
         user_id: "fetched-user".into(),
         ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
     };
+    let (arrived, release) = arm_enrichment_gate(&mgr, enrichment::GatePoint::BeforeMerge);
     mgr.update(initial).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The `/user` reply is in hand and the merge has not started: the intruder lands squarely mid-flight.
+    wait_arrived(arrived).await;
     let intruder = FuigoAuth {
         key: "intruder-key".into(),
         refresh_token: Some("intruder-rt".into()),
@@ -2607,36 +2743,36 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
     };
     let mut store = AuthStore::new();
     store.insert(scope.clone(), intruder);
-    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
     let auth_path = dir.path().join("auth.json");
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let store = read_auth_json(&auth_path).unwrap();
-        let entry = store.get(&scope).expect("entry exists");
-        assert_eq!(
-            entry.user_id, "intruder-user",
-            "intruder's user_id must survive aborted enrichment"
-        );
-        assert_eq!(
-            entry.refresh_token.as_deref(),
-            Some("intruder-rt"),
-            "intruder's refresh_token must survive aborted enrichment"
-        );
-        assert_eq!(
-            entry.key, "intruder-key",
-            "intruder's access token must survive aborted enrichment"
-        );
-        assert_eq!(
-            entry.team_id.as_deref(),
-            Some("intruder-team"),
-            "intruder's team must NOT be overwritten with fetched-team"
-        );
-        assert_eq!(
-            entry.email.as_deref(),
-            Some("intruder@corp.com"),
-            "intruder's email must NOT be overwritten with fetched@corp.com"
-        );
-    }
+    write_auth_json(&auth_path, &store).unwrap();
+    release.send(()).unwrap();
+    wait_enrichments(&mgr, 1).await;
+
+    let store = read_auth_json(&auth_path).unwrap();
+    let entry = store.get(&scope).expect("entry exists");
+    assert_eq!(
+        entry.user_id, "intruder-user",
+        "intruder's user_id must survive aborted enrichment"
+    );
+    assert_eq!(
+        entry.refresh_token.as_deref(),
+        Some("intruder-rt"),
+        "intruder's refresh_token must survive aborted enrichment"
+    );
+    assert_eq!(
+        entry.key, "intruder-key",
+        "intruder's access token must survive aborted enrichment"
+    );
+    assert_eq!(
+        entry.team_id.as_deref(),
+        Some("intruder-team"),
+        "intruder's team must NOT be overwritten with fetched-team"
+    );
+    assert_eq!(
+        entry.email.as_deref(),
+        Some("intruder@corp.com"),
+        "intruder's email must NOT be overwritten with fetched@corp.com"
+    );
     server.abort();
 }
 /// Regression: on initial Team-principal login the OIDC flow stamps `auth.user_id = team_id` as a placeholder.
@@ -2648,6 +2784,11 @@ async fn enrichment_aborts_when_disk_user_changes_mid_flight() {
 /// That matches disk on bootstrap and only diverges when a sibling actually stomped.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn enrichment_overlays_team_login_placeholder_user_id() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrichment_overlays_team_login_placeholder_user_id",
+    ) else {
+        return;
+    };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let app = axum::Router::new().route(
@@ -2673,7 +2814,7 @@ async fn enrichment_overlays_team_login_placeholder_user_id() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = FuigoComConfig::default();
     let mgr = Arc::new(
-        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
+        AuthManager::new(dir.path(), cfg).with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
     );
     let team_login = FuigoAuth {
         key: "team-key".into(),
@@ -2688,18 +2829,18 @@ async fn enrichment_overlays_team_login_placeholder_user_id() {
         ..make_auth(Some(Utc::now() + Duration::hours(1)), Utc::now())
     };
     mgr.update(team_login).await.unwrap();
+    wait_enrichments(&mgr, 1).await;
     let auth_path = dir.path().join("auth.json");
-    let mut enriched = None;
-    for _ in 0..50 {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let store = read_auth_json(&auth_path).unwrap();
-        let entry = store.values().next().expect("entry exists").clone();
-        if entry.email.is_some() {
-            enriched = Some(entry);
-            break;
-        }
-    }
-    let enriched = enriched.expect("enrichment must overlay onto Team login");
+    let enriched = read_auth_json(&auth_path)
+        .unwrap()
+        .values()
+        .next()
+        .expect("entry exists")
+        .clone();
+    assert!(
+        enriched.email.is_some(),
+        "enrichment must overlay onto Team login"
+    );
     assert_eq!(
         enriched.user_id, "real-user-id",
         "team_id placeholder must be replaced by real user_id from /user"
@@ -3084,10 +3225,15 @@ async fn spawn_user_stub(token: &'static str, body: &'static str) -> String {
 }
 #[tokio::test]
 async fn enrich_auth_inline_populates_zdr_flags() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrich_auth_inline_populates_zdr_flags",
+    ) else {
+        return;
+    };
     let body = r#"{"userId":"u-1","teamBlockedReasons":["BLOCKED_REASON_NO_LOGS"],"codingDataRetentionOptOut":true}"#;
     let base = spawn_user_stub("tok", body).await;
     let dir = tempfile::tempdir().unwrap();
-    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&base);
+    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&front.front(&base));
     let mut auth = FuigoAuth {
         key: "tok".into(),
         ..FuigoAuth::test_default()
@@ -3100,10 +3246,15 @@ async fn enrich_auth_inline_populates_zdr_flags() {
 }
 #[tokio::test]
 async fn enrich_auth_inline_keeps_fields_absent_from_response() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "auth::manager::tests::enrich_auth_inline_keeps_fields_absent_from_response",
+    ) else {
+        return;
+    };
     let body = r#"{"userId":"u-1","teamBlockedReasons":["BLOCKED_REASON_NO_LOGS_MODERATED"]}"#;
     let base = spawn_user_stub("tok", body).await;
     let dir = tempfile::tempdir().unwrap();
-    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&base);
+    let mgr = AuthManager::new(dir.path(), FuigoComConfig::default()).with_proxy_base_url(&front.front(&base));
     let mut auth = FuigoAuth {
         key: "tok".into(),
         principal_type: Some("Team".into()),
@@ -4034,6 +4185,12 @@ fn dark_wake_defer_budget_survives_powered_on_during_dark_wake() {
 #[test]
 #[serial_test::serial(force_dark_wake_env)]
 fn is_dark_wake_false_when_power_listener_not_started() {
+    // `FUIGO_AUTH_FORCE_DARK_WAKE` is read by every `is_dark_wake` call in this binary, and only this test's serial group
+    // takes `force_dark_wake_env`; written in the shared process it flipped e.g.
+    // `compute_proactive_sleep_dark_wake_returns_backoff`'s precondition to the 300 s backoff (seen under host load).
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _unset = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_FORCE_DARK_WAKE");
     let dir = tempfile::tempdir().unwrap();
     let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());
@@ -4048,6 +4205,12 @@ fn is_dark_wake_false_when_power_listener_not_started() {
 #[test]
 #[serial_test::serial(force_dark_wake_env)]
 fn is_dark_wake_env_override_forces_both_states() {
+    // `FUIGO_AUTH_FORCE_DARK_WAKE` is read by every `is_dark_wake` call in this binary, and only this test's serial group
+    // takes `force_dark_wake_env`; written in the shared process it flipped e.g.
+    // `compute_proactive_sleep_dark_wake_returns_backoff`'s precondition to the 300 s backoff (seen under host load).
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let dir = tempfile::tempdir().unwrap();
     let mgr = AuthManager::new(dir.path(), FuigoComConfig::default());

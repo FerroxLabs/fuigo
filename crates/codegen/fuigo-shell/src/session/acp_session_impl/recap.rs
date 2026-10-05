@@ -148,7 +148,7 @@ impl SessionActor {
         };
 
         // Built once; each attempt clones it and stamps a fresh req_id, and retries are rare so the success path pays one clone.
-        let base_request = self.parent_cached_request(AuxCall {
+        let mut base_request = self.parent_cached_request(AuxCall {
             items,
             tools: tool_specs,
             hosted_tools,
@@ -158,6 +158,13 @@ impl SessionActor {
             conv_id: btw_session_id.clone(),
             req_id: format!("fuigo-btw-{}", uuid::Uuid::new_v4()),
         }).with_purpose(fuigo_sampling_types::RequestPurpose::Work);
+        // Its own per-request admission, so a token-budget refusal comes back as the typed denial
+        // (Contract D.4) and never lands on the turn's request.
+        let admission = crate::session::execution_state::Execution::current(&parent_session_id)
+            .map(|execution| execution.request_admission());
+        base_request.execution_admission = admission
+            .clone()
+            .map(|a| a as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
 
         // conversation_collect is one-shot (no sampler-actor retry)
         // /btw adds its own bounded transient-failure retry (the policy and predicate above)
@@ -183,15 +190,34 @@ impl SessionActor {
                 let content = response.assistant_text();
                 if content.is_empty() {
                     let err = SideQuestionError::EmptyResponse;
-                    persist(String::new(), false, Some(err.to_string()), attempts.get());
+                    // P70b: `btw_history.jsonl` is a persisted sink.
+                    persist(
+                        String::new(),
+                        false,
+                        Some(fuigo_telemetry::sent_credentials::scrub_owned(
+                            err.to_string(),
+                        )),
+                        attempts.get(),
+                    );
                     return Err(err);
                 }
                 persist(content.clone(), true, None, attempts.get());
                 Ok(content)
             }
             Err(e) => {
-                let err = SideQuestionError::from(e);
-                persist(String::new(), false, Some(err.to_string()), attempts.get());
+                let err = match admission.as_ref().and_then(|a| a.take_budget_denial()) {
+                    Some(denial) => SideQuestionError::BudgetDenied(denial),
+                    None => SideQuestionError::from(e),
+                };
+                // P70b: `btw_history.jsonl` is a persisted sink.
+                persist(
+                    String::new(),
+                    false,
+                    Some(fuigo_telemetry::sent_credentials::scrub_owned(
+                        err.to_string(),
+                    )),
+                    attempts.get(),
+                );
                 Err(err)
             }
         }
@@ -353,7 +379,10 @@ impl SessionActor {
                     started_at,
                     None,
                     None,
-                    Some(&e.to_string()),
+                    // P70b: `recap_requests/*.json` is a persisted sink.
+                    Some(&fuigo_telemetry::sent_credentials::scrub_owned(
+                        e.to_string(),
+                    )),
                 );
                 clear_in_flight();
                 // A manual `/recap` shows a loading spinner; clear it on failure.

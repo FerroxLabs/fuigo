@@ -59,6 +59,9 @@ pub enum WsError {
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+    /// P47: the destination may not receive the session token, so the request was not made.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for WsError {
@@ -120,7 +123,12 @@ impl WorkspacesClient {
             query.push(("kind", kind.to_owned()));
         }
 
-        let mut builder = self
+        // P47: the session token goes only where the service-endpoint trust class admits `url`.
+        crate::auth::session_delivery::service_session_gate(&auth, &url, Some(base), "workspaces")
+            .map_err(|refused| WsError::SessionDestinationRefused(refused.to_string()))?;
+        // P43: identity only to a FluxRouter-operated destination.
+        let identity = super::account_identity_headers(&url, &auth.user_id, auth.email.as_deref());
+        let builder = self
             .http
             .get(&url)
             .query(&query)
@@ -129,20 +137,12 @@ impl WorkspacesClient {
                 "X-XAI-Token-Auth",
                 self.auth.fuigo_com_config().token_header.clone(),
             )
-            .header("x-userid", &auth.user_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
+            .headers(identity)
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
             )
             .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(email) = &auth.email {
-            builder = builder.header("x-email", email);
-        }
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
 
         let response = builder.send_checked().await?;
@@ -167,6 +167,25 @@ pub(crate) use super::skills_client::first_nonempty_env;
 
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: a workspaces host that is not FluxRouter-operated gets no identity.
+    #[tokio::test(flavor = "current_thread")]
+    async fn workspaces_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::workspaces_client::tests::workspaces_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+            let base = front.front_service(&base);
+        let mut client = WorkspacesClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        client.base_url = Some(base);
+        let _ = client.list_workspaces(&WsQuery { page_size: 1, ..WsQuery::default() }).await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "workspaces");
+    }
     use super::*;
 
     #[test]

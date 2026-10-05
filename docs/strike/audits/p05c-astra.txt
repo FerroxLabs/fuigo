@@ -1,0 +1,92 @@
+P05c Astra cross-model audits (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null)
+Four rounds over git diff 2d2ee31e..HEAD. Final answer of each round below, verbatim (ANSI codes stripped).
+
+=================== ROUND 1 (641172003ae55e64 raw-log sha256 prefix) ===================
+Reviewed all 12 files at `9227d97c8f2fe5fb38014ad62400a54ad0783b6e` against `2d2ee31e`. No BLOCKER/HIGH found. Four test-related findings:
+
+1. **MEDIUM — Windows test fails on ARM64.** [tests/windows.rs:90](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-crash-handler/tests/windows.rs:90)  
+   **Scenario:** The test is enabled for every Windows architecture, including the repository’s ARM64 release target. The existing handler sets `(crash_pc, crash_fp) = (0, 0)` outside x86_64, producing an empty backtrace; indexing `r.backtrace[0]` fails. An x64 MSVC pass does not qualify ARM64.  
+   **Fix:** Separate general recording assertions from x86_64 symbolication assertions, and explicitly retain ARM64’s missing-PC limitation—or implement ARM64 PC capture if symbolication there is required.
+
+2. **LOW — Remote-hook test depends on ambient configuration.** [resolve/crash_handler.rs:396](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:396)  
+   **Scenario:** The comment assumes an isolated test HOME, but `guard()` only clears `FUIGO_CRASH_HANDLER`. A real user/managed/requirements setting of `crash_handler = true` correctly prevents the hook and fails the assertion.  
+   **Fix:** Run this case in an isolated subprocess with controlled configuration layers, using the existing test-support helpers.
+
+3. **LOW — Tests do not protect the production hook registration.** [main.rs:2082](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-pager-bin/src/main.rs:2082)  
+   **Scenario:** Removing this registration leaves the new tests passing: shell tests register their own counter callback, while crash-handler tests invoke release independently. Mid-session disabling would stop working in the pager. This is a source-inferred mutation gap, not a mutation run.  
+   **Fix:** Add a subprocess test exercising the production registration, delivering remote false from Tokio, then verifying slot removal and that a subsequent deliberate crash produces no blob.
+
+4. **LOW — Windows sweep test permits a vacuous pass.** [tests/windows.rs:112](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-crash-handler/tests/windows.rs:112)  
+   **Scenario:** `before == 0` satisfies every assertion without exercising deletion.  
+   **Fix:** Before sweeping, assert exactly one empty slot belonging to the exited child; then require exactly one removal.
+
+The production changes withstand source review:
+
+- The shared classifier preserves the old four substring checks exactly. The dependency graph has no return path from crash-handler to telemetry or shell; Cargo.lock adds one edge and no package versions.
+- Gate precedence is preserved. The cache write guard is dropped before re-resolution and callback execution. Registration precedes Tokio startup.
+- Unix and Windows atomic swaps prevent double-close between repeated release calls and crash handling. Release needs no Tokio runtime operation; an already-claimed crash may finish, while subsequent crashes cannot acquire the slot.
+- The strengthened fork test verifies successful reinstall, the child’s own blob, clean-child cleanup, and the parent’s subsequent crash.
+
+No files modified; builds, runtime tests, and mutations were not executed. The supplied native Windows pass remains externally supplied evidence.
+
+VERDICT: PASS WITH NOTES — No BLOCKER/HIGH regression was found; the remaining findings concern Windows architecture coverage and regression-test reliability.
+
+=================== ROUND 2 (f4e29d48072a8c8c raw-log sha256 prefix) ===================
+Reviewed all 12 files at `e5f69074` against `2d2ee31e`. No BLOCKER/HIGH findings.
+
+1. **MEDIUM — C2-1: Test can leave the developer’s persisted gate changed.** [main.rs:4134](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-pager-bin/src/main.rs:4134)  
+   Applying remote settings writes `false` to the actual `$FUIGO_HOME/crash/remote-gate`. If either subsequent assertion fails—for example, when hook registration regresses—the restoration code never executes. Even successful restoration can overwrite a concurrent session’s update; restoration errors are ignored.  
+   **Fix:** Run this test in a subprocess with a private `FUIGO_HOME`, following the existing isolated-test pattern. Do not snapshot and rewrite developer state.
+
+2. **LOW — C2-2: C1-2 still assumes env outranks requirements.** [crash_handler.rs:411](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:411)  
+   With `[diagnostics] crash_handler = false` in effective requirements, setting `FUIGO_CRASH_HANDLER=1` cannot enable recording. The production resolver correctly runs the stop hook, but line 415 incorrectly expects no additional stop.  
+   **Fix:** Control requirements in the fixture, or derive this assertion from the fully resolved gate while the env override remains set.
+
+3. **LOW — C2-3: Production-registration regression coverage remains conditional.** [main.rs:4135](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-pager-bin/src/main.rs:4135)  
+   When an ambient higher tier keeps recording enabled, deleting hook registration from `install_crash_recorder()` still passes both new pager tests: the functional test expects the slot to remain, and the source test only checks that `main()` calls the helper. Thus C1-3 detects the regression only under suitable external configuration.  
+   **Fix:** Include a controlled, mandatory gate-off case that asserts an installed slot disappears, plus a separate higher-tier override case.
+
+Production review supports the implementation:
+
+- Sentry retains exactly the previous four substring predicates. The new dependency introduces no cycle; the crash crate has no Fuigo dependencies, and the lockfile adds only the dependency edge.
+- The cache write guard ends before re-resolution. The hook runs outside that lock. Unix and Windows atomically transfer descriptor/handle ownership, preventing release and crash recording from closing the same resource. No Tokio-runtime dependency or callback recursion was found.
+- The strengthened fork test verifies successful reinstall, child evidence, clean-child cleanup, and subsequent parent recording.
+- C1-1 and C1-4 are resolved in source: architecture-specific symbolication assertions and non-vacuous Windows sweep assertions are present.
+
+`git diff --check` passed; the checkout remains unchanged. Builds and runtime tests were not rerun in this read-only audit; Windows-native passes are supplied evidence.
+
+VERDICT: PASS WITH NOTES — Production changes withstand source review, with three non-blocking test isolation and regression-coverage issues remaining.
+
+=================== ROUND 3 (3677e30360a6a545 raw-log sha256 prefix) ===================
+Reviewed `2d2ee31e..77c96a740a328b206ce5e0997797ee5cee56f3a1` read-only. **No BLOCKER/HIGH found. Three LOW test findings remain.**
+
+1. **LOW — Pager subprocess isolation still includes machine policy.** [main.rs:4151](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-pager-bin/src/main.rs:4151)  
+   Redirecting `FUIGO_HOME` and `HOME` protects developer files, resolving C2-1. However, the resolver still reads `/etc/fuigo` and macOS MDM requirements. A system setting enabling recording makes `switch_off` fail; a requirement disabling it makes `env_keeps_on` fail—even with correct production behavior.  
+   **Fix:** Run these mandatory cases with isolated system-policy inputs or in an explicitly policy-free test environment; retain unconditional outcome assertions.
+
+2. **LOW — Shell hook test races with other settings tests.** [crash_handler.rs:404](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:404)  
+   Its private `ENV_LOCK` does not serialize `agent/config_tests.rs::remote_settings_disarm_managed_config_signatures`, which calls `apply_remote_settings_side_effects` and clears the same remote cache. If that happens between the stop callback and line 405’s second resolution, the expected stop count changes retrospectively, causing a false failure.  
+   **Fix:** Isolate this test in its own process, or share synchronization across every test mutating this cache.
+
+3. **LOW — Release-then-crash test does not establish successful installation.** [integration.rs:863](/Volumes/Mando/WaylandBots/Fuigo/wt-p05c/crates/codegen/fuigo-crash-handler/tests/integration.rs:863)  
+   The shared subprocess entry ignores `install()`’s return value at line 173. If installation fails, SIGSEGV still terminates the child and leaves no slot, satisfying this test without exercising release.  
+   **Fix:** Assert successful installation and an existing slot before `release_slot()` in this scenario.
+
+Production review found identical Sentry filtering, no dependency cycle, and no new dependency versions. Shell gains no direct crash-handler dependency, although telemetry introduces a transitive one. The cache write guard ends before re-resolution; the hook runs outside that lock. Registration precedes Tokio startup. Unix and Windows release atomically take ownership of the descriptor/handle, making repeated release safe without runtime re-entry.
+
+The strengthened fork assertions, Windows architecture guards, exact sweep assertions, and mandatory pager cases are present. Builds, tests, and mutation runs were not executed during this read-only audit; Windows-native passes remain supplied evidence.
+
+VERDICT: PASS WITH NOTES — Production changes withstand source review, with three low-severity test reliability and precondition gaps remaining.
+
+=================== ROUND 4 (ac879db90a473d0f raw-log sha256 prefix) ===================
+Reviewed all 12 files in `2d2ee31e..97629cc8`, read-only. **No BLOCKER/HIGH/MEDIUM/LOW findings remain.**
+
+- **Shared classification:** Sentry retains exactly the old four-substring behavior. No dependency cycle exists. Telemetry now requires the crash crate; shell gains no direct dependency, although it reaches it transitively through telemetry.
+- **Mid-session stop:** Full precedence is preserved. The cache write guard drops before re-resolution and hook invocation. Registration precedes agent startup. Unix and Windows atomically detach the recording descriptor/handle, preventing double-close on repeated calls or concurrent release. The callback requires no Tokio runtime entry or asynchronous lock.
+- **Fork regression:** Failed child installation now fails the test. Assertions require the reinstalled child’s own blob, cleanup after child reinstall-and-exit, and a valid subsequent parent crash blob.
+- **Prior fixes:** C1–C3 are addressed in the final source. Pager tests use isolated processes and homes, reject conflicting machine policy explicitly, and require unconditional stop/keep outcomes. The racy shell hook test is removed. Release-before-crash requires the installation marker.
+- **Windows coverage:** Recording assertions remain architecture-independent; symbolication assertions are x86_64-only. Clean-exit sweeping requires exactly one empty child-owned slot and exactly one removal.
+
+`git diff --check` passed; the worktree remains clean. Builds and runtime tests were not rerun under the read-only constraint. Native Windows passes are user-supplied evidence, not independently reproduced here; build-time and binary-size impact were not measured.
+
+VERDICT: PASS — P05c satisfies the scoped source audit, and all findings from rounds 1–3 are addressed.

@@ -1217,7 +1217,8 @@ pub fn persist_to_session(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("no encoded bytes to persist"))?;
 
-    std::fs::create_dir_all(session_images_dir)?;
+    // A pasted image is session content: owner-only folder and file (P150, S14).
+    fuigo_config::create_dir_all_owner_only(session_images_dir)?;
 
     let ext = extension_for_mime(&img.mime_type);
     let filename = format!("image-{}.{}", uuid::Uuid::new_v4(), ext);
@@ -1226,7 +1227,7 @@ pub fn persist_to_session(
     let tmp_path = path.with_extension(format!("{ext}.tmp"));
     let write_result: anyhow::Result<()> = (|| {
         use std::io::Write as _;
-        let mut f = std::fs::File::create(&tmp_path)?;
+        let mut f = fuigo_config::create_file_owner_only(&tmp_path)?;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
@@ -1865,6 +1866,12 @@ mod tests {
         let path = img.session_image_path.as_ref().expect("path set");
         let on_disk = std::fs::read(path).expect("readable");
         assert_eq!(on_disk, payload);
+        // P150 (S14): a pasted image is session content, owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
         assert!(img.encoded_bytes.is_none(), "in-memory bytes released");
         // No .tmp left behind after success
         // `Path::extension()` returns `OsStr("tmp")` without the dot, so check filenames directly

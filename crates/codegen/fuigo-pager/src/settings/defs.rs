@@ -158,7 +158,8 @@ const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
 // Persisted to `[ui].default_selected_permission` in config.toml
 // It controls which row the cursor preselects on the FIRST permission prompt of a session
 // After the user confirms any prompt, the cursor sticks to the last-used option kind
-// `always_allow_all_sessions` (the effective default) lands the cursor on the "Always allow on all sessions" (enable-always-approve) row
+// Unset or unrecognised means `allow_once`, the least permissive approve row (P152)
+// `always_allow_all_sessions` (explicit opt-in only) lands the cursor on the "Always allow on all sessions" (enable-always-approve) row
 // That targeting goes through `is_enable_always_approve_option`, not index 0
 // The other three map onto `acp::PermissionOptionKind::{AllowOnce, AllowAlways, Reject*}`
 //
@@ -1213,7 +1214,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned, persisted to `[ui].default_selected_permission` in config.toml
         // Read by the pager via `appearance::permission_cursor`
-        // Canonical `always_allow_all_sessions` (the effective default) lands the first prompt's cursor on the enable-always-approve row
+        // Unset means `allow_once` (P152): the first prompt's cursor lands on the least permissive approve row
+        // Canonical `always_allow_all_sessions` (explicit opt-in only) lands it on the enable-always-approve row
         // Subsequent prompts stick to the last-used kind
         SettingMeta {
             key: "default_selected_permission",
@@ -1236,7 +1238,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "allow",
             ],
             kind: SettingKind::Enum {
-                default: DefaultSelectedPermission::AlwaysAllowAllSessions.as_canonical(),
+                default: DefaultSelectedPermission::EFFECTIVE_DEFAULT.as_canonical(),
                 choices: DEFAULT_SELECTED_PERMISSION_CHOICES,
                 supports_preview: false,
             },

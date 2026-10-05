@@ -63,6 +63,19 @@ pub(crate) fn expand_env_vars_with_process_skip(
     extra: &HashMap<String, String>,
     skip_process_env: &[&str],
 ) -> String {
+    // P70a (Astra f4 #1, f5 #1, f6): a `$`-run before the first-party name (`$${FUIGO_API_KEY}`, any form) is kept as written, so
+    // the `$$` escape cannot turn it into a plain reference that the spawn would then hand the saved key to (a shell
+    // reads the kept `$$` as its PID, never as the key).
+    fuigo_config::credential_env::expand_keeping_escaped_first_party_references(input, |text| {
+        expand_env_vars_masking_modifiers(text, extra, skip_process_env)
+    })
+}
+
+fn expand_env_vars_masking_modifiers(
+    input: &str,
+    extra: &HashMap<String, String>,
+    skip_process_env: &[&str],
+) -> String {
     let sentinel = make_sentinel();
 
     // Defence in depth: a collision between the fresh sentinel and the input or an extra-env value would require predicting our PRNG output
@@ -75,7 +88,8 @@ pub(crate) fn expand_env_vars_with_process_skip(
 
     // Step 1: hide any `${VAR<modifier>...}` substring from shellexpand by replacing the leading `${` with the per-call sentinel
     // shellexpand needs a `$` before the brace to recognize the form, so the masked body reads as literal text
-    let masked = mask_modifier_forms(input, &sentinel);
+    let dollar_sentinel = make_sentinel();
+    let masked = mask_modifier_forms_with(input, &sentinel, &dollar_sentinel);
 
     // Step 2: run shellexpand on the (possibly) masked input.
     let context = |name: &str| -> Option<String> {
@@ -88,6 +102,7 @@ pub(crate) fn expand_env_vars_with_process_skip(
         std::env::var(name).ok()
     };
     let expanded = shellexpand::env_with_context_no_errors(&masked, context).into_owned();
+    let expanded = restore_kept_runs(expanded, &dollar_sentinel);
 
     // Step 3: restore the sentinels back to `${`
     // The sentinel is freshly randomized per call, so it appears in `expanded` only where `mask_modifier_forms` put it
@@ -103,7 +118,12 @@ pub(crate) fn expand_env_vars_with_process_skip(
 ///
 /// "Modifier" means anything inside the braces after the identifier: `:-`, `-`, `:=`, `=`, `:?`, `?`, `:+`, `+`, `%`, `#`, `/`, `:N`, `:N:M`, etc.
 /// Detection is shared with [`crate::runner::command::find_unresolved_env_vars`] via [`iter_env_var_references`].
+#[cfg(test)]
 fn mask_modifier_forms(input: &str, sentinel: &str) -> String {
+    mask_modifier_forms_with(input, sentinel, sentinel)
+}
+
+fn mask_modifier_forms_with(input: &str, sentinel: &str, dollar_sentinel: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut cursor: usize = 0;
     for r in iter_env_var_references(input) {
@@ -114,7 +134,7 @@ fn mask_modifier_forms(input: &str, sentinel: &str) -> String {
         // Modifier-form braced ref: replace leading `${` with sentinel and emit the body (including closing `}`) as-is
         if r.braced && r.has_modifier {
             out.push_str(sentinel);
-            out.push_str(&input[r.start + 2..r.end]);
+            out.push_str(&protect_kept_runs(&input[r.start + 2..r.end], dollar_sentinel));
         } else {
             // Plain `${NAME}`, bare `$NAME`, or invalid form: pass through verbatim so shellexpand can resolve (or leave unresolved)
             out.push_str(&input[r.start..r.end]);
@@ -125,6 +145,53 @@ fn mask_modifier_forms(input: &str, sentinel: &str) -> String {
     if cursor < input.len() {
         out.push_str(&input[cursor..]);
     }
+    out
+}
+
+/// P118 (Astra r1 #1): inside a masked modifier body, a `$`-run of two or more before the first-party name is an
+/// escape that must survive shellexpand (which would turn `$$` into `$` and make `${OTHER:-$$FUIGO_API_KEY}` read as a
+/// reference). Each such run becomes `<sentinel>D<n>.` and is restored to its `n` dollars after expansion.
+fn protect_kept_runs(body: &str, sentinel: &str) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let run = rest[at..].bytes().take_while(|b| *b == b'$').count();
+        let after = &rest[at + run..];
+        if run >= 2 && fuigo_config::credential_env::names_first_party_key(after) {
+            out.push_str(&format!("{sentinel}{run}."));
+        } else {
+            out.push_str(&rest[at..at + run]);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn restore_kept_runs(expanded: String, sentinel: &str) -> String {
+    let marker = sentinel.to_owned();
+    if !expanded.contains(&marker) {
+        return expanded;
+    }
+    let mut out = String::with_capacity(expanded.len());
+    let mut rest = expanded.as_str();
+    while let Some(at) = rest.find(&marker) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + marker.len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        match (tail[..digits].parse::<usize>(), tail[digits..].strip_prefix('.')) {
+            (Ok(n), Some(after)) if n <= 4096 => {
+                out.push_str(&"$".repeat(n));
+                rest = after;
+            }
+            _ => {
+                out.push_str(&marker);
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
     out
 }
 
@@ -241,10 +308,119 @@ impl<'a> Iterator for EnvVarRefIter<'a> {
     }
 }
 
+/// Whether `input` names the first-party API key explicitly (P70a): `$FUIGO_API_KEY`, `${FUIGO_API_KEY}`, a modifier
+/// form (`${FUIGO_API_KEY:-}`), a length or indirection form (`${#FUIGO_API_KEY}`, `${!FUIGO_API_KEY}`), and a reference
+/// nested in another variable's modifier (`${OVERRIDE:-$FUIGO_API_KEY}`, `${OVERRIDE:-${FUIGO_API_KEY}}`). A textual
+/// scan, not [`iter_env_var_references`], which reads a braced form as ONE reference and never looks inside it (Astra
+/// f1 #3). The name must end at an identifier boundary (`$FUIGO_API_KEY_2` is another variable), and the `$`-run that
+/// opens it must be odd (an escaped `$$FUIGO_API_KEY` is text; parse-time expansion keeps the run as written).
+pub(crate) fn references_first_party_key(input: &str) -> bool {
+    const NAME: &str = fuigo_config::FIRST_PARTY_KEY_ENV_VAR;
+    let bytes = input.as_bytes();
+    input.match_indices(NAME).any(|(at, _)| {
+        let ends_identifier = bytes
+            .get(at + NAME.len())
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || *c == b'_'));
+        let before = &input[..at];
+        ends_identifier
+            && ["$", "${", "${#", "${!"].iter().any(|p| {
+                // The `$`-run that opens the reference must be odd: `$$` is an escape (for the expanders) and the
+                // PID (for a shell), so `$${FUIGO_API_KEY}` is text and `$$${FUIGO_API_KEY}` a reference (Astra f4 #1,
+                // f7 #2).
+                before.ends_with(p) && before[..before.len() - p.len() + 1].bytes().rev().take_while(|b| *b == b'$').count() % 2 == 1
+            })
+    })
+}
+
+/// The per-hook environment one hook's child is given (P70a): its configured `env` map, plus the first-party API key
+/// when, and only when, that hook's configuration names the key explicitly.
+///
+/// The agent does not hold the key the user saved (`auth.json`, `fuigo/setApiKey`) in its environment, so hooks do not
+/// inherit it (and every hook child has `FUIGO_API_KEY` stripped by name anyway). A COMMAND hook whose `command`
+/// (passed as `configured`) references `$FUIGO_API_KEY` gets `FUIGO_API_KEY` in its own child environment, and a
+/// `${FUIGO_API_KEY}` / `$FUIGO_API_KEY` inside a value of its `env` map is replaced by the key; no other `env` value
+/// is expanded (as before). The key comes from [`fuigo_config::resolve_credential_env_var`]: an exported key, else the
+/// saved one. A value the `env` map sets for `FUIGO_API_KEY` itself is kept. Nothing is written to the agent's own
+/// environment. A script that reads `$FUIGO_API_KEY` without the hook's config naming it gets nothing.
+pub(crate) fn hook_child_env<'a>(
+    configured: Option<&str>,
+    extra_env: &'a HashMap<String, String>,
+    may_name_saved_key: bool,
+) -> std::borrow::Cow<'a, HashMap<String, String>> {
+    // P118 (Astra r2 #5): a project hook, a plugin hook or an agent's hook is never handed the saved key, whatever its
+    // strings turned into after parsing and later expansion passes.
+    let in_configured = may_name_saved_key && configured.is_some_and(references_first_party_key);
+    let in_env = may_name_saved_key && extra_env.values().any(|v| references_first_party_key(v));
+    // One snapshot of the key for every value.
+    let key = if in_configured || in_env {
+        fuigo_config::resolve_credential_env_var(fuigo_config::FIRST_PARTY_KEY_ENV_VAR)
+    } else {
+        None
+    };
+    // `env` values are read like every other destination: references resolve (when this hook names the key and there
+    // is one) and a `$$` before the name is an escape either way (Astra f9 #2).
+    let mentions = |v: &String| v.contains(fuigo_config::FIRST_PARTY_KEY_ENV_VAR);
+    if key.is_none() && !extra_env.values().any(mentions) {
+        return std::borrow::Cow::Borrowed(extra_env);
+    }
+    let mut env = extra_env.clone();
+    for value in env.values_mut() {
+        if let std::borrow::Cow::Owned(read) = fuigo_config::read_first_party_key_references(value, key.as_deref()) {
+            *value = read;
+        }
+    }
+    if in_configured && let Some(key) = key.as_ref() {
+        env.entry(fuigo_config::FIRST_PARTY_KEY_ENV_VAR.to_owned())
+            .or_insert_with(|| key.clone());
+    }
+    // P118 (backlog row "Hook-child key scrub record"): a key handed to this child is recorded as a credential sent, so
+    // the S8 display and log scrub covers an error that echoes it, as it does for an MCP server.
+    if let Some(key) = key.as_deref()
+        && (in_configured || env.values().any(|v| v.contains(key)))
+    {
+        fuigo_secrets::sent_credentials::record(key);
+    }
+    std::borrow::Cow::Owned(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::with_env_var;
+
+    /// P70a (Astra f1 #3): every spelling a shell resolves names the key, nested ones included; other variables,
+    /// longer names and plain text do not.
+    #[test]
+    fn first_party_key_references_are_found_in_every_shell_form() {
+        for named in [
+            "$FUIGO_API_KEY",
+            "x=${FUIGO_API_KEY}",
+            "${FUIGO_API_KEY:-}",
+            "${#FUIGO_API_KEY}",
+            "${!FUIGO_API_KEY}",
+            "--key \"${OVERRIDE:-$FUIGO_API_KEY}\"",
+            "${OVERRIDE:-${FUIGO_API_KEY}}",
+            "a$FUIGO_API_KEY/b",
+            "$$$FUIGO_API_KEY",
+            "x=$$${FUIGO_API_KEY}",
+        ] {
+            assert!(references_first_party_key(named), "{named}");
+        }
+        for not_named in [
+            "FUIGO_API_KEY",
+            "$FUIGO_API_KEY_2",
+            "${MY_FUIGO_API_KEY}",
+            "$XFUIGO_API_KEY",
+            "$FUIGO_CODE_API_KEY",
+            "",
+            "$$FUIGO_API_KEY",
+            "$${FUIGO_API_KEY}",
+            "x=$${#FUIGO_API_KEY}",
+            "$$$$FUIGO_API_KEY",
+        ] {
+            assert!(!references_first_party_key(not_named), "{not_named}");
+        }
+    }
 
     #[test]
     fn expands_braced_var_from_extra() {

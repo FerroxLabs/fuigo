@@ -1,0 +1,100 @@
+# P54-K Astra diff audits (gpt-6-astra, codex exec --sandbox read-only, no cargo). Round 0 (independent hunt) is in P54K-astra-hunt.txt.
+
+
+## Round 1 — on a6903998..e2cc2d9b
+
+1. **MEDIUM — “No new disclosure” overstates the review change.** [feedback.rs:396](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/extensions/feedback.rs:396) adds a stable machine pseudonym where the baseline omitted it. It matches the LOC pseudonym **if that archive is uploaded**, but review uploads do not require an archive upload; deployment-key configurations can upload reviews while one-shot archives are refused ([agent_ops.rs:3580](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:3580)). Thus this can introduce machine-level correlation at that destination. No new raw-ID forwarding was found, and the change fits P54’s accepted pseudonym policy, but qualify the unconditional claim at [research:87](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:87).
+
+2. **MEDIUM — The earlier hunt’s historical tombstone risk is not fully fixed.** [research:116](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:116) labels hunt finding 7 “fixed.” New creates and deletes use the same pseudonym, but a pre-P54 create keyed by `(raw_agent_id, commentId)` still will not match a new pseudonymous tombstone ([feedback.rs:488](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/extensions/feedback.rs:488)). Preserve that external-consumer risk as **PLAUSIBLE pending migration**. Field-presence compatibility is repaired; historical compatibility is not established.
+
+3. **LOW — The empty-ID test misses an event-call-site regression.** [client.rs:756](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/client.rs:756) invokes the selector itself before calling `mixpanel_track_props`. Reverting only the production selector call at [client.rs:465](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/client.rs:465) leaves this test passing while events and profiles diverge. Removing the filter or reverting the profile change would fail it. Add coverage through the production event preparation path.
+
+4. **LOW — The default-install test proves less than advertised.** [client_tests.rs:1390](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/remote/client_tests.rs:1390) explicitly accepts enabled Mixpanel when a token is baked in; it cannot prove public builds never bake one. Checking `has_proxy()` also does not inspect independent trace/OTLP endpoint defaults ([config.rs:332](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/agent/config.rs:332)). Narrow [research:99](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:99), or extend the checks. The own-process prologue is correctly placed before mutations, and its helper verifies actual child-test entry; no network or sibling-order dependency was found.
+
+5. **LOW — The new privacy explanation promises too much.** [fluxrouter.rs:274](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/src/fluxrouter.rs:274) says nobody lacking the raw ID can recover it. This public deterministic hash permits candidate guessing for low-entropy IDs, and [id.rs:53](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/id.rs:53) accepts arbitrary nonempty overrides. Normally generated UUIDv5 IDs cannot equal the UUIDv8 output because their version nibble differs. Arbitrary supplied v8 IDs have no explicit inequality guarantee, although no practical fixed-point attack is demonstrated. Qualify the documentation; this is an existing algorithm limitation, not a new production regression.
+
+6. **LOW — Two research statements need correction.** [research:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:55) upgrades hostname UI loss to **CONFIRMED**, whereas the picker displays whatever hostname the server returns ([session_picker.rs:772](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-pager/src/views/session_picker.rs:772)). Request omission is confirmed; universal UI loss remains conditional, as the earlier hunt stated. Also, [research:65](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:65)’s “Mixpanel is the only site whose raw id changed” contradicts the backend, registry and LOC transformations.
+
+7. **INFO — Production fallback and disclosure routing are correct by inspection.** [client.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/client.rs:77) handles `None`, empty and whitespace-only account IDs, preserves nonblank IDs verbatim, and is used by both profiles and events. Product events remain unchanged. Review tests reject omission and raw-ID substitution; archive equality is meaningful interoperability coverage. The added warning contains only a count and constant filename ([feedback_archive.rs:98](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:98)).
+
+8. **INFO — Guard changes and published vectors check out.** The only re-pins are [identity_body_guard.rs:209](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:209), feedback **8→9**, and [identity_body_guard.rs:260](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:260), telemetry **38→39**. Independent token recount attributes both increments to new assertions. All three distinct published vectors matched independent Python computation. Audited `a6903998..e2cc2d9b` read-only; no Cargo or Rust tests ran. No BLOCKER/HIGH production regression identified.
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+
+## Round 2 — on a6903998..05ad0849 (delta e2cc2d9b..05ad0849)
+
+1. **HIGH — New landing-gate failure.** [identity_body_guard.rs:260](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:260) expects **39** telemetry identity tokens, but the new assertion at [client.rs:765](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/client.rs:765) makes **40**. A source-level reproduction of the guard’s counting rules confirms the mismatch; `body_identity_sites_are_exactly_the_reviewed_ones` will fail. Classify the added test occurrence, re-pin to 40, and rerun the guard. Cargo was not run.
+
+2. **MEDIUM — Round-1 disclosure correction is contradicted by the new receipt.** [R080-p54k.md:27](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:27) still recommends keeping the change because of “no new disclosure.” Research §3.2 and `feedback.rs:386` correctly acknowledge that deployment-key configurations gain a new pseudonymous machine key. Carry that qualification into the receipt.
+
+3. **LOW — Default-install coverage remains overstated in summary prose.** [P54-knock-on-audit.md:101](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:101) says adding a compiled Mixpanel default makes the test fail. A build-time token instead makes both expected and actual values true, so it passes. The new comment at `remote/client_tests.rs:1398` correctly limits the claim; update the research summary and receipt accordingly.
+
+4. **LOW — Hostname UI qualification is incomplete.** [P54-knock-on-audit.md:143](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:143) and `R080-p54k.md:28` still promise disappearance of the picker’s Host line. Row 1c correctly makes this conditional on the registry response; `session_picker.rs:772` displays any returned hostname. The separate “Mixpanel is the only site” error is corrected at research line 65.
+
+5. **INFO — Historical tombstones and recipe limitations are addressed.** [P54-knock-on-audit.md:118](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:118) explicitly leaves historical create/delete pairs pending operator migration. [fluxrouter.rs:274](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/src/fluxrouter.rs:274) now explains public, unsalted candidate checking.
+
+6. **INFO — Mixpanel production-path correction is sound.** [client.rs:111](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-telemetry/src/client.rs:111) selects the key inside the production helper. All three callers—lines 468, 708 and 763—use the new signature. Nonblank account IDs retain their original bytes and properties; product-events construction remains unchanged. The empty-ID test now exercises the helper’s selector.
+
+7. **INFO — Endpoint assertions and isolation order are correct.** [client_tests.rs:1378](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/remote/client_tests.rs:1378) retains the own-process prologue before every EnvGuard. With the relevant overrides unset, `config.rs:333` returns `""` for trace upload and `config.rs:366` returns `"/traces"` for internal OTLP. No additional HIGH/BLOCKER found in the full packet.
+
+VERDICT: DO-NOT-LAND
+
+
+## Round 3 — on a6903998..910ae46a (delta 05ad0849..910ae46a)
+
+1. **HIGH-1 — RESOLVED.** The baseline is now **40** at [identity_body_guard.rs:260](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:260). Independently reproducing the scanner’s counting rules yielded 40; all other changed source files also match their baselines.
+
+2. **MEDIUM-2 — RESOLVED.** [R080-p54k.md:26](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:26) now explicitly acknowledges the new pseudonymous disclosure when deployment-key configurations upload comments but refuse one-shot archives.
+
+3. **LOW-3 — Corrected passage; minor follow-up remains.** [Research:101](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:101) correctly says a baked Mixpanel token would pass. However, [receipt:17](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:17) and [test documentation:1372](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/crates/codegen/fuigo-shell/src/remote/client_tests.rs:1372) still overstate what the test pins. Align those summaries.
+
+4. **LOW-4 — Corrected decision sections; minor follow-up remains.** [Research:146](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:146) and [receipt:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:30) now qualify the Host display correctly. The unconditional claims remain in [research:22](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/research/P54-knock-on-audit.md:22) and [receipt:21](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:21); make those conditional too.
+
+5. **INFO — No remaining HIGH/BLOCKER found** in `a6903998..910ae46a`. This is a read-only source audit; no Cargo ran. It does not establish runtime qualification: the receipt’s gate remains [TBD at line 72](/Volumes/Mando/WaylandBots/Fuigo/wt-p54k/docs/strike/receipts/R080-p54k.md:72).
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+## Round 4 — on a6903998..61c8752a (delta 910ae46a..61c8752a)
+
+1. **INFO — Host-line residue resolved.** The text now distinguishes omission from the register request from what the registry returns to the picker; server-supplied hostnames remain possible. See `docs/strike/research/P54-knock-on-audit.md:22–23` and `docs/strike/receipts/R080-p54k.md:23–24`.
+
+2. **INFO — Mixpanel pin residue resolved.** The receipt and test comment now explicitly limit the test to the build-token mechanism; a token-bearing release can pass. The public-build assertion is identified as a release-pipeline fact, not test evidence. See `docs/strike/receipts/R080-p54k.md:17–19` and `crates/codegen/fuigo-shell/src/remote/client_tests.rs:1372–1375`.
+
+3. **INFO — Final delta changes no source behavior.** `910ae46a..61c8752a` changes two Markdown documents and only the test’s doc comment in Rust. Test assertions and executable code are unchanged (`crates/codegen/fuigo-shell/src/remote/client_tests.rs:1368–1375`).
+
+4. **INFO — No remaining HIGH/BLOCKER found in `a6903998..61c8752a`.** Static review finds the packet’s behavioral changes consistent with its stated scope: Mixpanel empty-ID fallback (`crates/codegen/fuigo-telemetry/src/client.rs:77`), review-comment pseudonyms (`crates/codegen/fuigo-shell/src/extensions/feedback.rs:390`), and dropped-record warnings (`crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:94`). Cargo was not run; this verdict covers the code/document audit, not execution of the pending qualification gates.
+
+VERDICT: LAND
+
+## Round 5 — on 67a0a7fe..6fdd3093 (strike/p54k-s19: the rebase of 61c8752a onto integration 67a0a7fe + the R080 receipt commit)
+
+Brief: merged identity_body_guard EXPECTED table (P47 + P54-K re-pins), P47 x P54-K interaction, receipt claims vs evidence, anything BLOCKER/HIGH in the range.
+
+1. **HIGH — Body guard would fail on this tree.** Reproduced `identity_body_guard.rs:342` rules: count boundary-matched `agent_id(`/`agent_id_async(` except definition lines, exact quoted keys, leading identity fields after permitted visibility prefixes, and `.engage(`; comments count. Scan `crates/` and `prod/`, excluding target/git directories and the guard itself. Requested counts match **1 / 10 / 9 / 40**. However, four other pins are stale: `identity_body_guard.rs:84` benchmark **1→0** (deleted); `:143` lifecycle tests **32→25**; `:154` event loop **12→8**; `:290` hub auth **18→17**. These mismatches are inherited from `67a0a7fe`, not introduced by P54-K, but `body_identity_sites_are_exactly_the_reviewed_ones` still fails. Review those removals and reconcile the pins before landing.
+
+2. **MEDIUM — Rebasing proof is unsupported in the receipt.** `docs/strike/receipts/R080-p54k.md:203` claims the merged guard was proven by an s19 run in §11; `:214–215` repeats that claim. **§11 does not exist**—the file ends at line 216—and the current source recount contradicts a passing body guard. Section 5 explicitly covers old tip `61c8752a`, so it cannot supply the missing evidence.
+
+3. **MEDIUM — Support-correlation status loses the historical qualification.** `R080-p54k.md:69` labels operator-proxy correlation **FIXED** and promises create↔tombstone joins without restricting them to post-upgrade records. `docs/strike/research/P54-knock-on-audit.md:71` and `:121` explicitly retain historical raw-ID create/pseudonymous tombstone pairs as **PLAUSIBLE pending migration**. Carry that qualification into the dimension table.
+
+4. **INFO — Header guard and P47 interaction check out statically.** Reproducing case-insensitive literals/fragments, identifier-boundary names, and globally discovered aliases (`identity_header_guard.rs:74–119`) found **no table mismatches across 3,057 files**; the header guard would pass. P47 adds credential-delivery gates, not default hosts: `agent/config.rs:307–368`, `:488–527`; `remote/client.rs:389–398`. It does not change the assertions at `remote/client_tests.rs:1466`, or `stamp_review_agent_id`, `mixpanel_key_source`, or `destination_pseudonym`.
+
+5. **INFO — Remaining evidence/scope check.** Named tests in §§1.2/4/5 exist; mutant descriptions match their targeted code, including K8’s event selector (`fuigo-telemetry/src/client.rs:111,764`) and K7’s untested warning (`upload/feedback_archive.rs:60,94`). The range also contains five P6063 commits, documented by `R081-p6063.md:3–5`. No additional BLOCKER/HIGH identified in the inspected delta. No cargo, builds, or tests ran; the recount is source analysis.
+
+VERDICT: DO-NOT-LAND
+
+## Round 6 — on the rebased base..e5548450 (strike/p54k-s19 after the guard re-pin) + the uncommitted R080 §11/§6a and this file
+
+Brief: are the four re-pins correct by independent recount and the classification comments true; anything else out of pin; MEDIUM-2/MEDIUM-3 resolved; §11 consistent; any BLOCKER/HIGH.
+
+1. **MEDIUM — §11 misstates stack provenance.** `docs/strike/receipts/R080-p54k.md:224` places P6063 inside base `67a0a7fe`, but its five commits (`a2e12d4f`, `876efcbd`, `2266b48d`, `ffec4164`, `abab1bba`) are **above** that base. The audited range contains **12 commits**, not just the seven listed at `:227`. The “84 commits ahead” count is correct. Correct the packet attribution and commit inventory.
+
+2. **LOW — Commit-message explanation overreaches.** `e5548450` says neither packet’s gates ran `fuigo-extra-ca`; P47’s receipt explicitly reports it (`docs/strike/receipts/R055-p47-service-session-delivery.md:181`). R080 correctly acknowledges this uncertainty at `:217`. The stale pins are established; that blanket explanation is unsupported.
+
+3. **INFO — HIGH-1 resolved; classifications check out.** `crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:142`, `:153`, `:289`: independently recounted **25 / 8 / 17**, with the deleted benchmark absent. Removed tokens are seven and four pager-local test fields, one benchmark Git-config `"user.email"` literal, and one local auth fixture `"user_id"` literal. No request-body identity site changed through these removals. Across **3,057 files**, all **248 body rows** and **29 header rows** match; no additional pin drift.
+
+4. **INFO — MEDIUM-2 and MEDIUM-3 resolved within source-audit limits.** `docs/strike/receipts/R080-p54k.md:230` now supplies the missing failure/control/correction account; its four rows, counts and deletion commits match source. `:69` explicitly preserves historical tombstones as **PLAUSIBLE pending migration**. Hetzner execution remains unverified here.
+
+5. **INFO — No remaining BLOCKER/HIGH identified** in `67a0a7fe..e5548450` plus the uncommitted documents. The guard comparison at `identity_body_guard.rs:468` is satisfied by source recount. No Cargo, builds or tests ran.
+
+VERDICT: LAND-WITH-FOLLOWUPS

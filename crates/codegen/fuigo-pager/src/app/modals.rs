@@ -3217,6 +3217,8 @@ mod command_palette_vim_input_tests {
     // That is the path the bug was on; the test asserts the cursor tracks focus
     #[test]
     fn command_palette_search_bar_cursor_only_when_focused() {
+        // the process-global theme is mutated by concurrent set_theme tests; hold the shared lock so every read in this test sees one theme
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

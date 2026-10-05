@@ -815,6 +815,7 @@ mod tests {
     }
     #[test]
     fn config_status_line_paints_and_records_the_script_size() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use std::sync::Arc;
         use fuigo_pager::views::status_line::{
             RowSize, SanitizedText, StatusLineDisplay, StatusLineFrame,
@@ -863,6 +864,7 @@ mod tests {
     }
     #[test]
     fn tail_height_uses_owning_session_cwd_for_tool_paths() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::app::agent::AgentState;
         use fuigo_pager::scrollback::RenderBlock;
         use fuigo_pager::scrollback::entry::ScrollbackEntry;
@@ -903,6 +905,7 @@ mod tests {
     /// The tail and the committed footprint are one builder with a different tick; this test catches anyone forking them again.
     #[test]
     fn the_animation_tick_never_changes_a_blocks_height() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::scrollback::RenderBlock;
         use fuigo_pager::scrollback::entry::ScrollbackEntry;
         minimal_api::set_show_thinking_blocks(true);
@@ -941,6 +944,7 @@ mod tests {
     }
     #[test]
     fn minimal_status_shows_rich_activity_and_idle_hint() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::acp::tracker::TurnActivity;
         use fuigo_pager::app::agent::AgentState;
         let theme = Theme::current();
@@ -992,6 +996,7 @@ mod tests {
                 max_retries: 3,
                 reason: "transient error".to_string(),
                 error_type: None,
+                verdicts: None,
             }),
             None,
             &theme,
@@ -1000,6 +1005,7 @@ mod tests {
     }
     #[test]
     fn minimal_status_shows_idle_watching_cue() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::app::agent::AgentState;
         let theme = Theme::current();
         let area = Rect::new(0, 0, 60, 1);
@@ -1034,6 +1040,7 @@ mod tests {
     }
     #[test]
     fn prompt_style_bash_mode_shows_bang_prefix() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::app::agent_view::PromptInputMode;
         use fuigo_pager::appearance::AppearanceConfig;
         let appearance = AppearanceConfig::default();
@@ -1056,6 +1063,7 @@ mod tests {
     }
     #[test]
     fn prompt_info_renders_model_context_and_queued() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let mut a = agent();
         a.context_state = Some(fuigo_shell::session::ContextInfo {
             used: 276_000,
@@ -1080,6 +1088,7 @@ mod tests {
     }
     #[test]
     fn prompt_info_bash_mode_shows_run_shell_command() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         use fuigo_pager::app::agent_view::PromptInputMode;
         let mut a = agent();
         a.prompt_input_mode = PromptInputMode::Bash;
@@ -1112,6 +1121,7 @@ mod tests {
     /// Where Ctrl+O is the interject chord (Apple Terminal) the caller passes the `/transcript` fallback, and the info row advertises that instead.
     #[test]
     fn prompt_info_shows_slash_transcript_fallback_hint() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let a = agent();
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
@@ -1125,6 +1135,7 @@ mod tests {
     }
     #[test]
     fn prompt_info_shows_session_mode_flag() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let read = |buf: &Buffer| -> String {

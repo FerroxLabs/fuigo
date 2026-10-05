@@ -245,24 +245,46 @@ fn write_store_to(path: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Test-only, path-scoped write fault: `write_auth_json_atomic` fails with `Unsupported` for exactly this `auth.json` path.
-/// Path-scoped so parallel tests in the same process do not sabotage each other.
+/// Test-only, path-scoped write faults: `write_auth_json_atomic` fails with `Unsupported` for exactly the `auth.json`
+/// paths listed here. A list, each test adding and removing only its own path, so parallel tests in the same process
+/// neither sabotage nor clear each other's fault.
 #[cfg(test)]
-pub(super) static WRITE_FAULT_PATH: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+pub(super) static WRITE_FAULT_PATHS: std::sync::Mutex<Vec<PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Test-only: fail every atomic write of `auth_file` until the guard drops.
+#[cfg(test)]
+#[must_use]
+pub(super) fn inject_write_fault(auth_file: &Path) -> impl Drop + use<> {
+    struct Clear(PathBuf);
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            WRITE_FAULT_PATHS
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|p| *p != self.0);
+        }
+    }
+    WRITE_FAULT_PATHS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(auth_file.to_owned());
+    Clear(auth_file.to_owned())
+}
 
 /// Atomic write: a temp file, then a rename.
 /// Unix `rename(2)` replaces atomically; Windows `rename` requires removing the target first.
 fn write_auth_json_atomic(auth_file: &Path, auth_store: &AuthStore) -> std::io::Result<()> {
     #[cfg(test)]
-    if WRITE_FAULT_PATH
+    if WRITE_FAULT_PATHS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .as_deref()
-        == Some(auth_file)
+        .iter()
+        .any(|p| p == auth_file)
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            "injected write fault (WRITE_FAULT_PATH)",
+            "injected write fault (WRITE_FAULT_PATHS)",
         ));
     }
     // Unique per write (pid and a monotonic seq): two concurrent in-process writers must not share one tmp path
@@ -361,12 +383,67 @@ pub fn read_api_key(fuigo_home: &Path) -> Option<String> {
     map.get(API_KEY_SCOPE).map(|a| a.key.clone())
 }
 
+/// Serializes, within this process, every read-modify-write of `auth.json` together with the in-memory credential
+/// write that belongs to it: `AuthManager::update` / `save_without_enrichment`, the spawned `/user` enrichment merge,
+/// scope removal and stale-scope pruning, the API-key writers below, and every write of an `AuthManager`'s in-memory
+/// credential.
+///
+/// The `auth.json` file lock orders PROCESSES; every read-modify-write of the file takes it (see
+/// `cross_process_race_tests`). This lock additionally pairs each disk write with its in-memory write, so an enrichment
+/// merge cannot interleave with an `update` and restore the OLDER access and refresh tokens in memory or on disk
+/// (measured under host load as `enrichment_task_preserves_interleaved_token_rotation` ending with `key-v1`/`rt-v1`).
+/// A reverted refresh token is later spent twice and fails with `invalid_grant`.
+///
+/// One lock for the process, not one per path: a per-path key has to establish file identity (symlinks, case-folding
+/// filesystems, a directory created mid-write), and any miss there reopens the race. The sections are short.
+/// Reentrant, so a guarded section may call another guarded helper (`with_inner_write` inside `update`). Every
+/// section is synchronous: never hold the guard across `.await` (it is `!Send`, so the compiler refuses most attempts).
+/// Order: the `auth.json` file lock, when held, is taken first; then this; then `inner` / `permanent_failure`.
+/// Nothing holding `inner` or `permanent_failure` takes this.
+pub(crate) fn auth_state_lock() -> parking_lot::ReentrantMutexGuard<'static, ()> {
+    auth_state().lock()
+}
+
+fn auth_state() -> &'static parking_lot::ReentrantMutex<()> {
+    static AUTH_STATE: parking_lot::ReentrantMutex<()> = parking_lot::const_reentrant_mutex(());
+    &AUTH_STATE
+}
+
 /// Store a plain API key in auth.json under the `fuigo::api_key` scope.
 ///
 /// Uses the corrupt-recovery reader so a malformed auth.json (e.g. from a previous crash) can be healed when the user sets an API key.
+///
+/// A read-modify-write of the whole file, so it holds the cross-process `auth.json` lock from the read through the
+/// write; otherwise a sibling's token rotation landing in between would be rolled back by this write. Waits at most
+/// `AUTH_LOCK_TIMEOUT` and never writes unlocked: a lock it cannot get is an error.
+/// Blocks the calling thread while it waits; async callers use [`store_api_key_async`].
 pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
     let path = fuigo_home.join("auth.json");
-    let mut map = read_auth_json_or_empty_recovering_corrupt(&path)?;
+    std::fs::create_dir_all(fuigo_home)?;
+    let flock =
+        super::manager::lock::lock_auth_file_blocking(&path, super::manager::AUTH_LOCK_TIMEOUT)
+            .into_io_result()?;
+    store_api_key_locked(&path, api_key, &flock)
+}
+
+/// [`store_api_key`] for async callers: waits for the cross-process lock without blocking a runtime thread.
+pub(crate) async fn store_api_key_async(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
+    let path = fuigo_home.join("auth.json");
+    std::fs::create_dir_all(fuigo_home)?;
+    let flock = super::manager::lock::try_lock_auth_file_async(
+        &path,
+        super::manager::AUTH_LOCK_TIMEOUT,
+        super::manager::lock::Heartbeat::Skip,
+    )
+    .await
+    .into_io_result()?;
+    store_api_key_locked(&path, api_key, &flock)
+}
+
+/// The read-modify-write itself; `_flock` proves the caller holds the cross-process lock.
+fn store_api_key_locked(path: &Path, api_key: &str, _flock: &AuthFileLock) -> std::io::Result<()> {
+    let _state = auth_state_lock();
+    let mut map = read_auth_json_or_empty_recovering_corrupt(path)?;
     map.insert(
         API_KEY_SCOPE.to_owned(),
         FuigoAuth {
@@ -375,18 +452,48 @@ pub fn store_api_key(fuigo_home: &Path, api_key: &str) -> std::io::Result<()> {
             ..Default::default()
         },
     );
-    write_auth_json(&path, &map)
+    write_auth_json(path, &map)
 }
 
 /// Remove the `fuigo::api_key` scope from auth.json.
+///
+/// Same locking as [`store_api_key`]: the cross-process lock is held from the read through the write (or the delete
+/// of the emptied file), bounded by `AUTH_LOCK_TIMEOUT`, and never skipped. Nothing to clear when auth.json is absent.
 pub fn clear_api_key(fuigo_home: &Path) -> std::io::Result<()> {
     let path = fuigo_home.join("auth.json");
-    if let Ok(mut map) = read_auth_json(&path) {
+    if !path.exists() {
+        return Ok(());
+    }
+    let flock =
+        super::manager::lock::lock_auth_file_blocking(&path, super::manager::AUTH_LOCK_TIMEOUT)
+            .into_io_result()?;
+    clear_api_key_locked(&path, &flock)
+}
+
+/// [`clear_api_key`] for async callers.
+pub(crate) async fn clear_api_key_async(fuigo_home: &Path) -> std::io::Result<()> {
+    let path = fuigo_home.join("auth.json");
+    if !path.exists() {
+        return Ok(());
+    }
+    let flock = super::manager::lock::try_lock_auth_file_async(
+        &path,
+        super::manager::AUTH_LOCK_TIMEOUT,
+        super::manager::lock::Heartbeat::Skip,
+    )
+    .await
+    .into_io_result()?;
+    clear_api_key_locked(&path, &flock)
+}
+
+fn clear_api_key_locked(path: &Path, _flock: &AuthFileLock) -> std::io::Result<()> {
+    let _state = auth_state_lock();
+    if let Ok(mut map) = read_auth_json(path) {
         map.remove(API_KEY_SCOPE);
         if map.is_empty() {
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path);
         } else {
-            write_auth_json(&path, &map)?;
+            write_auth_json(path, &map)?;
         }
     }
     Ok(())

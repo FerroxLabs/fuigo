@@ -5,7 +5,9 @@ use crate::common::*;
 const FEEDBACK_LABEL_SENTINEL: &str = "How can we improve Fuigo?";
 const FEEDBACK_PLACEHOLDER_SENTINEL: &str = "Please provide as much detail as possible.";
 const SESSION_GATE_SENTINEL: &str = "No active session";
-const THANKS_SENTINEL: &str = "Thanks for the feedback";
+/// The line a submitted report produces: the PTY sandbox pins `FUIGO_FEEDBACK_ENABLED=false`, and since P152 the
+/// thank-you waits for a confirmed send.
+const THANKS_SENTINEL: &str = "Couldn't send feedback";
 const PANE_FEEDBACK: &str = "minimal-pty-feedback-report-xyz";
 
 /// Minimal: bare `/feedback` without a bound session_id shows a system notice; with a session the freeform pane opens and submits like full TUI.
@@ -66,7 +68,7 @@ async fn minimal_feedback_session_gate_and_pane() {
         .expect("submit freeform feedback");
     harness
         .wait_for_full_text(THANKS_SENTINEL, Duration::from_secs(15))
-        .expect("minimal pane submit should thank the user");
+        .expect("minimal pane submit should report its result");
     assert!(
         !harness.contains_text("panicked"),
         "pager panicked\nscreen:\n{}",

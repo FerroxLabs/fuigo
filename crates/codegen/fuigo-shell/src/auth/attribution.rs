@@ -18,8 +18,8 @@
 //!
 //! ```text
 //! {
-//!   "sent_key_prefix": "<last 12 chars of bearer the client sent, or """>,
-//!   "current_key_prefix": "<last 12 chars of the held token (current or
+//!   "sent_key_prefix": "<fingerprint of the bearer the client sent, or """>,
+//!   "current_key_prefix": "<fingerprint of the held token (current or
 //!                         expired), or null when the manager is empty>",
 //!   "mint_age_seconds": <i64; current time minus auth.create_time, or -1>,
 //!   "expires_at_seconds_from_now": <i64; auth.expires_at minus now
@@ -33,6 +33,9 @@
 //!                        (fail-closed) and "held nothing" are both false>
 //! }
 //! ```
+//!
+//! A fingerprint is [`fuigo_auth::BearerFingerprint`]: `sha256:<4 hex>/len=<chars>`. The field names keep their
+//! historical `_prefix` spelling so existing queries still bind; their values carry no characters of the credential (P70).
 //!
 //! # Cross-crate wiring
 //!
@@ -49,7 +52,7 @@ use fuigo_tools::{Auth401AttributionCallback as ToolAuth401AttributionCallback, 
 use serde_json::Value as JsonValue;
 
 use crate::auth::{AuthManager, TOKEN_TTL};
-use fuigo_auth::bearer_suffix;
+use fuigo_auth::BearerFingerprint;
 
 /// `cfg(test)`-only process-global counter that bumps on every successful `record_auth_401` invocation.
 ///
@@ -122,14 +125,14 @@ impl ShellAttribution {
 }
 
 impl Auth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: SamplingConsumer, sent_bearer_suffix: Option<&str>) {
-        // Already truncated by the sampler; the re-truncate downstream is a deliberate no-op so the full bearer never leaves that crate
+    fn record_401(&self, consumer: SamplingConsumer, sent_bearer: Option<&BearerFingerprint>) {
+        // Already fingerprinted by the sampler: the bearer never leaves that crate
         record_consumer_401(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
             ConsumerKind::OaiCompatClient,
             consumer.as_endpoint(),
-            sent_bearer_suffix,
+            sent_bearer,
         );
     }
 }
@@ -141,7 +144,7 @@ impl Auth401AttributionCallback for ShellAttribution {
 /// `ToolConsumer::VideoGenStart` and `VideoGenPoll` collapse to the same [`ConsumerKind::VideoGen`] with different op strings.
 /// The gate query can then break down video-gen 401s by phase.
 impl ToolAuth401AttributionCallback for ShellAttribution {
-    fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
+    fn record_401(&self, consumer: ToolConsumer, sent_bearer: Option<&BearerFingerprint>) {
         let (kind, op) = match consumer {
             ToolConsumer::ImageGen => (ConsumerKind::ImageGen, ""),
             ToolConsumer::VideoGenStart => (ConsumerKind::VideoGen, "start"),
@@ -153,7 +156,7 @@ impl ToolAuth401AttributionCallback for ShellAttribution {
             self.session_id.as_deref(),
             kind,
             op,
-            sent_bearer_suffix,
+            sent_bearer,
         );
     }
 }
@@ -231,16 +234,14 @@ fn format_consumer(kind: ConsumerKind, op: &str) -> String {
 /// The per-client `record_401_attribution` wrappers in `agent/feedback_client.rs`, `agent/session_registry_client.rs`, and
 /// `upload/storage_client.rs` each resolve their bearer and call this with the right `(kind, op)`.
 ///
-/// `sent_bearer` may be a full bearer or a 12-char prefix.
-/// The non-sampler call sites listed above pass the full bearer, read directly from the client's `user_token` / `deployment_key` snapshot.
-/// The sampler-side [`Auth401AttributionCallback`] boundary passes a prefix; the sampler scrubs before crossing the crate boundary.
-/// The truncation inside [`record_auth_401`] / `compute_attribution_payload` is idempotent for the prefix case.
+/// `sent_bearer` is the [`BearerFingerprint`] of the bearer that went on the wire; the type admits nothing else, so no
+/// call site can hand a raw credential (or a fragment of one) to the sinks.
 pub(crate) fn record_consumer_401(
     auth_manager: &AuthManager,
     session_id: Option<&str>,
     kind: ConsumerKind,
     op: &str,
-    sent_bearer: Option<&str>,
+    sent_bearer: Option<&BearerFingerprint>,
 ) {
     let consumer = format_consumer(kind, op);
     record_auth_401(auth_manager, session_id, &consumer, sent_bearer);
@@ -250,10 +251,8 @@ pub(crate) fn record_consumer_401(
 ///
 /// Schema: `(sent_key_prefix, current_key_prefix, mint_age_seconds, expires_at_seconds_from_now, consumer, is_stale_snapshot)`.
 ///
-/// `sent_bearer` is the bearer that was sent on the wire (the `Authorization` value with `"Bearer "` stripped, or `x-api-key`).
-/// It may also be that bearer's 12-char tail fragment: the sampler and middleware boundaries pass tails.
-/// A caller holding the full bearer may rely on the [`compute_attribution_payload`] truncation.
-/// `None` becomes the empty string, meaning "no bearer was sent."
+/// `sent_bearer` is the fingerprint of the bearer that was sent on the wire (the `Authorization` value with `"Bearer "`
+/// stripped, or `x-api-key`). `None` becomes the empty string, meaning "no bearer was sent."
 ///
 /// `consumer` should be one of the canonical strings used by the per-client wrappers,
 /// e.g. `"OaiCompatClient.chat_completions_stream"`, `"StorageClient.upload"`, `"IdleResumeModelRefresh"`.
@@ -262,9 +261,10 @@ pub(crate) fn record_auth_401(
     auth_manager: &AuthManager,
     session_id: Option<&str>,
     consumer: &str,
-    sent_bearer: Option<&str>,
+    sent_bearer: Option<&BearerFingerprint>,
 ) {
-    let payload = compute_attribution_payload(auth_manager, consumer, sent_bearer);
+    let payload =
+        compute_attribution_payload(auth_manager, consumer, sent_bearer, attribution_now());
 
     // Sink 1 -- local file (~/.fuigo/logs/unified.jsonl) + scrubbed
     // tracing event
@@ -304,6 +304,34 @@ pub(crate) fn record_auth_401(
     EMIT_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// The wall clock, except in a test that pinned it with [`pin_attribution_now`] on its own thread.
+fn attribution_now() -> chrono::DateTime<chrono::Utc> {
+    #[cfg(test)]
+    if let Some(pinned) = PINNED_NOW.with(std::cell::Cell::get) {
+        return pinned;
+    }
+    chrono::Utc::now()
+}
+
+#[cfg(test)]
+thread_local! {
+    static PINNED_NOW: std::cell::Cell<Option<chrono::DateTime<chrono::Utc>>> = const { std::cell::Cell::new(None) };
+}
+
+/// Test-only: pin [`attribution_now`] for the calling thread until the guard drops.
+#[cfg(test)]
+#[must_use]
+fn pin_attribution_now(now: chrono::DateTime<chrono::Utc>) -> impl Drop {
+    struct Unpin;
+    impl Drop for Unpin {
+        fn drop(&mut self) {
+            PINNED_NOW.with(|p| p.set(None));
+        }
+    }
+    PINNED_NOW.with(|p| p.set(Some(now)));
+    Unpin
+}
+
 /// Pure (no I/O) computation of the attribution payload.
 /// Extracted from [`record_auth_401`] so unit tests can assert each field without reaching into `unified_log`'s writer or the tracing layer.
 ///
@@ -312,23 +340,25 @@ pub(crate) fn record_auth_401(
 ///
 /// `is_stale_snapshot` is `true` only when a bearer was actually sent and it differs from the held token.
 /// "Sent nothing" (fail-closed) and "held nothing" (empty manager) are both `false`.
+///
+/// `now` is the instant the ages are measured from; [`record_auth_401`] passes [`attribution_now`].
 fn compute_attribution_payload(
     auth_manager: &AuthManager,
     consumer: &str,
-    sent_bearer: Option<&str>,
+    sent_bearer: Option<&BearerFingerprint>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> JsonValue {
-    let now = chrono::Utc::now();
-
-    // Last-12-char suffix of the bearer the wire actually carried (see [`bearer_suffix`]: JWT headers share a common base64 prefix)
-    // `""` when the request had no bearer at all
+    // Fingerprint of the bearer the wire actually carried; `""` when the request had no bearer at all
     // That is a distinct case from "had a bearer that turned out to be stale"; the gate-criteria query can break down on this
-    let sent_suffix = sent_bearer.map(bearer_suffix).unwrap_or("");
+    let sent_suffix = sent_bearer.map(BearerFingerprint::as_str).unwrap_or("");
 
     // One read; `current_or_expired` keeps the hard-expired token visible (see the fn doc)
+    // Fingerprinted the same way, so equal credentials compare equal (a different one collides with odds 2^-16 at
+    // the same length, which only ever under-reports staleness in a diagnostic)
     let current_auth = auth_manager.current_or_expired();
     let current_suffix_owned: Option<String> = current_auth
         .as_ref()
-        .map(|a| bearer_suffix(&a.key).to_string());
+        .map(|a| fuigo_auth::bearer_fingerprint(&a.key));
 
     // True-positive staleness only: a bearer was sent AND differs from the held token
     // "Sent nothing" is the fail-closed path (in sync, credential dead); "held nothing" is no evidence; neither is stale
@@ -379,17 +409,41 @@ mod tests {
     fn empty_auth_manager() -> (tempfile::TempDir, AuthManager) {
         let dir = tempfile::tempdir().expect("tempdir");
         let cfg = FuigoComConfig::default();
-        let am = AuthManager::new(dir.path(), cfg);
+        // `new_at_path`, not `new`: other tests in this binary briefly set `FUIGO_AUTH` / `FUIGO_AUTH_PATH`, which
+        // `new` honours, and a credential borrowed that way made "empty manager" tests flake (seen in the P70 runs).
+        let am = AuthManager::new_at_path(dir.path().join("auth.json"), cfg);
         (dir, am)
     }
 
+    /// The instant every test measures from: the payload's ages are computed against it, not the wall clock, so a
+    /// stalled host cannot move them.
+    fn t0() -> chrono::DateTime<Utc> {
+        chrono::DateTime::parse_from_rfc3339("2026-06-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    /// Minted at `t0`, expiring an hour later.
     fn fresh_auth(key: &str) -> FuigoAuth {
         FuigoAuth {
             key: key.to_string(),
-            create_time: Utc::now(),
-            expires_at: Some(Utc::now() + Duration::hours(1)),
+            create_time: t0(),
+            expires_at: Some(t0() + Duration::hours(1)),
             ..FuigoAuth::test_default()
         }
+    }
+
+    fn payload_at_t0(am: &AuthManager, consumer: &str, sent: Option<&str>) -> JsonValue {
+        let sent = sent.map(BearerFingerprint::of);
+        compute_attribution_payload(am, consumer, sent.as_ref(), t0())
+    }
+
+    fn fp(credential: &str) -> String {
+        fuigo_auth::bearer_fingerprint(credential)
+    }
+
+    fn fpo(credential: &str) -> Option<BearerFingerprint> {
+        Some(BearerFingerprint::of(credential))
     }
 
     fn payload_field<'a>(payload: &'a JsonValue, key: &str) -> &'a JsonValue {
@@ -406,32 +460,16 @@ mod tests {
         let sent = "live-token-1234567890abcdef";
         am.hot_swap(fresh_auth(sent));
 
-        let payload = compute_attribution_payload(&am, "Test.live", Some(sent));
+        let payload = payload_at_t0(&am, "Test.live", Some(sent));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "consumer"), "Test.live");
-        // Last 12 chars (tail prefix for JWT-friendly diagnostics).
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "567890abcdef");
-        assert_eq!(
-            payload_field(&payload, "current_key_prefix"),
-            "567890abcdef"
-        );
-        // mint_age_seconds: small and non-negative for a freshly-created auth
-        let mint = payload_field(&payload, "mint_age_seconds")
-            .as_i64()
-            .unwrap();
-        assert!(
-            (0..5).contains(&mint),
-            "mint_age_seconds should be 0-5 sec for a freshly-created auth, got {mint}"
-        );
-        // expires_at_seconds_from_now: just under 1 hour (3600s), with a tolerance for elapsed time during the test
-        let expires = payload_field(&payload, "expires_at_seconds_from_now")
-            .as_i64()
-            .unwrap();
-        assert!(
-            (3590..=3600).contains(&expires),
-            "expires_at_seconds_from_now should be ~3600 for a 1h-expiry token, got {expires}"
-        );
+        // Fingerprints, equal because the credential is the same
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp(sent).as_str());
+        assert_eq!(payload_field(&payload, "current_key_prefix"), fp(sent).as_str());
+        // Minted at t0 and measured at t0: age 0, expiry exactly an hour out
+        assert_eq!(payload_field(&payload, "mint_age_seconds"), 0);
+        assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 3600);
     }
 
     /// Stale snapshot sent and a 401 with a different (newer) `current()`: `is_stale_snapshot` must be `true`.
@@ -442,14 +480,11 @@ mod tests {
         let live = "live-token-different";
         am.hot_swap(fresh_auth(live));
 
-        let payload = compute_attribution_payload(&am, "Test.stale", Some(stale));
+        let payload = payload_at_t0(&am, "Test.stale", Some(stale));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "n-1234567890");
-        assert_eq!(
-            payload_field(&payload, "current_key_prefix"),
-            "en-different"
-        );
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp(stale).as_str());
+        assert_eq!(payload_field(&payload, "current_key_prefix"), fp(live).as_str());
         assert_eq!(payload_field(&payload, "consumer"), "Test.stale");
     }
 
@@ -460,10 +495,10 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         // Do NOT inject anything; the manager has no current token
 
-        let payload = compute_attribution_payload(&am, "Test.absent", Some("any-token"));
+        let payload = payload_at_t0(&am, "Test.absent", Some("any-token"));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
-        assert_eq!(payload_field(&payload, "sent_key_prefix"), "any-token");
+        assert_eq!(payload_field(&payload, "sent_key_prefix"), fp("any-token").as_str());
         assert!(payload_field(&payload, "current_key_prefix").is_null());
         assert_eq!(payload_field(&payload, "mint_age_seconds"), -1);
         assert_eq!(payload_field(&payload, "expires_at_seconds_from_now"), 0);
@@ -474,8 +509,8 @@ mod tests {
     fn hard_expired_auth(key: &str) -> FuigoAuth {
         FuigoAuth {
             key: key.to_string(),
-            create_time: Utc::now() - Duration::hours(2),
-            expires_at: Some(Utc::now() - Duration::hours(1)),
+            create_time: t0() - Duration::hours(2),
+            expires_at: Some(t0() - Duration::hours(1)),
             ..FuigoAuth::test_default()
         }
     }
@@ -489,27 +524,19 @@ mod tests {
         am.hot_swap(hard_expired_auth(sent));
         assert!(am.current().is_none(), "hard-expired precondition");
 
-        let payload = compute_attribution_payload(&am, "Test.expired", Some(sent));
+        let payload = payload_at_t0(&am, "Test.expired", Some(sent));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(
             payload_field(&payload, "current_key_prefix"),
-            "567890abcdef",
+            fp(sent).as_str(),
             "the held token must stay visible even when hard-expired"
         );
-        let mint = payload_field(&payload, "mint_age_seconds")
-            .as_i64()
-            .unwrap();
-        assert!(
-            (7195..=7210).contains(&mint),
-            "mint_age_seconds should be ~7200 for a 2h-old token, got {mint}"
-        );
-        let expires = payload_field(&payload, "expires_at_seconds_from_now")
-            .as_i64()
-            .unwrap();
-        assert!(
-            (-3610..=-3590).contains(&expires),
-            "expires_at_seconds_from_now should be ~-3600 for a token dead 1h, got {expires}"
+        // Minted 2h before t0, dead since 1h before it
+        assert_eq!(payload_field(&payload, "mint_age_seconds"), 7200);
+        assert_eq!(
+            payload_field(&payload, "expires_at_seconds_from_now"),
+            -3600
         );
     }
 
@@ -521,13 +548,13 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         am.hot_swap(hard_expired_auth("held-but-not-sent"));
 
-        let payload = compute_attribution_payload(&am, "Test.fail_closed", None);
+        let payload = payload_at_t0(&am, "Test.fail_closed", None);
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), false);
         assert_eq!(payload_field(&payload, "sent_key_prefix"), "");
         assert_eq!(
             payload_field(&payload, "current_key_prefix"),
-            "but-not-sent",
+            fp("held-but-not-sent").as_str(),
             "the held token must stay visible for diagnosis"
         );
     }
@@ -540,13 +567,12 @@ mod tests {
         am.hot_swap(hard_expired_auth("held-token-different"));
         assert!(am.current().is_none(), "hard-expired precondition");
 
-        let payload =
-            compute_attribution_payload(&am, "Test.expired_stale", Some("frozen-at-spawn-copy"));
+        let payload = payload_at_t0(&am, "Test.expired_stale", Some("frozen-at-spawn-copy"));
 
         assert_eq!(payload_field(&payload, "is_stale_snapshot"), true);
         assert_eq!(
             payload_field(&payload, "current_key_prefix"),
-            "en-different"
+            fp("held-token-different").as_str()
         );
     }
 
@@ -557,30 +583,19 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         let auth = FuigoAuth {
             key: "k".into(),
-            create_time: Utc::now() - Duration::seconds(60),
+            create_time: t0() - Duration::seconds(60),
             // No expires_at falls through to create_time + TOKEN_TTL (30 days)
             ..FuigoAuth::test_default()
         };
         am.hot_swap(auth);
 
-        let payload = compute_attribution_payload(&am, "Test.legacy", Some("k"));
+        let payload = payload_at_t0(&am, "Test.legacy", Some("k"));
 
-        // mint_age_seconds: ~60.
-        let mint = payload_field(&payload, "mint_age_seconds")
-            .as_i64()
-            .unwrap();
-        assert!(
-            (60..=70).contains(&mint),
-            "mint_age_seconds should be ~60 for a 60s-old auth, got {mint}"
-        );
-        // expires_at_seconds_from_now: TOKEN_TTL minus 60s, roughly 30 * 86400 - 60 = 2_591_940. Tolerate ~10s drift.
-        let expires = payload_field(&payload, "expires_at_seconds_from_now")
-            .as_i64()
-            .unwrap();
-        let expected = TOKEN_TTL.num_seconds() - 60;
-        assert!(
-            (expected - 10..=expected + 10).contains(&expires),
-            "expires_at_seconds_from_now should be ~{expected}, got {expires}"
+        // Minted 60s before t0; no expires_at, so it expires TOKEN_TTL after minting
+        assert_eq!(payload_field(&payload, "mint_age_seconds"), 60);
+        assert_eq!(
+            payload_field(&payload, "expires_at_seconds_from_now"),
+            TOKEN_TTL.num_seconds() - 60
         );
     }
 
@@ -659,11 +674,12 @@ mod tests {
         ];
 
         for (consumer, expected_consumer_str) in cases {
-            cb.record_401(consumer, Some("bearer-1234567890"));
+            cb.record_401(consumer, fpo("bearer-1234567890").as_ref());
             let payload = compute_attribution_payload(
                 am_arc.as_ref(),
                 expected_consumer_str,
-                Some("bearer-1234567890"),
+                fpo("bearer-1234567890").as_ref(),
+                t0(),
             );
             assert_eq!(
                 payload_field(&payload, "consumer"),
@@ -772,11 +788,12 @@ mod tests {
         let (_dir, am) = empty_auth_manager();
         am.hot_swap(fresh_auth("live-token-1234567890"));
 
+        let _clock = pin_attribution_now(t0());
         record_auth_401(
             &am,
             Some("sid-otel-span"),
             "OaiCompatClient.chat_completions_stream",
-            Some("stale-snapshot-aaaaaa"),
+            fpo("stale-snapshot-aaaaaa").as_ref(),
         );
 
         let spans = captured.lock().unwrap();
@@ -785,21 +802,21 @@ mod tests {
             .find(|s| s.name == "auth_401_attribution")
             .expect("expected one auth_401_attribution span; got: {spans:?}");
 
-        // String fields: prefixes truncated to 12 chars, consumer and session_id passed verbatim
+        // String fields: fingerprints, consumer and session_id passed verbatim
         assert_eq!(
             attribution
                 .fields_str
                 .get("sent_key_prefix")
                 .map(String::as_str),
-            Some("pshot-aaaaaa"),
-            "sent_key_prefix should be last 12 chars",
+            Some(fp("stale-snapshot-aaaaaa").as_str()),
+            "sent_key_prefix should be the fingerprint",
         );
         assert_eq!(
             attribution
                 .fields_str
                 .get("current_key_prefix")
                 .map(String::as_str),
-            Some("n-1234567890"),
+            Some(fp("live-token-1234567890").as_str()),
         );
         assert_eq!(
             attribution.fields_str.get("consumer").map(String::as_str),
@@ -816,24 +833,11 @@ mod tests {
             Some(&true),
         );
 
-        // Numeric: mint_age in [0, 5) for a freshly-injected auth; expires_at ~3600s away
-        let mint = attribution
-            .fields_i64
-            .get("mint_age_seconds")
-            .copied()
-            .unwrap();
-        assert!(
-            (0..5).contains(&mint),
-            "mint_age_seconds should be 0-5, got {mint}",
-        );
-        let expires = attribution
-            .fields_i64
-            .get("expires_at_seconds_from_now")
-            .copied()
-            .unwrap();
-        assert!(
-            (3590..=3600).contains(&expires),
-            "expires_at_seconds_from_now should be ~3600, got {expires}",
+        // Numeric, against the pinned clock: minted at t0, expiring an hour after it
+        assert_eq!(attribution.fields_i64.get("mint_age_seconds"), Some(&0));
+        assert_eq!(
+            attribution.fields_i64.get("expires_at_seconds_from_now"),
+            Some(&3600)
         );
     }
 
@@ -847,9 +851,9 @@ mod tests {
         reset_test_emit_count();
         let (_dir, am) = empty_auth_manager();
         am.hot_swap(fresh_auth("k"));
-        record_auth_401(&am, None, "Test.counter", Some("k"));
+        record_auth_401(&am, None, "Test.counter", fpo("k").as_ref());
         assert_eq!(test_emit_count(), 1);
-        record_auth_401(&am, None, "Test.counter", Some("k"));
+        record_auth_401(&am, None, "Test.counter", fpo("k").as_ref());
         assert_eq!(test_emit_count(), 2);
     }
 
@@ -871,11 +875,11 @@ mod tests {
 
         // Drive the inherited callback
         // The `record_401` bumps the same global counter the parent callback would, proving they refer to the same underlying impl
-        inherited_cb.record_401(SamplingConsumer::ChatCompletionsStream, Some("bearer"));
+        inherited_cb.record_401(SamplingConsumer::ChatCompletionsStream, fpo("bearer").as_ref());
         assert_eq!(test_emit_count(), 1);
 
         // Sanity: the parent_cb still works too (it's the same Arc).
-        parent_cb.record_401(SamplingConsumer::Messages, Some("bearer"));
+        parent_cb.record_401(SamplingConsumer::Messages, fpo("bearer").as_ref());
         assert_eq!(test_emit_count(), 2);
     }
 
@@ -900,7 +904,7 @@ mod tests {
             SamplingConsumer::Messages,
         ];
         for consumer in variants {
-            cb.record_401(consumer, Some("test-bearer"));
+            cb.record_401(consumer, fpo("test-bearer").as_ref());
         }
         assert_eq!(test_emit_count() as usize, variants.len());
 
@@ -911,11 +915,97 @@ mod tests {
                 ConsumerKind::OaiCompatClient,
                 SamplingConsumer::MessagesStream.as_endpoint(),
             ),
-            Some("test-bearer"),
+            fpo("test-bearer").as_ref(),
+            t0(),
         );
         assert_eq!(
             payload_field(&payload, "consumer"),
             "OaiCompatClient.messages_stream"
         );
+    }
+
+    /// Every substring of `credential` at least `min` characters long, the shortest first.
+    fn fragments(credential: &str, min: usize) -> Vec<String> {
+        let chars: Vec<char> = credential.chars().collect();
+        let mut out = Vec::new();
+        for len in min..=chars.len() {
+            for w in chars.windows(len) {
+                out.push(w.iter().collect());
+            }
+        }
+        out
+    }
+
+    /// Tracing layer that renders every span and event field (any type) into one string per record.
+    mod record_capture {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::registry::LookupSpan;
+
+        pub(crate) struct Collector(pub Arc<Mutex<Vec<String>>>);
+
+        struct Render<'a>(&'a mut String);
+        impl Visit for Render<'_> {
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!(" {}={value:?}", field.name()));
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0.push_str(&format!(" {}={value}", field.name()));
+            }
+        }
+
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Collector {
+            fn on_new_span(&self, attrs: &tracing::span::Attributes<'_>, _: &tracing::Id, _: Context<'_, S>) {
+                let mut line = attrs.metadata().name().to_string();
+                attrs.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+            fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+                let mut line = event.metadata().name().to_string();
+                event.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push(line);
+            }
+        }
+    }
+
+    /// P70 hostile: a 401 on a SHORT key (which the old 12-character tail logged whole) and on a long one. Both sinks
+    /// (the tracing span the OTel bridge exports, and the unified log file) are captured; neither holds the credential
+    /// or any four-character run of it, sent or held. Positive control: both sinks did record the event.
+    #[test]
+    #[serial_test::serial(attribution_emit_count)]
+    fn attribution_sinks_hold_no_key_material() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+
+        // The unit-test binary's unified log is already redirected to a private temp file (`test_support` ctor).
+        for (held, sent) in [
+            // Random-looking (no English runs the captured field names could contain), obviously fake.
+            ("Qx7Vw2Zk9FAKE", "k7FAKE"),
+            ("Hq3Zx8Wv1Ny6Tb4Rm0Kp2Lc9FAKE", "Sv5Gj2Xq7Dz1Wm8Pb3Yt6Nh0FAKE"),
+        ] {
+            let records = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let subscriber = tracing_subscriber::registry().with(record_capture::Collector(records.clone()));
+            let _guard = subscriber.set_default();
+            let (_dir, am) = empty_auth_manager();
+            am.hot_swap(fresh_auth(held));
+            // Shares no four-character run with either key (the scan below would otherwise match the session id).
+            let sid = format!("attribution-sink-{}", sent.len());
+            record_consumer_401(&am, Some(&sid), ConsumerKind::StorageClient, "upload", fpo(sent).as_ref());
+
+            let traced = records.lock().unwrap().join("\n");
+            assert!(traced.contains("auth_401_attribution"), "control: the span was captured: {traced}");
+            let logged = String::from_utf8(
+                fuigo_telemetry::unified_log::snapshot_session_log(&sid).expect("control: the event reached the unified log"),
+            )
+            .expect("utf-8 log");
+            assert!(logged.contains(&fp(sent)), "control: the log carries the fingerprint: {logged}");
+            for key in [held, sent] {
+                for frag in fragments(key, 4) {
+                    assert!(!traced.contains(&frag), "tracing captured {frag:?} of {key:?}: {traced}");
+                    assert!(!logged.contains(&frag), "the unified log holds {frag:?} of {key:?}: {logged}");
+                }
+            }
+        }
     }
 }

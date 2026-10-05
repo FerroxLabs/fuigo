@@ -316,6 +316,10 @@ fn make_scrollback_for_hittest(
 
 #[test]
 fn ffmpeg_install_midsession_expands_video_reservation() {
+    // The overlay decision reads the process-wide `INLINE_OVERLAY_FORCE_OFF` (it beats the
+    // thread-local protocol override), which the mode-switch tests flip while holding the theme
+    // test lock; hold it too.
+    let _modes = crate::theme::cache::pin_theme();
     use crate::inline_media_ffmpeg::set_ffmpeg_available_for_test;
     use crate::scrollback::block::RenderBlock;
     use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};

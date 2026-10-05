@@ -1,0 +1,27 @@
+# P86 Astra round 5 -- final report (gpt-6-astra, read-only; brief: P86-astra-r5-brief.md; raw transcript on Hetzner /root/fuigo-builds/p86/logs/astra/)
+
+Audited `fc3ccb94..a8c555b1` read-only. No Cargo commands or Rust tests ran. The worktree remains clean.
+
+1. **MEDIUM — Queued MCP launches retain credentials registered before the actual spawn.**  
+   [servers.rs:5299](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-mcp/src/servers.rs:5299), [servers.rs:2582](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-mcp/src/servers.rs:2582).  
+   An MCP launch builds its environment while `CORP_KEY` is unregistered, then queues `spawn_blocking`. Before that worker executes, a config reload registers `CORP_KEY`. The worker subsequently spawns using the already-built environment, exposing the credential despite registration having completed. The new fence protects persistent-shell dispatch only. **Tests miss this:** MCP probes register before starting the launch. Rebuild the implicit environment under the fence inside the spawning worker, preserving explicit server overrides.
+
+2. **MEDIUM, pre-existing coverage gap — Command-shell startup files can reintroduce denied credentials.**  
+   [terminal.rs:3354](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3354), [shell_state.rs:541](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:541).  
+   With `BASH_ENV` pointing to a script exporting `FLUX_API_KEY`, filtering the initial environment does not prevent Bash from loading that key before executing the model’s command. A fileless Bash probe started without the key and confirmed both command and grandchild received it. Zsh similarly reads `.zshenv` on ordinary `-c` invocations; snapshot omission does not unset variables introduced by that startup file. [Zsh startup documentation](https://zsh.sourceforge.io/Doc/Release/Files.html). **Tests miss these paths:** fixtures use `.bashrc`/`.bash_profile`, and terminal credential probes force Bash.
+
+3. **MEDIUM, pre-existing coverage gap — Snapshot serialization helpers inherit startup-file credentials.**  
+   [shell_state.rs:176](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:176), [shell_state.rs:164](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:164).  
+   A login file exports a registered credential. The scrub unsets it only inside the `env_vars=$(...)` subshell; subsequent `base64`, `tr`, and option-capture helpers run from the outer shell, which still exports it. A source-derived Zsh capture probe confirmed the serialized export text omitted the fake credential while the next external child inherited it. **Tests miss this:** they inspect the eventual user command and its grandchild, not capture helpers. Apply the scrub across the serializer’s helper-spawning context.
+
+4. **LOW, pre-existing — Initialization retains its unbounded final wait.**  
+   [shell_state.rs:396](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:396).  
+   A startup file or exit handler closes stdout and then hangs. The stdout timeout completes, followed by an indefinite `child.wait()`. **No added test covers it.** This remains the acknowledged follow-up.
+
+The r4 persistent-dispatch and cwd corrections look correct in source. I found no concrete fence deadlock or `Send` defect: both paths acquire fence before registry, registration’s preliminary reads release their guards, and no fence guard survives an `.await`. Although `RwLockReadGuard` is `!Send`, that alone does not invalidate this placement. [Rust guard documentation](https://doc.rust-lang.org/std/sync/struct.RwLockReadGuard.html), [Tokio suspension requirements](https://tokio.rs/tokio/tutorial/spawning#send-bound).
+
+Release selectors still resolve to **11 P86 unit tests, 2 default-policy tests, 1 config integration test, 7 extra-ca redirect tests, 1 sampler redirect test, and 6 MCP HTTP-policy tests**—source counts only.
+
+No checked-in first-party hook, MCP server, or plugin dependency on these inherited credentials was found. The nested [leader launch](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/leader/mod.rs:1734) can depend on inherited credentials and remains outside the scrub path.
+
+DO-NOT-LAND

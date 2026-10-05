@@ -1604,22 +1604,31 @@ mod tests {
         }
     }
 
-    // Serialize the process-global bidi latch
-    // Restore it on scope exit even if `f` panics, so a failed assertion can't leak `rtl_bidi = true` into other tests in the process
-    // LTR cases need no reorder so only these RTL cases need the guard
+    // Pin bidi for this test thread only. The latch is process-wide and every test that builds a scrollback or app view
+    // writes it from its (bidi-off) appearance config, so writing the global here raced those tests (and leaked `true` into them).
+    // The per-thread pin restores itself on scope exit even if `f` panics.
     // "خوب" avoids the lam-alef ligature so columns map 1:1
-    static BIDI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    struct BidiLatchGuard(bool);
-    impl Drop for BidiLatchGuard {
-        fn drop(&mut self) {
-            crate::render::bidi::set_enabled(self.0);
-        }
+    fn with_bidi<R>(on: bool, f: impl FnOnce() -> R) -> R {
+        let _pin = crate::render::bidi::pin_for_current_thread(on);
+        f()
     }
     fn with_rtl_bidi<R>(f: impl FnOnce() -> R) -> R {
-        let _g = BIDI_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _latch = BidiLatchGuard(crate::render::bidi::is_enabled());
-        crate::render::bidi::set_enabled(true);
-        f()
+        with_bidi(true, f)
+    }
+
+    /// The pin survives a concurrent appearance write: another thread turning the process-wide latch off (as every scrollback
+    /// or app-view construction with the default appearance does) must not turn this test's bidi off mid-test.
+    #[test]
+    fn rtl_bidi_pin_is_immune_to_a_concurrent_latch_write() {
+        with_rtl_bidi(|| {
+            std::thread::spawn(|| crate::render::bidi::set_enabled(false))
+                .join()
+                .expect("writer thread");
+            assert!(
+                crate::render::bidi::is_enabled(),
+                "a write to the process-wide latch from another thread reached a pinned test"
+            );
+        });
     }
 
     /// A drag over painted (visual) RTL cells copies the logical text, not a mismapped substring of the trailing-trimmed derived text.
@@ -1682,8 +1691,10 @@ mod tests {
         };
         // Region is logical columns 0..3 (the "…" span is excluded).
         assert_eq!(selectable_cols(&line.content, &line.selectable), Some(0..3));
-        // Reordering off: identity.
-        assert_eq!(visual_selectable_cols(&line), Some(0..3));
+        // Reordering off: identity. Pinned off for this thread, so the read cannot see a latch another test left on.
+        with_bidi(false, || {
+            assert_eq!(visual_selectable_cols(&line), Some(0..3));
+        });
         with_rtl_bidi(|| {
             // Painted "خوب…" reorders to "…بوخ"; the word occupies visual cells 1..4
             assert_eq!(visual_selectable_cols(&line), Some(1..4));
@@ -3607,8 +3618,10 @@ mod tests {
 
     #[test]
     fn persistent_and_active_overlay_agree_on_same_endpoints() {
-        // Pin theme to avoid races with parallel tests that call `cache::set`.
-        crate::theme::cache::set(crate::theme::ThemeKind::FuigoNight);
+        // Pin theme to avoid races with parallel tests that call `cache::set`: `pin_theme` takes the
+        // shared theme test lock (a bare `cache::set` here used to overwrite another test's pinned
+        // theme mid-assertion).
+        let _theme = crate::theme::cache::pin_theme();
         let mut model = ResolvedSelectionModel::default();
         for i in 0..4u16 {
             model.push_line(ResolvedSelectableLine {

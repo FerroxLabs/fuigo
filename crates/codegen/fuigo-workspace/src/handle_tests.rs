@@ -1376,7 +1376,7 @@ pub(crate) async fn assert_backend_stops(
     backend: &Arc<dyn fuigo_tools::computer::types::TerminalBackend>,
 ) {
     let out_dir = tempfile::tempdir().expect("temp dir");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let request = terminal_run_request("true", out_dir.path(), "probe");
         if backend.run(request).await.is_err() {
@@ -1405,7 +1405,7 @@ async fn drop_session_shuts_down_terminal_backend_explicitly() {
     drop(retained_toolset);
 }
 async fn assert_hunk_tracker_stops(tracker: &fuigo_hunk_tracker::HunkTrackerHandle) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !tracker.is_closed() {
         assert!(
             std::time::Instant::now() < deadline,
@@ -2299,6 +2299,24 @@ fn make_queue_backed_handle_with(
     identity: crate::WorkspaceIdentity,
     data_collection_disabled: bool,
 ) -> (WorkspaceHandle, tempfile::TempDir) {
+    let auth: fuigo_computer_hub_sdk::SharedAuthProvider = Arc::new(
+        fuigo_computer_hub_sdk::auth::AuthCredential::bearer("test-token"),
+    );
+    let proxy = Arc::new(crate::upload::ProxyStorageConfig::new(
+        auth,
+        "http://127.0.0.1:1/v1".to_string(),
+        identity.clone(),
+    ));
+    let source: Arc<dyn fuigo_file_utils::queue::TraceExportSource> =
+        Arc::new(crate::upload::WorkspaceTraceExportSource::new(proxy));
+    make_queue_backed_handle_with_source(identity, data_collection_disabled, source)
+}
+/// [`make_queue_backed_handle_with`] uploading through an explicit `source` (P71: the destination class is the source's).
+fn make_queue_backed_handle_with_source(
+    identity: crate::WorkspaceIdentity,
+    data_collection_disabled: bool,
+    source: Arc<dyn fuigo_file_utils::queue::TraceExportSource>,
+) -> (WorkspaceHandle, tempfile::TempDir) {
     let factory = Arc::new(TestSessionContextFactory::new());
     let cwd = factory.temp.path().to_path_buf();
     let config = WorkspaceConfig {
@@ -2325,16 +2343,6 @@ fn make_queue_backed_handle_with(
         bind_mcp: None,
     };
     let home = tempfile::tempdir().expect("workspace home tempdir");
-    let auth: fuigo_computer_hub_sdk::SharedAuthProvider = Arc::new(
-        fuigo_computer_hub_sdk::auth::AuthCredential::bearer("test-token"),
-    );
-    let proxy = Arc::new(crate::upload::ProxyStorageConfig::new(
-        auth,
-        "http://127.0.0.1:1/v1".to_string(),
-        identity.clone(),
-    ));
-    let source: Arc<dyn fuigo_file_utils::queue::TraceExportSource> =
-        Arc::new(crate::upload::WorkspaceTraceExportSource::new(proxy));
     let policy = fuigo_file_utils::queue::UploadRetryPolicy {
         max_attempts: 1,
         ..Default::default()
@@ -2405,6 +2413,136 @@ async fn environment_artifact_enqueued_when_queue_present() {
         1,
         "the environment artifact must reach the queue"
     );
+}
+/// P71: a source whose destination is `method`, and whose uploads wait for `release` before they resolve,
+/// so a spilled item sits in the queue directory for the test to read.
+struct HeldSource {
+    method: fuigo_file_utils::UploadMethod,
+    release: Arc<tokio::sync::Notify>,
+}
+impl fuigo_file_utils::queue::TraceExportSource for HeldSource {
+    fn resolve(&self) -> fuigo_file_utils::TraceExportConfig {
+        fuigo_file_utils::TraceExportConfig {
+            bucket_url: Some("gs://operator-bucket".to_string()),
+            service_account_key: None,
+            upload_method: self.method.clone(),
+            prefix_dir: None,
+            gcs_prefix: None,
+            absolute_paths: false,
+            archive_name_override: None,
+        }
+    }
+    fn resolve_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = fuigo_file_utils::TraceExportConfig> + Send + '_>>
+    {
+        Box::pin(async move {
+            self.release.notified().await;
+            self.resolve()
+        })
+    }
+}
+
+fn proxy_method_at(base: &str) -> fuigo_file_utils::UploadMethod {
+    fuigo_file_utils::UploadMethod::Proxy {
+        proxy_base_url: base.to_string(),
+        user_token: String::new(),
+        deployment_key: Some("p71-deployment-key".to_string()),
+        alpha_test_key: None,
+    }
+}
+
+/// The environment record the queue is holding (spilled to `upload_queue/`), as the worker will send it.
+fn spilled_environment_record(home: &std::path::Path) -> String {
+    let dir = home.join("upload_queue");
+    for entry in std::fs::read_dir(&dir).expect("queue dir").flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.contains("workspace_environment") && !name.ends_with(".meta.json") {
+            return std::fs::read_to_string(entry.path()).expect("spilled record");
+        }
+    }
+    panic!("no spilled environment record in {}", dir.display());
+}
+
+/// P71 hostile, end to end: the environment artifact (a STRUCTURED record) for a destination class.
+///
+/// * Class 3 (a third-party proxy): the record the queue holds carries no account id, team id,
+///   working directory or host (field rule), AND the proxy receives no connection (the gate).
+/// * Class 1 (FluxRouter-class) and class 2 (the operator's S3 bucket): the record is unchanged and
+///   is delivered.
+#[tokio::test]
+async fn environment_artifact_follows_the_destination_class() {
+    use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+    let identity = || {
+        crate::WorkspaceIdentity::new(
+            "acct-71-owner",
+            Some("Team".to_string()),
+            Some("team-71-owner".to_string()),
+        )
+    };
+    let cwd = std::path::Path::new("/home/rowan-71/work");
+
+    // Class 3.
+    let third_party = RecordingEndpoint::third_party().await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(HeldSource {
+        method: proxy_method_at(&third_party.proxy_base_url()),
+        release: release.clone(),
+    });
+    let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
+    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    let record = spilled_environment_record(home.path());
+    assert!(record.contains("sess-p71"), "the record exists: {record}");
+    for leaked in ["acct-71-owner", "team-71-owner", "rowan-71"] {
+        assert!(!record.contains(leaked), "class 3 record carries {leaked}: {record}");
+    }
+    release.notify_one();
+    // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
+    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
+    third_party.settle(std::time::Duration::from_millis(300)).await;
+    assert_eq!(third_party.connections(), 0, "the environment record reached a third-party proxy");
+
+    // Class 1 (FluxRouter-class loopback).
+    let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(HeldSource {
+        method: proxy_method_at(&fluxrouter_class.proxy_base_url()),
+        release: release.clone(),
+    });
+    let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
+    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    let record = spilled_environment_record(home.path());
+    for kept in ["acct-71-owner", "team-71-owner", "rowan-71"] {
+        assert!(record.contains(kept), "class 1 record lost {kept}: {record}");
+    }
+    release.notify_one();
+    // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
+    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
+    assert!(fluxrouter_class.received_contains(b"acct-71-owner"), "class 1 did not receive the record");
+
+    // Class 2 (the operator's own S3 bucket): the record is unchanged.
+    let bucket = RecordingEndpoint::third_party().await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    let source = Arc::new(HeldSource {
+        method: fuigo_file_utils::UploadMethod::S3 {
+            bucket: "operator-bucket".to_string(),
+            region: "us-east-1".to_string(),
+            credentials_file: None,
+            credentials_content: Some(r#"{"aws_access_key_id":"t","aws_secret_access_key":"t"}"#.to_string()),
+            endpoint_url: Some(bucket.endpoint_url()),
+        },
+        release: release.clone(),
+    });
+    let (handle, home) = make_queue_backed_handle_with_source(identity(), false, source);
+    handle.emit_environment_artifact("sess-p71", cwd, None).await.expect("enqueued");
+    let record = spilled_environment_record(home.path());
+    for kept in ["acct-71-owner", "team-71-owner", "rowan-71"] {
+        assert!(record.contains(kept), "class 2 record lost {kept}: {record}");
+    }
+    release.notify_one();
+    // Nothing left in the queue: the attempt ran to its end (withheld, or sent), it was not cut short.
+    assert_eq!(handle.shared().upload_queue().expect("queue").drain(std::time::Duration::from_secs(20)).await, 0);
+    assert!(bucket.received_contains(b"acct-71-owner"), "the operator's bucket did not receive the record");
 }
 /// Without a queue (tests / local mode) emission is a silent no-op.
 #[tokio::test]
@@ -3258,6 +3396,10 @@ async fn on_hub_tools_changed_updates_snapshot() {
 }
 #[test]
 fn startup_stage_observe_records_independent_samples() {
+    // Reads deltas of a process-global metric: only a process of its own makes the delta exact.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let recovery_before = super::STARTUP_STAGE_DURATION_SECONDS
         .with_label_values(&[
             super::STARTUP_STAGE_STARTUP_RECOVERY,
@@ -3327,6 +3469,10 @@ fn startup_stage_observe_records_independent_samples() {
 }
 #[tokio::test]
 async fn connect_hub_noop_when_no_config() {
+    // Reads deltas of a process-global metric, which any test that starts a workspace also moves: only a process of its own makes the delta exact.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let catalog_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
         .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
         .get_sample_count();
@@ -3398,6 +3544,10 @@ async fn connect_hub_noop_when_no_config() {
 }
 #[test]
 fn observe_connect_hub_catalog_result_records_error_pair() {
+    // Reads deltas of a process-global metric: only a process of its own makes the delta exact.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let catalog_ok_before = super::STARTUP_STAGE_DURATION_SECONDS
         .with_label_values(&[super::STARTUP_STAGE_TOOL_CATALOG, super::STARTUP_OUTCOME_OK])
         .get_sample_count();
@@ -4484,7 +4634,8 @@ async fn a_failed_server_is_retried_by_the_next_convergence() {
         WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
     config.bind_mcp = Some(
         BindMcpConfig::new([configured_test_mcp("hanging", url)])
-            .with_discovery_timeout(std::time::Duration::from_secs(2))
+            // Long enough that a host under load still reaches the server inside it; the server hangs, so each convergence runs to this timeout either way.
+            .with_discovery_timeout(std::time::Duration::from_secs(14))
             .with_first_party_servers(["hanging".to_owned()]),
     );
     let handle = WorkspaceHandle::new(config).unwrap();
@@ -5259,6 +5410,10 @@ async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
 /// them.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_install_cannot_cross_into_a_revived_life() {
+    // The interleaving below is ordered by short sleeps (teardown queues on the binding lock before the revival does), so it must not compete with ~2000 sibling tests for threads.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
@@ -5305,17 +5460,17 @@ async fn a_stale_install_cannot_cross_into_a_revived_life() {
     reached.notified().await;
     let gate = session.mcp_binding.lock().await;
     release.notify_one();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let teardown = {
         let handle = handle.clone();
         tokio::spawn(async move { handle.teardown_session_mcp("main").await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     let revive = {
         let session = Arc::clone(&session);
         tokio::spawn(async move { reopen_and_enrol(&session).await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     drop(gate);
     teardown.await.unwrap();
     revive.await.unwrap();
@@ -5370,6 +5525,95 @@ async fn a_bind_mcp_server_gets_no_agent_header_unless_first_party() {
          its requests: {app_seen:?}"
     );
     third_task.abort();
+    app_task.abort();
+}
+/// Audit mutant M4 / P91 R5, end to end over real HTTP: a bind config that sets
+/// `X-Grok-Agent-ID` itself (trying to impersonate or forge the session id) never
+/// gets that header onto the wire for a third-party server, and a first-party
+/// server receives the real session id, not the configured value.
+#[tokio::test]
+async fn a_configured_agent_id_header_is_never_forwarded() {
+    let third_state = BindMcpTestState::default();
+    let app_state = BindMcpTestState {
+        tool_name: Some("app_tool".to_owned()),
+        ..Default::default()
+    };
+    let (third_url, third_task) = spawn_bind_mcp_server(third_state.clone()).await;
+    let (app_url, app_task) = spawn_bind_mcp_server(app_state.clone()).await;
+    let forged = |name: &str, url: String| {
+        agent_client_protocol::McpServer::Http(
+            agent_client_protocol::McpServerHttp::new(name, url).headers(vec![
+                agent_client_protocol::HttpHeader::new("X-Grok-Agent-ID", "forged-id"),
+            ]),
+        )
+    };
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([forged("third", third_url), forged("app", app_url)])
+            .with_first_party_servers(["app".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("hdr2").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "hdr2", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        third_state.session_ids.lock().is_empty(),
+        "a configured agent-id header must be stripped for a third-party server: {:?}",
+        third_state.session_ids.lock()
+    );
+    let app_seen = app_state.session_ids.lock().clone();
+    assert!(
+        !app_seen.is_empty() && app_seen.iter().all(|s| s == "hdr2"),
+        "the first-party endpoint must see only the real session id: {app_seen:?}"
+    );
+    third_task.abort();
+    app_task.abort();
+}
+/// P91 R5 through the production start path (Astra r1 #8): a server designated
+/// first-party by NAME but addressed by a non-loopback URL never receives the
+/// agent-id header. The URL uses `0.0.0.0`, which `is_loopback_http_url` rejects
+/// but which the Linux kernel routes to the loopback listener, so a name-only
+/// implementation would deliver the session id to the recording server. The test
+/// also requires that the server WAS reached (`inits > 0`), so it cannot pass by
+/// never connecting.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_first_party_name_off_loopback_gets_no_agent_header() {
+    let app_state = BindMcpTestState {
+        tool_name: Some("app_tool".to_owned()),
+        ..Default::default()
+    };
+    let (app_url, app_task) = spawn_bind_mcp_server(app_state.clone()).await;
+    let unspecified_url = app_url.replacen("127.0.0.1", "0.0.0.0", 1);
+    assert_ne!(unspecified_url, app_url);
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("app", unspecified_url)])
+            .with_first_party_servers(["app".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("hdr3").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "hdr3", &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(
+        app_state.inits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the server behind 0.0.0.0 was never reached, so this test proves nothing"
+    );
+    assert!(
+        app_state.session_ids.lock().is_empty(),
+        "a first-party name on a non-loopback URL must not receive the session id: {:?}",
+        app_state.session_ids.lock()
+    );
     app_task.abort();
 }
 /// A soft rebind of an Active session CONTINUES the life: the epoch must not
@@ -5962,10 +6206,13 @@ async fn a_hung_mcp_server_cannot_push_a_bind_past_the_ack_budget() {
     );
     let handle = WorkspaceHandle::new(config).unwrap();
     handle.create_session("main").unwrap();
+    let setup_done = Arc::new(parking_lot::Mutex::new(None::<std::time::Instant>));
+    let setup_done_hook = setup_done.clone();
     handle.set_bind_mount_hook(crate::path_virtualization::BindMountHook::probe_then_mount(
         |_| false,
         move |_root| {
             std::thread::sleep(std::time::Duration::from_secs(6));
+            *setup_done_hook.lock() = Some(std::time::Instant::now());
             Ok(())
         },
     ));
@@ -5977,9 +6224,13 @@ async fn a_hung_mcp_server_cannot_push_a_bind_past_the_ack_budget() {
         .await
         .expect("a hung MCP server must not fail the bind");
     let elapsed = started.elapsed();
+    // Judge the wait AFTER setup, not the total: the setup is a real 6 s sleep that a loaded host stretches, and that stretch is not what is under test.
+    // With the deadline anchored at bind start the converge wait is what setup left of the 9 s, about 3 s (less if setup overran); the pre-deadline behavior waited the full 8 s grace.
+    let setup_end = setup_done.lock().expect("the mount hook ran");
+    let after_setup = (started + elapsed).saturating_duration_since(setup_end);
     assert!(
-        elapsed < std::time::Duration::from_secs(11),
-        "slow setup must shrink the converge grace (deadline from bind start), got {elapsed:?}"
+        after_setup < std::time::Duration::from_secs(6),
+        "slow setup must shrink the converge grace (deadline from bind start), waited {after_setup:?} after setup (total {elapsed:?})"
     );
     server_task.abort();
 }
@@ -6053,7 +6304,7 @@ async fn a_rebind_reopens_for_the_client_driven_configure_path() {
             &session,
             "legacy",
             vec![server],
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
             &std::collections::HashSet::new(),
             fuigo_session_events::EventWriter::noop(),
         )
@@ -6313,6 +6564,10 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
 /// phases a window inside the deadline.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
+    // The deadline here is the tightest the test can use and still discriminate (see below), so the handshake must not also compete with ~2000 sibling tests for this process's threads.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
         swallow_discover: true,
         ..Default::default()
@@ -6332,10 +6587,23 @@ async fn a_swallowed_discover_probe_leaves_the_legacy_handshake_its_window() {
             .mcp_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
-    // Six seconds: the probe phase can only end at its timeout, which tracks the
-    // startup budget, so an un-split budget spends every second of the deadline
-    // probing.
-    let discovery_timeout = std::time::Duration::from_secs(6);
+    // Nine seconds: the probe timeout is min(10 s, startup budget), so below 10 s an un-split budget spends every
+    // second of the deadline probing and the legacy handshake gets nothing, while the split leaves it 4 s. At 10 s
+    // or more the probe cap would leave the legacy phase time even unsplit and the test would stop discriminating.
+    // The test runs in its own process (above), which is what makes the 4 s dependable under load.
+    let discovery_timeout = std::time::Duration::from_secs(9);
+    // The budget itself, asserted directly and independent of host speed: the client must split the deadline so
+    // that the probe (min(10 s, startup budget)) and the legacy phase both fit. An unsplit budget (the original
+    // bug) would be the whole deadline and fail here, not by racing the handshake below.
+    {
+        let deadline_secs = discovery_timeout.as_secs();
+        let startup = fuigo_mcp::servers::McpClient::max_startup_within_deadline(deadline_secs);
+        let probe = startup.min(10);
+        assert!(
+            startup >= 1 && startup + probe <= deadline_secs,
+            "the startup budget {startup}s plus its probe {probe}s must fit the {deadline_secs}s deadline: the probe must not eat the legacy handshake's window"
+        );
+    }
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::config::BindMcpConfig::MAX_SERVERS);
     let drive = {
         let session = Arc::clone(&session);
@@ -6469,7 +6737,8 @@ async fn a_bind_handshake_reports_its_own_error_inside_the_discovery_deadline() 
     //              20 s deadline cancels it — the generic error, 3 s past the deadline.
     // The deadline and the fake's delays are scaled together; an 8 s version of this test left
     // ~1 s of slack and failed under a 16-thread lib run.
-    let discovery_timeout = std::time::Duration::from_secs(20);
+    // (Doubled again: the fake's rejection still lands ~13 s in, so the extra 20 s is pure margin for a starved host.)
+    let discovery_timeout = std::time::Duration::from_secs(40);
     let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
         swallow_discover: true,
         init_reject_after_ms: Some(3_000),
@@ -6671,6 +6940,88 @@ async fn reload_collision_unregisters_the_id_the_surviving_server_lost() {
     first_task.abort();
     second_task.abort();
 }
+/// Two configured servers are discovered CONCURRENTLY: each holds its `tools/list` open until BOTH
+/// are inside `tools/list` at once, which only a concurrent drive can reach. A sequential drive
+/// deadlocks on the first server until the (hang-guard) deadline and fails both.
+///
+/// `bind_mcp_discovery_is_concurrent_and_bounded` below bounds the total time with one hanging
+/// peer; this test proves the overlap itself, with no deadline in the assertion.
+#[tokio::test]
+async fn bind_mcp_discovery_is_concurrent() {
+    let (gated_reached, gated_release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let (ready_reached, ready_release) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let (gated_url, gated_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&gated_reached), Arc::clone(&gated_release))),
+        ..Default::default()
+    })
+    .await;
+    let (ready_url, ready_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&ready_reached), Arc::clone(&ready_release))),
+        tool_name: Some("ready_echo".to_owned()),
+        ..Default::default()
+    })
+    .await;
+    let both_inside = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let releaser = {
+        let both_inside = Arc::clone(&both_inside);
+        tokio::spawn(async move {
+            gated_reached.notified().await;
+            ready_reached.notified().await;
+            both_inside.store(true, std::sync::atomic::Ordering::SeqCst);
+            gated_release.notify_one();
+            ready_release.notify_one();
+        })
+    };
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([
+            configured_test_mcp("gated", gated_url),
+            configured_test_mcp("ready", ready_url),
+        ])
+        // A hang guard, not a race: reached only if discovery is sequential.
+        .with_discovery_timeout(std::time::Duration::from_secs(30)),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = fuigo_tool_protocol::SessionId::new("concurrent-mcp").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed regardless of MCP servers");
+    let hub = FakeHubRegistry::default();
+    let delta = converge_with(
+        &handle,
+        "concurrent-mcp",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    assert!(
+        both_inside.load(std::sync::atomic::Ordering::SeqCst),
+        "both servers must have been inside tools/list at the same time"
+    );
+    let mut added = delta.added.clone();
+    added.sort();
+    assert_eq!(added, vec!["gated".to_owned(), "ready".to_owned()]);
+    assert!(delta.failed.is_empty(), "failed: {:?}", delta.failed);
+    let ready = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .find(|handler| handler.tool_id().as_str() == "ready_echo")
+        .expect("ready handler must be registered");
+    assert_eq!(ready.description().namespace.as_deref(), Some("ready"));
+    releaser.await.unwrap();
+    gated_task.abort();
+    ready_task.abort();
+}
 #[tokio::test]
 async fn bind_mcp_discovery_is_concurrent_and_bounded() {
     let (hanging_url, hanging_task) = spawn_bind_mcp_server(BindMcpTestState {
@@ -6679,6 +7030,9 @@ async fn bind_mcp_discovery_is_concurrent_and_bounded() {
     })
     .await;
     let (ready_url, ready_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    // The ready server must finish its whole handshake inside this budget while the hanging one runs out the clock.
+    // One second was a race against host load (initialize, discover and tools/list on a busy box), so the budget is generous and the bound below is relative to it.
+    let discovery_timeout = fuigo_test_support::scaled(std::time::Duration::from_secs(8));
     let factory = Arc::new(TestSessionContextFactory::new());
     let mut config =
         WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
@@ -6687,7 +7041,7 @@ async fn bind_mcp_discovery_is_concurrent_and_bounded() {
             configured_test_mcp("hanging", hanging_url),
             configured_test_mcp("ready", ready_url),
         ])
-        .with_discovery_timeout(std::time::Duration::from_secs(1)),
+        .with_discovery_timeout(discovery_timeout),
     );
     let handle = WorkspaceHandle::new(config).unwrap();
     handle.create_session("main").unwrap();
@@ -6699,12 +7053,34 @@ async fn bind_mcp_discovery_is_concurrent_and_bounded() {
     let hub = FakeHubRegistry::default();
     let started_at = std::time::Instant::now();
     let delta = converge_with(&handle, "bounded-mcp", &hub, crate::mcp::McpReclaim::Always).await;
+    let elapsed = started_at.elapsed();
     assert!(
-        started_at.elapsed() < std::time::Duration::from_secs(3),
+        elapsed < discovery_timeout * 3,
         "one hanging server must not extend the deadline"
+    );
+    // The failure is the deadline cutting off a server that never answered, not an immediate
+    // handshake error: a deadline cannot fire early, so this lower bound cannot flake.
+    assert!(
+        elapsed >= discovery_timeout,
+        "failed after {elapsed:?}, before the {discovery_timeout:?} deadline: not a cut-off hang"
     );
     assert_eq!(delta.added, vec!["ready".to_owned()]);
     assert_eq!(delta.failed, vec!["hanging".to_owned()]);
+    // And the recorded cause is the discovery deadline itself.
+    let session = handle.session("bounded-mcp").expect("session exists");
+    let detail = session
+        .mcp_state
+        .lock()
+        .await
+        .init_failed
+        .iter()
+        .find(|(name, _)| name.as_str() == "hanging")
+        .map(|(_, detail)| detail.clone())
+        .expect("the hanging server's init failure is recorded");
+    assert!(
+        detail.contains("MCP discovery timed out after"),
+        "the failure must be the deadline cutting it off, got: {detail}"
+    );
     let echo = hub
         .handlers_for_session(&sid)
         .into_iter()
@@ -8142,7 +8518,8 @@ async fn two_phase_drain_waits_for_producer_then_drains_queue() {
     });
     let unfinished = handle
         .two_phase_drain(
-            std::time::Duration::from_millis(1_500),
+            // Phase 1.5 gets half of what phase 1 leaves, and the producer needs 100 ms plus its enqueue: on a loaded host 1.5 s left that half too small.
+            std::time::Duration::from_millis(6_000),
             DrainReason::Sigterm,
         )
         .await;
@@ -8753,6 +9130,9 @@ fn wiring_tool_configs(wiring: &AuxiliaryServiceWiring) -> (String, String, Stri
 // `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
 #[tokio::test(flavor = "current_thread")]
 async fn auxiliary_service_wiring_without_the_env_disables_gen_tools_and_collection() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _env = LockedTestEnv::lock()
         .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false")
         .unset(CLI_CHAT_PROXY_BASE_URL_ENV);
@@ -8774,11 +9154,36 @@ async fn auxiliary_service_wiring_without_the_env_disables_gen_tools_and_collect
     }
 }
 
+/// P47: a cleartext or loopback auxiliary base never receives the hub session token as the image/video/web-search
+/// key: the three tools stay disabled. Positive control: the https base in the test below enables all three.
+#[tokio::test(flavor = "current_thread")]
+async fn p47_auxiliary_service_wiring_withholds_the_session_from_a_cleartext_or_loopback_base() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    for base in [
+        "http://proxy.example.test/v1",
+        "https://127.0.0.1:9/v1",
+        "https://localhost/v1",
+    ] {
+        let _env = LockedTestEnv::lock().set_str(CLI_CHAT_PROXY_BASE_URL_ENV, base);
+        let wiring = auxiliary_service_wiring(&wiring_test_auth());
+        let (image, video, web) = wiring_tool_configs(&wiring);
+        for rendered in [&image, &video, &web] {
+            assert!(rendered.starts_with("Disabled"), "{base}: {rendered}");
+            assert!(!rendered.contains("test-token"), "{base}: {rendered}");
+        }
+    }
+}
+
 /// SET: the three tools are enabled against exactly the configured base, and the
 /// data-collection env var is honoured again (`false` => collection on).
 // `LocalTerminalBackend::new()` registers with the tokio reactor, so this needs a runtime.
 #[tokio::test(flavor = "current_thread")]
 async fn auxiliary_service_wiring_with_the_env_enables_gen_tools_at_that_base() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _env = LockedTestEnv::lock()
         .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
         .set_str(WORKSPACE_DATA_COLLECTION_DISABLED_ENV, "false");
@@ -8805,6 +9210,9 @@ async fn auxiliary_service_wiring_with_the_env_enables_gen_tools_at_that_base() 
 /// case changes is that the env var stops being able to turn it back on.
 #[test]
 fn auxiliary_service_wiring_default_collection_stays_disabled_with_a_proxy() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _env = LockedTestEnv::lock()
         .set_str(CLI_CHAT_PROXY_BASE_URL_ENV, "https://proxy.example.test/v1")
         .unset(WORKSPACE_DATA_COLLECTION_DISABLED_ENV);

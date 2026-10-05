@@ -18,9 +18,10 @@ use tokio::net::TcpListener;
 use super::super::config::{FuigoComConfig, OidcAuthConfig};
 use super::super::{AuthManager, FuigoAuth};
 use super::protocol::{
-    OidcError, build_authorize_url, build_fuigo_auth, discover, enforce_login_principal,
-    exchange_code, extract_user_info, generate_pkce, login_principal_policy,
-    peek_access_token_principal, peek_access_token_principal_id, validate_state,
+    OidcError, build_authorize_url, build_fuigo_auth, checked_token_endpoint, discover,
+    enforce_login_principal, exchange_code, extract_user_info, generate_pkce,
+    login_principal_policy, peek_access_token_principal, peek_access_token_principal_id,
+    validate_state,
 };
 
 /// Maximum time to wait for the browser OAuth callback (or manual paste of the code).
@@ -229,7 +230,7 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::Sender<CallbackResult>) {
                 }
                 Err(OidcError::InvalidPastedInput(msg)) => {
                     tracing::debug!(input = %msg, "OIDC: invalid stdin paste, retrying");
-                    eprintln!("  Invalid input: {msg}. Try again:");
+                    fuigo_tty_utils::cli_eprintln!("  Invalid input: {msg}. Try again:");
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "OIDC: stdin paste returned auth error");
@@ -379,6 +380,10 @@ pub async fn run_login_flow_with_config(
     .ok();
 
     let discovery = discover(&oidc.issuer).await?;
+    // P99: refuse a token endpoint that is not bound to the issuer BEFORE the browser opens,
+    // so the user is not sent through a sign-in whose code could never be exchanged.
+    // `exchange_code` applies the same check again at the point of sending.
+    checked_token_endpoint(&oidc.issuer, &discovery.token_endpoint)?;
     let pkce = generate_pkce();
     let state = uuid::Uuid::now_v7().to_string();
     let nonce = uuid::Uuid::now_v7().to_string();
@@ -415,30 +420,30 @@ pub async fn run_login_flow_with_config(
 
     if has_client_ui {
         // Client provides its own auth UI; just open the browser.
-        if let Err(e) = webbrowser::open(&auth_url) {
+        if let Err(e) = open_browser(&auth_url) {
             tracing::debug!(error = %e, "OIDC: failed to open browser");
         }
     } else {
         // No client UI: print to stderr
-        eprintln!();
+        fuigo_tty_utils::cli_eprintln!();
         let provider_label = if oidc.issuer == super::super::config::GROK_OAUTH2_ISSUER {
             "Fuigo".to_owned()
         } else {
             oidc.issuer.clone()
         };
-        eprintln!("Signing in with {}...", provider_label);
-        eprintln!();
-        if let Err(e) = webbrowser::open(&auth_url) {
+        fuigo_tty_utils::cli_eprintln!("Signing in with {}...", provider_label);
+        fuigo_tty_utils::cli_eprintln!();
+        if let Err(e) = open_browser(&auth_url) {
             tracing::debug!(error = %e, "OIDC: failed to open browser");
         }
-        eprintln!("Open this URL to sign in:");
-        eprintln!("  {}", auth_url);
+        fuigo_tty_utils::cli_eprintln!("Open this URL to sign in:");
+        fuigo_tty_utils::cli_eprintln!("  {}", auth_url);
     }
 
     let use_stdin = !has_client_ui && std::io::stdin().is_terminal();
     if use_stdin {
-        eprintln!();
-        eprintln!("Paste the URL here if it doesn't connect:");
+        fuigo_tty_utils::cli_eprintln!();
+        fuigo_tty_utils::cli_eprintln!("Paste the URL here if it doesn't connect:");
     }
 
     // Push auth URL to the TUI via oneshot.
@@ -466,6 +471,7 @@ pub async fn run_login_flow_with_config(
     }
 
     let tokens = exchange_code(
+        &oidc.issuer,
         &discovery.token_endpoint,
         &code,
         &redirect_uri,
@@ -535,6 +541,21 @@ pub async fn run_login_flow_with_config(
 
     Ok((auth, true))
 }
+
+/// Opens the sign-in page in the user's browser.
+#[cfg(not(test))]
+fn open_browser(url: &str) -> std::io::Result<()> {
+    webbrowser::open(url)
+}
+/// Test builds never launch a browser: the URL is recorded so a test can observe whether, and with
+/// what, the flow reached this point.
+#[cfg(test)]
+fn open_browser(url: &str) -> std::io::Result<()> {
+    OPENED_IN_TESTS.lock().push(url.to_owned());
+    Ok(())
+}
+#[cfg(test)]
+static OPENED_IN_TESTS: parking_lot::Mutex<Vec<String>> = parking_lot::Mutex::new(Vec::new());
 
 /// Successful OIDC callback payload.
 #[derive(Debug, PartialEq, Eq)]
@@ -610,6 +631,7 @@ mod tests {
         assert_eq!(received_state, state);
 
         let tokens = exchange_code(
+            &oidc_cfg.issuer,
             &discovery.token_endpoint,
             &code,
             &redirect_uri,
@@ -649,6 +671,108 @@ mod tests {
         assert!(auth_json.contains("user-42"));
 
         idp_server.abort();
+    }
+    /// P99, production entry point: when discovery names a token endpoint off the issuer's
+    /// origin, the login flow stops with the reason BEFORE it binds the callback server or
+    /// opens a browser. Nothing is stored and the foreign origin is never contacted.
+    #[tokio::test]
+    async fn login_flow_refuses_a_foreign_token_endpoint_before_the_browser_opens() {
+        let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        collector.set_nonblocking(true).unwrap();
+        let foreign = format!("http://{}/token", collector.local_addr().unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let authorize = format!("{issuer}/authorize");
+        let document = serde_json::json!({
+            "authorization_endpoint": authorize,
+            "token_endpoint": foreign,
+        });
+        let app = axum::Router::new().route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(move || {
+                let document = document.clone();
+                async move { axum::Json(document) }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let temp_dir = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(temp_dir.path(), FuigoComConfig::default()));
+        let oidc_cfg = OidcAuthConfig {
+            issuer,
+            client_id: TEST_CLIENT_ID.into(),
+            scopes: vec!["openid".into()],
+            audience: None,
+        };
+        // Without the early check the flow would open a browser and wait for a callback.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run_login_flow_with_config(&oidc_cfg, &auth_manager, None),
+        )
+        .await
+        .expect("the flow must stop at once, not wait for a browser callback");
+        server.abort();
+        let Err(error) = result else {
+            panic!("a foreign token endpoint must be refused");
+        };
+        match error.downcast_ref::<OidcError>() {
+            Some(OidcError::TokenEndpointRefused(reason)) => {
+                assert!(reason.contains("issuer's origin"), "{reason}")
+            }
+            other => panic!("expected TokenEndpointRefused, got {other:?} / {error:#}"),
+        }
+        assert!(error.to_string().contains("nothing was sent"), "{error}");
+        assert_eq!(
+            collector.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock,
+            "the foreign token endpoint was contacted"
+        );
+        assert!(!temp_dir.path().join("auth.json").exists());
+        // The browser was never asked to open this issuer's sign-in page (the port is unique to this test).
+        let opened = OPENED_IN_TESTS.lock().clone();
+        assert!(
+            !opened.iter().any(|url| url.starts_with(&authorize)),
+            "the browser was opened before the token endpoint was checked: {opened:?}"
+        );
+    }
+
+    /// Control for the test above: with a token endpoint on the issuer's own origin the same
+    /// entry point DOES reach the browser, so the absence asserted there is not vacuous.
+    #[tokio::test]
+    async fn login_flow_opens_the_browser_when_the_token_endpoint_is_on_the_issuer_origin() {
+        let (issuer, idp_server) = start_mock_idp().await;
+        let temp_dir = tempfile::tempdir().unwrap();
+        let auth_manager = Arc::new(AuthManager::new(temp_dir.path(), FuigoComConfig::default()));
+        let oidc_cfg = OidcAuthConfig {
+            issuer: issuer.clone(),
+            client_id: TEST_CLIENT_ID.into(),
+            scopes: vec!["openid".into()],
+            audience: None,
+        };
+        let authorize = format!("{issuer}/authorize");
+        let flow = run_login_flow_with_config(&oidc_cfg, &auth_manager, None);
+        tokio::pin!(flow);
+        let reached_browser = async {
+            for _ in 0..400 {
+                if OPENED_IN_TESTS
+                    .lock()
+                    .iter()
+                    .any(|url| url.starts_with(&authorize))
+                {
+                    return true;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            false
+        };
+        let opened = tokio::select! {
+            result = &mut flow => panic!(
+                "the login flow ended before any callback: {:?}",
+                result.map(|_| ()).map_err(|error| error.to_string())
+            ),
+            opened = reached_browser => opened,
+        };
+        idp_server.abort();
+        assert!(opened, "the login flow never reached the browser");
     }
     /// Parser matrix: full callback URL, bare code, error URL, empty.
     /// Each case is one bug class:

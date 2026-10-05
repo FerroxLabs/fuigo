@@ -1,0 +1,23 @@
+# P86 Astra round 4 -- final report (gpt-6-astra, read-only; brief: P86-astra-r4-brief.md; raw transcript on Hetzner /root/fuigo-builds/p86/logs/astra/)
+
+Audited `fc3ccb94..759f02fa` read-only. No Cargo commands or Rust tests were run. The worktree remains clean. Two acceptance defects remain, both supported by concrete source-level interleavings.
+
+1. **MEDIUM — The final generation check still races with registration on another thread.**  
+   [terminal.rs:871](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:871), [terminal.rs:927](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:927).  
+   A persistent snapshot contains unregistered `CORP_KEY`. The terminal passes its G0 check; another runtime worker completes registration, advancing to G1; the terminal then spawns and replays the G0 snapshot. Fresh environment filtering cannot prevent that replay from restoring the credential. Removing the `await` closes the cooperative scheduling gap, but Fuigo uses a multithreaded runtime and no shared synchronization protects check-through-spawn. **Tests miss this:** late registration happens between completed commands. Registration and snapshot dispatch need a shared synchronization boundary.
+
+2. **MEDIUM — An intervening background request still causes foreground cwd loss.**  
+   [terminal.rs:837](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:837), [terminal.rs:844](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:844).  
+   Start foreground command A at G0: `cd /repo/subdir; sleep 2`. Register a new credential while A runs. A background request B then reinitializes the canonical state at G1, using the previously recorded `/repo`. When A finishes, its G0 dump is discarded entirely because its generation differs from the state’s generation; `update_cwd_from_dump` is never called. The next foreground command silently starts in `/repo`. Background commands ordinarily do not update canonical cwd, so B should not erase A’s directory change. **Tests miss this:** the cwd test completes `cd` before registration and has no overlapping request. Preserve foreground cwd independently of credential snapshot eligibility.
+
+3. **LOW, pre-existing — Initialization still has an unbounded final wait.**  
+   [shell_state.rs:396](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:396).  
+   A startup file or exit handler closes stdout and then hangs. The timed stdout read completes, after which `child.wait()` can stall indefinitely. This remains the acknowledged r3 follow-up, not a new P86 defect. **Added tests do not cover it.** Bound the complete initialization operation.
+
+The r3 dump-overwrite correction, non-ASCII name handling, login-file cwd override, and duplicate-registration generation correction look correct in their covered paths. Exact capture probes removed fake Zsh Unicode credentials; the sandbox prevented complete serializer round-trip verification. No additional concrete shell injection, lock-poisoning panic, or ordinary-load performance defect was established.
+
+Release selectors resolve to **11 P86 unit tests, 2 default-policy tests, 1 config integration test, 7 extra-ca redirect tests, 1 sampler redirect test, and 6 MCP HTTP-policy tests**—source counts, not execution results.
+
+No checked-in first-party hook, MCP server, or plugin dependency on these inherited credentials was found. The nested [leader launch](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/leader/mod.rs:1734) can depend on inherited configured credentials for environment-only authentication; it remains outside the scrub path.
+
+DO-NOT-LAND

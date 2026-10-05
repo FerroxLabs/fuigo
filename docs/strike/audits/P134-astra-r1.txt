@@ -1,0 +1,32 @@
+- Successful metadata discovery permits refresh on a subsequent attempt; this is not an unconditional permanent loop.
+- Credentials for another server name/URL do not match. An old AS token under the same key causes deferral while metadata fails; once validated metadata exposes an issuer change, rmcp discards the old credentials.
+- [oauth.rs:348](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/oauth.rs:348) remains unchanged: no hydration or guessed-endpoint refresh without validated metadata.
+- These OAuth findings concern `NonInteractive + Network`; ordinary session startup defaults to `Disk`.
+
+Preserve anonymous acceptance, apply stored-login deferral to challenged responses after both discovery errors and timeouts, and cover those two missing scenarios. No BLOCKER/HIGH regression found in the scoped diff.
+
+**NOT LAND-OK**
+tokens used
+127,173
+Audited `strike/p134`, `15c21ddf..41aed0a5`, with comparisons to `v1.0.20`. Read-only; no Cargo or tests run. Worktree and `git diff --check` are clean.
+
+- **Item 1 — FIXED.** [owner_only.rs:35](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-shell/src/session/storage/owner_only.rs:35) always returns success after tightening, warns once, and retains `0600` creation. [log.rs:60](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-session-events/src/log.rs:60) does likewise. A refused chmod no longer causes `NotCommitted`. This restores the relevant v1.0.20 behavior; no additional regression found in these changes. Native filesystem/Windows behavior was not executed.
+
+- **Item 2 — NOT FIXED completely.** The original valid-token finding was incorrect: the disk gate already served tokens outside the refresh window at `15c21ddf`. P134 handles discovery errors returned before the deadline, but misses discovery timeouts.
+
+Findings:
+
+1. **MEDIUM — NEW versus both baselines:** [servers.rs:2179](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2179) returns `Unreachable` before checking anonymous access. Concrete scenario: `NonInteractive + Network`, an expired stored token with refresh token, a server that now permits anonymous MCP POSTs, and discovery returning HTTP 503. Both baselines reached the anonymous probe and could connect; HEAD refuses. The same applies to a working configured `X-Api-Key`. Repeated network attempts remain refused while discovery fails because refresh-token presence keeps the predicate true.
+
+2. **MEDIUM — residual, pre-existing in both baselines:** [servers.rs:2338](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2338) bypasses the new predicate when the outer five-second timeout expires. With a near-expiry or expired-but-refreshable token, stalled metadata, and an anonymous POST returning 401, [servers.rs:2359](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2359) still returns `NeedsInteractiveLogin`. The added immediate-500 tests miss this case.
+
+Recovery and safety:
+
+- Successful metadata discovery permits refresh on a subsequent attempt; this is not an unconditional permanent loop.
+- Credentials for another server name/URL do not match. An old AS token under the same key causes deferral while metadata fails; once validated metadata exposes an issuer change, rmcp discards the old credentials.
+- [oauth.rs:348](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/oauth.rs:348) remains unchanged: no hydration or guessed-endpoint refresh without validated metadata.
+- These OAuth findings concern `NonInteractive + Network`; ordinary session startup defaults to `Disk`.
+
+Preserve anonymous acceptance, apply stored-login deferral to challenged responses after both discovery errors and timeouts, and cover those two missing scenarios. No BLOCKER/HIGH regression found in the scoped diff.
+
+**NOT LAND-OK**

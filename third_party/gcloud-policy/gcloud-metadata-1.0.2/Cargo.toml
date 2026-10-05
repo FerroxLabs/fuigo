@@ -61,3 +61,10 @@ features = [
     "rt-multi-thread",
     "macros",
 ]
+
+[lints.clippy]
+# Release is panic = "abort": a print to a dead stdout/stderr aborts (R077). Vendored code in the
+# fuigo-pager graph keeps the workspace's print deny even though it opts out of `clippy::all`.
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"

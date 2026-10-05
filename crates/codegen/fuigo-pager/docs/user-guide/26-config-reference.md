@@ -145,7 +145,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
-| `diagnostics.crash_handler` | `boolean` | `yes` | `user` | Write a panic report under `$FUIGO_HOME/crash/`. Also FUIGO_CRASH_HANDLER. |
+| `diagnostics.crash_handler` | `boolean` | `yes` | `user` | On by default. Records a crash or panic report under `$FUIGO_HOME/crash/` (one slot per running session, reports in `crash/history/`) and shows a notice at the next start; broken-pipe and disk-full panics are kept but not announced. Reports stay on your computer and are never uploaded. Set `false`, or `FUIGO_CRASH_HANDLER=0`, to turn it off. A remote `crash_handler_enabled = false` from your organization applies from the next start. |
 
 ### `disable_web_search`
 
@@ -456,6 +456,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `relay.enabled` | `boolean` | `yes` | `user` | Enable session relay sync. |
+| `relay.trusted_origins` | `string[]` | `—` | `—` | Origins (`https://host[:port]`) of relays FluxRouter does not operate that `agent headless` / `agent leader` may connect to and that TUI session sharing (`[relay] enabled`) may sync a session to. Such a relay drives the agent like a local client (and sync sends it the session transcript); see [Agent mode](15-agent-mode.md). Read from the user `config.toml` only; project files, `FUIGO_CONFIG`, managed and requirements files cannot set it. Also FUIGO_TRUSTED_RELAY_ORIGINS. |
 
 ### `sandbox`
 

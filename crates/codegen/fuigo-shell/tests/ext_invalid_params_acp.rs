@@ -10,6 +10,14 @@ mod acp_harness;
 
 use acp_harness::{AutoApproveClient, RPC_TIMEOUT, connect_and_auth, new_session, run_agent_test};
 use agent_client_protocol::{self as acp, Agent as _};
+use serial_test::serial;
+
+// Two tests share this binary, and `run_agent_test` exports process-global env
+// (`FUIGO_HOME`, `HOME`, `FUIGO_API_BASE_URL`, the proxy URL) pointing at ITS
+// temp dirs and mock server -- its own doc says "one `#[test]` per binary". Run
+// unserialised, one test's agent could resolve the other's home or endpoint
+// (deleted when that test ends), and the two `set_var` bursts race each other's
+// reads. Both are `#[serial]` so each owns the environment for its whole run.
 
 /// The JSON-RPC error `method` replies with, serialized exactly as it goes on the wire.
 async fn ext_error(
@@ -48,6 +56,7 @@ fn assert_typed_data(method: &str, wire: &serde_json::Value) {
 }
 
 #[test]
+#[serial]
 fn malformed_ext_params_reply_with_typed_object_data() {
     run_agent_test(|cwd, _mock| async move {
         let (conn, _) = connect_and_auth(AutoApproveClient, "ext-invalid-params").await;
@@ -79,6 +88,7 @@ fn malformed_ext_params_reply_with_typed_object_data() {
 /// A client following the agent-mode guide ("never show `message` on its own"; `message` and `error_kind`
 /// are present "always") then shows the user a blank. The reply must be typed like every other error.
 #[test]
+#[serial]
 fn unknown_ext_methods_reply_with_typed_object_data() {
     run_agent_test(|cwd, _mock| async move {
         let (conn, _) = connect_and_auth(AutoApproveClient, "ext-unknown-method").await;

@@ -71,6 +71,48 @@ new job before starting another budgeted process. Do not treat these as dollar
 caps, persistent accounting, or limits on embedding, image, and external-tool API
 charges outside the model sampler. Those need separate host policy.
 
+When a limit refuses a prompt or one of its model requests, the prompt fails with
+the typed budget denial: `-32603`, `error_kind: "execution_incomplete"`,
+`data.code: "execution_budget_denied"`, and a `data.rule` naming the limit, with
+its `data.remedy` beside it. Match on `data.code` and `data.rule`, never on
+`data.message`:
+
+| `rule` | Limit | Refused when |
+| --- | --- | --- |
+| `execution_model_call_limit` | `FUIGO_MAX_MODEL_CALLS` | No model call is left for the request: the calls are spent, the one left is reserved for the execution's final answer, or a subagent has spent its share of its parent's calls |
+| `execution_runtime_limit` | `FUIGO_MAX_RUNTIME_SECS` | The wall deadline has passed, for a new prompt or for a model request of a running one |
+
+The same code also carries the token-budget rules
+(`execution_token_budget_exhausted`, `execution_output_token_budget_exhausted`,
+`execution_token_usage_unknown`). The `data` token figures (`total_token_limit`,
+`total_tokens_used`, `output_token_limit`, `output_tokens_used`,
+`unknown_usage`) are the refusing execution's token counters whatever the rule;
+they are `null` and `0` when the agent refused the prompt before any execution
+opened. A goal's execution keeps the call limit and deadline it opened with, so
+under a goal the remedy is to clear the goal, not only to raise the variable.
+
+Before 1.0.21 these refusals were not typed: a model request refused by either
+limit failed as `error_kind: "api"` with "execution admission denied or could
+not be persisted" (indistinguishable from the provider rejecting the request), a
+prompt with no call left failed as `session_storage` ("Execution state could not
+be made durable"), and a prompt after the deadline failed as `-32602`
+`invalid_request` ("execution budget: wall deadline exhausted"). Reaching
+`FUIGO_MAX_MODEL_CALLS` inside a turn ends that turn with its final answer and a
+partial execution receipt (`partial: true`, `reason`, ...); since 1.0.21 that
+error also carries `code: "execution_budget_denied"` and the limit's `rule`, and
+a model that calls a tool in that final slot ends the turn with the same denial
+instead of `Tool call rejected during finalization`. A model request in flight
+when the deadline passes is cut short (its timeout ends at the deadline, and the
+agent cancels resident sessions); that prompt now fails with the
+`execution_runtime_limit` denial instead of ending `cancelled`. The same holds
+for a prompt's turn that a subscription login outlasting the time left
+("execution deadline exhausted during subscription authentication") or the
+deadline falling between admission and sending ("execution deadline exhausted
+before transport") ends: once the deadline has passed, the prompt fails with the
+`execution_runtime_limit` denial. One refusal is not typed yet and still fails as
+`api`: a `/btw` side question refused by the agent process's own counter or clock
+rather than by its execution (rare: the execution refuses first).
+
 stdio is the common local integration path. The agent speaks JSON-RPC on stdin and stdout:
 
 ```bash
@@ -117,6 +159,29 @@ To reach the agent over the internet, connect the agent to a relay and point bro
 ```bash
 fuigo agent --always-approve headless --fuigo-ws-url wss://your-relay.example.com/ws
 ```
+
+### Relays FluxRouter does not operate need your opt-in
+
+A relay connected to the agent (`agent headless`, `agent leader`) drives it exactly like a local client: it can read
+any file the agent can read (including `~/.fuigo/auth.json`), run commands in terminals, add MCP servers and plugins, and
+change your configuration. FluxRouter's own relay needs nothing. For any other relay (for example one you host
+yourself), Fuigo does not connect until you opt in to that relay's origin (`https://host[:port]`; a `wss://` URL counts
+as `https://`), in your **user** config file:
+
+```toml
+# ~/.fuigo/config.toml
+[relay]
+trusted_origins = ["https://your-relay.example.com"]
+```
+
+or in the environment of the processes you start: `FUIGO_TRUSTED_RELAY_ORIGINS=https://your-relay.example.com`
+(several origins separated by commas or spaces). A project's `.fuigo/config.toml`, `FUIGO_CONFIG`, and managed or remote
+settings cannot opt in, and moving the relay to another origin needs a new opt-in. Without it, `agent headless` exits
+with an error that names the origin and what to set, and a leader keeps serving local clients but starts no relay
+connection (the same message is written to its log and stderr); nothing at all is sent to the relay. A leader that is
+already running picks up an opt-in added to the config file when the next headless client attaches; an environment
+variable reaches only processes started after it is set. Opt in only to relays you control: a relay you opted in to
+can also change your config file, including this list.
 
 ---
 
@@ -187,6 +252,35 @@ A prompt that failed on an empty model response:
   }
 }
 ```
+
+#### Token-budget denials (`data.code: "execution_budget_denied"`)
+
+When an execution has a token budget (a goal's `--budget`, or a workflow child's output grant), the
+agent checks it before every model request. A refused request fails the prompt with `-32603`,
+`error_kind: "execution_incomplete"`, and `data.code: "execution_budget_denied"`. Match on
+`data.code`: the class, the kind and the message may be reworded, but the code will not. The reply
+carries the denial as data:
+
+| `data` field | Meaning |
+| --- | --- |
+| `code` | Always `execution_budget_denied` |
+| `rule` | Which limit refused it (table below). Stable identifier, never localized |
+| `remedy` | What to change so the request is admitted |
+| `total_token_limit`, `total_tokens_used` | The total-token budget and what was spent (`null` limit when none is set) |
+| `output_token_limit`, `output_tokens_used` | The output-token budget and what was spent |
+| `unknown_usage` | `true` when an earlier request reported no token usage |
+
+| `rule` | Meaning |
+| --- | --- |
+| `execution_token_budget_exhausted` | The total-token budget is spent |
+| `execution_output_token_budget_exhausted` | The output-token budget is spent |
+| `execution_token_usage_unknown` | A token budget is set, but an earlier request reported no usage. The guard cannot tell how much is left, so it fails closed and refuses |
+| `execution_model_call_limit` | `FUIGO_MAX_MODEL_CALLS` has no model call left for the request (see "Bounded private jobs") |
+| `execution_runtime_limit` | `FUIGO_MAX_RUNTIME_SECS` has passed (see "Bounded private jobs") |
+
+New rules may be added; a reply with `code: "execution_budget_denied"` and an unknown `rule` is still
+a budget denial. `fuigo -p` (headless mode) turns this reply into exit code `3` and the same
+denial record as a permission denial; see the headless guide, "Blocked by a Permission".
 
 Before 1.0.18 most of these failures sent `data` as a bare string. A client that also talks to older agents should read `data.message` when `data` is an object and show `data` itself when it is a string.
 

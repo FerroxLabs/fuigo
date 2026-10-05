@@ -52,10 +52,15 @@ auth_provider = "grok-subscription"
 ```
 
 The xAI `base_url` is the provider's own inference endpoint and must be spelled
-exactly as above for the subscription credential to be attached. Fuigo's egress
-guard refuses xAI hosts by default, so both `fuigo login --provider xai` and a
-session using `grok-subscription` need `FUIGO_ALLOW_UPSTREAM_HOSTS=1` in the
-environment.
+exactly as above for the subscription credential to be attached. Subscription
+login and inference need no extra setting: Fuigo's egress guard, which refuses
+xAI hosts for every other connection, lets each subscription connection reach
+only its provider's own token or inference endpoint, and nothing else.
+
+Do not set `FUIGO_ALLOW_UPSTREAM_HOSTS=1` for a subscription. That variable turns
+the egress guard off for every connection the Fuigo process makes, including the
+blocked telemetry hosts (`mixpanel.com`). It is only for pointing an API-key
+provider at xAI.
 
 Replace the model placeholders, then select `-m chatgpt-subscription` or
 `-m grok-subscription`, or select that configured model in the TUI/ACP client.
@@ -75,15 +80,41 @@ processes and persisted atomically. A failed or interrupted refresh can require 
 new login; Fuigo will not reuse a potentially consumed refresh token.
 
 ```bash
+# Clear the current Fuigo session and every locally stored subscription account:
+fuigo logout
 fuigo logout --provider chatgpt
 fuigo logout --provider xai
 # Remove one account without removing sibling accounts:
 fuigo logout --provider chatgpt --account ACCOUNT_ID
 ```
 
-Logout removes only the named provider/account from Fuigo. It does not sign out
-other applications or revoke their sessions. Logging into another account keeps
+Plain `fuigo logout` clears the current Fuigo session and deletes all locally stored
+subscription credentials (every provider and account in
+`$FUIGO_HOME/subscriptions/credentials.json`). With `--provider`, logout removes
+only the named provider/account from Fuigo. In both cases the tokens are deleted
+from this machine only; Fuigo does not revoke them at OpenAI or xAI, so a copy taken
+before logout keeps working until it expires or you sign the session out in your
+ChatGPT or xAI account settings. Other applications, configured API keys, and
+environment variables are unchanged. Logging into another account keeps
 sibling records and selects the new account; configure `account` to pin a model.
+
+While a subscription model is active, Fuigo's helper models (image description,
+session titles, the auto-mode classifier) also use the subscription unless you chose
+a helper model yourself: a model set under `[models]` (`image_description`,
+`session_summary`) or `[auto_mode] classifier_model` in a config file, by
+`FUIGO_IMAGE_DESCRIPTION_MODEL` / `FUIGO_SESSION_SUMMARY_MODEL`, or by a CLI flag
+keeps its own route. Built-in defaults, remote settings and campaigns are not a
+choice and follow the subscription. If a helper you chose cannot be used (no
+credentials, or not in the model catalog), Fuigo does not quietly hand its work to
+the subscription: a turn with images stops with an error naming the model, and the
+auto-mode classifier reports itself unavailable (so the action is put to you). Session
+titles are the exception and fall back to the active model.
+
+During sign-in, Fuigo answers requests to the callback address that do not carry
+this sign-in's state with an error and keeps waiting, until the real callback or
+the 10-minute limit. ChatGPT sign-in listens on both `127.0.0.1` and `[::1]` port
+1455 (on a host without IPv6 loopback, on `127.0.0.1` only); if another program
+holds either address, sign-in stops and names it.
 
 Protocol constants and flow behavior reuse Ferrox Labs' Wayland Core and Wayland
 implementations (Apache-2.0). Public OAuth client compatibility and subscription
@@ -142,6 +173,38 @@ fuigo
 
 Fuigo uses the API key as a fallback when no session token is active. If you have already signed in interactively, the stored session token takes precedence. To fall back to the API key, run `fuigo logout` or delete `~/.fuigo/auth.json`.
 
+### A saved API key stays inside Fuigo
+
+A key you enter at the prompt is saved in `~/.fuigo/auth.json` and held in Fuigo's memory. It is **not** put into Fuigo's environment, so programs Fuigo starts (`!` commands, terminals, git, hooks, MCP servers, your sign-in helper) do not inherit it as `FUIGO_API_KEY`.
+
+To hand the saved key to one program, name it explicitly in your config with `${FUIGO_API_KEY}` (or `$FUIGO_API_KEY`); only that place receives it:
+
+```toml
+[mcp_servers.my-server]
+command = "my-mcp-server"
+env = { FUIGO_API_KEY = "${FUIGO_API_KEY}" }        # this server's own environment
+
+[mcp_servers.my-http-server]
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${FUIGO_API_KEY}" }
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "my-hook --key \"$FUIGO_API_KEY\""        # this hook's environment
+env = { MY_TOKEN = "${FUIGO_API_KEY}" }              # or under a name of your choice
+```
+
+The same works in an MCP server's `args` and a model's `api_key` (or use `env_key = "FUIGO_API_KEY"`). The key is filled in only when the value is used (when the server or hook starts, when the request is made), so Fuigo's own records of your config (logs, MCP server listings, settings it saves) keep showing `${FUIGO_API_KEY}`.
+
+A saved key is never filled into a URL (an MCP server's `url`, an HTTP hook's `url`): URLs end up in logs and stored records. Send it in an MCP header instead, or `export FUIGO_API_KEY` if a URL must carry it. A model's `extra_headers` are not filled either (they can also come from the model catalogue); use `api_key` or `env_key`.
+
+In an MCP server's `env`, `args` or `headers`, write `$${FUIGO_API_KEY}` to send the text `${FUIGO_API_KEY}` itself. In a hook command the shell's own rules apply (`$$` is the shell's process id).
+
+A hook script that reads `$FUIGO_API_KEY` without your config naming it gets nothing: no program Fuigo starts inherits `FUIGO_API_KEY`, not even an exported one. Hooks, MCP servers, LSP servers and the model's shell tool never did (as in 1.0.20), nor do they inherit any other provider key or a variable your config names as `env_key` (see [Shell Environment Policy](18-sandbox.md#shell-environment-policy)); `!` commands, terminals, git and the other programs Fuigo starts no longer do either. So reference it as above. A key you export before starting Fuigo is still used by Fuigo itself, and is filled into every `${FUIGO_API_KEY}` in your own config files when they are read, as before.
+
+`${FUIGO_API_KEY:-default}` gives the saved key, or `default` when there is none. Only your own files may name the key: `config.toml`, `managed_config.toml` and `requirements.toml` in `~/.fuigo`, `managed_config.toml` and `requirements.toml` in `/etc/fuigo`, `~/.claude.json`, `~/.cursor/mcp.json`, and hook files under `~/.fuigo/hooks/`. Anywhere else (a project, a plugin, `~/.claude/settings.json` hooks, a `hooks-paths` directory outside `~/.fuigo/hooks/`) the reference is removed and a note says so.
+
 ---
 
 ## OIDC (Customer SSO)
@@ -181,6 +244,24 @@ export FUIGO_CLI_CHAT_PROXY_BASE_URL="https://fuigo-proxy.acme.com/v1"
 ### 3. Run `fuigo`
 
 The CLI discovers endpoints via `{issuer}/.well-known/openid-configuration`, opens the IdP login page, and stores tokens in `~/.fuigo/auth.json`. Tokens auto-refresh silently via the stored `refresh_token`.
+
+Fuigo sends your authorization code and `refresh_token` only to a discovered `token_endpoint`
+that is https on the issuer's own origin (same scheme, host and port, no credentials in the
+URL), and it does not follow a redirect from that endpoint to another origin. This holds for
+sign-in, for background refresh, and for workspace hub connections, which refresh the same
+stored token themselves. Configure the `issuer` as an `https://` URL. (The only plain-http case
+is the developer-only local accounts app that `FUIGO_LOCAL_AUTH` selects, on its own loopback
+address; workspace hub connections do not make that exception.)
+
+One identity provider that issues tokens from a different host is built in: Google (issuer
+`https://accounts.google.com`, token endpoint on `https://oauth2.googleapis.com`). The pair is
+exact and cannot be extended in configuration.
+
+With any other IdP whose `token_endpoint` lives on another host (for example Amazon Cognito
+user pools), `fuigo login` stops with `OIDC token_endpoint is not on the issuer's origin`
+before the browser opens. If a session is already stored, refresh is refused with the same
+message: nothing is sent, the stored sign-in is kept, and Fuigo keeps using the stored token
+until it expires.
 
 ### Optional fields
 
@@ -447,4 +528,5 @@ RUST_LOG=debug fuigo -p "hello" 2> /tmp/fuigo.log
 - **"Authentication failed"** -- Run `fuigo logout` to clear cached credentials, then `fuigo login` to sign in again.
 - **Token expires too quickly** -- Set `auth_token_ttl` or return `expires_in` in your auth provider's JSON output.
 - **OIDC redirect fails** -- Ensure your IdP allows loopback redirect URIs (`http://127.0.0.1/callback`).
+- **`OIDC token_endpoint is not on the issuer's origin`** (or `is not https`) -- Your IdP's discovery document names a token endpoint on a different host than the `issuer`, or a plain-http one. Fuigo does not send credentials there. See [Run `fuigo`](#3-run-fuigo) under OIDC for the rule and the one built-in exception.
 - **External auth provider not found** -- Check that the `auth_provider_command` path is correct and the binary is executable.

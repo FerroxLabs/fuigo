@@ -427,7 +427,7 @@ impl MvpAgent {
     }
     /// Idempotent join-handle supervisor: polls `is_finished()` each tick, since JoinHandle is not awaitable.
     /// Sweeps under `catch_unwind` so one bad sweep cannot end supervision.
-    /// The `LocalRef` to `self` is sound because the agent owns and outlives the `LocalSet`.
+    /// The loop is bound to the agent (`spawn_bound`): it holds a `LocalRef` and ends when the agent is dropped.
     pub(super) fn ensure_session_supervisor(&self) {
         if self.supervisor_started.replace(true) {
             return;
@@ -435,9 +435,8 @@ impl MvpAgent {
         #[cfg(test)]
         self.supervisor_spawn_count
             .set(self.supervisor_spawn_count.get() + 1);
-        let agent_ref = LocalRef::new(self);
         let execution_budget = fuigo_sampler::execution_budget::process_budget().ok().flatten();
-        tokio::task::spawn_local(async move {
+        self.spawn_bound(move |agent_ref| Box::pin(async move {
             let mut budget_cancelled = std::collections::HashSet::new();
             loop {
                 tokio::time::sleep(SESSION_SUPERVISOR_TICK).await;
@@ -449,7 +448,7 @@ impl MvpAgent {
                                 let _ = handle.cmd_tx.send(SessionCommand::Cancel(CancelOptions {
                                     cancel_subagents: true,
                                     kill_background_tasks: true,
-                                    trigger: Some(CancelTrigger::Client("execution_budget_exhausted".into())),
+                                    trigger: Some(CancelTrigger::runtime_limit()),
                                     ..Default::default()
                                 }));
                             }
@@ -460,7 +459,7 @@ impl MvpAgent {
                     tracing::error!("session supervisor sweep panicked; continuing supervision");
                 }
             }
-        });
+        }));
     }
     /// Any work in flight? Checks the running turn and a parked plan approval synchronously, then probes the queue asynchronously.
     /// On a poisoned lock or a timeout it conservatively reports busy.

@@ -26,12 +26,31 @@ fn tool_overrides_capability() -> serde_json::Value {
     serde_json::to_value(TOOL_OVERRIDES_CAPABILITY)
         .expect("ToolOverridesCapability is always serializable")
 }
+/// `agentCapabilities._meta["fuigo/capabilities"]`. One entry per capability so later packets (Q5b) add a line.
+/// `authenticateApiKey` (P08) tells a client, before it authenticates, that `authenticate` accepts a key in
+/// `_meta["fuigo/apiKey"]` even when `authMethods` is empty (Contract E.3 keeps the empty list for a credential-less start).
+fn fuigo_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        "toolOverrides": tool_overrides_capability(),
+        "authenticateApiKey": auth_method::runtime_api_key_capability(),
+    })
+}
 /// The `authenticate` reply for a login that failed or that the user cancelled.
 /// Every embedding client calls `authenticate` on connect, and this is the failure path users hit most:
 /// bad credentials, a provider error, or a cancelled browser flow. It used to set `message` in place and
 /// send no `data` at all, so a client that renders only object-shaped `data` showed the user nothing.
 pub(super) fn auth_flow_error(err: &anyhow::Error) -> acp::Error {
     crate::acp_error::auth_required(err.to_string())
+}
+/// The `fuigo.api_key` failure when no key is available. Same `-32000 "Authentication required"` and typed `data` as
+/// [`auth_flow_error`] (Contract E.3 pins the top-level message), plus `data.metaKey`: the `_meta` key a client sends
+/// its key in. Never carries a key.
+fn api_key_required_error() -> acp::Error {
+    acp::Error::auth_required().data(crate::acp_error::error_data_with_fields(
+        crate::acp_error::AcpErrorKind::Sampling(fuigo_sampler::SamplingErrorKind::Auth),
+        auth_method::API_KEY_REQUIRED_MESSAGE,
+        serde_json::json!({ "metaKey": auth_method::RUNTIME_API_KEY_META }),
+    ))
 }
 #[async_trait::async_trait(?Send)]
 impl acp::Agent for MvpAgent {
@@ -99,12 +118,14 @@ impl acp::Agent for MvpAgent {
                     serde_json::json!({
                     "user_id": user_id,
                     "needs_user_info": needs_user_info,
-                    "key_prefix": fuigo_auth::bearer_suffix(&auth.key),
-                    "rt_prefix": auth.refresh_token.as_deref().map(fuigo_auth::bearer_suffix),
+                    "key_prefix": fuigo_auth::bearer_fingerprint(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(fuigo_auth::bearer_fingerprint),
                 }),
                 ),
             );
-            if needs_user_info && let Err(e) = self.auth_manager.update(auth).await {
+            if needs_user_info
+                && let Err(e) = self.auth_manager.update_unless_superseded(auth).await
+            {
                 tracing::warn!(
                     "Failed to refresh user info from proxy during new_session: {}",
                     e
@@ -184,22 +205,22 @@ impl acp::Agent for MvpAgent {
             .auth_manager
             .current()
             .map(|a| (
-                fuigo_auth::bearer_suffix(&a.key).to_owned(),
+                fuigo_auth::bearer_fingerprint(&a.key),
                 a
                     .refresh_token
                     .as_deref()
-                    .map(|t| fuigo_auth::bearer_suffix(t).to_owned()),
+                    .map(fuigo_auth::bearer_fingerprint),
             ));
         self.auth_manager.force_reload_from_disk();
         let post = self
             .auth_manager
             .current()
             .map(|a| (
-                fuigo_auth::bearer_suffix(&a.key).to_owned(),
+                fuigo_auth::bearer_fingerprint(&a.key),
                 a
                     .refresh_token
                     .as_deref()
-                    .map(|t| fuigo_auth::bearer_suffix(t).to_owned()),
+                    .map(fuigo_auth::bearer_fingerprint),
             ));
         fuigo_telemetry::unified_log::info(
             "auth init disk refresh",
@@ -225,13 +246,10 @@ impl acp::Agent for MvpAgent {
             }),
             ),
         );
-        if !self.cfg.borrow().fuigo_com_config.api_key_auth_disabled()
-            && auth_method::read_fuigo_api_key_env().is_err()
-            && let Some(api_key) = crate::auth::read_api_key(
-                &crate::util::fuigo_home::fuigo_home(),
-            )
-        {
-            unsafe { std::env::set_var("FUIGO_API_KEY", &api_key) };
+        if auth_method::load_saved_api_key(
+            &crate::util::fuigo_home::fuigo_home(),
+            self.cfg.borrow().fuigo_com_config.api_key_auth_disabled(),
+        ) {
             tracing::info!("auth: loaded API key from auth.json (fuigo::api_key scope)");
             fuigo_telemetry::unified_log::info(
                 "auth: loaded API key from auth.json (fuigo::api_key scope)",
@@ -304,7 +322,7 @@ impl acp::Agent for MvpAgent {
         if !init_has_current && init_is_expired {
             has_cached_token = match self.auth_manager.silent_refresh().await {
                 SilentRefresh::Renewed(_) => true,
-                SilentRefresh::Failed(remedy) => remedy.is_self_healing(),
+                SilentRefresh::Failed(remedy) => remedy.keeps_session(),
             };
         }
         let (
@@ -421,13 +439,10 @@ impl acp::Agent for MvpAgent {
         let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
         self.spawn_initialize_launch_mcp_setup();
         self.spawn_managed_gateway_tool_catalog_fetch();
-        {
-            let agent_ref = LocalRef::new(self);
-            tokio::task::spawn_local(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                agent_ref.get().emit_announcements(AnnouncementsPushMode::SeedNewClient);
-            });
-        }
+        self.spawn_bound(|agent_ref| Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            agent_ref.get().emit_announcements(AnnouncementsPushMode::SeedNewClient);
+        }));
         self.spawn_announcements_refresh();
         self.spawn_heap_profile_monitor();
         let init_model_state = if crate::agent::chat_modes::process_chat_mode_enabled() {
@@ -458,9 +473,7 @@ impl acp::Agent for MvpAgent {
                         "decisions": crate::extensions::hooks::ADVERTISED_DECISIONS,
                         "stopSignals": crate::extensions::hooks::ADVERTISED_STOP_SIGNALS,
                     },
-                    "fuigo/capabilities": {
-                        "toolOverrides": tool_overrides_capability(),
-                    },
+                    "fuigo/capabilities": fuigo_capabilities(),
                 })
                                 .as_object()
                                 .cloned(),
@@ -554,14 +567,68 @@ impl acp::Agent for MvpAgent {
                         crate::acp_error::auth_required("API-key auth is disabled by your administrator."),
                     );
                 }
-                let mut sampling_config = self.sampling_config.borrow_mut();
-                if sampling_config.api_key.is_none() {
-                    if let Ok(api_key) = auth_method::read_fuigo_api_key_env() {
+                // P08: a key the client supplies in `_meta["fuigo/apiKey"]` lives in memory only; persisting it (or the
+                // ambient env key) is an explicit opt-in. Parse errors are fixed text and never quote the request.
+                let request = match auth_method::parse_runtime_api_key_meta(arguments.meta.as_ref()) {
+                    Ok(request) => request,
+                    Err(reason) => {
+                        emit_login_span(false, "api_key", None, Some("invalid_api_key_meta"));
+                        return Err(crate::acp_error::invalid_params(reason));
+                    }
+                };
+                let carried_meta = arguments
+                    .meta
+                    .as_ref()
+                    .is_some_and(|m| m.contains_key(auth_method::RUNTIME_API_KEY_META));
+                // The borrow ends before the persist below awaits the cross-process auth.json lock.
+                let installs_runtime_key = request.key.is_some();
+                let key_in_use = {
+                    let mut sampling_config = self.sampling_config.borrow_mut();
+                    if let Some(api_key) = request.key {
+                        // The client's explicit key replaces whatever this process held, for every later request.
+                        // A sampler `env_http_headers` entry naming FUIGO_API_KEY must see this key too.
+                        fuigo_sampler::client::install_env_header_resolver(auth_method::read_named_key_env);
+                        // P148: and, when the user has no key of their own, a `${FUIGO_API_KEY}` reference in a file
+                        // allowed to name the key (S16) resolves to it in this process; it is saved only with `persist`
+                        // (B18).
+                        fuigo_config_types::install_credential_env_resolver(auth_method::read_named_key_env_for_config);
+                        let _ = auth_method::set_runtime_api_key(Some(api_key.clone()));
                         sampling_config.api_key = Some(api_key.clone());
-                        if let Err(e) = crate::auth::store_api_key(
-                            &crate::util::fuigo_home::fuigo_home(),
-                            &api_key,
-                        ) {
+                        Some(api_key)
+                    } else if sampling_config.api_key.is_none() {
+                        if let Ok(api_key) = auth_method::read_fuigo_api_key_env() {
+                            sampling_config.api_key = Some(api_key.clone());
+                            Some(api_key)
+                        } else if !self
+                            .models_manager
+                            .models()
+                            .values()
+                            .any(|m| m.has_own_credentials())
+                        {
+                            emit_login_span(false, "api_key", None, Some("no_credentials"));
+                            return Err(api_key_required_error());
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+                // Persist the static key now in use: the one just supplied or adopted, else the runtime/env key a
+                // previous `authenticate` already adopted (never `sampling_config.api_key`, which may be a session JWT).
+                let mut persisted = false;
+                if request.persist
+                    && let Some(api_key) =
+                        key_in_use.or_else(|| auth_method::read_fuigo_api_key_env().ok())
+                {
+                    match crate::auth::store_api_key_async(
+                        &crate::util::fuigo_home::fuigo_home(),
+                        &api_key,
+                    )
+                    .await
+                    {
+                        Ok(()) => persisted = true,
+                        Err(e) => {
                             tracing::warn!("failed to persist API key to auth.json: {e}");
                             fuigo_telemetry::unified_log::warn(
                                 "failed to persist API key to auth.json",
@@ -569,22 +636,16 @@ impl acp::Agent for MvpAgent {
                                 Some(serde_json::json!({ "error": e.to_string() })),
                             );
                         }
-                    } else if !self
-                        .models_manager
-                        .models()
-                        .values()
-                        .any(|m| m.has_own_credentials())
-                    {
-                        emit_login_span(false, "api_key", None, Some("no_credentials"));
-                        return Err(
-                            crate::acp_error::auth_required(
-                                    "Set FUIGO_API_KEY or add api_key/env_key to config.toml.",
-                                ),
-                        );
                     }
                 }
                 self.set_auth_method(arguments.method_id.clone());
                 self.sync_process_static_api_key(None);
+                if installs_runtime_key {
+                    // The model catalog's fetch credential was chosen at startup, when this key did not exist (a
+                    // credential-less start resolves `ModelFetchAuth::Session`), and a replaced key is a different
+                    // account: invalidate and refetch exactly as any other identity change does.
+                    self.models_manager.on_auth_changed().await;
+                }
                 self.ensure_telemetry_client();
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();
@@ -594,7 +655,17 @@ impl acp::Agent for MvpAgent {
                     auth_method: "api_key".to_string(),
                     user_id: None,
                 });
-                Ok(Default::default())
+                // A client that used the P08 channel learns whether its key reached disk; Murage's plain
+                // `authenticate` (no `_meta`) still gets exactly `{}` (Contract E.3).
+                if carried_meta {
+                    Ok(AuthenticateResponse::new().meta(
+                        serde_json::json!({ (auth_method::RUNTIME_API_KEY_META): { "persisted": persisted } })
+                            .as_object()
+                            .cloned(),
+                    ))
+                } else {
+                    Ok(Default::default())
+                }
             }
             auth_method::CACHED_TOKEN_AUTH_METHOD_ID => {
                 let auth_meta = AuthRequestMeta::from_json(arguments.meta.as_ref());
@@ -683,7 +754,7 @@ impl acp::Agent for MvpAgent {
                     None => {
                         match self.auth_manager.silent_refresh().await {
                             SilentRefresh::Renewed(auth) => Some(*auth),
-                            SilentRefresh::Failed(remedy) if remedy.is_self_healing() => {
+                            SilentRefresh::Failed(remedy) if remedy.keeps_session() => {
                                 self.auth_manager.current_or_expired()
                             }
                             SilentRefresh::Failed(_) => None,
@@ -950,7 +1021,11 @@ impl acp::Agent for MvpAgent {
         let budget = fuigo_sampler::execution_budget::process_budget()
             .map_err(crate::acp_error::invalid_params)?;
         if budget.is_some_and(|budget| budget.expired()) {
-            return Err(crate::acp_error::invalid_params(fuigo_sampler::execution_budget::WALL_LIMIT));
+            // The runtime limit refuses the prompt: a budget denial, not a malformed request (P44).
+            return Err(crate::acp_error::ExecutionBudgetDenial::without_token_figures(
+                crate::acp_error::ExecutionBudgetRule::RuntimeLimit,
+            )
+            .to_acp_error());
         }
         use crate::session::plan_mode::PromptMode;
         if let Some(meta) = arguments.meta.as_ref() {
@@ -2255,10 +2330,6 @@ impl acp::Agent for MvpAgent {
                 let ops = self.resolve_workspace_ops()?;
                 crate::extensions::worktree::handle(self, &ops, &args).await
             }
-            #[cfg(feature = "local-workspace")]
-            "fuigo/session/add_local_workspace" => {
-                crate::extensions::session_admin::handle(self, &args).await
-            }
             "fuigo/session/rename" | "fuigo/session/delete"
             | "fuigo/session/update_mcp_servers" | "fuigo/session/fork"
             | "fuigo/plugins/reload" | "fuigo/commands/list" => {
@@ -2269,7 +2340,7 @@ impl acp::Agent for MvpAgent {
             }
             "fuigo/session/repair" => crate::extensions::repair::handle(self, &args).await,
             "fuigo/session/usage" => crate::extensions::usage::handle(self, &args).await,
-            "fuigo/memory/flush" | "fuigo/memory/rewrite" => {
+            "fuigo/memory/flush" | "fuigo/memory/rewrite" | "fuigo/memory/save_note" => {
                 crate::extensions::memory::handle(self, &args).await
             }
             "fuigo/skills/refresh-baseline" => {
@@ -2688,6 +2759,22 @@ impl acp::Agent for MvpAgent {
         }
         if args.method.as_ref() == InternalMethod::EvictSessions.name() {
             self.handle_evict_sessions(&args.params).await;
+        }
+        // P148: a dedicated stdio process's config watcher injects its reloads as notifications, so no reply to them
+        // reaches the client's stdout.
+        if let Some(method) = InternalMethod::from_name(args.method.as_ref())
+            && matches!(
+                method,
+                InternalMethod::ReloadAllMcpServers
+                    | InternalMethod::ReloadProjectMcpServers
+                    | InternalMethod::ReloadModels
+                    | InternalMethod::ReloadModelsCache
+            )
+        {
+            let request = acp::ExtRequest::new(args.method.clone(), args.params.clone());
+            if let Err(e) = crate::extensions::session_admin::handle(self, &request).await {
+                tracing::warn!(method = %args.method, error = %crate::sampling::error::acp_error_text(&e), "config reload failed");
+            }
         }
         if args.method.as_ref() == "fuigo/toggle_plan_mode"
             && let Ok(params) = serde_json::from_str::<

@@ -98,6 +98,8 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
             c.args(&inv.args).envs(inv.env);
             c
         };
+        // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
+        crate::remove_fuigo_secrets(&mut cmd);
         cmd.current_dir(&request.cwd)
             .envs(&request.env)
             .envs(crate::pager_env())
@@ -245,6 +247,32 @@ mod tests {
             "DETACHED",
             "child process should not be able to open /dev/tty after detach_from_tty()"
         );
+    }
+
+    /// P113 r3: a `!` command keeps the user's environment (their own provider key included) but none of Fuigo's own
+    /// secrets; an explicit request variable still arrives.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p113_bang_commands_never_see_fuigo_secrets() {
+        if crate::p113_probe::parent_env("p113_bang_commands_never_see_fuigo_secrets") {
+            return;
+        }
+        for explicit in [false, true] {
+            let check = crate::p113_probe::check(explicit);
+            let mut request = make_request(&format!("{check} && /bin/sh -c '{check}' && printf ok"));
+            if explicit {
+                request
+                    .env
+                    .insert("FUIGO_AGENT_SECRET".into(), "fake-p113-explicit".into());
+            }
+            let result = LocalTerminalRunner.run(request).await.unwrap();
+            assert_eq!(
+                (result.exit_code, result.combined_output.trim()),
+                (Some(0), "ok"),
+                "explicit={explicit}: the `!` command saw a Fuigo secret, lost the user's environment, or missed the \
+                 explicit variable"
+            );
+        }
     }
 
     /// Basic regression: commands still produce output and exit normally.

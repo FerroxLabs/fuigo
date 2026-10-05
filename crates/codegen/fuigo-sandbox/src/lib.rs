@@ -311,7 +311,9 @@ pub(crate) fn bwrap_reexec_command_ex(
     let self_exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
-            eprintln!("error: could not resolve the current executable for the bwrap re-exec: {e}");
+            fuigo_tty_utils::cli_eprintln!(
+                "error: could not resolve the current executable for the bwrap re-exec: {e}"
+            );
             return None;
         }
     };
@@ -327,13 +329,13 @@ pub(crate) fn bwrap_reexec_command_ex(
     if let Some(plan) = hook_plan
         && let Err(e) = hook_write_deny::append_hook_plan_binds(&mut cmd, plan)
     {
-        eprintln!("error: hook write-deny plan materialization failed: {e}");
+        fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan materialization failed: {e}");
         return None;
     }
     if !deny_read.is_empty() {
         for path in deny_read {
             let Some(blocked) = bwrap_blocked_source_for_path(Path::new(path)) else {
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "error: could not create bwrap placeholder for read-deny path {path}; \
                      refusing to start with a partial sandbox"
                 );
@@ -345,7 +347,9 @@ pub(crate) fn bwrap_reexec_command_ex(
     let sentinel = match read_deny_verify::ensure_bwrap_sentinel_dir() {
         Ok(path) => path,
         Err(e) => {
-            eprintln!("error: could not prepare the bwrap containment sentinel: {e}");
+            fuigo_tty_utils::cli_eprintln!(
+                "error: could not prepare the bwrap containment sentinel: {e}"
+            );
             return None;
         }
     };
@@ -356,7 +360,9 @@ pub(crate) fn bwrap_reexec_command_ex(
         match runtime_sockets::encode_bwrap_runtime_socket_denies(runtime_socket_denies) {
             Ok(encoded) => encoded,
             Err(error) => {
-                eprintln!("error: runtime-socket deny handoff encoding failed: {error}");
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: runtime-socket deny handoff encoding failed: {error}"
+                );
                 return None;
             }
         };
@@ -528,7 +534,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(resolved) => Some(resolved),
             Err(e) => {
                 if resolve_failure_must_refuse(profile, workspace) {
-                    eprintln!("error: sandbox profile resolve failed: {e}");
+                    fuigo_tty_utils::cli_eprintln!("error: sandbox profile resolve failed: {e}");
                     return None;
                 }
                 None
@@ -549,7 +555,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                eprintln!("error: hook write-deny plan failed: {e}");
+                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
                 return None;
             }
         }
@@ -557,7 +563,9 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
         None
     };
     if needs_hooks && hook_plan.is_none() {
-        eprintln!("error: hook write-deny is required but no plan was prepared");
+        fuigo_tty_utils::cli_eprintln!(
+            "error: hook write-deny is required but no plan was prepared"
+        );
         return None;
     }
     let (exact, globs) = deny::partition_deny_entries(&entries);
@@ -573,7 +581,9 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(paths) => deny_read.extend(paths),
             Err(reason) => {
                 tracing::error!(%reason, "sandbox deny-glob expansion failed; refusing to start");
-                eprintln!("error: sandbox deny glob could not be enforced on Linux: {reason}");
+                fuigo_tty_utils::cli_eprintln!(
+                    "error: sandbox deny glob could not be enforced on Linux: {reason}"
+                );
                 return None;
             }
         }
@@ -599,7 +609,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                eprintln!("error: hook write-deny plan failed: {e}");
+                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
                 return None;
             }
         }

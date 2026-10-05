@@ -10,7 +10,31 @@ use crate::version_overrides::{self, apply_version_overrides};
 /// Read and parse a TOML file WITHOUT `$VAR` expansion (empty table if absent).
 /// Shared core of [`load_toml_file`] and the hook-layer read.
 fn read_toml_file(path: &Path) -> std::io::Result<toml::Value> {
-    match std::fs::read_to_string(path) {
+    read_toml_file_as(path, BlankRead::Accept)
+}
+
+/// What [`read_toml_file_as`] does with a file that reads blank.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlankRead {
+    /// A blank file is an empty table, at once.
+    Accept,
+    /// Re-check before believing it (the user layer; see [`confirm_blank`]).
+    ConfirmStable,
+}
+
+/// How long a blank user layer is given to fill before it is re-read.
+const BLANK_RECHECK_DELAY: std::time::Duration = std::time::Duration::from_millis(15);
+
+/// Re-reads of a blank user layer whose identity keeps changing, before the
+/// blank is accepted anyway.
+const BLANK_RECHECKS: usize = 3;
+
+fn read_toml_file_as(path: &Path, blank: BlankRead) -> std::io::Result<toml::Value> {
+    let read = match std::fs::read_to_string(path) {
+        Ok(s) if s.trim().is_empty() && blank == BlankRead::ConfirmStable => confirm_blank(path),
+        other => other,
+    };
+    match read {
         Ok(s) if s.trim().is_empty() => Ok(toml::Value::Table(toml::map::Map::new())),
         Ok(s) => match toml::from_str::<toml::Value>(&s) {
             Ok(v) => Ok(v),
@@ -29,6 +53,124 @@ fn read_toml_file(path: &Path) -> std::io::Result<toml::Value> {
             tracing::error!(file = %path.display(), "config file unreadable: {e}");
             Err(e)
         }
+    }
+}
+
+/// A blank user `config.toml` is either a deliberate reset (the user emptied
+/// it, which must be honoured: no settings, no trusted origins) or a file
+/// caught between an in-place writer's truncate and its write (an editor
+/// saving in place), which must not be read as "no settings" (R013 §1.5).
+/// Content cannot tell them apart; time can. So the blank is re-read after
+/// [`BLANK_RECHECK_DELAY`]:
+///
+/// - it now has content: that content is used;
+/// - it is still blank and its identity (inode, size, times) did not move
+///   across the wait: the blank is stable, and accepted;
+/// - it is still blank but did move: a writer is active, so wait again, at
+///   most [`BLANK_RECHECKS`] times; if it never holds still, the read FAILS
+///   (`ResourceBusy`) rather than load "no settings" from a file that is
+///   being rewritten. Callers treat that like any unreadable config (the
+///   reloader keeps the last good layers);
+/// - it is gone: absent is empty, as always.
+///
+/// Costs one short wait only when the user layer is blank. Atomic writers
+/// (every Fuigo writer since P17-F1) never expose a blank file at all.
+fn confirm_blank(path: &Path) -> std::io::Result<String> {
+    for _ in 0..BLANK_RECHECKS {
+        let before = FileStamp::of(path);
+        blank_recheck_wait();
+        match std::fs::read_to_string(path) {
+            Ok(again) if !again.trim().is_empty() => return Ok(again),
+            Ok(again) => {
+                let after = FileStamp::of(path);
+                if before.is_some() && before == after {
+                    return Ok(again);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::ResourceBusy,
+        format!(
+            "{} read blank and kept changing across {BLANK_RECHECKS} re-reads; \
+             not treating a file that is being rewritten as empty",
+            path.display()
+        ),
+    ))
+}
+
+/// The identity [`confirm_blank`] compares across its wait.
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    ino_ctime: (u64, i64, i64),
+    // Windows: which file this is. Size and modified time cannot tell a blank
+    // file from the blank file that replaced it within one tick of the clock
+    // that stamps files (about a millisecond, up to ~16 ms).
+    #[cfg(windows)]
+    file: crate::managed_text::FileIdentity,
+}
+
+impl FileStamp {
+    /// `None` when the file cannot be examined, which is never a stable
+    /// blank: on Windows that includes a file whose identity cannot be read
+    /// (two unreadable identities must not pass for "the same file").
+    fn of(path: &Path) -> Option<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        let md = std::fs::metadata(path).ok()?;
+        Some(Self {
+            len: md.len(),
+            modified: md.modified().ok(),
+            #[cfg(unix)]
+            ino_ctime: (md.ino(), md.ctime(), md.ctime_nsec()),
+            #[cfg(windows)]
+            file: crate::managed_text::FileIdentity::of_file(path).ok()?,
+        })
+    }
+}
+
+#[cfg(not(test))]
+fn blank_recheck_wait() {
+    std::thread::sleep(BLANK_RECHECK_DELAY);
+}
+
+/// Tests replace the wait with a hook that plays the concurrent writer.
+#[cfg(test)]
+fn blank_recheck_wait() {
+    let _ = BLANK_RECHECK_DELAY;
+    blank_hook::fire();
+}
+
+#[cfg(test)]
+pub(crate) mod blank_hook {
+    thread_local! {
+        static HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            const { std::cell::RefCell::new(None) };
+        static FIRED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Install `hook` (run in place of the wait) and reset the count.
+    pub(crate) fn set(hook: Option<Box<dyn FnMut()>>) {
+        HOOK.with(|h| *h.borrow_mut() = hook);
+        FIRED.with(|f| f.set(0));
+    }
+
+    /// Waits taken on this thread since the last [`set`].
+    pub(crate) fn fired() -> usize {
+        FIRED.with(std::cell::Cell::get)
+    }
+
+    pub(super) fn fire() {
+        FIRED.with(|f| f.set(f.get() + 1));
+        HOOK.with(|h| {
+            if let Some(hook) = h.borrow_mut().as_mut() {
+                hook();
+            }
+        });
     }
 }
 
@@ -75,8 +217,60 @@ fn line_col(src: &str, byte: usize) -> (usize, usize) {
 
 /// [`load_toml_file`] plus that layer's `[[version_overrides]]`.
 /// Use for fuigo config files; use [`load_toml_file`] directly for unrelated TOML.
+///
+/// P118: a file outside the user-level and managed locations (a project's `.fuigo/config.toml`, a plugin's) may not
+/// name the saved API key `FUIGO_API_KEY`; see [`crate::key_naming`]. Its references are refused before `$VAR`
+/// expansion.
 pub fn load_config_file(path: &Path) -> std::io::Result<toml::Value> {
-    let mut v = load_toml_file(path)?;
+    load_config_file_with_key_naming(path, crate::key_naming::source_may_name_saved_key(path))
+}
+
+/// [`load_config_file`] with the tier decided by the caller (`may_name_saved_key`).
+pub fn load_config_file_with_key_naming(path: &Path, may_name_saved_key: bool) -> std::io::Result<toml::Value> {
+    let mut v = read_toml_file(path)?;
+    let label = path.display().to_string();
+    if !may_name_saved_key {
+        // Refuse, and mark every server this file defines (also inside its `version_overrides`) so the mark travels
+        // with the definition to the spawn, where the final strings are refused once more (Astra r3 N2, N4).
+        let refused = crate::key_naming::refuse_toml_source(&mut v, &label);
+        crate::key_naming::report_refusals(&refused);
+    }
+    expand_env_vars_in_toml(&mut v);
+    if !may_name_saved_key {
+        // Expansion can build a reference out of text that held none (`${D}FUIGO_API_KEY` with `D = "$"`, a default
+        // `${X:-FUIGO_API_KEY}` in a field that names a variable): refuse again on the expanded values.
+        let refused = crate::key_naming::refuse_key_references_in_toml(&mut v, &label);
+        crate::key_naming::report_refusals(&refused);
+    }
+    apply_version_overrides_with_registered(&mut v)?;
+    if !may_name_saved_key {
+        // And once more on the layered result: an override is the last thing that can change what a server holds.
+        let refused = crate::key_naming::refuse_key_references_in_toml(&mut v, &label);
+        crate::key_naming::report_refusals(&refused);
+    }
+    Ok(v)
+}
+
+/// The user `config.toml` layer parsed from `src` exactly as [`load_from_disk`]
+/// parses the file's contents: blank is an empty table, `$VAR`s are expanded,
+/// `[[version_overrides]]` applied. For a writer that already holds the bytes
+/// it is about to rewrite (the shell's settings save decides from the bytes
+/// `fs_atomic::edit_locked` hands it, P72). A blank `src` is believed as it
+/// is: the caller's own snapshot check, not a re-read, catches a file caught
+/// mid-write.
+///
+/// # Errors
+///
+/// A TOML syntax error (described without the offending line, as
+/// [`toml_error_detail`]), or a version-override failure.
+pub fn parse_user_config_layer(src: &str) -> std::io::Result<toml::Value> {
+    let mut v = if src.trim().is_empty() {
+        toml::Value::Table(toml::map::Map::new())
+    } else {
+        toml::from_str::<toml::Value>(src)
+            .map_err(|e| std::io::Error::other(toml_error_detail(src, &e)))?
+    };
+    expand_env_vars_in_toml(&mut v);
     apply_version_overrides_with_registered(&mut v)?;
     Ok(v)
 }
@@ -114,9 +308,16 @@ pub fn load_managed_config() -> std::io::Result<toml::Value> {
 /// Load a user-tier config layer from `<home>/<filename>`.
 /// With no resolvable user home, returns an empty table rather than reading a cwd-relative `.fuigo/<filename>`.
 /// The cwd fallback would silently promote an untrusted project `.fuigo` to the user tier.
+///
+/// A blank file is re-checked before it is believed (see [`confirm_blank`]).
 fn load_user_config_layer(home: Option<&Path>, filename: &str) -> std::io::Result<toml::Value> {
     match home {
-        Some(g) => load_config_file(&g.join(filename)),
+        Some(g) => {
+            let mut v = read_toml_file_as(&g.join(filename), BlankRead::ConfirmStable)?;
+            expand_env_vars_in_toml(&mut v);
+            apply_version_overrides_with_registered(&mut v)?;
+            Ok(v)
+        }
         None => Ok(toml::Value::Table(toml::map::Map::new())),
     }
 }
@@ -159,7 +360,7 @@ pub fn managed_config_layers_at(
         if !path.is_file() {
             continue;
         }
-        match load_config_file(&path) {
+        match load_config_file_with_key_naming(&path, true) {
             Ok(value) => layers.push(ManagedConfigLayer {
                 value,
                 path,
@@ -518,32 +719,79 @@ pub fn deep_merge_toml(base: &mut toml::Value, overrides: &toml::Value) {
 }
 
 /// Expand `$VAR` / `${VAR}` in all string values.
+///
+/// P147: a `${FUIGO_API_KEY:-default}` is kept for the destination only where the saved key is resolved when the value
+/// is used (an MCP server's `env`, `args` and `headers`, a model's `api_key`); everywhere else it is its default, as
+/// without a key in 1.0.20 (those places never receive the saved key).
 pub fn expand_env_vars_in_toml(value: &mut toml::Value) {
+    expand_env_vars_in_toml_at(value, &mut Vec::new());
+}
+
+fn expand_env_vars_in_toml_at(value: &mut toml::Value, path: &mut Vec<String>) {
     match value {
         toml::Value::String(s) => {
-            let expanded = expand_env_vars_in_string(s);
+            let expanded = expand_env_vars_in_string_keeping(s, key_default_resolves_at(path));
             if expanded != *s {
                 *s = expanded;
             }
         }
         toml::Value::Array(items) => {
             for item in items {
-                expand_env_vars_in_toml(item);
+                expand_env_vars_in_toml_at(item, path);
             }
         }
         toml::Value::Table(table) => {
-            for (_, item) in table.iter_mut() {
-                expand_env_vars_in_toml(item);
+            for (key, item) in table.iter_mut() {
+                path.push(key.clone());
+                expand_env_vars_in_toml_at(item, path);
+                path.pop();
             }
         }
         _ => {}
     }
 }
 
-/// Expand `$VAR` / `${VAR}` in a single string.
+/// Whether a config value at `path` is resolved against the saved key where it is used (see
+/// [`expand_env_vars_in_toml`]).
+fn key_default_resolves_at(path: &[String]) -> bool {
+    let in_server_values = path
+        .iter()
+        .position(|seg| seg == "mcp_servers")
+        .and_then(|i| path.get(i + 2))
+        .is_some_and(|field| matches!(field.as_str(), "env" | "args" | "headers"));
+    // A model's or a provider's own `api_key` (`[model.<name>]`, `[models.<name>]`, `[model_providers.<name>]`), not a
+    // map entry that happens to be named `api_key` (`query_params`, `extra_headers`, `[models.extra_headers]`: Astra
+    // r2 N1, r3 #1, #2).
+    let model_api_key = path.len() >= 3
+        && path[path.len() - 1] == "api_key"
+        && matches!(path[path.len() - 3].as_str(), "model" | "models" | "model_providers")
+        && !matches!(
+            path[path.len() - 2].as_str(),
+            "extra_headers" | "query_params" | "env_http_headers" | "http_headers" | "headers"
+        );
+    in_server_values || model_api_key
+}
+
+/// Expand `$VAR` / `${VAR}` in a single string, from the process environment.
+///
+/// P70a: an unexported `${FUIGO_API_KEY}` stays literal here even when the user saved a key; the places that use the
+/// value resolve it late (`crate::credential_env::resolve_first_party_key_references`), so no record of config holds
+/// the key. P147: so does an unexported `${FUIGO_API_KEY:-default}` (its default expanded); a place that never receives
+/// the key takes the default with [`crate::credential_env::apply_first_party_key_defaults`].
 pub fn expand_env_vars_in_string(input: &str) -> String {
-    let context = |name: &str| std::env::var(name).ok();
-    shellexpand::env_with_context_no_errors(input, context).into_owned()
+    expand_env_vars_in_string_keeping(input, true)
+}
+
+fn expand_env_vars_in_string_keeping(input: &str, key_default_resolves: bool) -> String {
+    // P70a (Astra f4 #1, f6): a `$`-run before the first-party name (`$${FUIGO_API_KEY}`, any form) is kept as
+    // written, so the `$$` escape cannot produce a plain reference that a destination would resolve to the saved key.
+    // P147: an exported key is expanded here, as before.
+    let keep_defaulted =
+        key_default_resolves && std::env::var_os(crate::credential_env::FIRST_PARTY_KEY_ENV_VAR).is_none();
+    crate::credential_env::expand_keeping_first_party_references(input, keep_defaulted, |text| {
+        let context = |name: &str| std::env::var(name).ok();
+        shellexpand::env_with_context_no_errors(text, context).into_owned()
+    })
 }
 
 #[cfg(test)]
@@ -812,6 +1060,98 @@ mod tests {
         let v = load_user_config_layer(Some(&dir), "config.toml").unwrap();
         assert_eq!(v.as_table().map(|t| t.is_empty()), Some(true));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R013 §1.5 loader half: a user layer caught blank mid-rewrite (an
+    /// in-place writer between its truncate and its write) is re-read, and
+    /// the written content is what loads, not "no settings".
+    #[test]
+    fn a_user_layer_caught_blank_mid_write_loads_the_written_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"").unwrap();
+        let writer = path.clone();
+        blank_hook::set(Some(Box::new(move || {
+            std::fs::write(&writer, "[telemetry]\nmode = \"kept\"\n").unwrap();
+        })));
+        let v = load_user_config_layer(Some(dir.path()), "config.toml");
+        let fired = blank_hook::fired();
+        blank_hook::set(None);
+        assert_eq!(v.unwrap()["telemetry"]["mode"].as_str(), Some("kept"));
+        assert_eq!(fired, 1);
+    }
+
+    /// A blank that stays blank and unchanged is a deliberate reset: honoured
+    /// after one re-check.
+    #[test]
+    fn a_stable_blank_user_layer_is_accepted_after_one_recheck() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), b"  \n").unwrap();
+        blank_hook::set(None);
+        let v = load_user_config_layer(Some(dir.path()), "config.toml").unwrap();
+        let fired = blank_hook::fired();
+        assert_eq!(v.as_table().map(toml::map::Map::is_empty), Some(true));
+        assert_eq!(fired, 1);
+    }
+
+    /// A blank whose identity keeps moving is waited on a bounded number of
+    /// times, then refused: it is being rewritten, not deliberately empty.
+    #[test]
+    fn a_blank_that_keeps_changing_is_refused_after_bounded_rechecks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"").unwrap();
+        let writer = path.clone();
+        let mut n = 0u8;
+        blank_hook::set(Some(Box::new(move || {
+            // A new blank inode each time: replaced, still empty.
+            n += 1;
+            let tmp = writer.with_extension(format!("t{n}"));
+            std::fs::write(&tmp, b"").unwrap();
+            std::fs::rename(&tmp, &writer).unwrap();
+        })));
+        let err = load_user_config_layer(Some(dir.path()), "config.toml").unwrap_err();
+        let fired = blank_hook::fired();
+        blank_hook::set(None);
+        assert_eq!(err.kind(), std::io::ErrorKind::ResourceBusy, "{err}");
+        assert_eq!(fired, BLANK_RECHECKS);
+    }
+
+    /// Deleted during the re-check: an absent user layer is empty, as always.
+    #[test]
+    fn a_blank_user_layer_deleted_during_the_recheck_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, b"").unwrap();
+        let gone = path.clone();
+        blank_hook::set(Some(Box::new(move || std::fs::remove_file(&gone).unwrap())));
+        let v = load_user_config_layer(Some(dir.path()), "config.toml").unwrap();
+        blank_hook::set(None);
+        assert_eq!(v.as_table().map(toml::map::Map::is_empty), Some(true));
+    }
+
+    /// Only the user layer pays for the re-check: other blank TOML loads as
+    /// empty at once.
+    #[test]
+    fn other_blank_toml_is_not_rechecked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("other.toml");
+        std::fs::write(&path, b"").unwrap();
+        blank_hook::set(None);
+        let v = load_toml_file(&path).unwrap();
+        assert_eq!(v.as_table().map(toml::map::Map::is_empty), Some(true));
+        assert_eq!(blank_hook::fired(), 0);
+    }
+
+    /// Non-blank user layers are read once, with no wait.
+    #[test]
+    fn a_non_blank_user_layer_is_not_rechecked() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "a = 1\n").unwrap();
+        blank_hook::set(None);
+        let v = load_user_config_layer(Some(dir.path()), "config.toml").unwrap();
+        assert_eq!(v["a"].as_integer(), Some(1));
+        assert_eq!(blank_hook::fired(), 0);
     }
 
     #[test]

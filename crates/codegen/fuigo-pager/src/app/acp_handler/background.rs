@@ -201,6 +201,9 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
                 .with_description(description.clone());
             let fallback = scrollback.push_block(RenderBlock::BgTask(block));
             scrollback.set_last_running(true);
+            session
+                .tracker
+                .note_tool_row(&tool_call_id, fallback, scrollback);
             Some(fallback)
         }
     } else if completed_early {
@@ -211,6 +214,9 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
             .with_description(description.clone());
         let eid = scrollback.push_block(RenderBlock::BgTask(block));
         scrollback.set_last_running(true);
+        session
+            .tracker
+            .note_tool_row(&tool_call_id, eid, scrollback);
         Some(eid)
     };
 

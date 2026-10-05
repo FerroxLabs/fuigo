@@ -1374,3 +1374,287 @@ fn network_unreachable_blips_never_escalate() {
         "counted blips must still escalate at the threshold",
     );
 }
+
+// ── P99: token endpoint bound to the issuer ────────────────────────
+
+/// Mock issuer whose discovery document names a token endpoint on ANOTHER origin, and that origin:
+/// a collector that records every request body and answers like a token endpoint.
+async fn start_issuer_naming_a_foreign_token_endpoint() -> (
+    String,
+    Arc<parking_lot::Mutex<Vec<String>>>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
+    let bodies = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let foreign = format!("http://{}", collector.local_addr().unwrap());
+    let collector_app = axum::Router::new().fallback({
+        let bodies = bodies.clone();
+        move |body: String| {
+            bodies.lock().push(body);
+            async {
+                axum::Json(serde_json::json!({
+                    "access_token": "collector-access",
+                    "refresh_token": "collector-refresh",
+                    "expires_in": 3600,
+                }))
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let document = serde_json::json!({
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{foreign}/token"),
+    });
+    let issuer_app = axum::Router::new().route(
+        "/.well-known/openid-configuration",
+        axum::routing::get(move || {
+            let document = document.clone();
+            async move { axum::Json(document) }
+        }),
+    );
+    let handles = vec![
+        tokio::spawn(async move { axum::serve(collector, collector_app).await.unwrap() }),
+        tokio::spawn(async move { axum::serve(listener, issuer_app).await.unwrap() }),
+    ];
+    (issuer, bodies, handles)
+}
+
+fn expired_stored_oidc_auth(issuer: &str) -> FuigoAuth {
+    FuigoAuth {
+        key: "stored-access".into(),
+        auth_mode: crate::auth::AuthMode::Oidc,
+        refresh_token: Some("stored-refresh".into()),
+        expires_at: Some(Utc::now() - Duration::minutes(1)),
+        oidc_issuer: Some(issuer.to_owned()),
+        oidc_client_id: Some("test-client".into()),
+        ..FuigoAuth::test_default()
+    }
+}
+
+/// P99 + P149 (S7/B11): a refused token endpoint is a VERDICT, not a transient failure: the refresher returns
+/// `PermanentFailure(TokenEndpointRefused)` attributed to the credential it would have sent, so `refresh_chain`
+/// records it and nobody retries. Nothing was sent to the foreign origin and the credential is kept.
+#[tokio::test]
+async fn refused_token_endpoint_is_a_verdict_that_keeps_the_credential() {
+    let (issuer, bodies, servers) = start_issuer_naming_a_foreign_token_endpoint().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+    mgr.hot_swap(expired_stored_oidc_auth(&issuer));
+    let refresher = OidcRefresher::new(mgr.clone());
+    match refresher
+        .refresh(crate::auth::manager::RefreshReason::PreRequest)
+        .await
+    {
+        RefreshOutcome::PermanentFailure {
+            error, tried_key, ..
+        } => {
+            assert_eq!(
+                error.reason,
+                crate::auth::error::RefreshTokenFailedReason::TokenEndpointRefused
+            );
+            assert_eq!(tried_key.as_deref(), Some("stored-access"));
+            let text = error.to_string();
+            assert!(text.contains("issuer's https origin"), "{text}");
+            assert!(text.contains("redirect"), "{text}");
+            assert!(text.contains("stored sign-in is kept"), "{text}");
+            assert!(!text.contains("127.0.0.1") && !text.contains("stored-refresh"), "{text}");
+        }
+        other => panic!("expected a refusal verdict, got: {other:?}"),
+    }
+    for server in servers {
+        server.abort();
+    }
+    let bodies = bodies.lock().clone();
+    assert!(
+        bodies.is_empty(),
+        "the foreign token endpoint was contacted: {bodies:?}"
+    );
+    assert_eq!(
+        mgr.expired_auth()
+            .and_then(|auth| auth.refresh_token)
+            .as_deref(),
+        Some("stored-refresh"),
+        "the in-memory credential must be kept"
+    );
+}
+
+/// Mock issuer whose token endpoint is on the issuer's own origin but answers every POST with a 302 to another
+/// origin (B11). Returns the issuer, the number of POSTs the token endpoint received, the number of discovery
+/// requests, and the bodies the redirect target received.
+async fn start_issuer_with_redirecting_token_endpoint() -> (
+    String,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<parking_lot::Mutex<Vec<String>>>,
+    Vec<tokio::task::JoinHandle<()>>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let bodies = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+    let collector = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let foreign = format!("http://{}", collector.local_addr().unwrap());
+    let collector_app = axum::Router::new().fallback({
+        let bodies = bodies.clone();
+        move |body: String| {
+            bodies.lock().push(body);
+            async { axum::Json(serde_json::json!({"access_token": "collector-access", "expires_in": 3600})) }
+        }
+    });
+    let posts = Arc::new(AtomicUsize::new(0));
+    let discoveries = Arc::new(AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer = format!("http://{}", listener.local_addr().unwrap());
+    let document = serde_json::json!({
+        "authorization_endpoint": format!("{issuer}/authorize"),
+        "token_endpoint": format!("{issuer}/token"),
+    });
+    let issuer_app = axum::Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            axum::routing::get({
+                let discoveries = discoveries.clone();
+                move || {
+                    discoveries.fetch_add(1, Ordering::SeqCst);
+                    let document = document.clone();
+                    async move { axum::Json(document) }
+                }
+            }),
+        )
+        .route(
+            "/token",
+            axum::routing::post({
+                let posts = posts.clone();
+                let target = format!("{foreign}/token");
+                move || {
+                    posts.fetch_add(1, Ordering::SeqCst);
+                    let target = target.clone();
+                    async move {
+                        (
+                            axum::http::StatusCode::FOUND,
+                            [(axum::http::header::LOCATION, target)],
+                        )
+                    }
+                }
+            }),
+        );
+    let handles = vec![
+        tokio::spawn(async move { axum::serve(collector, collector_app).await.unwrap() }),
+        tokio::spawn(async move { axum::serve(listener, issuer_app).await.unwrap() }),
+    ];
+    (issuer, posts, discoveries, bodies, handles)
+}
+
+fn manager_with_stored_oidc(dir: &std::path::Path, issuer: &str) -> (Arc<AuthManager>, std::path::PathBuf) {
+    let cfg = FuigoComConfig::default();
+    let mut store = crate::auth::model::AuthStore::new();
+    store.insert(cfg.auth_scope(), expired_stored_oidc_auth(issuer));
+    let auth_path = dir.join("auth.json");
+    crate::auth::storage::write_auth_json(&auth_path, &store).unwrap();
+    let mgr = Arc::new(AuthManager::new(dir, cfg.clone()));
+    mgr.configure_refresher(cfg.auth_provider_command.clone(), None);
+    mgr.hot_swap(expired_stored_oidc_auth(issuer));
+    (mgr, auth_path)
+}
+
+fn assert_refusal_verdict(error: &crate::auth::error::AuthError, attempt: u32) {
+    let text = error.to_string();
+    assert!(text.contains("issuer's https origin"), "attempt {attempt}: {text}");
+    assert!(text.contains("stored sign-in is kept"), "attempt {attempt}: {text}");
+    assert!(
+        matches!(
+            error,
+            crate::auth::error::AuthError::Refresh(crate::auth::error::RefreshTokenError::Permanent(e))
+                if e.reason == crate::auth::error::RefreshTokenFailedReason::TokenEndpointRefused
+        ),
+        "attempt {attempt}: a policy refusal must be a permanent verdict: {error:?}"
+    );
+}
+
+/// P99 + P149 end to end through `AuthManager::auth()`: with the stored sign-in on disk and a discovery document
+/// naming a foreign token endpoint, every caller gets the refusal verdict with its reason, the refusal is decided
+/// ONCE (one discovery, no retry by later callers), the foreign origin is never contacted, and `auth.json` still
+/// holds the same credential afterwards.
+#[tokio::test]
+async fn refused_token_endpoint_keeps_the_stored_credentials_and_says_why() {
+    let (issuer, bodies, servers) = start_issuer_naming_a_foreign_token_endpoint().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mgr, auth_path) = manager_with_stored_oidc(dir.path(), &issuer);
+
+    for attempt in 0..MAX_CONSECUTIVE_TRANSIENT_FAILURES + 2 {
+        let error = match mgr.auth().await {
+            Ok(auth) => panic!(
+                "attempt {attempt}: a refused refresh produced a credential (key {})",
+                fuigo_auth::bearer_fingerprint(&auth.key)
+            ),
+            Err(error) => error,
+        };
+        assert_refusal_verdict(&error, attempt);
+    }
+    assert!(
+        !mgr.requires_manual_reauth(),
+        "signing in again cannot fix a refused token endpoint; no /login banner"
+    );
+    for server in servers {
+        server.abort();
+    }
+    let bodies = bodies.lock().clone();
+    assert!(
+        bodies.is_empty(),
+        "the foreign token endpoint was contacted: {bodies:?}"
+    );
+    let disk = mgr
+        .read_disk_auth()
+        .expect("the stored credential was removed from auth.json");
+    assert_eq!(disk.key, "stored-access");
+    assert_eq!(disk.refresh_token.as_deref(), Some("stored-refresh"));
+    let raw = std::fs::read_to_string(&auth_path).unwrap();
+    assert!(
+        raw.contains("stored-refresh"),
+        "auth.json lost the refresh token"
+    );
+    assert!(
+        !raw.contains("collector-"),
+        "auth.json holds a foreign credential"
+    );
+}
+
+/// P149 (S7/B11, live lane C2 D5): a token endpoint that answers 302 received the refresh token 13 times in one
+/// headless run, because each refusal was transient and every caller retried. Now the first refusal is a verdict:
+/// across many callers the refresh token is POSTed exactly once, never to the redirect target, and every caller
+/// reads the reason.
+#[tokio::test]
+async fn redirecting_token_endpoint_receives_the_refresh_token_once_per_verdict() {
+    use std::sync::atomic::Ordering;
+    let (issuer, posts, discoveries, bodies, servers) =
+        start_issuer_with_redirecting_token_endpoint().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (mgr, auth_path) = manager_with_stored_oidc(dir.path(), &issuer);
+
+    for attempt in 0..13 {
+        let error = mgr
+            .auth()
+            .await
+            .expect_err("a redirecting token endpoint must not produce a credential");
+        assert_refusal_verdict(&error, attempt);
+    }
+    for server in servers {
+        server.abort();
+    }
+    assert_eq!(
+        posts.load(Ordering::SeqCst),
+        1,
+        "the refresh token was resent to the redirecting token endpoint"
+    );
+    assert!(discoveries.load(Ordering::SeqCst) <= 1, "the refusal was re-decided");
+    assert!(bodies.lock().is_empty(), "the redirect was followed: {:?}", bodies.lock());
+    let raw = std::fs::read_to_string(&auth_path).unwrap();
+    assert!(raw.contains("stored-refresh"), "auth.json lost the refresh token");
+    // Astra r1 #3: a turn that fails on this credential tells the user why (the remedy's advice is the tail of
+    // the turn error), without a sign-in prompt, and the session keeps its stored sign-in.
+    let remedy = mgr.auth_remedy();
+    assert_eq!(remedy, crate::auth::AuthRemedy::TokenEndpointRefused);
+    assert!(remedy.keeps_session() && !remedy.is_self_healing());
+    assert_eq!(remedy.turn_error_type(), "auth_transient");
+    let advice = remedy.advice().expect("the refusal is the advice");
+    assert!(advice.contains("issuer's https origin") && advice.contains("stored sign-in is kept"), "{advice}");
+}

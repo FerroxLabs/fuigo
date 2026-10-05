@@ -1,0 +1,168 @@
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 1 — raw transcript sha256 35b43ee9bd3990fc2604a8529ce5d102e194ccdc8516041f34814bc9e04f962f =====
+
+The reported `update(v2)` race is fixed, but authentication mutations remain outside the new serialization boundary. These are **pre-existing gaps left unresolved**, not newly introduced regressions.
+
+1. **HIGH — API-key writers can still overwrite newer tokens.**  
+   [store_api_key / clear_api_key](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:367) read and rewrite the entire `auth.json` without the flock or `disk_rmw`. They have live callers in the API-key extension and ACP authentication handler. An API-key write can read OAuth v1, allow `update(v2)` to finish, then restore v1 from its stale map. Conversely, enrichment can erase an API-key change. These writers need the same serialization protocol; locking only their final write is insufficient.
+
+2. **HIGH — Clearing or replacing cached credentials is not fenced against outstanding enrichment.**  
+   [remove_scope_impl](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager.rs:537) skips disk removal when enrichment holds the flock, then clears memory. Enrichment can subsequently execute its [unconditional cache replacement](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs:221), restoring the logged-out session. `hot_swap` and `clear_in_memory` also bypass `disk_rmw`.
+
+   A related case survives even with serialized writes: `update(v2)` fails to persist but retains v2 in memory; an outstanding v1 enrichment later sees v1 on disk and replaces memory with v1. Enrichment needs a current-credential/generation check covering logout and replacement. Merely adding the mutex to cache setters does not invalidate already-pending stale enrichment.
+
+   Successful `remove_scope` disk writes are flock-serialized against enrichment, but still lack serialization against bare `update`/`save_without_enrichment` calls.
+
+3. **MEDIUM — The regression test still does not force the failing interleaving.**  
+   [enrichment_task_preserves_interleaved_token_rotation](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2508) calls both updates consecutively while `/user` sleeps 50 ms. Normally v2 reaches disk before either enrichment reads it, so the test can pass with the mutex removed. Waiting for both completions is stronger than the previous early-success poll, and all token/profile assertions remain intact, but deterministic synchronization is needed to prove the stale-read/write exclusion. The test also checks disk only, despite the fix’s explicit in-memory guarantee.
+
+The remaining checks look sound by source inspection:
+
+- **Lock ordering / deadlocks:** updated paths use flock → `disk_rmw` → short-lived `inner` or `permanent_failure` guards. No reverse acquisition was found. Neither persistence method contains an `.await`; enrichment acquires `disk_rmw` after its final `.await`. No new guard-across-await or resulting `Send` problem is apparent.
+- **Smoke-check coverage:** injecting a separate verdict budget preserves the semantic assertions and removes the assumption that scheduling, filesystem access and validation always finish within 100 ms. No retries were added.
+- **Production timeout:** `CHECK_TIMEOUT` remains **100 ms**, and both production call sites explicitly pass it. The nonterminating test still requires the literal `100 ms` warning. This is a per-phase timeout; semaphore acquisition remains outside it, unchanged by this diff.
+
+Reviewed `ac7bfe92..0242a1b5` on `strike/p46`. No Cargo commands or runtime checks were run.
+
+**VERDICT: REQUEST CHANGES — the targeted fixes are sound, but auth writer coverage and stale-enrichment fencing remain incomplete.**
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 2 — raw transcript sha256 4bb47d5bd8be04bb0e25b330c701724d4232fe1ff3c805b533ca0af41fb97027 =====
+
+Reviewed `ac7bfe92..e90299a3`, including all four commits. **M3 remains unresolved.** No new production deadlock or BLOCKER identified by source inspection. No Cargo commands or tests were run.
+
+1. **MEDIUM — M3: the rotation test still permits a passing execution without exercising contention.**  
+   [manager_tests.rs:2590](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2590) spawns `update(v2)` and immediately releases v1. Spawning does not establish that v2 has started. A valid schedule is: release v1 → v1 finishes → v2 runs. That schedule passes even with the serialization fix removed. Waiting for both enrichments fixes premature observation, but does not force the disputed interleaving. Add instrumentation establishing actual lock contention/acquisition behavior before releasing v1, then demonstrate that removing serialization fails without retries.
+
+2. **HIGH — Pre-existing residual: startup pruning remains an uncoordinated stale-snapshot writer.**  
+   [manager.rs:422](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager.rs:422) takes the flock, then writes a cloned map originally read **before** that lock; it never takes `auth_state_lock`. With a legacy WebLogin entry present, a concurrent login/API-key write can commit after that initial read and then be erased by pruning. Thus the new lock’s claim to cover every in-process read-modify-write is incomplete. Correcting this requires flock → process lock → fresh read → removal → write. This is an existing gap, not a newly introduced regression.
+
+3. **HIGH — Cross-process residual: API-key writes still bypass the flock.**  
+   [storage.rs:386](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:386) serializes API-key writers within one process only. Another process can still overwrite rotated credentials from a stale map, or delete a newly populated file through `clear_api_key`. Bare login `update` callers retain the analogous cross-process limitation.
+
+The remaining requested checks:
+
+- **H1:** Resolved for the named API-key writers’ in-process race against enrichment.
+- **H2:** Resolved for the named manager’s credential transitions. The process lock covers the merge’s checks through disk and memory writes; the memory fence rejects cleared or replaced credentials, including a newer credential whose persistence failed.
+- **Lock ordering:** Inspected paths follow flock → process lock → `inner`/`permanent_failure`. Nested process-lock acquisition is reentrant. `permanent_failure()` releases its guard before credential resolution. No new synchronous guard spans an `.await`; existing refresh flocks intentionally span async exchanges.
+- **Tokio blocking/fsync:** Lock acquisition and filesystem persistence do block the calling worker. Holding serialization through fsync, rename, and the memory update is acceptable for this bounded correctness fix: releasing it earlier reopens the race. The global lock adds contention across unrelated managers/paths; latency under slow storage remains unmeasured.
+- **Test robustness:** The clear-from-memory test forces the relevant ordering and should fail if the memory fence is removed, assuming successful fixture I/O. The gate releases when its sender is dropped, including during unwinding. However, `release.recv()` and `writer.await` are unbounded; the 120-second arrival/completion checks do not guarantee escape from a synchronous deadlock. Mutation behavior was assessed statically, not executed.
+- **`e90299a3`: justified assertion correction.** MCP reminders actually use `push_user_message`, disproving the “prompt is last” assumption. The matcher retains main-turn filtering, excludes parent requests, requires a child request, and checks both tools on every matched child request. The behavioral assertion is preserved.
+- **Smoke-check budgets:** Separating verdict tests from the production latency budget is justified; production still passes `CHECK_TIMEOUT`, and the timeout-specific assertion remains.
+
+VERDICT: CHANGES REQUIRED — M3 is not deterministically closed; H1/H2 are resolved for the named in-process paths, with the writer residuals above.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 3 — raw transcript sha256 b4011955ee9c7ac247b98aba612409418fba1ebbb3426166cce379bbbbdefed0 =====
+
+Reviewed `ac7bfe92..47b451a8` and the corrective commit. **No in-scope BLOCKER/HIGH found, but M3 is not fully closed.**
+
+- **MEDIUM — cumulative counter can falsely establish v2 contention.** At [manager_tests.rs:2597](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2597), the test checks against zero. Because the mutex is process-wide, `update(v1)` can already increment this manager’s counter while another test holds it. The loop then skips immediately; `!writer.is_finished()` also passes for an unpolled v2 task. Releasing v1 before v2 starts recreates the round-2 spurious-pass schedule, including with the merge lock removed. Capture the counter after `wait_arrived` and require a subsequent increment. Strict lock-removal sensitivity under parallel execution also needs to distinguish contention against v1 from unrelated global-lock contention.
+
+- **Prune HIGH resolved by inspection.** The fresh read occurs under flock plus the state lock, preserves other entries, and rechecks `WebLogin` before removal. Continuing to remove a replacement that is itself `WebLogin` matches the existing legacy-token rejection policy.
+
+- **No new lock-order cycle identified.** Reviewed paths acquire flock before state, then inner/permanent-failure locks; nested state acquisition is reentrant, with no state guard crossing an await. Gate receives are bounded. The writer timeout bounds awaiting its handle, although it cannot terminate a synchronously deadlocked worker; no such cycle was found.
+
+Production smoke-check callers retain the 100 ms budget. The cross-process writer residual remains the acknowledged pre-existing proposal, outside this packet.
+
+Static review only; Cargo was not run. `git diff --check` passed.
+
+VERDICT: No in-scope BLOCKER/HIGH; M3 remains MEDIUM because the contention test can still spuriously pass.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 4 — raw transcript sha256 84aabfa6b97ee477e9dcd799230e4cc4f0994ca4c3b84a08ca452acb8a031a9d =====
+
+Reviewed `9941822b` and the full `ac7bfe92..HEAD` diff on clean branch `strike/p46`.
+
+The round-3 MEDIUM is closed: the parked flag precedes arrival notification, and the test captures its counter baseline before spawning v2. Earlier unrelated contention cannot satisfy the required increment.
+
+No new actionable findings or remaining BLOCKER/HIGH identified in scope. `git diff --check` passed. Source-only audit; Cargo was not run.
+
+VERDICT: PASS — round-3 MEDIUM closed; no BLOCKER/HIGH remains in scope.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 5 — raw transcript sha256 b0e13cad2402983da0b6721bb3026a447472623b4e43cb0ca9764c046bad7613 =====
+
+No findings. Clean `strike/p46` at `069b2ec1`, directly following `9941822b`; base `ac7bfe92` is an ancestor.
+
+- **Child executes the body:** the helper recognizes its child marker and returns `false`. The parent verifies child success and the execution marker before returning `true`.
+- **No recursion:** child detection occurs before subprocess creation.
+- **Serial interplay is correct:** pinned `serial_test` 3.2.0 executes the closure on the calling thread, preserving the test name. Its lock is process-local, so the child cannot deadlock against the parent. The parent’s `return` exits the closure and releases its lock.
+- **All writers isolated:** the shell crate contains exactly four mutations—one unset and three sets—inside these two tests, all after the subprocess guard. No other shared-process writer was found.
+
+Source audit only; Cargo was not run.
+
+VERDICT: PASS — Round 5, commit 069b2ec1.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 6 — raw transcript sha256 8e0802c47fac2dc40a78301d82aad4397e3cb787d027c5bf3a2f14f9deb9b72b =====
+
+**HIGH — path aliases bypass serialization**, introduced by `178b2e78`. The registry keys locks by the supplied `PathBuf` without resolving file identity ([storage.rs:398](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:398)).
+
+`AuthManager::new` accepts `FUIGO_AUTH_PATH` verbatim; API-key writers independently use `fuigo_home.join("auth.json")`. For example, with CWD `/home/sean`, `FUIGO_AUTH_PATH=.fuigo/auth.json` and `FUIGO_HOME=/home/sean/.fuigo` address the same file through different lock keys. An API-key writer can read OAuth v1, a manager can commit v2, then the API-key writer can restore v1 from its stale map. API-key writers take no flock to prevent this.
+
+Use a shared, stable path-identity resolution for every caller, including before `auth.json` exists. Add alias-contention coverage.
+
+The other requested checks pass by inspection:
+
+- **Reentrancy:** nested manager calls reuse the unchanged `self.path`, retrieving the same reentrant mutex.
+- **Registry deadlock:** the HashMap guard drops when `auth_state()` returns, before `.lock()` or `.try_lock()` executes. No registry-to-auth-lock wait cycle appears.
+- **Leak:** one retained mutex and map entry per distinct path key; repeated operations reuse it. Acceptable for a fixed set of configured stores, but “one or two” is an operational assumption, not an enforced bound.
+- **Contention counter:** baseline capture follows gate arrival; v2 must register a subsequent failed per-path `try_lock` while enrichment is parked. Registry contention alone cannot satisfy it.
+- **Sibling tests:** completion counting retains the field/token assertions and the first test’s pre-enrichment persistence check. Failed enrichment still fails the assertions; the 120-second completion bound replaces the incidental five-second deadline.
+
+Reviewed `069b2ec1..178b2e78` on `strike/p46`; base ancestry confirmed. `git diff --check` passed. No Cargo commands or runtime tests were run.
+
+VERDICT: CHANGES REQUIRED — path aliases can create separate locks for the same auth.json and reopen credential rollback.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 7 — raw transcript sha256 de8c1c0dccd6d610a1c4ac3139412da948f77a64914f69c18ac9a0e80a697ca9 =====
+
+Reviewed `ac7bfe92..f11de05d` on `strike/p46`. **Round-6 HIGH is only partially closed: three alias-related HIGH cases remain.** No Cargo commands or Rust tests were run.
+
+1. **HIGH — Case aliases still receive separate locks.**  
+   [auth_state_key](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:407) preserves the filename verbatim. On a case-insensitive filesystem, `auth.json` and `AUTH.JSON` address the same destination but produce different `PathBuf` keys. Thus `FUIGO_AUTH_PATH=…/AUTH.JSON` can still race the API-key writer’s `…/auth.json`, restoring stale credentials.
+
+   Read-only filesystem verification confirmed this checkout’s `Cargo.toml` and `CARGO.TOML` have identical device/inode identities while yielding different parent-plus-filename keys. This verifies the filesystem precondition, not an executed auth race.
+
+2. **HIGH — Canonicalization fallback can change locks during a write.**  
+   The comment assumes the parent exists, but [write_store_to](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:219) explicitly creates missing parents.
+
+   Concrete ordering: writer A locks `/tmp/new/auth.json` while `new` is absent, receiving the fallback key; A creates the directory; writer B resolves the same spelling to `/private/tmp/new/auth.json`, gets another lock, and commits newer credentials; A then publishes its older snapshot. Even identical input spellings can bypass serialization. `/tmp → /private/tmp` was verified on this host.
+
+   The identity must remain stable across parent creation and canonicalization failures; silently switching between fallback and canonical keys is insufficient.
+
+3. **HIGH — A symlinked `auth.json` still matters under the disk-full fallback.**  
+   Normal [atomic writing](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:288) replaces the symlink itself, leaving its target unchanged. Separate destination locks therefore make sense for that path.
+
+   However, [the `StorageFull` branch](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:195) writes in place. [open_secure_file](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell-base/src/util/secure_file.rs:43) follows symlinks and truncates the target. An alias writer can read v1, a target writer commit v2 under another lock, and the alias’s fallback overwrite the target with v1. Rename behavior does **not** eliminate this supported fallback case.
+
+The requested ordinary-path cases are sound by inspection:
+
+| Case | Assessment |
+|---|---|
+| Symlinked directory | Same lock when the parent resolves successfully. |
+| `.` | Same lock. |
+| `..` | Same lock when the traversed directories exist; parent canonicalization resolves it. |
+| Relative `FUIGO_AUTH_PATH` | Same lock as its absolute spelling, assuming unchanged process cwd and successful parent resolution. |
+| Nonexistent `auth.json` | Same lock when its parent exists. |
+| Symlinked file itself | Separate locks; normal rename separates destinations, but the fallback remains unsafe as above. |
+
+Rust’s documented behavior supports this distinction: [`absolute`](https://doc.rust-lang.org/std/path/fn.absolute.html) retains `..` on POSIX, while [`canonicalize`](https://doc.rust-lang.org/std/fs/fn.canonicalize.html) resolves symlinks and requires an existing path.
+
+The new unit test covers directory symlinks, `.`, an absent leaf, and independent files. It does not cover the three remaining failures, relative paths, or `..`.
+
+Canonicalization adds synchronous filesystem work on each mutation-lock acquisition, including nested acquisitions. Cached credential reads do not take this path. No measured performance regression establishes another HIGH; latency remains unmeasured.
+
+Across the remaining diff, I found no additional BLOCKER/HIGH or new lock-order cycle. Production smoke-check budgets remain 100 ms. The previously deferred cross-process writer issue remains outside this packet. `git diff --check` passed; files were unchanged.
+
+VERDICT: REQUEST CHANGES — round-6 finding partially closed; three in-scope HIGH alias/lock-identity cases remain.
+
+===== Astra (gpt-6-astra via codex exec --sandbox read-only) round 8 — raw transcript sha256 77977150eec2a6843dc4a84532bdf61c8cbfb9691981da7a4bbb02f1f7a4ce6b =====
+
+Reviewed `ac7bfe92..5a4410ed` on `strike/p46`. No in-scope BLOCKER/HIGH found.
+
+- **Round-7 HIGHs closed:** [storage.rs:381](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-shell/src/auth/storage.rs:381) uses one static process-wide `ReentrantMutex`. Case-folding, parent creation and symlinked `StorageFull` writes cannot select different locks. All lock acquisitions are parameterless; the identity resolver is gone.
+- **Own-process reruns are correct:** the pinned Tokio macro executes the test body through `Runtime::block_on` on the calling libtest thread, preserving its test name. The [helper](/Volumes/Mando/WaylandBots/Fuigo/wt-p46/crates/codegen/fuigo-test-support/src/env.rs:162) selects that exact test, prevents recursion, and checks both child success and its execution marker. Four Tokio workers remain available inside each child.
+- **Serialization remains sound:** reviewed production paths preserve flock → state lock → memory-lock ordering, with no state guard crossing an `.await`. Enrichment checks disk and memory before writing under the same guard.
+- **Remaining diff:** production smoke-check budgets remain 100 ms; verdict tests retain their assertions. MCP request matching retains main-turn filtering, parent exclusion and child-tool assertions.
+
+Minor comment mismatch: the clear-from-memory test parks at `BeforeMerge`, **before** acquiring locks; only the rotation test parks while holding them. This does not affect correctness.
+
+`git diff --check` passed. Source-only audit; no cargo or runtime tests run. Cross-process API-key flock work remains excluded.
+
+VERDICT: PASS — round-7 HIGHs closed; no BLOCKER/HIGH remains in scope.
+

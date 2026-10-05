@@ -19,6 +19,7 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 fuigo-config = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
@@ -66,3 +67,6 @@ regex = { workspace = true }
 [[example]]
 name = "sandbox_smoke_test"
 required-features = ["enforce"]
+
+[lints]
+workspace = true

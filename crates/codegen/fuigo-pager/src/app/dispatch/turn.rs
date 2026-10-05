@@ -640,6 +640,7 @@ pub(crate) fn reconcile_overdue_turn_ends(app: &mut AppView) -> Option<Vec<Effec
                 cancel_trigger: pending.cancel_trigger.as_deref(),
                 cancellation_category: pending.cancellation_category.as_deref(),
                 error_kind: pending.error_kind,
+                verdicts: pending.verdicts.as_ref(),
                 error_banner_present: !was_cancelling
                     && crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback),
             },

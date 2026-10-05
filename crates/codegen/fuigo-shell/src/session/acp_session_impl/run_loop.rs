@@ -26,6 +26,27 @@ mod yolo_toggle_report_tests {
 /// Best-effort removal of this session's scratch staging on teardown.
 /// A no-op in builds without a scratch producer.
 fn cleanup_session_scratch(_session: &SessionActor) {}
+
+/// How long after session start the first dream check runs: 30 s, or `FUIGO_MEMORY_DREAM_STARTUP_SECS` when it holds a
+/// whole number of seconds (a test seam: it lets a test see the startup dream without waiting half a minute).
+pub(super) fn startup_dream_delay(env: Option<&str>) -> std::time::Duration {
+    std::time::Duration::from_secs(env.and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(30))
+}
+
+#[cfg(test)]
+mod startup_dream_delay_tests {
+    use super::startup_dream_delay;
+    use std::time::Duration;
+
+    #[test]
+    fn defaults_to_thirty_seconds_and_accepts_whole_seconds() {
+        assert_eq!(startup_dream_delay(None), Duration::from_secs(30));
+        assert_eq!(startup_dream_delay(Some("")), Duration::from_secs(30));
+        assert_eq!(startup_dream_delay(Some("soon")), Duration::from_secs(30));
+        assert_eq!(startup_dream_delay(Some("2")), Duration::from_secs(2));
+        assert_eq!(startup_dream_delay(Some(" 5 ")), Duration::from_secs(5));
+    }
+}
 /// Bound on joining a cancelled SessionStart hook task at session end.
 const DEFERRED_START_CANCEL_JOIN: std::time::Duration = std::time::Duration::from_millis(500);
 /// The SessionStart hook runs on its own local task so `session/new` and the first prompt do not
@@ -81,7 +102,9 @@ pub(super) async fn fire_session_end_hooks(
             tool_call_count: None,
         },
     );
-    if let Some(registry) = session.hook_registry.borrow().clone() {
+    // Bind the registry clone first so the `RefCell` borrow ends before the awaits below.
+    let registry = session.hook_registry.borrow().clone();
+    if let Some(registry) = registry {
         let _dispatch = session_end::timed_child(timer, Phase::HooksDispatch, span.span());
         let ctx = session.hook_run_ctx();
         let results = fuigo_hooks::dispatcher::dispatch_non_blocking(
@@ -92,7 +115,7 @@ pub(super) async fn fire_session_end_hooks(
         )
         .await;
         session
-            .send_hook_execution("session_end", None, None, &results)
+            .send_hook_execution("session_end", None, None, None, &results)
             .await;
     }
     let _stop = session_end::timed_child(timer, Phase::HooksStop, span.span());
@@ -325,6 +348,8 @@ pub(super) async fn run_session(
     let mut turn_end_queue = super::turn_end_hooks::TurnEndQueue::spawn(session.clone());
     tracing::debug!("fs_notify_config: {:?}", fs_notify_config);
     let mut replay_buffer = ReplayBuffer::new(session.buffering_settings.clone());
+    // P148: the config notices this session was sent, so a reload's `NotifyConfigNoticeIfNew` does not repeat one.
+    let mut told_config_notices: std::collections::HashSet<String> = std::collections::HashSet::new();
     let event_tx_for_flush_timer = session.event_tx.clone();
     let buffering_flush_interval = replay_buffer.max_wait_duration_ms();
     if let Some(buffering_flush_interval) = buffering_flush_interval {
@@ -467,7 +492,7 @@ pub(super) async fn run_session(
     tokio::pin!(idle_flush_sleep);
     let mut startup_dream_pending = session.memory.dream_config.enabled;
     let dream_check_sleep = tokio::time::sleep(if startup_dream_pending {
-        std::time::Duration::from_secs(30)
+        startup_dream_delay(std::env::var("FUIGO_MEMORY_DREAM_STARTUP_SECS").ok().as_deref())
     } else { std::time::Duration::MAX });
     // Dropping the actor loop aborts its dream task, releasing the OS guard and HTTP future.
     struct DreamTask(Option<tokio::task::JoinHandle<()>>);
@@ -841,27 +866,27 @@ pub(super) async fn run_session(
                             let _ = responds_to.send(info);
                         }
                         SessionCommand::BackgroundForegroundCommand { tool_call_id, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_handle()
                                 .background_foreground_command(&tool_call_id)
                                 .await;
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::KillBackgroundTask { task_id, source, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_handle()
                                 .kill_background_task(&task_id, source)
                                 .await
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::DeleteScheduledTask { task_id, respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_handle()
                                 .delete_scheduled_task(&task_id)
                                 .await
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::ListTasks { respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
+                            let result = session.tool_bridge_handle()
                                 .list_tasks()
                                 .await;
                             let _ = respond_to.send(result);
@@ -1134,7 +1159,7 @@ pub(super) async fn run_session(
                             // Reuses the same path as `/hooks reload`; subagents inherit via the parent
                             // Run INLINE on the serialized command loop (not a spawned task) like `ReloadPlugins`
                             // `reload_hooks_impl` mutates `hook_registry`
-                            // The file-header `await_holding_refcell_ref` allow assumes no concurrent mutation; spawning would race turn tasks
+                            // Spawning would race turn tasks; inline on the loop it is serialized with every other command
                             if !session.startup_hints.is_subagent {
                                 let _ = session.reload_hooks_impl().await;
                             }
@@ -1312,6 +1337,36 @@ pub(super) async fn run_session(
                                     request_id,
                                 });
                         }
+                        SessionCommand::NoteInterruptedTurn { turn } => {
+                            session.push_system_reminder(&turn.model_reminder());
+                            tracing::info!(
+                                trace_turn = ?turn.trace_turn,
+                                prompt_id = %turn.prompt_id,
+                                "Injected interrupted-turn reminder for the model"
+                            );
+                        }
+                        SessionCommand::NotifyHistoryRepaired { notice } => {
+                            session
+                                .send_fuigo_notification(FuigoSessionUpdate::HistoryRepaired {
+                                    message: notice,
+                                })
+                                .await;
+                        }
+                        SessionCommand::NotifyConfigNotice { notice } => {
+                            // Not persisted: each session start announces what is refused now, so a replayed
+                            // transcript never carries (and re-announces) a stale copy.
+                            told_config_notices.insert(notice.clone());
+                            session.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                                message: notice,
+                            });
+                        }
+                        SessionCommand::NotifyConfigNoticeIfNew { notice } => {
+                            if told_config_notices.insert(notice.clone()) {
+                                session.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice {
+                                    message: notice,
+                                });
+                            }
+                        }
                         SessionCommand::CopyFile { respond_to } => {
                             // Flush the actor-owned replay buffer first
                             // Buffered notifications must reach updates.jsonl before the persistence task snapshots the session directory
@@ -1375,6 +1430,10 @@ pub(super) async fn run_session(
                         }
                         SessionCommand::UpdateAttachPolicy { startup_hints } => {
                             session.apply_attach_policy(&startup_hints);
+                            session.sync_ask_user_question_attachment().await;
+                        }
+                        SessionCommand::SetClientMcpSeed { seed } => {
+                            session.set_client_mcp_seed(seed);
                         }
                         SessionCommand::UpdateMcpServers { mcp_servers, respond_to } => {
                             if session.startup_hints.is_subagent {
@@ -1882,6 +1941,12 @@ pub(super) async fn run_session(
                                 tools: Some(tool_names),
                             });
                         }
+                        SessionCommand::GetLiveSamplerConfig { respond_to } => {
+                            let s = session.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = respond_to.send(s.reconstruct_full_config().await);
+                            });
+                        }
                         SessionCommand::ReloadSkills => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
@@ -1921,7 +1986,7 @@ pub(super) async fn run_session(
                                         if cancel.is_cancelled() {
                                             return;
                                         }
-                                        s.send_hook_execution("session_start", None, None, &results)
+                                        s.send_hook_execution("session_start", None, None, None, &results)
                                             .await;
                                     };
                                     tokio::select! {
@@ -2016,8 +2081,23 @@ pub(super) async fn run_session(
                         SessionCommand::RewriteMemoryNote { raw_text, context_summary, respond_to } => {
                             let s = session.clone();
                             tokio::task::spawn_local(async move {
-                                let result = s.handle_rewrite_memory_note(&raw_text, &context_summary).await;
+                                // A rewrite is a memory feature: with memory off (`--no-memory`) it must not send the note to the model
+                                let result = if s.memory.is_enabled() {
+                                    s.handle_rewrite_memory_note(&raw_text, &context_summary)
+                                        .await
+                                        .map_err(crate::acp_error::internal_error)
+                                } else {
+                                    Err(crate::acp_error::invalid_request(
+                                        "memory is not enabled for this session",
+                                    ))
+                                };
                                 let _ = respond_to.send(result);
+                            });
+                        }
+                        SessionCommand::SaveMemoryNote { text, respond_to } => {
+                            let s = session.clone();
+                            tokio::task::spawn_local(async move {
+                                let _ = respond_to.send(s.save_memory_note(&text).await);
                             });
                         }
                         SessionCommand::Interject { text, id, images } => {

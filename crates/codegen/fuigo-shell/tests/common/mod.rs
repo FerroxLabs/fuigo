@@ -1,4 +1,9 @@
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 use fuigo_shell::sampling::{ApiBackend, Client, SamplerConfig};
+
+pub mod session_front;
 
 #[cfg(unix)]
 pub mod leader {
@@ -305,11 +310,31 @@ pub fn block_on<F: std::future::Future>(fut: F) -> F::Output {
         .block_on(fut)
 }
 
+/// The front that keeps a seeded mock reachable as a configured origin; lives for the (single-test) process.
+#[allow(dead_code)]
+static SEEDED_MOCK_FRONT: std::sync::OnceLock<session_front::SessionFront> =
+    std::sync::OnceLock::new();
+
+/// A personal session-auth home whose `[endpoints]` reach a fresh `MockInferenceServer`.
+///
+/// P42/P65: the session token goes only to a configured `https` origin, never to the mock's loopback
+/// `http://` URL, so the endpoints name the configured origin and [`session_front`] forwards it to the mock.
+/// The trust set is installed the way a real boot installs it — by loading the config the home now holds —
+/// before anything can begin a fetch. Call it once per binary, first in the test, before anything builds an
+/// HTTP client or loads TLS roots (both latch the proxy/CA variables the front sets).
 #[allow(dead_code)]
 pub async fn start_seeded_mock(home: &std::path::Path) -> fuigo_test_support::MockInferenceServer {
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .expect("start mock server");
+    // One front per process, routed to this mock for good: a second seeded mock would be unreachable.
+    assert!(
+        SEEDED_MOCK_FRONT
+            .set(session_front::SessionFront::start(&server.url()))
+            .is_ok(),
+        "start_seeded_mock runs once per test binary"
+    );
+    let front = SEEDED_MOCK_FRONT.get().expect("front just set");
     std::fs::write(home.join("agent_id"), "test-agent-id").expect("seed agent_id");
     let scope = fuigo_shell::auth::FuigoComConfig::default().auth_scope();
     let auth = serde_json::json!({
@@ -327,10 +352,21 @@ pub async fn start_seeded_mock(home: &std::path::Path) -> fuigo_test_support::Mo
         home.join("config.toml"),
         format!(
             "[endpoints]\ncli_chat_proxy_base_url = \"{}\"\n",
-            server.url()
+            front.configured_url()
         ),
     )
     .expect("write config.toml");
+    let effective = fuigo_shell::config::load_effective_config().expect("load the seeded config");
+    fuigo_shell::agent::config::Config::new_from_toml_cfg(&effective)
+        .expect("parse the seeded config");
+    assert!(
+        fuigo_shell::util::is_fuigo_api_bearer_url(&format!("{}/models", front.configured_url())),
+        "the seeded config must make the fronted origin a session destination"
+    );
+    assert!(
+        !fuigo_shell::util::is_fuigo_api_bearer_url(&format!("{}/models", server.url())),
+        "the mock's own loopback URL must stay refused (P42)"
+    );
     server
 }
 

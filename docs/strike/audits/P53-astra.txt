@@ -1,0 +1,111 @@
+Astra (gpt-6-astra, codex exec --sandbox read-only) pre-gate audits of packet P53, final message of each round.
+Round briefs and the full transcripts are not kept; the verdicts and findings below are verbatim.
+
+===== ROUND 1 =====
+codex
+P53’s upload guard looks correct in source, but the packet does **not** establish its claimed no-write guarantee.
+
+Audited both commits through `0e5b957e`. No files changed. Runtime tests were not run because this workspace is read-only.
+
+1. **HIGH — Memory trace bypasses the gate, and the detector misses it.**  
+   [main.rs:2029](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager-bin/src/main.rs:2029) unconditionally starts process-memory tracing. [memory_trace.rs:395](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/memory_trace.rs:395) checks `FUIGO_MEMTRACE`, independently of `--no-memory`, and writes under `$FUIGO_HOME/memtrace/`. The predicate at [no_memory_writes_acp.rs:143](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:143) matches neither `memtrace/<timestamp>-<pid>.jsonl` nor its allocator dumps. I checked those exact path shapes against the predicate: both return false. The default sampler interval is also 30 seconds, exceeding either explicit idle window. **These are RSS/allocator diagnostics, not conversational memory**, but your stated acceptance explicitly includes memory trace. That part of the claim is false.
+
+2. **HIGH — The end-to-end test cannot detect regression of this packet’s production fix.**  
+   [no_memory_writes_acp.rs:192](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:192) uses the default sandbox, which sets `FUIGO_TRACE_UPLOAD=false` and disables telemetry uploads at [sandbox.rs:333](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-test-support/src/sandbox.rs:333). The config never enables session registry, and assertions never inspect archive uploads or their manifests. Restoring the old `upload_memory_state` implementation would therefore leave this scenario unaffected. The added unit test checks only the Boolean helper—not its wiring. Add an upload-enabled local control that actually receives `memory.tar.gz`, with the subject recording `memory_disabled` and sending none.
+
+3. **HIGH — `close()` does not exercise the claimed session-end pipeline.**  
+   [no_memory_writes_acp.rs:264](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:264) terminates the child through [process.rs:655](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-test-support/src/process.rs:655). On Unix, the agent signal handler calls [shutdown_and_flush_telemetry:1096](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager-bin/src/main.rs:1096), which exits without sending session shutdown or running memory save. Windows uses hard termination. The control’s existing flush logs satisfy every assertion without a session-end save ever occurring. Explicitly close the ACP session, await completion, and require a distinct session-end artifact in the control.
+
+4. **MEDIUM — Embeddings are disabled in the “every feature on” fixture.**  
+   [HOSTILE_CONFIG:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:45) specifies no embedding model. Resolution leaves it `None`; [embedding.rs:124](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-memory/src/embedding.rs:124) consequently returns no provider. An `index.sqlite` proves indexing, not embedding writes. Moreover, the request detector only considers chat completions. Configure a mock embedding model/response and require control embedding traffic and stored vectors.
+
+5. **MEDIUM — The asserted hot-reload exercise has no config watcher.**  
+   [no_memory_writes_acp.rs:256](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:256) rewrites config and sleeps, but this fixture selects standalone stdio. [run_stdio_agent:230](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/agent/app.rs:230) installs a skills watcher, while the config watcher at [app.rs:1096](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/agent/app.rs:1096) belongs to `run_leader`. Restart tests fresh config resolution; it does not prove hot reload. Use the actual reload-capable entry point and assert that reload occurred.
+
+6. **MEDIUM — Background timing is neither demonstrated nor deterministic.**  
+   Despite `check_interval_secs=1`, the first dream timer waits **30 seconds** at [run_loop.rs:468](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/acp_session_impl/run_loop.rs:468). The control’s dream-request assertion can be satisfied entirely by explicit `/dream`. Separately, the one-second idle flush can overlap the single extension or compaction attempt; [memory_dream.rs:559](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/acp_session_impl/memory_dream.rs:559) legitimately skips competing flushes. Their results are discarded, yet each trigger’s log is mandatory. This creates load-dependent failures. Synchronize on completion and distinguish automatic from explicit triggers.
+
+7. **MEDIUM — Path assertions break on Windows.**  
+   [no_memory_writes_acp.rs:87](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:87) stores native path separators, but lines 308, 353, 361 and 372 require forward-slash strings such as `memory/`, `/index.sqlite`, and `/sessions/`. Windows control assertions fail despite valid writes. The documentation exclusion also misses backslash paths. Normalize separators or inspect path components.
+
+8. **MEDIUM — Snapshot equality proves final-state equality, not absence of writes.**  
+   [no_memory_writes_acp.rs:83](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:83) silently ignores directory/metadata errors, substitutes zero for read failures, and records no directory timestamps. A file created and removed between snapshots is invisible. This cannot support “creates, modifies and deletes nothing.” Fail closed on inspection errors and either observe filesystem operations or narrow the claim to persistent final-state changes.
+
+9. **LOW — The tested binary can be stale.**  
+   The default resolver returns an existing binary without rebuilding at [env.rs:468](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-test-support/src/env.rs:468). Neither this test nor its output establishes that the child contains these two commits. Qualification needs an explicitly built candidate and recorded binary identity.
+
+The core storage chain checks out in source: initialization/GC, indexing, flush, dream and session-end persistence require storage; `/memory on` cannot reconstruct it without backend parameters. The new upload guard returns before archive construction. I found no additional conversational-memory bypass beyond the declared exclusions; those exclusions still prevent an unrestricted “all memory writes” claim.
+
+VERDICT: DO-NOT-LAND.
+
+===== ROUND 2 =====
+codex
+- **HIGH — Known deferred bypass remains:** [handle_request.rs:1020](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/agent/subagent/handle_request.rs:1020) adds agent-memory write tools and injects `MEMORY.md` without checking the parent’s memory setting. Thus `--no-memory` still cannot support an unconditional “no memory writes” claim across subagents. This remains a coordinator follow-up outside the agreed P53 fixes.
+
+- **MEDIUM — Dream-write positive control can pass without consolidation succeeding:** [no_memory_writes_acp.rs:445](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:445) accepts any changed `MEMORY.md`, but `ensure_initialized()` already creates the workspace template. The dream-request assertion proves only that inference started; the sentinel assertion can be satisfied by flush logs. A failed dream write or missing consolidation marker therefore still passes. Assert sentinel content in the workspace `MEMORY.md` and the committed consolidation marker.
+
+- **MEDIUM — Lifecycle failures can masquerade as successful no-write coverage:** [no_memory_writes_acp.rs:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:320) discards compaction errors, as well as subsequent prompt and close errors. The control’s `pre_compaction` log does **not** establish successful compaction: [compaction.rs:578](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/compaction.rs:578) launches that flush before `run_compact_inner` can fail. A subject-specific compaction or post-resume failure can also pass. Require successful non-memory lifecycle operations on both sides; permit only explicitly expected memory-disabled responses.
+
+- **MEDIUM — Extension calls have no test deadline:** [no_memory_writes_acp.rs:305](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:305) and subsequent extension calls await a helper that supplies no timeout ([acp_client.rs:410](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-test-support/src/acp_client.rs:410)). A stalled handler can hang this gate indefinitely. Wrap these calls in bounded, scaled timeouts with diagnostics.
+
+- **LOW — The accepted upload-wiring gap is cheaply coverable:** [agent_ops.rs:3831](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:3831). Reuse the fixture in [tests.rs:534](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs:534): it already obtains actual trace contexts using a direct-upload configuration and a preinstalled temporary queue. Call `get_trace_context` with memory disabled and enabled, assert `Some(ctx)` and `ctx.memory_enabled == false/true`. Registry authentication is unnecessary to test this assignment; no archive upload is required.
+
+Read-only source review of `16a5ce48`; no fresh compilation or runtime test execution.
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+===== ROUND 3 =====
+codex
+- **MEDIUM — [main.rs:2009](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager-bin/src/main.rs:2009): `--no-memory` still permits memtrace writes.** `FUIGO_MEMTRACE=1|true|on` overrides the flag and starts the file-writing sampler. An inherited debugging setting therefore defeats the stated no-write guarantee. The hostile harness leaves this variable unset. Make `--no-memory` authoritative and test it against an enabled memtrace environment.
+
+- **MEDIUM — [no_memory_writes_acp.rs:643](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:643): the subject can pass without running its child.** `chat.len() >= 2` also matches the parent’s spawn request followed by its continuation after a tool error. `spawn.is_satisfied()` proves the mock delivered the tool call, not that spawning succeeded. The control’s canary assertion does not establish subject execution. Require a child-specific request marker on both sides. The test also never inspects the child’s tool inventory, so its claim about withholding additional write tools is unverified.
+
+- **LOW — [no_memory_writes_acp.rs:358](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:358): detached-work completion still depends on fixed sleeps.** The unscaled three-second settlement and eight-second idle window can expire before background work completes on a loaded host; process shutdown then truncates the observation. Positive controls prevent a blind green but can fail intermittently. Wait for control completion evidence within a scaled deadline.
+
+Source review only; the read-only environment prevented runtime verification.
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+===== ROUND 4 =====
+codex
+VERDICT: LAND
+
+
+Follow-up rounds (coordinator's no-deferments request), same method: codex exec --model gpt-6-astra --sandbox read-only < /dev/null.
+
+===== ROUND 5: follow-up commit 6190e127 (rewrite refusal, precedence, pager note guard v1, startup-dream seam). The first attempt at this round was a misread (it summarised the receipt); the real result follows. =====
+codex
+- **HIGH — Memory-off still permits note writes:** [notes.rs:464](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/notes.rs:464). A skill named `flush` can be advertised when the disabled builtin is omitted: the catalog reserves only enabled builtins. Both guards therefore permit saving under `--no-memory`. The rewrite refusal falls back to raw text, and `SaveMemoryNote` writes unconditionally. Empty command lists also bypass both guards. Use authoritative memory state and enforce it at save time.
+
+- **MEDIUM — Enabled memory can be incorrectly rejected:** [notes.rs:462](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/notes.rs:462). `/flush` requires both enabled memory **and** registered `memory_search`/`memory_get` tools ([acp_session.rs:1363](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/acp_session.rs:1363)). Its absence does not establish memory-off; this rejects valid notes and displays an incorrect explanation.
+
+VERDICT: DO-NOT-LAND
+
+===== ROUND 6: follow-up with the memoryEnabled meta signal (a679c1da, 6be02bca) =====
+codex
+- **HIGH — Cached permission still allows saving while memory is off:** [notes.rs:577](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/notes.rs:577). Open a note modal while memory is on, disconnect that pager, disable memory through another attached client, then confirm the modal. The [disconnect handler:2978](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/event_loop.rs:2978) leaves `Some(true)` intact. Confirmation emits `SaveMemoryNote`, whose [executor:3706](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/effects/mod.rs:3706) writes locally without consulting the shell. Invalidate permission on disconnect; enforce the current session state at the actual save boundary.
+
+- **MEDIUM — A dropped startup update can lock out valid notes:** [effects/mod.rs:3974](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/effects/mod.rs:3974). If the user switches away before a new session finishes starting, its initial advertisement can miss routing: the pre-binding fallback accepts only the active unbound view. The post-start `RefreshAvailableCommands` recovers only commands; `ListCommandsResponse` does not carry `memoryEnabled`. The tracker therefore remains `None`, refusing notes in a memory-on session until another advertisement happens. Carry the authoritative state through the session-scoped refresh and apply it to the tracker.
+
+Source review only; runtime tests were not rerun in this read-only workspace.
+
+VERDICT: DO-NOT-LAND
+
+===== ROUND 7: shell-owned note write fuigo/memory/save_note (ab770aaf) =====
+codex
+- **HIGH — Write-time race remains:** [memory_dream.rs:867](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/acp_session_impl/memory_dream.rs:867). `storage()` clones the handle before `spawn_blocking`; `/memory off` can subsequently remove session storage while that write remains queued or blocked on `.memory-write.lock`. Releasing the lock then appends the note after memory was disabled. [run_loop.rs:2063](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/src/session/acp_session_impl/run_loop.rs:2063) detaches the save, so command-loop serialization does not protect it. Synchronize toggles with in-flight writes and add a lock-held overlap regression. The e2e’s sequential awaits at [no_memory_writes_acp.rs:885](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-shell/tests/no_memory_writes_acp.rs:885) cannot detect this race.
+
+- **MEDIUM — Stale “off” cache still overrides the shell:** [notes.rs:492](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/notes.rs:492), also [notes.rs:578](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/notes.rs:578). If another client enables memory while this pager retains `Some(false)`, both submission and modal save refuse locally without consulting the shell. A delayed or missed advertisement still rejects valid notes in a memory-on session. The cache remains an authoritative refusal gate; refresh its state before rejecting, or let the shell decide.
+
+VERDICT: DO-NOT-LAND
+
+===== ROUND 8: atomic write + cache never gates (4fdfa3cc) =====
+codex
+- **LOW — [prompt.rs:4960](/Volumes/Mando/WaylandBots/Fuigo/wt-p53/crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs:4960):** The stale-cache test replaces the open modal with `SendRememberNote("again")` after changing the cache. It therefore does not cover saving the original modal across a cache change. Open a fresh modal before each transition, change the cache, then save directly and assert the original text.
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+===== ROUND 9: final: last test-only commit =====
+codex
+VERDICT: LAND
+

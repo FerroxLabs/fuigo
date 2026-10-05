@@ -20,7 +20,7 @@ use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_l
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
-use crate::theme::{Theme, ThemeKind};
+use crate::theme::Theme;
 use crate::util::format_duration;
 use chrono::{DateTime, Utc};
 
@@ -748,7 +748,7 @@ pub struct TasksPane {
     prev_running_count: usize,
     opened_by_auto: bool,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
-    last_theme: ThemeKind,
+    last_theme: crate::theme::cache::RenderKey,
     workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
 }
 
@@ -844,7 +844,7 @@ impl TasksPane {
             prev_running_count: 0,
             opened_by_auto: false,
             highlight_cache: HashMap::new(),
-            last_theme: Theme::current_kind(),
+            last_theme: crate::theme::cache::render_key(),
             workflow_runs: Vec::new(),
         }
     }
@@ -861,7 +861,7 @@ impl TasksPane {
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
     ) {
         // Detect theme switch and refresh caches.
-        let current_theme = Theme::current_kind();
+        let current_theme = crate::theme::cache::render_key();
         if current_theme != self.last_theme {
             self.last_theme = current_theme;
             self.list_style = ListPaneStyle {
@@ -2039,6 +2039,7 @@ mod tests {
 
     #[test]
     fn bg_task_styled_prefix_uses_secondary_color() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut task = make_bg_task("t3a", "cargo test --release", BgTaskStatus::Running);
         task.description = Some("Run release tests".into());
         let mut cache = HashMap::new();
@@ -2057,6 +2058,7 @@ mod tests {
 
     #[test]
     fn monitor_task_styled_with_monitor_tag() {
+        let _theme = crate::theme::cache::pin_theme();
         // Monitors render a blue "Monitor" tag and neutral description, mirroring scheduled /loop rows, not the bash-highlighted command
         let mut task = make_bg_task("mon1", "python -u counter.py", BgTaskStatus::Running);
         task.is_monitor = true;
@@ -2152,6 +2154,39 @@ mod tests {
 
     /// Render `pane` to a fresh buffer of the given size and return the concatenated character content for every row.
     /// Lets tests do a `joined.contains("(N)")`-style assertion without depending on cell styling details.
+    /// Same contract as the queue pane: `sync` refreshes the style and highlight cache when the lock toggles.
+    #[test]
+    fn sync_refreshes_caches_when_the_terminal_native_lock_toggles() {
+        struct Unlock;
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                crate::theme::cache::set_terminal_native_lock(false);
+            }
+        }
+        let _theme = crate::theme::cache::pin_theme();
+        crate::theme::cache::set_terminal_native_lock(false);
+        let _unlock = Unlock;
+        let mut pane = TasksPane::new();
+        assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+        for locked in [true, false] {
+            pane.list_style.selection_bg = ratatui::style::Color::Rgb(1, 2, 3);
+            pane.highlight_cache
+                .insert("sentinel".to_string(), Vec::new());
+            crate::theme::cache::set_terminal_native_lock(locked);
+            pane.sync(
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                &HashSet::new(),
+                &[],
+            );
+            assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+            assert_ne!(pane.list_style.selection_bg, ratatui::style::Color::Rgb(1, 2, 3), "lock={locked}: list style not refreshed");
+            assert!(pane.highlight_cache.is_empty(), "lock={locked}: highlight cache not cleared");
+        }
+    }
+
     fn render_pane_to_strings(
         pane: &mut TasksPane,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
@@ -3003,6 +3038,7 @@ mod tests {
 
     #[test]
     fn subagent_activity_suffix_renders_while_running_only() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut info = make_info();
         info.activity_label = Some("Running: cargo build".into());
         let entry = TaskEntry::from_subagent(&info);

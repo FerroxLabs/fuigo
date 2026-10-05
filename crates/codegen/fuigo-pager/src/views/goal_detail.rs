@@ -1317,24 +1317,28 @@ mod tests {
 
     #[test]
     fn budget_color_green() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         assert_eq!(budget_color(0.3, &theme), theme.accent_success);
     }
 
     #[test]
     fn budget_color_yellow() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         assert_eq!(budget_color(0.6, &theme), theme.warning);
     }
 
     #[test]
     fn budget_color_red() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         assert_eq!(budget_color(0.9, &theme), theme.accent_error);
     }
 
     #[test]
     fn budget_color_boundary_at_50_pct() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         // Exactly 50% is yellow (green below 50%, yellow 50-80%)
         assert_eq!(budget_color(0.50, &theme), theme.warning);
@@ -1578,6 +1582,7 @@ mod tests {
 
     #[test]
     fn status_label_variants() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let mut goal = make_goal();
 

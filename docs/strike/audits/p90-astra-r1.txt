@@ -1,0 +1,62 @@
+Astra round 1 (codex 0.160.0 project-local, model gpt-6-astra, --sandbox read-only, run from the Mac worktree), audited fc3ccb94..75ea29ef.
+Brief: docs/strike/audits/p90-astra-brief-r1.txt. Raw transcript (9414 lines) not committed; sha256 915130c9e4910155d5b9940dd2e84143a8a0c7c81bb5abc9c78e0d51739acf0f; copy at hetzner-dsm:/root/fuigo-builds/p90-audits/p90-astra-r1.raw.txt
+
+Found **three HIGH, two MEDIUM, and one LOW defect** in `fc3ccb94..75ea29ef`. Read-only audit completed; no builds, Cargo commands, tests, or file changes. The worktree remains clean.
+
+1. **HIGH — Explicit helpers without credentials can use a paid route or the subscription instead.**  
+   [agent/config.rs:5622](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5622), [agent/config.rs:5786](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5786)
+
+   Configure a helper at `http://127.0.0.1:11434/v1` without an API key. The resolver discards that valid unauthenticated route because it requires `api_key` or `subscription`. With a retained `FUIGO_API_KEY`, session credential, or deployment key, it constructs a gateway route instead. The new `Explicit` branch preserves that substituted route, potentially sending the request with a paid credential the user did not select for this helper. Without fallback credentials, resolution returns `None`, and the callers substitute the active subscription.
+
+   **Tests miss it:** `subscription_explicit_local_helper_keeps_its_route_and_a_default_one_does_not` supplies `fake-local-key`, bypassing the failure. Explicit routing must govern resolution and failure handling, not just the final stamp.
+
+2. **HIGH — Image-helper reload mixes an old model with new provenance, sending images to the subscription.**  
+   [prompt_build.rs:962](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/prompt_build.rs:962), [session/acp_session.rs:1206](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session.rs:1206)
+
+   Start a Cursor subscription session with explicit local helper A. Change `[models].image_description` to another resolvable local helper B and reload, keeping both catalog entries. The actor retains A’s slug from session creation, while `models_manager.explicit_helper_models()` now returns B. Comparing A against B produces `Default`; the next uncached image transcription uses the active subscription.
+
+   **Tests miss it:** they exercise resolver/stamping functions directly, without an existing actor and config reload. Model selection and provenance must come from the same configuration snapshot.
+
+3. **HIGH — Remote campaign settings are incorrectly classified as explicit user choices.**  
+   [config/mod.rs:602](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/config/mod.rs:602), [util/config/campaigns.rs:280](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/util/config/campaigns.rs:280)
+
+   A remote settings campaign can set `models.image_description` or `models.session_summary`. Campaign patches are merged into effective TOML before `ModelOverrideConfig::resolve` receives it. That resolver labels every helper value in this table as explicit. Consequently, a remote campaign selecting a paid catalog helper bypasses subscription-default replacement, even when the user never configured that helper.
+
+   **Tests miss it:** `model_overrides_record_which_helpers_the_user_chose` checks direct remote fields, but never passes campaign-merged effective configuration. Preserve source provenance through campaign merging.
+
+4. **MEDIUM — A default helper already using subscription auth is exempt from replacement.**  
+   [agent/config.rs:5748](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5748)
+
+   During a ChatGPT session, let remote settings select a catalog helper configured for xAI subscription auth. Its choice is correctly `Default`, but `cfg.subscription.is_none()` is false, so it keeps the xAI route and resolver. It either uses that other subscription or fails because its credentials are unavailable, instead of using the active ChatGPT configuration. Another account on the same provider has the same problem.
+
+   **Tests miss it:** default-helper fixtures all start with `subscription: None`. This is a retained pre-existing exception that contradicts the stated F6 claim.
+
+5. **MEDIUM — Malformed HTTP requests can still complete or abort login.**  
+   [subscription/flow.rs:431](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/auth/subscription/flow.rs:431)
+
+   The parser checks only the first two whitespace-separated request-line tokens. It never validates the HTTP version, trailing tokens, or header syntax. For example, `GET /callback?state=S&code=x\r\n\r\n`, where `S` is the attempt’s state, lacks an HTTP version but starts exchange. With `error=access_denied` instead, it aborts login. F2 requires malformed requests to be ignored.
+
+   **Tests miss it:** malformed fixtures omit a usable target/state; none combines the correct state with a malformed request line or headers.
+
+6. **LOW — Unfinished requests are dropped without the promised HTTP error response.**  
+   [subscription/flow.rs:428](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/auth/subscription/flow.rs:428)
+
+   Send a partial request and half-close the write side while keeping the read side open. EOF returns `Ignored` immediately without writing 400. Read timeout and size-limit failures take the same response-free branch. Login continues correctly, but the claimed response behavior is absent.
+
+   **The test explicitly permits this:** [subscription/tests.rs:191](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/auth/subscription/tests.rs:191) accepts either an empty response or HTTP 400.
+
+The test-reversion assessment below is from source inspection, not executed mutation testing.
+
+| Area | Production path exercised | Reversion sensitivity |
+|---|---|---|
+| F2 | Real callback sockets, production finish/exchange/storage path, mock token endpoint | Wrong-state recovery, removal of the request cap, and concurrent reads have meaningful regression assertions. Missing malformed-state combinations and unfinished-response enforcement. |
+| F3 | Production bind function, real sockets, injected IPv6 bind errors | Detects IPv6 omission on capable hosts and incorrect handling of unavailable/fatal IPv6 errors. Covers xAI remaining IPv4-only. |
+| F5 | Production store deletion and refresh; actual CLI subprocess | Detects omitted CLI deletion, orphan cleanup, and lock removal. The stash test detects omission of the post-lock clear. The logout/refresh race itself runs within one process; existing separate-process tests cover refresh locking. |
+| F6 | Production resolution/stamping functions and provenance merge helpers | Detects restoration of unconditional replacement for a **keyed** explicit helper. Does not establish caller/reload correctness, credential-free routing, campaign provenance, or defaults already using subscriptions. The ordinary default-subscription test also passes the pre-P90 behavior. |
+
+**F3 and F5 have no additional defects identified in the audited paths.** Their source supports the requested bind policy, refresh-lock serialization, bounded subscription-file deletion, and local-only logout wording. I found no direct subscription-bearer forwarding to another endpoint: the explicit path does not copy the subscription resolver, and subscription dispatch checks the recipient before resolving credentials. The routing and paid-credential failures above remain landing blockers.
+
+DO-NOT-LAND
+
+
+exit=0

@@ -77,6 +77,9 @@ pub enum ConvError {
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+    /// P47: the destination may not receive the session token, so the request was not made.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for ConvError {
@@ -136,32 +139,36 @@ impl ConversationsClient {
         Ok(auth)
     }
 
+    /// P47: the session token goes only where the service-endpoint trust class admits `url` (with the configured
+    /// conversations base); otherwise the request is not made.
     fn apply_auth_headers(
         &self,
         builder: reqwest::RequestBuilder,
+        url: &str,
         auth: &FuigoAuth,
-    ) -> reqwest::RequestBuilder {
-        let mut builder = builder
+    ) -> Result<reqwest::RequestBuilder, ConvError> {
+        crate::auth::session_delivery::service_session_gate(
+            auth,
+            url,
+            self.base_url.as_deref(),
+            "conversations",
+        )
+        .map_err(|refused| ConvError::SessionDestinationRefused(refused.to_string()))?;
+        // P43: identity only to a FluxRouter-operated destination.
+        let identity = super::account_identity_headers(self.base_url.as_deref().unwrap_or_default(), &auth.user_id, auth.email.as_deref());
+        let builder = builder
             .header("Authorization", format!("Bearer {}", auth.key))
             .header(
                 "X-XAI-Token-Auth",
                 self.auth.fuigo_com_config().token_header.clone(),
             )
-            .header("x-userid", &auth.user_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
+            .headers(identity)
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
             )
             .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(email) = &auth.email {
-            builder = builder.header("x-email", email);
-        }
-        fuigo_file_utils::trace_context::inject_trace_context_into_request(builder)
+        Ok(fuigo_file_utils::trace_context::inject_trace_context_into_request(builder))
     }
 
     pub async fn list_conversations(
@@ -183,7 +190,7 @@ impl ConversationsClient {
             query.push(("workspaceId", workspace.to_owned()));
         }
 
-        let builder = self.apply_auth_headers(self.http.get(&url).query(&query), &auth);
+        let builder = self.apply_auth_headers(self.http.get(&url).query(&query), &url, &auth)?;
 
         let response = builder.send_checked().await?;
         let status = response.status();
@@ -229,7 +236,7 @@ impl ConversationsClient {
             urlencoding::encode(conversation_id)
         );
         let builder = self
-            .apply_auth_headers(self.http.put(&url), &auth)
+            .apply_auth_headers(self.http.put(&url), &url, &auth)?
             .json(body);
 
         let response = builder.send_checked().await?;
@@ -254,7 +261,7 @@ impl ConversationsClient {
             base,
             urlencoding::encode(conversation_id)
         );
-        let builder = self.apply_auth_headers(self.http.delete(&url), &auth);
+        let builder = self.apply_auth_headers(self.http.delete(&url), &url, &auth)?;
 
         let response = builder.send_checked().await?;
         let status = response.status();
@@ -270,6 +277,25 @@ impl ConversationsClient {
 
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: a conversations host that is not FluxRouter-operated gets no identity.
+    #[tokio::test(flavor = "current_thread")]
+    async fn conversations_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::conversations_client::tests::conversations_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+            let base = front.front_service(&base);
+        let mut client = ConversationsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        client.base_url = Some(base);
+        let _ = client.list_conversations(&ConvQuery { page_size: 1, ..ConvQuery::default() }).await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "conversations");
+    }
     use super::*;
 
     #[test]

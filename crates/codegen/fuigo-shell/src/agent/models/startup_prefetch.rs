@@ -186,6 +186,72 @@ pub fn wait_settings(timeout: Duration) -> Option<RemoteSettings> {
     finished.0.state.lock().unwrap().settings.clone()
 }
 
+/// Test-only: which thread, if any, currently owns the process-wide fetch registry.
+///
+/// `INFLIGHT` has one slot and `accept_within` consumes it. In a real boot that is
+/// correct -- one process, one boot, one prefetch. In the `fuigo-shell` lib test
+/// binary it is not: `MvpAgent::new` -> `crate::agent::init::bootstrap` ->
+/// `ensure_remote_settings_side_effects` -> `accept_within` runs inside 57 tests,
+/// **36 of which are in no serial group at all**, and `Finished::take` does
+/// `mem::take(state)` -- which sets `finished: false` on the very cell a registry
+/// test registered a microsecond earlier. The victim's own `accept_within` then
+/// sees an unfinished cell, marks it abandoned, and returns
+/// `(Consumed(None), Some(DegradedStartCause::DeadlineMissed))`. That is exactly
+/// how `no_auth_boot_is_not_a_degraded_start` fails in a full run and passes alone,
+/// and how `wait_settings_leaves_the_fetch_for_accept` reads `None` where it had
+/// just injected `Some(true)`.
+///
+/// No `serial_test` group can express the exclusion, because the consumers are
+/// reached through production boot code from tests that have nothing to do with the
+/// prefetch. So a registry test declares ownership for its duration, and
+/// `accept_within` on any other thread leaves the entry alone while it holds.
+///
+/// `#[cfg(test)]`: this seam is in no shipped binary. It is the mirror of the
+/// `cfg!(test)` guard `begin_inner` already carries -- that one stops a test process
+/// from STARTING a fetch, this one stops an unrelated test from CONSUMING one.
+#[cfg(test)]
+static REGISTRY_OWNER: Mutex<Option<std::thread::ThreadId>> = Mutex::new(None);
+
+/// Ownership of the fetch registry for this value's lifetime. See `REGISTRY_OWNER`.
+#[cfg(test)]
+pub(crate) struct RegistryOwner;
+
+#[cfg(test)]
+pub(crate) fn own_registry_for_test() -> RegistryOwner {
+    let mut owner = REGISTRY_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Asserting rather than waiting: the tests that take this are serialised against
+    // each other by `#[serial(remote_sig_disarm)]`, so a second owner means that
+    // group no longer covers every registry test and must say so loudly instead of
+    // quietly queueing.
+    assert!(
+        owner.is_none(),
+        "two tests own the startup-prefetch registry at once: the \
+         #[serial(remote_sig_disarm)] group no longer covers every test that \
+         registers a fetch"
+    );
+    *owner = Some(std::thread::current().id());
+    RegistryOwner
+}
+
+#[cfg(test)]
+impl Drop for RegistryOwner {
+    fn drop(&mut self) {
+        *REGISTRY_OWNER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+#[cfg(test)]
+fn registry_owned_by_another_thread() -> bool {
+    REGISTRY_OWNER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_some_and(|id| id != std::thread::current().id())
+}
+
 pub(crate) enum Accept {
     /// A fetch was consumed. The boot's settings budget is spent even when it
     /// carried no settings: an empty fetch must not trigger a second
@@ -199,6 +265,12 @@ pub(crate) enum Accept {
 /// Waits at most `deadline` (the boot's `STARTUP_SETTINGS_WAIT_DEADLINE`): a miss spends the
 /// settings budget and hands the cache commit to the still-running worker.
 pub(crate) fn accept_within(deadline: Duration) -> (Accept, Option<DegradedStartCause>) {
+    // A registry test owns the entry; consuming it here would blank the cell that
+    // test is asserting on. See `REGISTRY_OWNER`. A no-op when unowned.
+    #[cfg(test)]
+    if registry_owned_by_another_thread() {
+        return (Accept::Miss, None);
+    }
     let Some(cell) = INFLIGHT.lock().unwrap().clone() else {
         return (Accept::Miss, None);
     };

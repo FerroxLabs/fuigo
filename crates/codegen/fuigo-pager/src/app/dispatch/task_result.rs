@@ -237,6 +237,51 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
         action: None,
     });
 }
+/// Show a finished `/provider` write where the command was typed: the agent's
+/// scrollback, or the dashboard toast (errors with the `✗` marker), as the
+/// synchronous command used to.
+fn deliver_provider_write_result(
+    app: &mut AppView,
+    report_to: crate::app::actions::ConfigWriteReport,
+    result: Result<String, String>,
+) {
+    use crate::app::actions::ConfigWriteReport;
+    let text = match &result {
+        Ok(m) | Err(m) => m.clone(),
+    };
+    match report_to {
+        ConfigWriteReport::Dashboard if app.dashboard.is_some() => {
+            if let Some(d) = app.dashboard.as_mut() {
+                match result {
+                    Ok(m) => d.error_toast = Some(m),
+                    Err(e) => d.set_error_toast(&e),
+                }
+            }
+        }
+        ConfigWriteReport::Agent(id) if app.agents.contains_key(&id) => {
+            if let Some(agent) = app.agents.get_mut(&id) {
+                push_and_page_flip(
+                    &mut agent.scrollback,
+                    RenderBlock::system(text),
+                );
+            }
+        }
+        ConfigWriteReport::Agent(id) => deliver_doctor_message(app, id, text),
+        ConfigWriteReport::Dashboard | ConfigWriteReport::Anywhere => {
+            match app.active_view {
+                ActiveView::Agent(id) => deliver_doctor_message(app, id, text),
+                _ => match app.agents.keys().next().copied() {
+                    Some(id) => deliver_doctor_message(app, id, text),
+                    None => app.startup_warnings.push(crate::startup::StartupWarning {
+                        severity: crate::startup::WarningSeverity::Info,
+                        message: text,
+                        action: None,
+                    }),
+                },
+            }
+        }
+    }
+}
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     if result.ends_startup() {
         app.finish_startup(fuigo_telemetry::startup::StartupOutcome::Ok);
@@ -670,9 +715,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             result,
             http_status,
+            verdicts,
             prompt_id,
         } => {
-            let effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
+            let effects =
+                handle_prompt_response(app, agent_id, result, http_status, verdicts, prompt_id);
             app.refresh_status_line_for(agent_id);
             effects
         }
@@ -1398,14 +1445,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             format!("Couldn't load session usage: {error}"),
             nonce,
         ),
-        TaskResult::FeedbackComplete { .. } => vec![],
-        TaskResult::FeedbackFailed { agent_id, error } => {
+        TaskResult::FeedbackComplete { agent_id } => {
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't send feedback: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        super::notes::FEEDBACK_THANKS.to_string(),
+                    ));
+            } else {
+                // P152 (Astra r2 #6, r3 LOW): the tab the report came from closed meanwhile; confirm it where the user
+                // is, as a scrollback line (minimal mode does not draw toasts).
+                feedback_outcome_on_active_tab(app, super::notes::FEEDBACK_THANKS.to_string());
+            }
+            vec![]
+        }
+        TaskResult::FeedbackFailed { agent_id, error } => {
+            let message = format!("Couldn't send feedback: {error}");
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
+            } else {
+                feedback_outcome_on_active_tab(app, message);
             }
             vec![]
         }
@@ -1695,6 +1756,37 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
         }
+        TaskResult::AgentsModalConfigWritten {
+            agent_id,
+            write,
+            result,
+        } => {
+            // Shown below (modal message or toast) in this same handler.
+            let result = result.map_err(crate::config_write_queue::WriteFailure::acknowledge);
+            let modal = agent_id
+                .and_then(|id| app.agents.get_mut(&id))
+                .and_then(|agent| agent.agents_modal.as_mut())
+                .filter(|state| crate::views::agents_modal::awaits_config_write(state, &write));
+            match (modal, result) {
+                (Some(state), result) => {
+                    crate::views::agents_modal::finish_config_write(state, &write, result);
+                }
+                // The modal that asked is gone (closed, or reopened with a write
+                // of its own): a success needs no word, a failure does.
+                (None, Ok(())) => {}
+                (None, Err(e)) => {
+                    let scrubbed = scrub_error_for_toast(&e);
+                    app.show_toast(&format!("\u{2717} Could not save agent setting: {scrubbed}"));
+                }
+            }
+            vec![]
+        }
+        TaskResult::ProviderConfigWritten { report_to, result } => {
+            // Shown by `deliver_provider_write_result`, right here.
+            let result = result.map_err(crate::config_write_queue::WriteFailure::acknowledge);
+            deliver_provider_write_result(app, report_to, result);
+            vec![]
+        }
         TaskResult::SettingPersistFailedBestEffort { key, error } => {
             tracing::warn!(
                 target: "settings",
@@ -1705,5 +1797,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             vec![]
         }
+    }
+}
+
+/// A `/feedback` outcome whose tab closed before the send finished goes to the tab the user is on (P152).
+fn feedback_outcome_on_active_tab(app: &mut AppView, message: String) {
+    if let Some(agent) = get_active_agent_mut(app) {
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::system(message));
     }
 }

@@ -501,6 +501,74 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
         "persist the advanced counter once, ahead of the spawned uploads",
     );
 }
+/// The per-turn trace context says whether the session has memory on, because the `memory.tar.gz` artifact is built
+/// from the user's memory root whatever the session setting is. `--no-memory` leaves the agent without a memory config,
+/// so the context must say `false`, and only an enabled memory config may say `true`.
+#[tokio::test(flavor = "current_thread")]
+async fn trace_context_memory_enabled_follows_the_session_memory_config() {
+    for (label, memory_config, expected) in [
+        ("never configured", None, false),
+        (
+            "configured but disabled",
+            Some(crate::config::MemoryConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            false,
+        ),
+        (
+            "configured and enabled",
+            Some(crate::config::MemoryConfig::default()),
+            true,
+        ),
+    ] {
+        let mut agent = build_minimal_agent_for_tests();
+        {
+            let mut cfg = agent.cfg.borrow_mut();
+            cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
+            cfg.telemetry.trace_upload = Some(true);
+            cfg.endpoints.trace_upload_bucket = Some("gs://harness-trace-test".to_string());
+        }
+        if let Some(memory_config) = memory_config {
+            agent.set_memory_config(memory_config);
+        }
+        let sid = acp::SessionId::new("trace-memory-enabled-sess");
+        let info = crate::session::info::Info {
+            id: sid.clone(),
+            cwd: "/tmp".to_string(),
+        };
+        let mut handle = make_test_handle("test-model", false, None);
+        handle.info = info.clone();
+        let queue_home = tempfile::tempdir().unwrap();
+        let queue_cfg = crate::session::repo_changes::TraceExportConfig {
+            bucket_url: Some("gs://harness-trace-test".to_string()),
+            service_account_key: None,
+            prefix_dir: None,
+            gcs_prefix: None,
+            absolute_paths: false,
+            archive_name_override: None,
+            upload_method: crate::session::repo_changes::UploadMethod::Direct {
+                service_account_key: None,
+            },
+        };
+        let queue = crate::upload::trace::spawn_upload_queue(
+            queue_home.path(),
+            &queue_cfg,
+            Some(fuigo_version::VERSION),
+            agent.auth_manager.clone(),
+        );
+        let _ = handle.upload_queue.set(queue);
+        agent.insert_resident(&sid, handle);
+        let built = agent
+            .build_harness_trace_uploads(&sid, &info, "test-model", 0, vec![harness_pair("a")])
+            .await;
+        assert_eq!(built.len(), 1, "{label}: the harness turn obtained a trace context");
+        assert_eq!(
+            built[0].0.memory_enabled, expected,
+            "{label}: trace context memory_enabled",
+        );
+    }
+}
 /// With trace upload disabled the agent-side path must NOT burn a turn number or persist a counter (and spawns no upload).
 /// The buffer-clearing half of the drain is the caller's `TakeHarnessTraceTurns`; this guards the upload function's uploads-disabled branch.
 #[tokio::test(flavor = "current_thread")]
@@ -1157,7 +1225,7 @@ fn make_test_handle(
         status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         mcp_servers: vec![],
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         display_cwd: None,
         feedback_manager: std::sync::Arc::new(
             crate::session::feedback_manager::FeedbackManager::local_only("test"),
@@ -1195,13 +1263,265 @@ fn make_test_handle(
         managed_mcp_proxy_base_url: String::new(),
         session_default_agent_profile: None,
         allowed_subagent_types: None,
-        hook_registry: None,
+        hook_registry: Default::default(),
         workspace_ops: fuigo_workspace::WorkspaceOps::for_test(),
         terminal_backend: None,
         tools_notification_handle: None,
         scheduler_handle: None,
     }
 }
+/// P71: a per-turn artifact uploaded directly (`upload_small_artifact` with `UploadWait::Confirm`, then
+/// `upload_artifact_to_gcs`: the path of the unified log, the system prompt, plugin state, the upload manifest
+/// and `metadata.json`) reaches no storage proxy that is neither FluxRouter-operated nor the operator's own
+/// bucket; a FluxRouter-class proxy receives it unchanged. The content stands for a unified-log line carrying
+/// the account id (the R063 residual P54-K handed to P71v2).
+/// (Here because the context needs a `SessionHandle`; the other shell paths are in `upload/p71_gate_tests.rs`.)
+#[tokio::test]
+async fn p71_turn_artifact_upload_is_gated_by_destination() {
+    use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+    const CONTENT: &[u8] = br#"{"P71-UNIFIED-LOG":"turn","account":"user-123","cwd":"/home/rowan/work"}"#;
+    let home = tempfile::tempdir().unwrap();
+    let manager = crate::auth::AuthManager::new(home.path(), crate::auth::FuigoComConfig::default());
+    // A static API key, not a session token: only the P71 gate stands between the bytes and a loopback mock.
+    manager.hot_swap(crate::auth::FuigoAuth {
+        key: "p71-static-api-key".into(),
+        auth_mode: crate::auth::AuthMode::ApiKey,
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    let manager = Arc::new(manager);
+    let ctx_for = |base: String| {
+        let handle = make_test_handle("test-model", false, None);
+        crate::upload::turn::PromptTraceContext {
+            gcs_config: crate::session::repo_changes::TraceExportConfig {
+                bucket_url: None,
+                service_account_key: None,
+                upload_method: fuigo_file_utils::UploadMethod::Proxy {
+                    proxy_base_url: base,
+                    user_token: String::new(),
+                    deployment_key: Some("p71-deployment-key".to_string()),
+                    alpha_test_key: None,
+                },
+                prefix_dir: None,
+                gcs_prefix: Some("sess-1".to_string()),
+                absolute_paths: false,
+                archive_name_override: None,
+            },
+            session_info: handle.info.clone(),
+            turn_number: 0,
+            session_handle: handle,
+            session_registry_enabled: false,
+            memory_enabled: false,
+            upload_queue: None,
+            artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+            auth_manager: manager.clone(),
+        }
+    };
+
+    let third_party = RecordingEndpoint::third_party().await;
+    let ctx = ctx_for(third_party.proxy_base_url());
+    crate::upload::trace::upload_small_artifact(
+        &ctx,
+        CONTENT,
+        "sess-1/unified_log.jsonl",
+        "application/x-ndjson",
+        "unified_log",
+        crate::upload::turn::UploadWait::Confirm,
+    )
+    .await;
+    let url = crate::upload::trace::upload_artifact_to_gcs(
+        &ctx,
+        "sess-1/turn_0/system_prompt.txt",
+        CONTENT,
+        "text/plain",
+        "system_prompt",
+    )
+    .await;
+    assert_eq!(url, None, "a withheld upload is not a successful upload");
+    third_party.settle(std::time::Duration::from_millis(400)).await;
+    assert_eq!(third_party.connections(), 0, "a turn artifact reached a third-party proxy");
+    assert!(third_party.received().is_empty());
+
+    let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+    let ctx = ctx_for(fluxrouter_class.proxy_base_url());
+    crate::upload::trace::upload_small_artifact(
+        &ctx,
+        CONTENT,
+        "sess-1/unified_log.jsonl",
+        "application/x-ndjson",
+        "unified_log",
+        crate::upload::turn::UploadWait::Confirm,
+    )
+    .await;
+    assert!(fluxrouter_class.received_contains(b"sess-1/unified_log.jsonl"));
+    assert!(
+        fluxrouter_class.received_contains(CONTENT),
+        "the FluxRouter-class proxy did not receive the artifact unchanged"
+    );
+}
+/// P149 (S14/K16, live lane C2 D2): the turn upload `permission_decisions.json` (and every other text artifact a turn
+/// uploads) left the machine with the tool command as written: the sent FUIGO_API_KEY, `ghp_`/`sk-ant-` shaped strings
+/// and a private key. What reaches the FluxRouter-class storage proxy now carries `<redacted>` in their place, through
+/// both the direct and the queued path; an image upload is sent byte for byte.
+#[tokio::test]
+async fn p149_turn_trace_uploads_are_scrubbed_of_credentials() {
+    use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+    const SENT: &str = "fuigo-p149-SYNTH-turn-upload-key-01";
+    const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+    const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
+    fuigo_telemetry::sent_credentials::record(SENT);
+    let home = tempfile::tempdir().unwrap();
+    let manager = crate::auth::AuthManager::new(home.path(), crate::auth::FuigoComConfig::default());
+    manager.hot_swap(crate::auth::FuigoAuth {
+        key: "p149-static-api-key".into(),
+        auth_mode: crate::auth::AuthMode::ApiKey,
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    let manager = Arc::new(manager);
+    let endpoint = RecordingEndpoint::fluxrouter_class().await;
+    let handle = make_test_handle("test-model", false, None);
+    let ctx = crate::upload::turn::PromptTraceContext {
+        gcs_config: crate::session::repo_changes::TraceExportConfig {
+            bucket_url: None,
+            service_account_key: None,
+            upload_method: fuigo_file_utils::UploadMethod::Proxy {
+                proxy_base_url: endpoint.proxy_base_url(),
+                user_token: String::new(),
+                deployment_key: Some("p149-deployment-key".to_string()),
+                alpha_test_key: None,
+            },
+            prefix_dir: None,
+            gcs_prefix: Some("sess-p149/turn_0".to_string()),
+            absolute_paths: false,
+            archive_name_override: None,
+        },
+        session_info: handle.info.clone(),
+        turn_number: 0,
+        session_handle: handle,
+        session_registry_enabled: false,
+        memory_enabled: false,
+        upload_queue: None,
+        artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+        auth_manager: manager.clone(),
+    };
+    let command = format!(
+        "echo {SENT}; echo {GHP}; printf '-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n-----END PRIVATE KEY-----\n'"
+    );
+    let event: fuigo_workspace::permission::PermissionEvent = serde_json::from_value(serde_json::json!({
+        "tool_id": "call-p149",
+        "tool_name": "run_terminal_command",
+        "access_kind": "execute",
+        "access_detail": command,
+        "yolo_mode": false,
+        "auto_approved": true,
+        "user_prompted": false,
+        "decision": "allow",
+        "timestamp": "2026-10-05T00:00:00Z",
+    }))
+    .expect("a permission event");
+    crate::upload::trace::upload_permission_events(
+        &ctx,
+        &[event],
+        crate::upload::turn::UploadWait::Confirm,
+    )
+    .await;
+    // The queued path (a blocking turn end) with no queue falls back to the same direct upload.
+    let log = format!("{{\"line\":\"key {SENT} and {GHP}\"}}\n");
+    crate::upload::trace::upload_small_artifact(
+        &ctx,
+        log.as_bytes(),
+        "sess-p149/unified_log.jsonl",
+        "application/x-ndjson",
+        "unified_log",
+        crate::upload::turn::UploadWait::Defer {
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(20),
+        },
+    )
+    .await;
+    let image: Vec<u8> = [&[0x89u8, b'P', b'N', b'G'][..], SENT.as_bytes()].concat();
+    let _ = crate::upload::trace::upload_artifact_to_gcs(
+        &ctx,
+        "sess-p149/turn_0/image_0.png",
+        &image,
+        "image/png",
+        "image",
+    )
+    .await;
+    endpoint.settle(std::time::Duration::from_millis(400)).await;
+    assert!(endpoint.received_contains(b"permission_decisions.json"), "control: the artifact was uploaded");
+    assert!(endpoint.received_contains(b"unified_log.jsonl"), "control: the log was uploaded");
+    assert!(endpoint.received_contains(&image), "an image upload must be sent byte for byte");
+    let received = endpoint.received();
+    let text = String::from_utf8_lossy(&received);
+    assert!(text.contains("<redacted>"), "control: {text}");
+    // The image carries the key on purpose (it is binary and passed through); everything else must not.
+    let without_image = text.replace(&String::from_utf8_lossy(&image).into_owned(), "");
+    for secret in [SENT, GHP, PEM_BODY] {
+        assert!(!without_image.contains(secret), "an uploaded text artifact carries {secret}: {text}");
+    }
+}
+/// P149 (S14/K16, Astra r1 #2): the memory archive the turn uploads has its members scrubbed on the way out. What the
+/// storage proxy receives, unpacked, carries `<redacted>` and no key.
+#[tokio::test]
+async fn p149_memory_archive_upload_is_scrubbed() {
+    use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+    const SENT: &str = "fuigo-p149-SYNTH-memory-upload-key-1";
+    fuigo_telemetry::sent_credentials::record(SENT);
+    let home = tempfile::tempdir().unwrap();
+    let manager = Arc::new(crate::auth::AuthManager::new(home.path(), crate::auth::FuigoComConfig::default()));
+    let endpoint = RecordingEndpoint::fluxrouter_class().await;
+    let handle = make_test_handle("test-model", false, None);
+    let ctx = crate::upload::turn::PromptTraceContext {
+        gcs_config: crate::session::repo_changes::TraceExportConfig {
+            bucket_url: None,
+            service_account_key: None,
+            upload_method: fuigo_file_utils::UploadMethod::Proxy {
+                proxy_base_url: endpoint.proxy_base_url(),
+                user_token: String::new(),
+                deployment_key: Some("p149-deployment-key".to_string()),
+                alpha_test_key: None,
+            },
+            prefix_dir: None,
+            gcs_prefix: Some("sess-p149/turn_0".to_string()),
+            absolute_paths: false,
+            archive_name_override: None,
+        },
+        session_info: handle.info.clone(),
+        turn_number: 0,
+        session_handle: handle,
+        session_registry_enabled: false,
+        memory_enabled: true,
+        upload_queue: None,
+        artifact_tracker: crate::upload::manifest::new_artifact_tracker(),
+        auth_manager: manager,
+    };
+    let mut gz = Vec::new();
+    {
+        let mut b = tar::Builder::new(flate2::write::GzEncoder::new(&mut gz, flate2::Compression::default()));
+        let data = format!("# Notes\n- key {SENT}\n");
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o600);
+        h.set_cksum();
+        b.append_data(&mut h, "memory/MEMORY.md", data.as_bytes()).unwrap();
+        b.into_inner().unwrap().finish().unwrap();
+    }
+    crate::upload::memory::upload_built_memory_archive(
+        &ctx,
+        Ok(Arc::new(gz)),
+        crate::upload::turn::UploadWait::Confirm,
+    )
+    .await;
+    endpoint.settle(std::time::Duration::from_millis(400)).await;
+    let received = endpoint.received();
+    let start = received.windows(2).position(|w| w == [0x1f, 0x8b]).expect("control: the archive was uploaded");
+    let mut tar_bytes = Vec::new();
+    // The proxy body may carry trailing multipart framing: take what the gzip stream yields.
+    let _ = std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&received[start..]), &mut tar_bytes);
+    let text = String::from_utf8_lossy(&tar_bytes);
+    assert!(text.contains("# Notes") && text.contains("<redacted>"), "control: {text}");
+    assert!(!text.contains(SENT), "the uploaded memory archive carries the key: {text}");
+}
+
 #[tokio::test]
 async fn lookup_session_model_returns_per_session_model() {
     let default_model = acp::ModelId::new("default-model");
@@ -1720,7 +2040,17 @@ async fn drain_finished_thread_returns_immediately() {
         RefCell::new(HashMap::new());
     let sid = acp::SessionId::new("drain-test");
     let handle = std::thread::spawn(|| {});
-    std::thread::sleep(std::time::Duration::from_millis(10));
+    // Establish the precondition ("already finished") by observing it, not by sleeping 10 ms and
+    // hoping the OS scheduled the thread to exit by then (it did not, on a loaded run). 30 s is a
+    // hang guard only.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !handle.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "spawned thread never exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     session_threads.borrow_mut().insert(
         sid.clone(),
         crate::session::SessionThread::from_handle(handle),
@@ -2135,7 +2465,7 @@ async fn refresh_mcp_search_index_broadcasts_to_sessions() {
         .expect("channel should stay open");
     assert!(matches!(cmd, SessionCommand::RefreshMcpSearchIndex));
 }
-fn build_minimal_agent_for_tests() -> MvpAgent {
+fn build_minimal_agent_for_tests() -> MvpAgentHandle {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2621,7 +2951,7 @@ async fn default_model_session_new_echo_reads_the_spawn_snapshot_without_waiting
         "a custom-model switch still round-trips to the actor, exactly as upstream does"
     );
 }
-fn build_agent_with_auth(auth: crate::auth::FuigoAuth) -> MvpAgent {
+fn build_agent_with_auth(auth: crate::auth::FuigoAuth) -> MvpAgentHandle {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2658,6 +2988,10 @@ async fn feedback_trace_offer_asks_personal_oauth_accounts() {
     let _e3 = EnvGuard::unset("FUIGO_FEEDBACK_TRACE_CARD");
     let agent = build_agent_with_auth(personal_fuigo_oauth_auth());
     make_trace_card_eligible(&agent);
+    // P47: the one-shot upload carries the session token, so it needs a trace-upload URL (here the default, the
+    // cli-chat-proxy base) the service-endpoint trust class admits; with none the token is dropped and there is
+    // no upload path.
+    agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url = Some("https://api.fluxrouter.ai/v1".into());
     assert!(agent.feedback_trace_offer(), "every gate is open");
     assert!(
         agent
@@ -2723,6 +3057,9 @@ async fn feedback_trace_offer_suppressed_for_managed_deployments() {
 #[tokio::test]
 #[serial_test::serial]
 async fn ensure_plugin_registry_lazily_populates_snapshot() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     use fuigo_test_support::EnvGuard;
@@ -2772,6 +3109,17 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
     );
 }
 mod list_running_heal_tests;
+mod cold_load_deferred_marker_tests;
+mod deferred_reminder_order_tests;
+mod deferred_marker_delivery_tests;
+mod p81_relay_bridge_tests;
+mod p125_relay_sync_tests;
+mod p82_relay_credentials_bridge_tests;
+mod p83_teardown_tests;
+mod p84_relocation_tests;
+mod p133_config_notice_tests;
+mod p136_forwarded_mcp_tests;
+mod p141_single_merge_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
 mod session_rename_tests;
@@ -3406,7 +3754,7 @@ async fn auth_type_no_method_id_with_current_returns_session_token() {
     assert_eq!(agent.auth_type(), fuigo_chat_state::AuthType::SessionToken,);
 }
 /// Minimal agent whose `fuigo_com_config` engages the api-key kill switch (`disable_api_key_auth = true`), mirroring a forced-IdP deployment.
-fn build_agent_with_api_key_auth_disabled() -> MvpAgent {
+fn build_agent_with_api_key_auth_disabled() -> MvpAgentHandle {
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     let temp_dir = tempfile::tempdir().unwrap();
@@ -3635,6 +3983,95 @@ async fn prepare_image_gen_config_sends_client_identifier_header() {
          applies the coding ZDR opt-out to Build traffic"
     );
 }
+/// P43 hostile: the tool headers for web search, image and video carry the identity-class
+/// client labels only to a FluxRouter-operated destination. Web search goes to
+/// `web_search_model`'s base URL (any BYOK provider); image and video to a repointable
+/// `fuigo_api_base_url`. A caller pre-set entry (user `extra_headers`) is the user's own.
+#[test]
+fn inject_proxy_headers_withholds_identity_from_a_non_fluxrouter_tool_destination() {
+    for base_url in [
+        "https://api.openai.com/v1",
+        "https://gateway.example/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://api.fluxrouter.ai/v1",
+    ] {
+        let mut headers = indexmap::IndexMap::new();
+        super::inject_proxy_headers(&mut headers, Some("1.0.21"), None, base_url);
+        for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+            assert!(!headers.contains_key(name), "{base_url} got {name}");
+        }
+        let mut user_set = indexmap::IndexMap::new();
+        user_set.insert("x-fuigo-client-identifier".to_string(), "user-choice".to_string());
+        super::inject_proxy_headers(&mut user_set, None, None, base_url);
+        assert_eq!(user_set["x-fuigo-client-identifier"], "user-choice");
+    }
+    let mut headers = indexmap::IndexMap::new();
+    super::inject_proxy_headers(&mut headers, Some("1.0.21"), None, "https://api.fluxrouter.ai/v1");
+    assert_eq!(headers["x-fuigo-client-version"], "1.0.21");
+    assert_eq!(
+        headers["x-fuigo-client-identifier"],
+        crate::http::process_client_identifier()
+    );
+}
+/// P43 hostile: the extension handlers that call the operator-configured cli-chat-proxy
+/// (billing, auto top-up, consent, privacy) send it no identity-class header, because a
+/// configured proxy is not FluxRouter-operated.
+#[tokio::test(flavor = "current_thread")]
+async fn proxy_extension_handlers_send_no_identity_to_a_non_fluxrouter_proxy() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::proxy_extension_handlers_send_no_identity_to_a_non_fluxrouter_proxy",
+    ) else {
+        return;
+    };
+    use crate::auth::{AuthMode, FuigoAuth, GROK_OAUTH2_ISSUER};
+    crate::auth::set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
+    let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+    let base = front.front_service(&base);
+    let auth = FuigoAuth {
+        key: "token".into(),
+        auth_mode: AuthMode::Oidc,
+        create_time: chrono::Utc::now(),
+        user_id: "user-1".into(),
+        email: Some("test@example.com".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        oidc_issuer: Some(GROK_OAUTH2_ISSUER.to_string()),
+        ..Default::default()
+    };
+    let (agent, _rx) =
+        build_agent_with_auth_and_proxy(auth, base, crate::agent::config::AgentMode::Generic);
+    let ext = |method: &str, params: serde_json::Value| {
+        acp::ExtRequest::new(
+            method,
+            std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+        )
+    };
+    let calls: [(&str, serde_json::Value); 4] = [
+        ("fuigo/billing", serde_json::json!({})),
+        ("fuigo/auto-topup-rule", serde_json::json!({})),
+        ("fuigo/consent/record", serde_json::json!({"noticeId": "n1", "version": 1})),
+        (
+            "fuigo/privacy/setCodingDataRetention",
+            serde_json::json!({"codingDataRetentionOptOut": true}),
+        ),
+    ];
+    for (method, params) in calls {
+        let before = seen.lock().unwrap().len();
+        let request = ext(method, params);
+        let _ = match method {
+            "fuigo/consent/record" => crate::extensions::consent::handle(&agent, &request).await,
+            "fuigo/privacy/setCodingDataRetention" => {
+                crate::extensions::privacy::handle(&agent, &request).await
+            }
+            _ => crate::extensions::billing::handle(&agent, &request).await,
+        };
+        assert!(
+            seen.lock().unwrap().len() > before,
+            "{method}: the handler made no request, so this proves nothing"
+        );
+    }
+    handle.abort();
+    crate::remote::identity_tests::assert_no_identity_headers(&seen, "proxy extension handlers");
+}
 /// Same contract for video generation (also a direct API call).
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_video_gen_config_sends_client_identifier_header() {
@@ -3834,10 +4271,15 @@ async fn diagnostic_upload_skipped_for_opted_out_user() {
 }
 #[tokio::test]
 async fn diagnostic_upload_sent_for_normal_user() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::diagnostic_upload_sent_for_normal_user",
+    ) else {
+        return;
+    };
     let (stub_url, count) = spawn_counting_storage_stub().await;
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     enable_trace_upload_config(&agent);
-    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
+    agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(front.front(&stub_url));
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
@@ -3908,6 +4350,9 @@ fn search_index_env() -> (tempfile::TempDir, [fuigo_test_support::EnvGuard; 2]) 
 #[tokio::test]
 #[serial_test::serial]
 async fn search_index_honors_the_session_search_feature() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     {
         let _off = fuigo_test_support::EnvGuard::set("FUIGO_SESSION_SEARCH", "0");
@@ -3929,6 +4374,9 @@ async fn search_index_honors_the_session_search_feature() {
 #[tokio::test]
 #[serial_test::serial]
 async fn auto_gc_declines_until_the_remote_answer_settles() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     assert!(
@@ -3958,6 +4406,9 @@ async fn auto_gc_declines_until_the_remote_answer_settles() {
 #[tokio::test]
 #[serial_test::serial]
 async fn search_before_the_decision_asks_the_caller_to_retry() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     assert!(
@@ -3988,6 +4439,9 @@ async fn search_before_the_decision_asks_the_caller_to_retry() {
 #[tokio::test]
 #[serial_test::serial]
 async fn read_before_the_remote_settings_land_does_not_decide() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     assert!(
@@ -4015,6 +4469,9 @@ async fn read_before_the_remote_settings_land_does_not_decide() {
 #[tokio::test]
 #[serial_test::serial]
 async fn exhausted_fetch_decides_on_the_local_layers() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::agent::config::Config as AgentConfig;
     use crate::auth::{AuthManager, FuigoComConfig};
     use fuigo_test_support::EnvGuard;
@@ -4050,6 +4507,9 @@ async fn exhausted_fetch_decides_on_the_local_layers() {
 #[tokio::test]
 #[serial_test::serial]
 async fn kill_switch_after_the_decision_leaves_the_index_up() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
@@ -4075,6 +4535,9 @@ async fn kill_switch_after_the_decision_leaves_the_index_up() {
 #[tokio::test]
 #[serial_test::serial]
 async fn session_opened_before_the_decision_sees_it_land() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let (_home, _env) = search_index_env();
     let agent = build_agent_with_auth(crate::auth::FuigoAuth::test_default());
     let held_by_a_session = agent.search_index_cell();
@@ -4232,290 +4695,6 @@ fn chat_new_session_model_state_matrix() {
             "[{label}] override must not mutate the catalog"
         );
     }
-}
-/// A valid `fuigo/local_workspace` parses to ExistingWorkspace only.
-/// It never reads `envId` and never emits SandboxEnvironment.
-#[cfg(feature = "local-workspace")]
-#[test]
-fn parse_session_computer_sessions_local_workspace_matrix() {
-    use crate::gateway_bridge::ComputerSession;
-    use serde_json::json;
-    fn existing(server_id: &str, cwd: Option<&str>) -> Vec<ComputerSession> {
-        vec![ComputerSession::ExistingWorkspace {
-            server_id: server_id.to_owned(),
-            cwd: cwd.map(str::to_owned),
-        }]
-    }
-    let cases: &[(&str, serde_json::Value, Option<Vec<ComputerSession>>)] = &[
-        (
-            "attach_server_id_on_local",
-            json!({
-                "fuigo/local_workspace": {
-                    "mode": "attach",
-                    "server_id": "lw-attach-1",
-                    "cwd": "/repo",
-                },
-                "envId": "env-must-be-ignored",
-            }),
-            Some(existing("lw-attach-1", Some("/repo"))),
-        ),
-        (
-            "attach_server_id_from_cloud_existing",
-            json!({
-                "fuigo/local_workspace": {
-                    "mode": "attach",
-                    "cwd": "/repo",
-                },
-                "fuigo/cloud_existing_workspace": {
-                    "server_id": "lw-attach-2",
-                    "cwd": "/repo-existing",
-                },
-                "envId": "env-must-be-ignored",
-            }),
-            Some(existing("lw-attach-2", Some("/repo"))),
-        ),
-        (
-            "own_with_server_id_ignores_envid",
-            json!({
-                "fuigo/local_workspace": {
-                    "mode": "own",
-                    "server_id": "lw-own-1",
-                    "cwd": "/Users/me/src",
-                },
-                "envId": "env-must-be-ignored",
-            }),
-            Some(existing("lw-own-1", Some("/Users/me/src"))),
-        ),
-        (
-            "own_without_server_id_no_sandbox_fallback",
-            json!({
-                "fuigo/local_workspace": {
-                    "mode": "own",
-                    "cwd": "/Users/me/src",
-                },
-                "envId": "env-must-be-ignored",
-            }),
-            None,
-        ),
-        (
-            "invalid_mode_falls_through_to_envid",
-            json!({
-                "fuigo/local_workspace": {
-                    "mode": "bogus",
-                    "server_id": "lw-x",
-                },
-                "envId": "env-prod",
-            }),
-            Some(vec![ComputerSession::SandboxEnvironment {
-                environment_id: Some("env-prod".to_owned()),
-            }]),
-        ),
-        (
-            "non_object_local_falls_through_to_envid",
-            json!({
-                "fuigo/local_workspace": "not-an-object",
-                "envId": "env-prod",
-            }),
-            Some(vec![ComputerSession::SandboxEnvironment {
-                environment_id: Some("env-prod".to_owned()),
-            }]),
-        ),
-    ];
-    for (label, meta, expected) in cases {
-        let got = parse_session_computer_sessions(meta.as_object());
-        assert_eq!(
-            got.as_deref(),
-            expected.as_deref(),
-            "[{label}] local_workspace match-table mismatch"
-        );
-    }
-}
-/// Local intent without resolvable server_id fails closed (no silent unstamped start).
-#[cfg(feature = "local-workspace")]
-#[test]
-fn resolve_local_workspace_missing_server_id_fails_closed() {
-    use serde_json::json;
-    let meta = json!({
-        "fuigo/session": { "kind": "chat" },
-        "fuigo/local_workspace": {
-            "mode": "own",
-            "cwd": "/repo",
-        }
-    });
-    let err = resolve_session_computer_sessions(meta.as_object())
-        .expect_err("own without server_id must fail closed");
-    assert_eq!(
-        err.data
-            .as_ref()
-            .and_then(|d| d.get("code"))
-            .and_then(|v| v.as_str()),
-        Some("local_workspace_server_id_missing")
-    );
-}
-/// The supervisor map, the reap guard, and shutdown_gateway_bridge tear down the entry.
-#[cfg(all(feature = "local-workspace", unix))]
-#[test]
-fn local_workspace_reap_guard_and_shutdown_clear_map() {
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        let sid = gateway_bridge_test_session_id();
-        {
-            let mut guard = agent.new_local_workspace_reap_guard(sid.clone(), true);
-            guard.disarm();
-        }
-        assert!(agent.local_workspace_supervisors.borrow().is_empty());
-        agent.shutdown_gateway_bridge(&sid);
-        assert!(
-            agent
-                .local_workspace_generations
-                .borrow()
-                .get(&sid)
-                .is_none()
-        );
-    });
-}
-/// A pre-bridge crash refresh rewrites the handshake stamp from the live supervisor id.
-#[cfg(all(feature = "local-workspace", unix))]
-#[test]
-fn refresh_sessions_from_supervisor_overrides_server_id() {
-    use crate::gateway_bridge::ComputerSession;
-    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        let sid = gateway_bridge_test_session_id();
-        let original = Some(vec![ComputerSession::ExistingWorkspace {
-            server_id: "lw-stale".into(),
-            cwd: Some("/repo".into()),
-        }]);
-        let unchanged = agent.refresh_sessions_from_supervisor(&sid, original.clone());
-        assert!(matches!(
-            unchanged.as_ref().and_then(|v| v.first()),
-            Some(ComputerSession::ExistingWorkspace { server_id, .. }) if server_id == "lw-stale"
-        ));
-        let (_dir, handle) = test_start_ready_own().await;
-        let live_id = handle.server_id.clone();
-        agent.register_local_workspace_supervisor(sid.clone(), handle);
-        let refreshed = agent.refresh_sessions_from_supervisor(&sid, original);
-        match refreshed.as_ref().and_then(|v| v.first()) {
-            Some(ComputerSession::ExistingWorkspace { server_id, .. }) => {
-                assert_eq!(
-                    server_id, &live_id,
-                    "refresh must use live supervisor server_id"
-                );
-            }
-            other => panic!("expected ExistingWorkspace, got {other:?}"),
-        }
-        agent.shutdown_gateway_bridge(&sid);
-    });
-}
-/// start_own followed by register stamps server_id into meta and stores the handle.
-#[cfg(all(feature = "local-workspace", unix))]
-#[test]
-fn start_own_registers_and_stamps_server_id() {
-    use crate::gateway_bridge::local_workspace_supervisor::{
-        stamp_server_id_into_meta, test_start_ready_own,
-    };
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        let sid = gateway_bridge_test_session_id();
-        let (_dir, handle) = test_start_ready_own().await;
-        let server_id = handle.server_id.clone();
-        let mut meta = acp::Meta::new();
-        meta.insert(
-            "fuigo/local_workspace".into(),
-            serde_json::json!({"mode": "own", "cwd": "/tmp/repo"}),
-        );
-        stamp_server_id_into_meta(&mut meta, &server_id);
-        assert_eq!(
-            meta.get("fuigo/local_workspace")
-                .and_then(|v| v.get("server_id"))
-                .and_then(|v| v.as_str()),
-            Some(server_id.as_str())
-        );
-        agent.register_local_workspace_supervisor(sid.clone(), handle);
-        assert!(
-            agent
-                .local_workspace_supervisors
-                .borrow()
-                .contains_key(&sid),
-            "handle must be registered by SessionId"
-        );
-        assert!(
-            agent
-                .local_workspace_generations
-                .borrow()
-                .get(&sid)
-                .is_some_and(|g| *g >= 1),
-            "arm must bump generation"
-        );
-        agent.shutdown_gateway_bridge(&sid);
-    });
-}
-/// Armed reap guard removes a registered supervisor on drop (session/new failure).
-#[cfg(all(feature = "local-workspace", unix))]
-#[test]
-fn reap_guard_drop_removes_registered_supervisor() {
-    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        let sid = gateway_bridge_test_session_id();
-        let (_dir, handle) = test_start_ready_own().await;
-        agent.register_local_workspace_supervisor(sid.clone(), handle);
-        assert!(
-            agent
-                .local_workspace_supervisors
-                .borrow()
-                .contains_key(&sid)
-        );
-        {
-            let _guard = agent.new_local_workspace_reap_guard(sid.clone(), true);
-        }
-        assert!(
-            agent
-                .local_workspace_supervisors
-                .borrow()
-                .get(&sid)
-                .is_none(),
-            "armed guard drop must reap supervisor"
-        );
-        assert!(
-            agent
-                .local_workspace_generations
-                .borrow()
-                .get(&sid)
-                .is_none(),
-            "armed guard drop must invalidate generation"
-        );
-    });
-}
-/// Shutdown generation invalidates a pending restart re-insert.
-#[cfg(all(feature = "local-workspace", unix))]
-#[test]
-fn shutdown_generation_invalidates_stale_restart() {
-    use crate::gateway_bridge::local_workspace_supervisor::test_start_ready_own;
-    run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
-        let sid = gateway_bridge_test_session_id();
-        let (_dir, handle) = test_start_ready_own().await;
-        agent.register_local_workspace_supervisor(sid.clone(), handle);
-        let generation = *agent
-            .local_workspace_generations
-            .borrow()
-            .get(&sid)
-            .expect("generation after register");
-        agent.shutdown_gateway_bridge(&sid);
-        assert!(
-            agent.local_workspace_generations.borrow().get(&sid) != Some(&generation),
-            "shutdown must invalidate generation so stale restart cannot re-insert"
-        );
-        assert!(
-            agent
-                .local_workspace_supervisors
-                .borrow()
-                .get(&sid)
-                .is_none()
-        );
-    });
 }
 /// `spawn_gateway_bridge` uses `tokio::task::spawn_local`.
 fn run_local_for_bridge_test<F, Fut, T>(body: F) -> T
@@ -5844,6 +6023,11 @@ async fn resolving_gate_fetches_through_the_settings_coalescer() {
 /// The full `initialize` fires once-per-process FUIGO_HOME cleanup work that a unit test must not run against the developer's real home.
 #[test]
 fn gated_reconnect_tier_recheck_is_single_flight() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::gated_reconnect_tier_recheck_is_single_flight",
+    ) else {
+        return;
+    };
     crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
     crate::agent::config::Config::install_test_trusted_origins();
     run_local_for_bridge_test(|| async {
@@ -5868,7 +6052,7 @@ fn gated_reconnect_tier_recheck_is_single_flight() {
         });
         let agent = build_minimal_agent_for_tests();
         agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url =
-            Some(format!("http://{addr}/v1"));
+            Some(front.front(&format!("http://{addr}/v1")));
         agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
             allow_access: Some(false),
             ..Default::default()
@@ -5943,6 +6127,11 @@ fn tier_recheck_identity_guard_accepts_enrichment_canonical_user_id() {
 /// The bearer's tier claim already matches the live tier, so the post-unblock mint is skipped and no refresher is needed.
 #[test]
 fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::gated_reconnect_recheck_lifts_gate_clearing_paywall_flash",
+    ) else {
+        return;
+    };
     run_local_for_bridge_test(|| async {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -5998,7 +6187,7 @@ fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
         let cfg = crate::agent::config::Config::default();
         let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
         agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url =
-            Some(format!("http://{addr}/v1"));
+            Some(front.front(&format!("http://{addr}/v1")));
         let auth = crate::auth::FuigoAuth {
             key: jwt_with_tier(5),
             user_id: "user-flash".into(),
@@ -6034,7 +6223,7 @@ fn build_agent_with_auth_and_proxy(
     proxy_url: String,
     mode: crate::agent::config::AgentMode,
 ) -> (
-    MvpAgent,
+    MvpAgentHandle,
     tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
 ) {
     use crate::agent::config::Config as AgentConfig;
@@ -6121,6 +6310,11 @@ async fn access_gate_does_not_leak_verdict_across_identities() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate",
+    ) else {
+        return;
+    };
     crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
     crate::agent::config::Config::install_test_trusted_origins();
     use crate::agent::config::AgentMode;
@@ -6143,7 +6337,7 @@ async fn post_auth_settings_fuigo_upgrades_writeback_emits_and_opens_gate() {
         "precondition: first-party Ferrox Labs auth"
     );
     let (agent, mut rx) =
-        build_agent_with_auth_and_proxy(fuigo_auth, server.url(), AgentMode::Leader);
+        build_agent_with_auth_and_proxy(fuigo_auth, front.front(&server.url()), AgentMode::Leader);
     assert_eq!(
         agent.storage_mode(),
         StorageMode::Local,
@@ -6264,6 +6458,11 @@ async fn same_credential_refresh_does_not_flap_resolved_gate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial_test::serial]
 async fn settings_self_heal_refetches_after_token_rotation() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "agent::mvp_agent::tests::settings_self_heal_refetches_after_token_rotation",
+    ) else {
+        return;
+    };
     use crate::agent::config::AgentMode;
     use crate::auth::refresh::{RefreshOutcome, TokenRefresher};
     use crate::auth::{FuigoAuth, GROK_OAUTH2_ISSUER};
@@ -6296,7 +6495,7 @@ async fn settings_self_heal_refetches_after_token_rotation() {
         ..FuigoAuth::test_default()
     };
     let (agent, _rx) =
-        build_agent_with_auth_and_proxy(stale.clone(), server.url(), AgentMode::Leader);
+        build_agent_with_auth_and_proxy(stale.clone(), front.front(&server.url()), AgentMode::Leader);
     agent
         .auth_manager
         .set_refresher(std::sync::Arc::new(RotatingRefresher));
@@ -6384,7 +6583,7 @@ fn reload_after_terminal_removal_starts_clean() {
 /// Build an agent whose gateway is wired to a live receiver.
 /// A test can observe (and answer) agent-to-client reverse-requests like the dormant `fuigo/folder_trust/request` round-trip.
 fn build_agent_with_gateway_rx() -> (
-    MvpAgent,
+    MvpAgentHandle,
     tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
 ) {
     use crate::agent::config::Config as AgentConfig;
@@ -6431,6 +6630,11 @@ fn folder_trust_on() -> crate::util::config::RemoteSettings {
 #[test]
 #[serial_test::serial]
 fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+    let _home = fuigo_test_support::FuigoHome::new();
     let repo = tempfile::tempdir().unwrap();
     git2::Repository::init(repo.path()).unwrap();
     write_project_subagent_definitions(repo.path());
@@ -6495,6 +6699,9 @@ fn subagent_spawn_context_reloads_project_definitions_after_trust_changes() {
 #[test]
 #[serial_test::serial]
 fn project_roles_personas_gated_via_resolve_and_record_chain() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -6576,6 +6783,9 @@ async fn answer_folder_trust_request(
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_grant_reloads_project_mcp() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     use fuigo_workspace::trust::{TrustStore, workspace_key};
     let home = tempfile::tempdir().unwrap();
@@ -6655,6 +6865,9 @@ fn interactive_trust_prompt_grant_reloads_project_mcp() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_reject_keeps_gated() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     use fuigo_workspace::trust::{TrustStore, workspace_key};
     let home = tempfile::tempdir().unwrap();
@@ -6693,6 +6906,9 @@ fn interactive_trust_prompt_reject_keeps_gated() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_dormant_when_feature_off() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -6723,6 +6939,9 @@ fn interactive_trust_prompt_dormant_when_feature_off() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_no_request_without_capability() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -6750,6 +6969,9 @@ fn interactive_trust_prompt_no_request_without_capability() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_client_error_fails_closed() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     use fuigo_workspace::trust::{TrustStore, workspace_key};
     let home = tempfile::tempdir().unwrap();
@@ -6792,6 +7014,9 @@ fn interactive_trust_prompt_client_error_fails_closed() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_dedups_same_workspace() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -6869,6 +7094,9 @@ async fn drain_reload_commands(
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_reloads_all_same_workspace_sessions() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -6930,6 +7158,9 @@ fn interactive_trust_prompt_reloads_all_same_workspace_sessions() {
 #[test]
 #[serial_test::serial]
 fn interactive_trust_prompt_reprompts_after_untrust() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_hooks_plugins_types::HooksAction;
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
@@ -7299,7 +7530,7 @@ async fn emit_announcements_gate_keeps_baseline_on_failed_send_and_retries() {
         "a failed send must leave the baseline untouched"
     );
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    agent.gateway = GatewaySender::new(tx);
+    agent.set_gateway_for_tests(GatewaySender::new(tx));
     agent.emit_announcements(AnnouncementsPushMode::IfChanged);
     let msg = rx
         .try_recv()
@@ -8119,4 +8350,540 @@ fn a_failed_login_answers_with_typed_data_not_a_bare_message() {
             "{reason}: `message` is the class name; the reason lives in `data.message`"
         );
     }
+}
+
+// ---- P17-R: a failed config read during a settings refresh ------------------
+//
+// These drive `agent_ops::reapply_config_after_settings_refresh`, which is the
+// body `refresh_settings_and_reapply` runs after the remote fetch, with the disk
+// read's result and the last-good disk layers injected. A real failing read
+// cannot be arranged per test here: `fuigo_home()` is a process-wide `OnceLock`,
+// so a broken `config.toml` would be broken for every test in the binary.
+//
+// WHICH REGRESSION EACH TEST CATCHES -- measured by running each test against
+// one mutant per earlier behaviour (receipt R013), not predicted. Only one test
+// catches all three; each of the others catches a subset:
+//   A = empty-table substitution (pre-fix, 8e11724)
+//   B = skip the re-resolve (v1, 05157d8b)
+//   E = replay the last effective TABLE instead of the disk layers (v2)
+//   * keeps_the_configured_trust_set ................ A
+//   * still_applies_freshly_fetched_remote_settings .. A, B
+//   * does_not_resurrect_a_withdrawn_remote_campaign . A, B, E
+//   * before_any_successful_read .................... A
+
+const P17R_CONFIGURED: &str = "https://my.gateway.invalid/v1";
+
+/// Endpoint env vars fill only ABSENT `[endpoints]` fields -- i.e. exactly the
+/// empty-table case -- so an ambient `FUIGO_API_BASE_URL` naming the configured
+/// host would make the old substitution look correct. The rest would override
+/// the file, remote and campaign values these tests assert on.
+///
+/// Callers must be `#[serial_test::serial]` (the unnamed group). `EnvVarGuard`'s
+/// own lock excludes only other `EnvVarGuard`s, not the `#[serial]` tests that
+/// export `FUIGO_API_BASE_URL` / `FUIGO_MODELS_BASE_URL` through `EnvGuard`.
+/// The proxy URL is a process anchor (`fuigo_test_support::env::PROCESS_ANCHORS`),
+/// so it is held through `EnvGuard`, whose anchor lock every other reader of it
+/// takes; under `EnvVarGuard` it bypassed that lock. Lock order is serial ->
+/// anchor -> `EnvVarGuard`'s lock, and no test takes them the other way round.
+fn p17r_without_ambient_env() -> (fuigo_test_support::EnvGuard, crate::env::EnvVarGuard) {
+    let proxy = fuigo_test_support::EnvGuard::unset("FUIGO_CLI_CHAT_PROXY_BASE_URL");
+    let rest = crate::env::EnvVarGuard::remove("FUIGO_API_BASE_URL")
+        .and_remove("FUIGO_MODELS_BASE_URL")
+        .and_remove("FUIGO_MANAGED_MCPS_ENABLED")
+        .and_remove(crate::config::SubagentsConfig::ENV_MAX_CONCURRENT)
+        .and_remove("FUIGO_CAMPAIGNS")
+        .and_remove("FUIGO_CAMPAIGNS_OVERRIDE");
+    (proxy, rest)
+}
+
+fn p17r_raw(body: &str) -> toml::Value {
+    toml::from_str(body).expect("fixture parses")
+}
+
+/// Disk layers holding `user` as the user's `config.toml` and nothing else.
+fn p17r_layers(user: toml::Value) -> std::sync::Arc<fuigo_config::ConfigLayers> {
+    std::sync::Arc::new(fuigo_config::ConfigLayers {
+        user,
+        ..Default::default()
+    })
+}
+
+/// A config as the binaries leave it at startup: parsed, then resolved.
+fn p17r_live_config(
+    raw: &toml::Value,
+    remote: Option<crate::util::config::RemoteSettings>,
+) -> crate::agent::config::Config {
+    let mut cfg = crate::agent::config::Config::new_from_toml_cfg(raw).expect("fixture parses");
+    cfg.remote_settings = remote;
+    let remote = cfg.remote_settings.clone();
+    cfg.resolve_runtime_fields(&crate::agent::config::RuntimeResolutionContext {
+        raw_config: raw,
+        remote_settings: remote.as_ref(),
+        is_headless: false,
+        cli_subagents: None,
+        cli_web_search_model: None,
+        cli_session_summary_model: None,
+        memory_enabled_override: None,
+        disable_web_search: false,
+        todo_gate: false,
+        laziness_debug_log: None,
+        storage_mode: None,
+        campaign_free_config: None,
+    });
+    cfg
+}
+
+fn p17r_failed_read() -> std::io::Result<toml::Value> {
+    Err(std::io::Error::other(
+        "simulated: config.toml could not be read",
+    ))
+}
+
+/// The trust set survives a failed read, and still follows a successful one.
+#[test]
+#[serial_test::serial]
+fn a_failed_config_read_during_settings_refresh_keeps_the_configured_trust_set() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _env = p17r_without_ambient_env();
+    let raw = p17r_raw(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{P17R_CONFIGURED}\"\n"
+    ));
+    let mut cfg = p17r_live_config(&raw, None);
+    let before = cfg.trusted_origins().clone();
+    assert!(
+        before.is_fuigo_api_bearer_url(P17R_CONFIGURED),
+        "precondition: the user's configured endpoint is a configured API origin"
+    );
+
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        p17r_failed_read(),
+        None,
+        Some(p17r_layers(raw.clone())),
+    );
+
+    assert_eq!(
+        cfg.trusted_origins(),
+        &before,
+        "a failed read must not move the trust set; the old empty-table substitution \
+         replaced it with the built-in default"
+    );
+
+    // P150 (B25/F5): a SUCCESSFUL read of an edited endpoint makes it trusted (Sean's decision) without moving trust
+    // off the endpoint requests still go to; see `an_endpoints_edit_keeps_credentials_on_the_endpoint_in_use`.
+    const EDITED: &str = "https://edited.gateway.invalid/v1";
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        Ok(p17r_raw(&format!(
+            "[endpoints]\nfuigo_api_base_url = \"{EDITED}\"\n"
+        ))),
+        None,
+        Some(p17r_layers(raw)),
+    );
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(P17R_CONFIGURED));
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(EDITED));
+}
+
+/// P150 (B25/F5; live e2e lane C2). An `[endpoints]` edit followed by a settings reapply (what every new session and
+/// ACP `initialize` run) used to move the trust set to the edited origin while the agent's endpoints, its model
+/// catalog and every session's `base_url` stayed on the origin the process started with: the session bearer and
+/// `FUIGO_API_KEY` were then withheld from the endpoint actually in use, and requests returned 401 until a restart.
+/// Through the production caller, the endpoint requests go to must stay a configured API origin.
+#[test]
+#[serial_test::serial]
+fn an_endpoints_edit_keeps_credentials_on_the_endpoint_in_use() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _env = p17r_without_ambient_env();
+    let raw = p17r_raw(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{P17R_CONFIGURED}\"\n"
+    ));
+    let mut cfg = p17r_live_config(&raw, None);
+    const EDITED: &str = "https://edited.gateway.invalid/v1";
+    let edited = p17r_raw(&format!("[endpoints]\nfuigo_api_base_url = \"{EDITED}\"\n"));
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        Ok(edited.clone()),
+        Some(edited.clone()),
+        Some(p17r_layers(edited)),
+    );
+    let in_use = cfg.endpoints.fuigo_api_base_url.clone();
+    assert_eq!(in_use, P17R_CONFIGURED, "the agent's endpoints are fixed at process start");
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(&in_use),
+        "the session bearer must still reach the endpoint requests go to"
+    );
+    assert!(
+        cfg.trusted_origins().is_configured_api_origin(&in_use),
+        "FUIGO_API_KEY must still be attachable to the endpoint requests go to"
+    );
+    // Astra r1: a reloaded `[model.*] base_url` can point at the edited origin; it keeps its credentials too.
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(EDITED));
+}
+
+/// Astra's first case: remote settings refreshed (managed MCPs now disabled),
+/// then the disk read failed. The remote-derived flag must follow the fresh
+/// settings while the file-derived value keeps its last-known-good setting.
+#[test]
+#[serial_test::serial]
+fn a_failed_config_read_still_applies_freshly_fetched_remote_settings() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _env = p17r_without_ambient_env();
+    const FILE_MAX: usize = 5;
+    assert_ne!(
+        FILE_MAX,
+        fuigo_tools::implementations::fuigo_build::task::admission::DEFAULT_MAX_CONCURRENT,
+        "precondition: the file value must be distinguishable from the default"
+    );
+    let raw = p17r_raw(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{P17R_CONFIGURED}\"\n\
+         [subagents]\nmax_concurrent = {FILE_MAX}\n"
+    ));
+    let mut cfg = p17r_live_config(&raw, None);
+    assert!(
+        cfg.managed_mcps_enabled,
+        "precondition: managed MCPs default on for an interactive agent"
+    );
+    assert_eq!(cfg.subagents_max_concurrent, FILE_MAX, "precondition");
+
+    // What `refresh_remote_settings` leaves behind just before the disk read.
+    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+        managed_mcps_enabled: Some(false),
+        ..Default::default()
+    });
+
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        p17r_failed_read(),
+        None,
+        Some(p17r_layers(raw)),
+    );
+
+    assert!(
+        !cfg.managed_mcps_enabled,
+        "a remote-derived field must follow the freshly fetched settings even when the \
+         disk read failed; skipping the re-resolve left it stale"
+    );
+    assert_eq!(
+        cfg.subagents_max_concurrent, FILE_MAX,
+        "a file-derived field must keep its last-known-good value; an empty-table \
+         substitution reset it to the default"
+    );
+    assert!(
+        cfg.trusted_origins()
+            .is_fuigo_api_bearer_url(P17R_CONFIGURED)
+    );
+}
+
+/// Astra's second case (P17-R v2 audit #2): a remote CAMPAIGN supplied a value
+/// at the last successful read, the fresh settings withdraw it, then the read
+/// fails. The withdrawn value must not come back. Replaying the last effective
+/// table would bring it back as TOML, which outranks the remote setting.
+#[test]
+#[serial_test::serial]
+fn a_failed_config_read_does_not_resurrect_a_withdrawn_remote_campaign() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _env = p17r_without_ambient_env();
+    let user = p17r_raw(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{P17R_CONFIGURED}\"\n"
+    ));
+    let layers = p17r_layers(user);
+    let campaign: crate::util::config::RemoteSettings = serde_json::from_value(serde_json::json!({
+        "managed_mcps_enabled": false,
+        "campaigns": [{ "id": "p17r-managed-mcps-on", "managed_mcps": { "enabled": true } }],
+    }))
+    .expect("remote settings fixture parses");
+
+    // The last successful read, as `load_effective_config` produced it then.
+    let then = crate::util::config::effective_config_for_remote_settings(&layers, Some(&campaign));
+    assert_eq!(
+        then.get("managed_mcps")
+            .and_then(|m| m.get("enabled"))
+            .and_then(toml::Value::as_bool),
+        Some(true),
+        "precondition: the campaign patch is in the effective table"
+    );
+    let mut cfg = p17r_live_config(&then, Some(campaign));
+    assert!(
+        cfg.managed_mcps_enabled,
+        "precondition: the campaign's TOML value outranks the remote `false`"
+    );
+
+    // Fresh settings: the campaign is withdrawn, the remote value still says off.
+    cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+        managed_mcps_enabled: Some(false),
+        ..Default::default()
+    });
+
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        p17r_failed_read(),
+        None,
+        Some(layers),
+    );
+
+    assert!(
+        !cfg.managed_mcps_enabled,
+        "a withdrawn remote campaign must not be replayed over the fresh settings"
+    );
+    assert!(
+        cfg.trusted_origins()
+            .is_fuigo_api_bearer_url(P17R_CONFIGURED)
+    );
+}
+
+/// With no config ever read successfully there is nothing known-good to fall
+/// back to, and the only safe move is none at all.
+#[test]
+#[serial_test::serial]
+fn a_failed_config_read_before_any_successful_read_leaves_the_config_alone() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _env = p17r_without_ambient_env();
+    let raw = p17r_raw(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{P17R_CONFIGURED}\"\n"
+    ));
+    let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).expect("fixture parses");
+    let before = cfg.trusted_origins().clone();
+
+    super::agent_ops::reapply_config_after_settings_refresh(&mut cfg, p17r_failed_read(), None, None);
+
+    assert_eq!(cfg.trusted_origins(), &before);
+}
+
+/// P90 F6 (Astra r3 #1): a settings refresh pairs the reloaded config with the campaign-free
+/// files of the same read, and the failed-read fallback with the last-good layers' own files.
+#[test]
+fn settings_refresh_pairs_helper_provenance_with_the_same_read() {
+    let raw = p17r_raw("[models]\nimage_description = \"local-a\"\n");
+    let mut cfg = p17r_live_config(&raw, None);
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        Ok(raw.clone()),
+        Some(raw.clone()),
+        None,
+    );
+    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+    super::agent_ops::reapply_config_after_settings_refresh(&mut cfg, Ok(raw.clone()), None, None);
+    assert_eq!(cfg.explicit_helper_models.image_description, None);
+    super::agent_ops::reapply_config_after_settings_refresh(
+        &mut cfg,
+        p17r_failed_read(),
+        None,
+        Some(p17r_layers(raw)),
+    );
+    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+}
+
+/// P121 (K6). The session-title helper client is built once at session setup from the model the
+/// session had then. A model switch must rebuild it, or an API session that switches to a
+/// subscription before its first prompt titles itself on the old (paid) route.
+#[tokio::test]
+async fn a_model_switch_rebuilds_the_session_summary_helper() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry, TitlePolicy};
+    use agent_client_protocol::Agent;
+    let agent = build_minimal_agent_for_tests();
+    agent.cfg.borrow_mut().session.title_policy = Some(TitlePolicy::Local);
+    let mut entry = ModelEntry::fallback("helper-switch-model", &EndpointsConfig::default());
+    entry.info.user_selectable = true;
+    agent.models_manager.insert_test_entry("helper-switch-model", entry);
+    let sid = acp::SessionId::new("helper-switch-test");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.cmd_tx = tx;
+    handle.persistence_tx = persistence_tx;
+    agent.insert_resident(&sid, handle);
+    let request = serde_json::from_value::<acp::SetSessionModelRequest>(serde_json::json!({
+        "sessionId": "helper-switch-test", "modelId": "helper-switch-model"
+    }))
+    .unwrap();
+    let (result, switched_to) = tokio::join!(agent.set_session_model(request), async {
+        match rx.recv().await.unwrap() {
+            crate::session::SessionCommand::GetActiveAgent { responds_to } => {
+                let _ = responds_to.send(None);
+            }
+            _ => panic!("expected the harness compatibility check"),
+        }
+        match rx.recv().await.unwrap() {
+            crate::session::SessionCommand::SetSessionModel { sampling_config, responds_to, .. } => {
+                let model = sampling_config.model.clone();
+                let _ = responds_to.send(Ok(acp::ModelId::new(model.clone())));
+                model
+            }
+            _ => panic!("expected the model switch"),
+        }
+    });
+    assert!(result.is_ok(), "{result:?}");
+    match persistence_rx.try_recv() {
+        Ok(crate::session::persistence::PersistenceMsg::ReplaceSummaryHelper(helper)) => {
+            assert_eq!(helper.model, switched_to, "the helper follows the model the session switched to");
+        }
+        other => panic!("a model switch must rebuild the summary helper, got {other:?}"),
+    }
+}
+
+/// P121 (K6). A catalog reload rebuilds the summary helper of every resident session, from the
+/// session's OWN live config: the live models below are not in the catalog at all, so a rebuild that
+/// re-read the catalog by model id could not produce them.
+#[tokio::test(flavor = "current_thread")]
+async fn a_catalog_reload_rebuilds_the_summary_helper_of_every_resident_session() {
+    use crate::agent::config::{Config as AgentConfig, TitlePolicy};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            agent.cfg.borrow_mut().session.title_policy = Some(TitlePolicy::Local);
+            // A model the reloaded catalog still lists.
+            agent.models_manager.apply_config(AgentConfig::default());
+            let known = agent.models_manager.models().keys().next().expect("a default catalog entry").clone();
+            let mut probes = Vec::new();
+            for name in ["helper-reload-a", "helper-reload-b"] {
+                let sid = acp::SessionId::new(name);
+                let live_model = format!("live-model-of-{name}");
+                let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut handle = make_test_handle(&known, false, None);
+                handle.persistence_tx = persistence_tx;
+                handle.cmd_tx = cmd_tx;
+                handle.info = crate::session::info::Info { id: sid.clone(), cwd: "/tmp".to_string() };
+                agent.insert_resident(&sid, handle);
+                let answer = live_model.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(command) = cmd_rx.recv().await {
+                        if let crate::session::SessionCommand::GetLiveSamplerConfig { respond_to } = command {
+                            let _ = respond_to.send(fuigo_sampler::SamplerConfig {
+                                model: answer.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
+                });
+                probes.push((live_model, persistence_rx));
+            }
+            agent.ensure_helper_rebuild_watcher();
+            tokio::task::yield_now().await;
+            agent.models_manager.apply_config(AgentConfig::default());
+            for (live_model, probe) in &mut probes {
+                let message = tokio::time::timeout(std::time::Duration::from_secs(10), probe.recv())
+                    .await
+                    .expect("the reload reaches every resident session")
+                    .expect("channel open");
+                match message {
+                    crate::session::persistence::PersistenceMsg::ReplaceSummaryHelper(helper) => {
+                        assert_eq!(&helper.model, live_model, "built from the session's live config");
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+        })
+        .await;
+}
+
+/// P121 (K6). A session whose model left the catalog keeps its title client even though it would
+/// answer: a config rebuilt then could have lost the subscription identity it was set up with.
+#[tokio::test(flavor = "current_thread")]
+async fn a_catalog_reload_keeps_the_helper_of_a_session_whose_model_left_the_catalog() {
+    use crate::agent::config::{Config as AgentConfig, TitlePolicy};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            agent.cfg.borrow_mut().session.title_policy = Some(TitlePolicy::Local);
+            let sid = acp::SessionId::new("helper-gone-model");
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut handle = make_test_handle("model-that-is-not-in-the-catalog", false, None);
+            handle.persistence_tx = persistence_tx;
+            handle.cmd_tx = cmd_tx;
+            handle.info = crate::session::info::Info { id: sid.clone(), cwd: "/tmp".to_string() };
+            agent.insert_resident(&sid, handle);
+            tokio::task::spawn_local(async move {
+                while let Some(command) = cmd_rx.recv().await {
+                    if let crate::session::SessionCommand::GetLiveSamplerConfig { respond_to } = command {
+                        let _ = respond_to.send(fuigo_sampler::SamplerConfig::default());
+                    }
+                }
+            });
+            agent.ensure_helper_rebuild_watcher();
+            tokio::task::yield_now().await;
+            agent.models_manager.apply_config(AgentConfig::default());
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(persistence_rx.try_recv().is_err(), "the session keeps the client it has");
+        })
+        .await;
+}
+
+/// P121 (K6). A session that does not answer with its live config keeps the title client it has:
+/// guessing its config from the reloaded catalog could substitute another route, possibly a paid one.
+#[tokio::test(flavor = "current_thread")]
+async fn a_catalog_reload_keeps_the_helper_of_a_session_that_does_not_answer() {
+    use crate::agent::config::{Config as AgentConfig, TitlePolicy};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            agent.cfg.borrow_mut().session.title_policy = Some(TitlePolicy::Local);
+            let sid = acp::SessionId::new("helper-silent-session");
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            agent.models_manager.apply_config(AgentConfig::default());
+            let known = agent.models_manager.models().keys().next().expect("a default catalog entry").clone();
+            let mut handle = make_test_handle(&known, false, None);
+            handle.persistence_tx = persistence_tx;
+            handle.info = crate::session::info::Info { id: sid.clone(), cwd: "/tmp".to_string() };
+            agent.insert_resident(&sid, handle);
+            agent.ensure_helper_rebuild_watcher();
+            tokio::task::yield_now().await;
+            agent.models_manager.apply_config(AgentConfig::default());
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert!(persistence_rx.try_recv().is_err(), "the session keeps the client it has");
+        })
+        .await;
+}
+
+/// P121 (K6). In Leader mode a session's model switch leaves the process-wide current model alone,
+/// so the switch must still move the epoch helper clients are judged by.
+#[tokio::test]
+async fn a_leader_mode_model_switch_still_moves_the_helper_epoch() {
+    use crate::agent::config::{AgentMode, EndpointsConfig, ModelEntry};
+    use agent_client_protocol::Agent;
+    let agent = build_minimal_agent_for_tests();
+    agent.cfg.borrow_mut().mode = AgentMode::Leader;
+    let mut entry = ModelEntry::fallback("helper-leader-model", &EndpointsConfig::default());
+    entry.info.user_selectable = true;
+    agent.models_manager.insert_test_entry("helper-leader-model", entry);
+    let sid = acp::SessionId::new("helper-leader-test");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.cmd_tx = tx;
+    handle.persistence_tx = persistence_tx;
+    agent.insert_resident(&sid, handle);
+    let before = agent.models_manager.helper_epoch();
+    let request = serde_json::from_value::<acp::SetSessionModelRequest>(serde_json::json!({
+        "sessionId": "helper-leader-test", "modelId": "helper-leader-model"
+    }))
+    .unwrap();
+    let (result, ()) = tokio::join!(agent.set_session_model(request), async {
+        if let crate::session::SessionCommand::GetActiveAgent { responds_to } = rx.recv().await.unwrap() {
+            let _ = responds_to.send(None);
+        }
+        if let crate::session::SessionCommand::SetSessionModel { sampling_config, responds_to, .. } = rx.recv().await.unwrap() {
+            let _ = responds_to.send(Ok(acp::ModelId::new(sampling_config.model)));
+        }
+    });
+    assert!(result.is_ok(), "{result:?}");
+    assert_ne!(agent.models_manager.helper_epoch(), before, "the switch is visible to helper clients");
 }

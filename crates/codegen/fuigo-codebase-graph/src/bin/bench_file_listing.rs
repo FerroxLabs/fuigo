@@ -1,6 +1,9 @@
 //! Benchmark for comparing git CLI vs git2 file listing.
 //!
 //! Usage: cargo run --bin bench_file_listing --release -- [path] [cli|git2|git2-index|both]
+// Dev/benchmark tool: never shipped (not linked into `fuigo-pager`), run by hand on a terminal.
+// Printing is its whole interface, so the workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::Path;
 use std::process::Command;

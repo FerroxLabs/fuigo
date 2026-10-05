@@ -1,3 +1,6 @@
+// PTY test harness: never shipped; its stdout/stderr are the harness's report channel, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 use std::path::PathBuf;
 use std::process::ExitCode;
 

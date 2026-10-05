@@ -3,7 +3,7 @@ use pretty_assertions::assert_eq;
 
 #[test]
 fn acp_reducer_maps_agent_message_to_text() {
-    let mut r = AcpReducer;
+    let mut r = AcpReducer::default();
     assert_eq!(
         r.reduce(StreamEvent::AgentMessage("hi".into()))[0],
         json!({"type": "text", "data": "hi"})
@@ -12,7 +12,7 @@ fn acp_reducer_maps_agent_message_to_text() {
 
 #[test]
 fn acp_reducer_maps_tool_call_to_native_shape() {
-    let mut r = AcpReducer;
+    let mut r = AcpReducer::default();
     assert_eq!(
         r.reduce(StreamEvent::ToolCall(tool_call_ev()))[0],
         json!({
@@ -31,7 +31,7 @@ fn acp_reducer_maps_tool_call_to_native_shape() {
 
 #[test]
 fn acp_reducer_maps_tool_call_update_to_native_shape() {
-    let mut r = AcpReducer;
+    let mut r = AcpReducer::default();
     assert_eq!(
         r.reduce(StreamEvent::ToolCallUpdate(tool_update(
             "completed",
@@ -50,7 +50,7 @@ fn acp_reducer_maps_tool_call_update_to_native_shape() {
 
 #[test]
 fn acp_response_completed_emits_usage_line() {
-    let mut r = AcpReducer;
+    let mut r = AcpReducer::default();
     let out = r.reduce(StreamEvent::ResponseCompleted {
         message_id: Some("msg_1".into()),
         stop_reason: Some("tool_use".into()),
@@ -71,7 +71,7 @@ fn acp_response_completed_emits_usage_line() {
 
 #[test]
 fn acp_finish_emits_end_line_with_usage_and_structured_output() {
-    let mut r = AcpReducer;
+    let mut r = AcpReducer::default();
     let aggregate = json!({
         "inputTokens": 5,
         "outputTokens": 2,

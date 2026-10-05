@@ -950,6 +950,13 @@ impl SchedulerActor {
 
 #[cfg(test)]
 mod tests {
+    /// Hang guard for anything a test REQUIRES to arrive (a notification, an expiry, a reply).
+    /// Most of these follow a durable write (`sync_all` on the file and its directory), which the
+    /// product itself allows `DURABILITY_BARRIER_TIMEOUT` (30 s); a 1-2 s guard failed whenever a
+    /// loaded disk took longer to fsync. Waits that assert something does NOT arrive keep their
+    /// short windows.
+    const MUST_ARRIVE: Duration = Duration::from_secs(60);
+    const _: () = assert!(MUST_ARRIVE.as_secs() > super::DURABILITY_BARRIER_TIMEOUT.as_secs());
     use super::*;
     use crate::implementations::fuigo_build::scheduler::types::{
         ScheduledTask, SchedulerHandle, scheduler_tool_error,
@@ -1016,7 +1023,7 @@ mod tests {
     async fn next_acknowledged(
         notifications: &mut mpsc::UnboundedReceiver<AcknowledgedToolNotification>,
     ) -> AcknowledgedToolNotification {
-        tokio::time::timeout(Duration::from_secs(2), notifications.recv())
+        tokio::time::timeout(MUST_ARRIVE, notifications.recv())
             .await
             .expect("notification timeout")
             .expect("notification channel closed")
@@ -1271,16 +1278,14 @@ mod tests {
         tokio::pin!(delete);
         let delivery = tokio::select! {
             _ = &mut delete => panic!("delete must wait for acknowledgement"),
-            delivery = tokio::time::timeout(Duration::from_secs(1), deliveries.recv()) => {
+            delivery = tokio::time::timeout(MUST_ARRIVE, deliveries.recv()) => {
                 delivery.unwrap().unwrap()
             },
         };
         delivery.acknowledgement.unwrap().send(Ok(())).unwrap();
-        tokio::time::timeout(Duration::from_secs(1), delete)
-            .await
-            .unwrap();
+        tokio::time::timeout(MUST_ARRIVE, delete).await.unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), response)
+            tokio::time::timeout(MUST_ARRIVE, response)
                 .await
                 .unwrap()
                 .unwrap()
@@ -1487,14 +1492,14 @@ mod tests {
         reply_rx.await.unwrap().unwrap();
 
         // Drain ScheduledTaskCreated.
-        let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+        let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("created")
             .expect("channel open");
         assert!(matches!(notif, ToolNotification::ScheduledTaskCreated(_)));
 
         // First fire.
-        let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+        let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("first fire")
             .expect("channel open");
@@ -1502,7 +1507,7 @@ mod tests {
 
         // The task re-fires purely from `next_fire_at` rescheduling, with no
         // in-flight guard to clear.
-        let notif = tokio::time::timeout(Duration::from_secs(3), notif_rx.recv())
+        let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("second fire")
             .expect("channel open");
@@ -1547,11 +1552,11 @@ mod tests {
 
         // The first two events on the channel must be ScheduledTaskCreated
         // for the two restored tasks, in insertion order.
-        let n1 = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+        let n1 = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("first notification")
             .expect("channel open");
-        let n2 = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+        let n2 = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("second notification")
             .expect("channel open");
@@ -1633,7 +1638,7 @@ mod tests {
 
         let mut kinds = Vec::new();
         for _ in 0..2 {
-            let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+            let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
                 .await
                 .expect("notification")
                 .expect("channel open");
@@ -1822,7 +1827,7 @@ mod tests {
             .unwrap();
         up_rx.await.unwrap().unwrap();
 
-        let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+        let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
             .await
             .expect("upsert notification")
             .expect("channel open");
@@ -1967,7 +1972,7 @@ mod tests {
     }
 
     async fn next_event<T>(rx: &mut mpsc::UnboundedReceiver<T>) -> T {
-        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+        tokio::time::timeout(MUST_ARRIVE, rx.recv())
             .await
             .expect("event timeout")
             .expect("channel closed")
@@ -2050,7 +2055,7 @@ mod tests {
 
         let mut fired_subagent_id = None;
         for _ in 0..4 {
-            let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+            let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
                 .await
                 .expect("notification")
                 .expect("channel open");
@@ -2416,7 +2421,7 @@ mod tests {
 
         let mut fired = None;
         for _ in 0..4 {
-            let notif = tokio::time::timeout(Duration::from_secs(3), notif_rx.recv())
+            let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
                 .await
                 .expect("notification")
                 .expect("channel open");
@@ -2446,7 +2451,7 @@ mod tests {
 
         let mut fired = None;
         for _ in 0..4 {
-            let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+            let notif = tokio::time::timeout(MUST_ARRIVE, notif_rx.recv())
                 .await
                 .expect("notification")
                 .expect("channel open");
@@ -2731,12 +2736,12 @@ mod tests {
         let delivery = next_acknowledged(&mut notifications).await;
         let _acknowledgement = delivery.acknowledgement;
         cancel.cancel();
-        let result = tokio::time::timeout(Duration::from_secs(1), deletion)
+        let result = tokio::time::timeout(MUST_ARRIVE, deletion)
             .await
             .unwrap()
             .unwrap();
         assert!(matches!(result, Err(SchedulerError::Cancelled)));
-        tokio::time::timeout(Duration::from_secs(1), handle.0.closed())
+        tokio::time::timeout(MUST_ARRIVE, handle.0.closed())
             .await
             .unwrap();
         assert!(
@@ -2779,7 +2784,7 @@ mod tests {
             let removed = notification!(delivery.notification, ScheduledTaskRemoved);
             assert_eq!(removed.revision, 1);
             delivery.acknowledgement.unwrap().send(Ok(())).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+            tokio::time::timeout(MUST_ARRIVE, expiry.as_mut())
                 .await
                 .unwrap();
         }
@@ -2813,7 +2818,7 @@ mod tests {
             persisted
                 .send(Err(std::io::Error::other("disk unavailable")))
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+            tokio::time::timeout(MUST_ARRIVE, expiry.as_mut())
                 .await
                 .unwrap();
         }
@@ -2883,7 +2888,7 @@ mod tests {
                 .unwrap()
                 .send(Err("append failed".into()))
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(1), expiry.as_mut())
+            tokio::time::timeout(MUST_ARRIVE, expiry.as_mut())
                 .await
                 .unwrap();
             removed_revision
@@ -2961,7 +2966,7 @@ mod tests {
         ));
         assert!(!actor_task.is_finished());
         cancel_token.cancel();
-        tokio::time::timeout(Duration::from_secs(1), actor_task)
+        tokio::time::timeout(MUST_ARRIVE, actor_task)
             .await
             .unwrap()
             .unwrap();

@@ -94,3 +94,6 @@ harness = false
 name = "paste_latency"
 path = "benches/paste_latency.rs"
 harness = false
+
+[lints]
+workspace = true

@@ -49,12 +49,20 @@ impl TurnEnd {
                 error,
                 error_details,
                 last_assistant_message,
-            } => event::HookPayload::StopFailure {
-                error,
-                error_details: clip(error_details.as_deref()),
-                last_assistant_message: clip_message(last_assistant_message.as_deref()),
-                subagent_type,
-            },
+            } => {
+                // P70b: hook input leaves the process (a command's stdin, an HTTP body). Both texts are built from
+                // the failed turn's error; credentials sent upstream are replaced before the clip.
+                let scrub =
+                    |text: Option<String>| text.map(fuigo_telemetry::sent_credentials::scrub_owned);
+                let error_details = scrub(error_details);
+                let last_assistant_message = scrub(last_assistant_message);
+                event::HookPayload::StopFailure {
+                    error,
+                    error_details: clip(error_details.as_deref()),
+                    last_assistant_message: clip_message(last_assistant_message.as_deref()),
+                    subagent_type,
+                }
+            }
             Self::Cancelled {
                 reason,
                 trigger,

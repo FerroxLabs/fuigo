@@ -272,7 +272,10 @@ async fn run_command(
         fuigo_sandbox::child_net::restrict_child_network(cmd);
     };
 
+    // The command is the user's own program: it never sees Fuigo's secrets (P120). Removed when the command is built,
+    // before any explicit variable is set.
     let mut direct = Command::new(&expanded);
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut direct);
     configure(&mut direct);
     #[allow(clippy::disallowed_methods)] // enrolled in the session scope below
     let mut child = match direct.spawn() {
@@ -287,6 +290,7 @@ async fn run_command(
             #[cfg(unix)]
             let mut shell = {
                 let mut c = Command::new("sh");
+                fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut c);
                 c.args(["-c", expanded.as_str()]);
                 c
             };
@@ -296,6 +300,8 @@ async fn run_command(
             let mut shell = {
                 let inv = fuigo_config::shell::shell_command_argv(&expanded);
                 let mut c = Command::new(&inv.program);
+                // Before the explicit variables, so those still arrive (P120).
+                fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut c);
                 c.args(&inv.args).envs(inv.env);
                 c
             };

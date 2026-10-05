@@ -163,6 +163,13 @@ mod tests {
         BlockLine, BlockOutput, derive_selection_text, line_plain_text, selectable_cols,
     };
 
+    /// The renderer paints bars with the theme read inside `MarkdownContent::output`'s wrap pass, and the strip compares them
+    /// against a second `Theme::current()` read in `QuoteBarStrip::new`. Concurrent theme / mode-switch tests can change the
+    /// process-global theme between those two reads, which leaves the bar selectable. Hold the shared theme lock for the test.
+    fn pin_markdown_theme() -> std::sync::MutexGuard<'static, ()> {
+        crate::theme::cache::pin_theme()
+    }
+
     fn find_line<'a>(out: &'a BlockOutput, needle: &str) -> &'a BlockLine {
         out.lines
             .iter()
@@ -172,6 +179,7 @@ mod tests {
 
     #[test]
     fn rendered_quote_prefix_len_shapes() {
+        let _theme = pin_markdown_theme();
         let bq = quote_bar_style();
         let quote = Line::from(vec![Span::styled("│", bq), Span::raw(" text")]);
         assert_eq!(rendered_quote_prefix_len(&quote, bq), Some(4));
@@ -216,6 +224,7 @@ mod tests {
 
     #[test]
     fn rendered_quote_prefix_len_rejects_content_bars_after_genuine_prefix() {
+        let _theme = pin_markdown_theme();
         let bq = quote_bar_style();
         // Source `> │ box art`: a genuine bar, then a literal (unstyled) bar as the first content char, which must not be consumed as a nesting level
         let literal_second = Line::from(vec![Span::styled("│", bq), Span::raw(" │ box art")]);
@@ -237,6 +246,7 @@ mod tests {
 
     #[test]
     fn quote_prefix_selectable_requires_bar_style() {
+        let _theme = pin_markdown_theme();
         // Same content, wrong style (no DIM): a literal bar span is not a parser-generated quote bar and must stay fully selectable
         let mut line = Line::from(vec![Span::raw("│"), Span::raw(" text")]);
         assert_eq!(
@@ -259,6 +269,7 @@ mod tests {
 
     #[test]
     fn quote_line_selection_excludes_bar_prefix() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("intro\n\n> QUOTE alpha\n\noutro");
         let out = md.output(80);
 
@@ -289,6 +300,7 @@ mod tests {
 
     #[test]
     fn nested_quote_selection_excludes_all_bars() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("> outer line\n>\n> > NESTED deep");
         let out = md.output(80);
 
@@ -301,6 +313,7 @@ mod tests {
 
     #[test]
     fn wrapped_quote_continuations_exclude_reinjected_prefix() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("> alpha bravo charlie delta echo foxtrot golf hotel india");
         let out = md.output(16);
         assert!(out.lines.len() > 1, "quote must wrap at width 16");
@@ -335,6 +348,7 @@ mod tests {
 
     #[test]
     fn blank_quote_line_survives_drag_copy_as_blank() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("> QUOTE_A first\n>\n> QUOTE_B second");
         let out = md.output(80);
         assert_eq!(out.lines.len(), 3, "quote renders as three rows");
@@ -375,6 +389,7 @@ mod tests {
 
     #[test]
     fn literal_bar_at_quote_content_start_is_not_stripped() {
+        let _theme = pin_markdown_theme();
         // Quoted box-drawing output: the content's own bar must never be consumed as a nesting level (that would DELETE user bytes from the copy)
         // The row degrades to the conservative interior-bar class
         let md = MarkdownContent::new("> │ box art");
@@ -386,6 +401,7 @@ mod tests {
 
     #[test]
     fn literal_bar_as_entire_quote_content_is_not_dropped() {
+        let _theme = pin_markdown_theme();
         // Degenerate `> │`: without the style-aware scan this classified as a bar-only blank row and the content bar vanished from copies
         let md = MarkdownContent::new("> │");
         let out = md.output(80);
@@ -396,6 +412,7 @@ mod tests {
 
     #[test]
     fn list_nested_quote_keeps_prefix() {
+        let _theme = pin_markdown_theme();
         // Bullet span precedes the bar, so the first-span guard skips the row (documented conservative false negative on quote_prefix_selectable)
         let md = MarkdownContent::new("- > quoted text");
         let out = md.output(80);
@@ -406,6 +423,7 @@ mod tests {
 
     #[test]
     fn literal_bar_in_paragraph_is_not_stripped() {
+        let _theme = pin_markdown_theme();
         // A paragraph starting with a literal bar (file-tree art) is a single glued span without the quote-bar style, so it stays fully selectable
         let md = MarkdownContent::new("│ literal tree line");
         let out = md.output(80);
@@ -416,6 +434,7 @@ mod tests {
 
     #[test]
     fn literal_bar_in_code_block_is_not_stripped() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("```\n│ box art\n└── tree\n```");
         let out = md.output(80);
         let line = find_line(&out, "box art");
@@ -425,6 +444,7 @@ mod tests {
 
     #[test]
     fn table_rows_keep_borders_in_copy() {
+        let _theme = pin_markdown_theme();
         let md = MarkdownContent::new("| a | b |\n|---|---|\n| CELL1 | CELL2 |");
         let out = md.output(40);
         let row = find_line(&out, "CELL1");
@@ -438,6 +458,7 @@ mod tests {
 
     #[test]
     fn raw_mode_quote_lines_stay_fully_selectable() {
+        let _theme = pin_markdown_theme();
         let mut md = MarkdownContent::new("> QUOTE alpha");
         md.set_raw_mode(true);
         let out = md.output(80);

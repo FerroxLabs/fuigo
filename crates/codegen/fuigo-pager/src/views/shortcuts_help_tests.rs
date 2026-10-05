@@ -1132,6 +1132,7 @@ fn handle_modal_key_enter_on_hint_enters_detail() {
 /// Over-scrolling a detail body clamps to the last lines instead of paging into an all-blank page.
 #[test]
 fn render_detail_body_clamps_overscroll() {
+    let _theme = crate::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let theme = crate::theme::Theme::current();
@@ -1167,6 +1168,7 @@ fn render_detail_body_clamps_overscroll() {
 /// A distinct body (populated long_help) must still render below the title.
 #[test]
 fn render_detail_body_omits_body_equal_to_title() {
+    let _theme = crate::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let theme = crate::theme::Theme::current();
@@ -1260,6 +1262,7 @@ fn detail_from_entry_uses_long_help_for_body() {
 /// A logical-line clamp could not reach it.
 #[test]
 fn render_detail_body_scroll_is_wrap_aware() {
+    let _theme = crate::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let theme = crate::theme::Theme::current();
@@ -1295,6 +1298,7 @@ fn render_detail_body_scroll_is_wrap_aware() {
 /// The inline expand (arrows) is a separate path and stays tight.
 #[test]
 fn render_detail_body_spaces_paragraphs_with_blank_line() {
+    let _theme = crate::theme::cache::pin_theme();
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let theme = crate::theme::Theme::current();
@@ -2182,6 +2186,7 @@ fn handle_modal_key_left_collapses_expanded_hint() {
 /// A row's `long_help` renders as an inline line only while its id is expanded, and is absent otherwise.
 #[test]
 fn render_modal_shows_long_help_only_when_expanded() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::actions::ActionId;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;

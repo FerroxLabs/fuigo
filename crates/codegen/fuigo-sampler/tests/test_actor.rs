@@ -857,9 +857,13 @@ async fn connection_reset_emits_payload_heuristic_and_strips_request() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_failure_does_not_emit_images_stripped() {
     // Connection refused is `is_connect`, not a body-upload reset.
+    // A held closed port, not `127.0.0.1:1`: WSL2 mirrored networking never refuses a closed IPv4 loopback port.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let handle = SamplerActor::spawn(
-        test_config("http://127.0.0.1:1/v1".into(), "test-model"),
+        test_config(
+            format!("{}/v1", fuigo_test_support::refused_loopback_url()),
+            "test-model",
+        ),
         RetryPolicy::default(),
         event_tx,
     );

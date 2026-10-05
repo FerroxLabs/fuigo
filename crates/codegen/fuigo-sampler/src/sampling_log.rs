@@ -8,8 +8,9 @@ pub const TARGET: &str = "sampling_log";
 
 #[derive(Debug, Clone)]
 pub struct AuthInfo {
+    /// `"bearer"`, `"x-api-key"` or `"none"`: which credential header was sent. Never any part of the credential
+    /// itself (P08: a key fragment in a log is a partial key leak, and a short key is the whole key).
     pub auth_type: &'static str,
-    pub auth_prefix: Option<String>,
 }
 
 pub fn request_span(
@@ -27,7 +28,6 @@ pub fn request_span(
         api_backend = api_backend,
         base_url = base_url,
         auth_type = auth.auth_type,
-        auth_prefix = auth.auth_prefix.as_deref().unwrap_or(""),
         // Recorded from `SamplerConfig` / response usage as the request progresses; `field::Empty` lets callers `record()` them later
         reasoning_effort = tracing::field::Empty,
         output_tokens = tracing::field::Empty,

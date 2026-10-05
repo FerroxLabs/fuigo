@@ -8,8 +8,12 @@ fn crash_handler_from_toml(v: Option<&TomlValue>) -> Option<bool> {
     v?.get("diagnostics")?.get("crash_handler")?.as_bool()
 }
 
+/// Default when no layer sets the gate: crash recording is ON (Fuigo 1.0.21). Reports stay local
+/// under `$FUIGO_HOME/crash/`; any layer can turn it off.
+pub(crate) const CRASH_HANDLER_DEFAULT: bool = true;
+
 /// Precedence core shared by the typed resolver and the disk reader so they can't drift.
-/// Order: requirement > env > config > managed > remote > default `false`.
+/// Order: requirement > env > config > managed > remote > default `true`.
 fn resolve_crash_handler_enabled_layers(
     requirement: Option<bool>,
     config: Option<bool>,
@@ -22,11 +26,12 @@ fn resolve_crash_handler_enabled_layers(
         .config(config)
         .managed(managed)
         .feature_flag(feature_flag)
+        .default(CRASH_HANDLER_DEFAULT)
         .resolve()
 }
 
 /// Precedence: requirements > env (`FUIGO_CRASH_HANDLER`) > user `[diagnostics] crash_handler` > managed > remote settings `crash_handler_enabled`.
-/// Defaults to `false`.
+/// Defaults to `true`; `false` at any layer (or `FUIGO_CRASH_HANDLER=0`) turns it off.
 pub fn resolve_crash_handler_enabled(
     requirements: Option<&TomlValue>,
     user: Option<&TomlValue>,
@@ -46,14 +51,90 @@ pub fn resolve_crash_handler_enabled(
 static REMOTE_CRASH_HANDLER_ENABLED: std::sync::RwLock<Option<bool>> = std::sync::RwLock::new(None);
 
 /// Called when the agent applies `RemoteSettings`.
+///
+/// A delivered value is also persisted under `$FUIGO_HOME/crash/remote-gate`, because the install
+/// decision runs at the top of `main`, before any remote settings arrive: without it a remote
+/// `crash_handler_enabled = false` kill switch could never stop the (default-on) recorder. The
+/// persisted value is sticky — an absent value (settings not fetched yet, or offline) leaves it
+/// in place, and a later `true` lifts it.
+///
+/// A `false` that turns the effective gate off (no higher tier keeps it on) also stops recording
+/// in this session, through the hook the binary registered with
+/// [`set_crash_recording_stop_hook`]. Turning it back on applies from the next start.
 pub(crate) fn cache_remote_crash_handler_enabled(value: Option<bool>) {
     if let Ok(mut guard) = REMOTE_CRASH_HANDLER_ENABLED.write() {
         *guard = value;
+    }
+    #[cfg(not(test))]
+    if let Some(v) = value {
+        persist_remote_gate(&persisted_remote_gate_path(), v);
+    }
+    stop_recording_if_gate_now_off(
+        value,
+        load_crash_handler_enabled_sync,
+        CRASH_RECORDING_STOP_HOOK.get().copied(),
+    );
+}
+
+/// How the binary stops crash recording mid-session (it closes and deletes this process's crash
+/// slot). A hook instead of a call keeps `fuigo-shell` free of a dependency on the crash crate:
+/// the composition root (`fuigo-pager-bin`), which already owns the recorder, registers it.
+static CRASH_RECORDING_STOP_HOOK: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
+/// Register the function that stops crash recording for the rest of this session. Called once by
+/// the binary right after the recorder is installed; later calls are ignored.
+pub fn set_crash_recording_stop_hook(hook: fn()) {
+    let _ = CRASH_RECORDING_STOP_HOOK.set(hook);
+}
+
+/// Run `hook` when a delivered remote value is `false` and the gate it feeds, re-resolved with
+/// full precedence by `effective`, is now off. Returns whether the hook ran.
+fn stop_recording_if_gate_now_off(
+    value: Option<bool>,
+    effective: impl FnOnce() -> bool,
+    hook: Option<fn()>,
+) -> bool {
+    match (value, hook) {
+        (Some(false), Some(hook)) if !effective() => {
+            hook();
+            true
+        }
+        _ => false,
     }
 }
 
 fn cached_remote_crash_handler_enabled() -> Option<bool> {
     REMOTE_CRASH_HANDLER_ENABLED.read().ok().and_then(|g| *g)
+}
+
+fn persisted_remote_gate_path() -> std::path::PathBuf {
+    crate::util::fuigo_home::fuigo_home()
+        .join("crash")
+        .join("remote-gate")
+}
+
+/// Best-effort and atomic: the value goes to a unique temporary sibling that is renamed over the
+/// gate, so a concurrent startup never reads a truncated file and a failed write keeps the
+/// previous value.
+fn persist_remote_gate(path: &std::path::Path, value: bool) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    let tmp = dir.join(format!(".remote-gate.tmp-{}", std::process::id()));
+    let written = std::fs::write(&tmp, if value { "1\n" } else { "0\n" })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+fn read_persisted_remote_gate(path: &std::path::Path) -> Option<bool> {
+    match std::fs::read_to_string(path).ok()?.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// Merge system-managed policy (`/etc/fuigo`) under home `managed_config.toml` so MDM/system layers still reach the managed BoolFlag tier.
@@ -72,7 +153,7 @@ fn load_managed_toml_layers() -> Option<TomlValue> {
 }
 
 /// Free-function form of [`resolve_crash_handler_enabled`] for the pager-bin install path, which has no live `RemoteSettings`.
-/// Defaults to `false`.
+/// Defaults to `true`.
 pub fn load_crash_handler_enabled_sync() -> bool {
     let requirements = crate::config::load_merged_requirements();
     let user = crate::config::load_from_disk().ok();
@@ -81,7 +162,8 @@ pub fn load_crash_handler_enabled_sync() -> bool {
         crash_handler_from_toml(requirements.as_ref()),
         crash_handler_from_toml(user.as_ref()),
         crash_handler_from_toml(managed.as_ref()),
-        cached_remote_crash_handler_enabled(),
+        cached_remote_crash_handler_enabled()
+            .or_else(|| read_persisted_remote_gate(&persisted_remote_gate_path())),
     )
     .value
 }
@@ -112,11 +194,36 @@ mod crash_handler_gate_tests {
     }
 
     #[test]
-    fn defaults_off_when_nothing_set() {
+    fn defaults_on_when_nothing_set() {
         let _g = guard();
         let r = resolve_crash_handler_enabled(None, None, None, None);
-        assert!(!r.value, "gate must default OFF");
+        assert!(r.value, "crash recording must default ON");
         assert_eq!(r.source, ConfigSource::Default);
+        let r = resolve_crash_handler_enabled(None, None, None, Some(&remote(None)));
+        assert!(r.value, "an unset remote tier keeps the default");
+        assert_eq!(r.source, ConfigSource::Default);
+    }
+
+    #[test]
+    fn user_config_false_turns_the_default_off() {
+        let _g = guard();
+        let off = toml_diag(false);
+        let r = resolve_crash_handler_enabled(None, Some(&off), None, None);
+        assert!(
+            !r.value,
+            "[diagnostics] crash_handler = false must win over the default"
+        );
+        assert_eq!(r.source, ConfigSource::Config);
+    }
+
+    #[test]
+    fn env_zero_turns_the_default_off() {
+        let _g = guard();
+        unsafe { std::env::set_var(ENV_CRASH_HANDLER, "0") };
+        let r = resolve_crash_handler_enabled(None, None, None, None);
+        unsafe { std::env::remove_var(ENV_CRASH_HANDLER) };
+        assert!(!r.value, "FUIGO_CRASH_HANDLER=0 must win over the default");
+        assert_eq!(r.source, ConfigSource::Env);
     }
 
     #[test]
@@ -159,7 +266,7 @@ mod crash_handler_gate_tests {
         assert!(!r.value);
         assert_eq!(r.source, ConfigSource::Remote);
         let r = resolve_crash_handler_enabled(None, None, None, Some(&remote(None)));
-        assert!(!r.value);
+        assert!(r.value, "no remote value: the ON default applies");
         assert_eq!(r.source, ConfigSource::Default);
     }
 
@@ -208,6 +315,81 @@ mod crash_handler_gate_tests {
         assert!(!r.value, "requirement must beat env");
         assert_eq!(r.source, ConfigSource::Requirement);
         unsafe { std::env::remove_var(ENV_CRASH_HANDLER) };
+    }
+
+    #[test]
+    fn persisted_remote_kill_switch_reaches_the_startup_decision() {
+        let _g = guard();
+        let dir = std::env::temp_dir().join(format!("fuigo-crash-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("crash").join("remote-gate");
+        assert_eq!(
+            read_persisted_remote_gate(&path),
+            None,
+            "nothing persisted yet"
+        );
+        persist_remote_gate(&path, false);
+        let remote = read_persisted_remote_gate(&path);
+        assert_eq!(remote, Some(false));
+        let r = resolve_crash_handler_enabled_layers(None, None, None, remote);
+        assert!(
+            !r.value,
+            "a persisted remote kill switch turns the default off at startup"
+        );
+        assert_eq!(r.source, ConfigSource::Remote);
+        let on = toml_diag(true);
+        let r = resolve_crash_handler_enabled_layers(
+            None,
+            crash_handler_from_toml(Some(&on)),
+            None,
+            remote,
+        );
+        assert!(r.value, "user config still outranks the remote tier");
+        // A failed replacement (the rename target is a directory) keeps the previous value
+        // and leaves no temporary file behind.
+        let blocked = dir.join("crash").join("blocked-gate");
+        std::fs::create_dir_all(blocked.join("child")).expect("mkdir");
+        persist_remote_gate(&blocked, true);
+        assert!(
+            blocked.is_dir(),
+            "a failed replacement leaves the target untouched"
+        );
+        persist_remote_gate(&path, true);
+        assert_eq!(
+            read_persisted_remote_gate(&path),
+            Some(true),
+            "a later true lifts it"
+        );
+        let leftovers = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .count();
+        assert_eq!(leftovers, 0, "no temporary files left behind");
+        std::fs::write(&path, "garbage").expect("write");
+        assert_eq!(read_persisted_remote_gate(&path), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    static STOPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn count_stop() {
+        STOPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn remote_switch_off_stops_recording_only_when_the_gate_turns_off() {
+        let _g = guard();
+        let before = STOPS.load(std::sync::atomic::Ordering::SeqCst);
+        let hook: Option<fn()> = Some(count_stop);
+        assert!(stop_recording_if_gate_now_off(Some(false), || false, hook));
+        assert!(
+            !stop_recording_if_gate_now_off(Some(false), || true, hook),
+            "a higher tier (config/env/managed/requirement) keeps it on"
+        );
+        assert!(!stop_recording_if_gate_now_off(Some(true), || false, hook));
+        assert!(!stop_recording_if_gate_now_off(None, || false, hook));
+        assert!(!stop_recording_if_gate_now_off(Some(false), || false, None));
+        assert_eq!(STOPS.load(std::sync::atomic::Ordering::SeqCst), before + 1);
     }
 
     #[test]

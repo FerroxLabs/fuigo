@@ -79,6 +79,7 @@ fn rewind_then_resubmit_drains_immediately_and_discards_orphan() {
                     .cloned(),
             )),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1318,6 +1319,7 @@ fn stacked_rewinds_each_get_their_own_pid_and_orphans_drop_independently() {
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)
                 .meta(serde_json::json!({ "promptId": pid }).as_object().cloned())),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         })
     };

@@ -201,7 +201,7 @@ async fn a_stale_task_completion_is_frame_bounded() {
 }
 
 fn build_agent_with_gateway() -> (
-    MvpAgent,
+    super::MvpAgentHandle,
     tokio::sync::mpsc::UnboundedReceiver<AcpClientMessage>,
 ) {
     use crate::agent::config::Config as AgentConfig;

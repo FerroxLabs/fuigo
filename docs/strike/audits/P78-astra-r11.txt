@@ -1,0 +1,13 @@
+# P78 Astra round 11 (gpt-6-astra, codex exec, read-only) - audited the one-line change 66a29b0d on 01115e18..HEAD (strike/p78-s20)
+# Final report, verbatim (the full transcript is tool output).
+
+No new BLOCKER/HIGH/MEDIUM/LOW findings.
+
+- [tests.rs:2316](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2316): The allow applies only to the following `let` statement. `Command::spawn()` is its only disallowed call.
+- [tests.rs:2311](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2311): Successful spawning immediately transfers ownership into `Probe`. Its destructor calls `kill()` and `wait()` on normal exit and panic unwinding. Spawn failure leaves no child requiring this guard. The justification is supported for these paths; cleanup errors are ignored.
+- `66a29b0d` changes exactly that one line. `4ee9994f` adds only the round-10 report.
+- HEAD advanced to `a6a8886b` during inspection. Its only additional change wraps two declarations in `theme_pin_guard_tests.rs`; literal contents and behavior are unchanged.
+
+Round 10’s existing LOW limitations remain unchanged. Read-only inspection only; no cargo, builds, tests, or file modifications. Verdict covers `01115e18..HEAD`, with HEAD at `a6a8886b`.
+
+LAND

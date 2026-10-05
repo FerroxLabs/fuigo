@@ -143,7 +143,7 @@ impl OtelGate {
                 self.apply_and_open(identity, Some(&settings));
                 Some(*settings)
             }
-            SettingsFetch::Rejected | SettingsFetch::Retry => {
+            SettingsFetch::Rejected | SettingsFetch::Retry | SettingsFetch::DestinationRefused(_) => {
                 self.apply_and_open(identity, None);
                 None
             }
@@ -170,6 +170,9 @@ mod tests {
     #[serial_test::serial]
     #[serial_test::serial(FUIGO_HOME)]
     fn configured_policy_authority_waits_and_rearms() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use fuigo_test_support::env::EnvGuard;
         let Some(home) = fuigo_test_support::env::fresh_process_home(
             "agent::otel_gate::tests::configured_policy_authority_waits_and_rearms",

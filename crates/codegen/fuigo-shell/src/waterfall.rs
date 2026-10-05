@@ -51,7 +51,7 @@ fn mark_with_clock(id: &str, stage: &str, clock: impl FnOnce() -> u128) {
     };
     let t_us = clock();
     match file {
-        None => eprintln!("{LINE_PREFIX} id={id} stage={stage} t_us={t_us}"),
+        None => fuigo_tty_utils::cli_eprintln!("{LINE_PREFIX} id={id} stage={stage} t_us={t_us}"),
         Some(f) => {
             use std::io::Write as _;
             if let Ok(mut f) = f.lock() {

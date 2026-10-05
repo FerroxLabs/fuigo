@@ -199,19 +199,19 @@ impl AgentView {
                         &self.plugin_cta.phase
                 {
                     let plugin_id = name.clone();
-                    if let Err(e) = fuigo_shell::config::add_dismissed_plugin_cta(&plugin_id) {
-                        tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
-                    }
                     self.plugin_cta.dismissed.insert(plugin_id.clone());
                     fuigo_telemetry::session_ctx::log_event(
                         fuigo_telemetry::events::PluginCtaDismissed {
-                            plugin_name: plugin_id,
+                            plugin_name: plugin_id.clone(),
                         },
                     );
                     self.plugin_cta.phase = CtaPhase::Hidden;
                     self.plugin_cta.hit_connect.clear();
                     self.plugin_cta.hit_dismiss.clear();
-                    return InputOutcome::Changed;
+                    // Persisted by an effect, off the input thread: the write
+                    // waits for `config.toml.lock`, which another writer may
+                    // hold (P17-F1's open MEDIUM, fixed in P49).
+                    return InputOutcome::Action(Action::PersistPluginCtaDismissal(plugin_id));
                 }
                 if self
                     .plugin_cta
@@ -1028,7 +1028,8 @@ impl AgentView {
                             entry.block,
                             crate::scrollback::block::RenderBlock::AgentMessage(_)
                                 | crate::scrollback::block::RenderBlock::Btw(_)
-                        ))
+                        )
+                        || entry.hook_data.as_ref().is_some_and(|hd| hd.has_content()))
                 {
                     changed = true;
                 }
@@ -1678,6 +1679,7 @@ mod tests {
     /// A synthetic left-click on a rendered follow-up chip yields the literal `SubmitFollowUp` action (never a slash-command path).
     #[test]
     fn follow_up_chip_click_yields_literal_submit_action() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::test_fixtures::make_agent;
         let mut agent = make_agent();
         agent.apply_follow_ups("resp-1".into(), vec!["/always-approve".into()]);

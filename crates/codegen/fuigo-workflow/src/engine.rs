@@ -1,5 +1,8 @@
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll};
 
 use rhai::{Dynamic, EvalAltResult, Position};
 use tokio::sync::{mpsc, oneshot};
@@ -36,6 +39,8 @@ struct Ctx {
     host_tx: mpsc::UnboundedSender<WorkflowHostRequest>,
     journal: Journal,
     seq: u64,
+    /// The run's stop signal (the manager fires it on pause, stop and session shutdown).
+    cancel: CancellationToken,
 }
 
 impl Ctx {
@@ -93,11 +98,86 @@ enum PendingAgent {
     },
 }
 
-fn drain_parallel_replies(pending: Vec<PendingAgent>) {
+fn drain_parallel_replies(ctx: &Rc<RefCell<Ctx>>, pending: Vec<PendingAgent>) {
     for entry in pending {
         if let PendingAgent::Live { reply_rx, .. } = entry {
-            let _ = reply_rx.blocking_recv();
+            let _ = await_host_reply(ctx, reply_rx);
         }
+    }
+}
+
+/// Waits for the host's reply to a request the engine has already sent, without outliving the host.
+///
+/// A plain `blocking_recv` can wait forever on the engine itself. When a send races the host dropping
+/// its receiver, tokio's mpsc can leave the request in the channel after the receiver's drop has drained
+/// it; the request, and the reply sender inside it, then live until the channel's last sender is
+/// dropped. The engine holds that sender, so it would wait on its own handle (P38: engine threads parked
+/// in `release_agent_calls` behind a closed host channel). Once the channel reports closed, nothing still
+/// queued can ever be received, so the engine lets go of its sender: that frees any stranded request, and
+/// its dropped reply sender ends this wait with `RecvError`, the same answer as any dropped reply. A
+/// request the host already received keeps its reply sender and is still awaited. Later sends fail
+/// exactly as they would on the closed channel.
+fn await_host_reply<T>(
+    ctx: &Rc<RefCell<Ctx>>,
+    mut reply_rx: oneshot::Receiver<T>,
+) -> Result<T, oneshot::error::RecvError> {
+    let replied = {
+        let ctx = ctx.borrow();
+        let mut closed = std::pin::pin!(ctx.host_tx.closed());
+        block_on(std::future::poll_fn(|cx| {
+            if let Poll::Ready(reply) = Pin::new(&mut reply_rx).poll(cx) {
+                return Poll::Ready(Some(reply));
+            }
+            closed.as_mut().poll(cx).map(|()| None)
+        }))
+    };
+    if let Some(reply) = replied {
+        return reply;
+    }
+    let (detached, _) = mpsc::unbounded_channel();
+    drop(std::mem::replace(&mut ctx.borrow_mut().host_tx, detached));
+    block_on(reply_rx)
+}
+
+/// What a host call ends with when the host is gone: its channel refused the request (`failure` is
+/// then "workflow host channel closed") or the reply was lost ("workflow host dropped reply").
+///
+/// If the run's stop signal has fired, the host going away is that stop taking effect: on cancel the
+/// host answers what it has queued with `Cancelled` and ends, and a request sent into that teardown
+/// is dropped with the receiver or stranded (P38). Such a call ends exactly as if the host had
+/// answered `HostError::Cancelled`, so the run finishes `Cancelled`, which the manager keeps as
+/// `UserPaused` for a pause and `Cancelled` for a stop. No result or terminal is journaled for it; a
+/// dispatch intent already recorded stays, so resuming past an effect-bearing call reports its outcome
+/// unknown, exactly as after any stop that interrupts one. Without a stop, a vanished host is a failure
+/// (P38-F).
+fn host_gone(ctx: &Rc<RefCell<Ctx>>, failure: &str) -> Box<EvalAltResult> {
+    if ctx.borrow().cancel.is_cancelled() {
+        terminated(ControlToken::Cancelled)
+    } else {
+        terminated(ControlToken::Fatal(failure.into()))
+    }
+}
+
+/// Drives `future` to completion on this thread. The engine runs on a plain blocking thread, and the
+/// futures it waits on (tokio `sync` primitives) need only a waker, not a runtime.
+fn block_on<F: Future>(future: F) -> F::Output {
+    struct Unpark(std::thread::Thread);
+    impl std::task::Wake for Unpark {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+    let waker = std::task::Waker::from(std::sync::Arc::new(Unpark(std::thread::current())));
+    let mut cx = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+        std::thread::park();
     }
 }
 
@@ -115,9 +195,11 @@ pub fn run_workflow(params: WorkflowRunParams) -> WorkflowOutcome {
         host_tx,
         journal,
         seq: 0,
+        cancel: cancel.clone(),
     }));
 
     let mut engine = rhai::Engine::new();
+    crate::route_script_output(&mut engine);
     engine.set_max_operations(max_ops);
     engine.set_max_call_levels(64);
     engine.set_max_expr_depths(128, 64);
@@ -300,14 +382,11 @@ fn host_call<T>(
         .dispatch(seq, kind, &hash)
         .map_err(journal_fatal)?;
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.borrow()
-        .host_tx
-        .send(build(reply_tx))
-        .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
+    let sent = ctx.borrow().host_tx.send(build(reply_tx));
+    sent.map_err(|_| host_gone(ctx, "workflow host channel closed"))?;
 
-    let reply = reply_rx
-        .blocking_recv()
-        .map_err(|_| terminated(ControlToken::Fatal("workflow host dropped reply".into())))?;
+    let reply = await_host_reply(ctx, reply_rx)
+        .map_err(|_| host_gone(ctx, "workflow host dropped reply"))?;
 
     let value = match reply {
         Ok(v) => to_result(v),
@@ -390,16 +469,16 @@ fn reserve_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) -> ScriptResult<()>
     let count =
         u64::try_from(count).map_err(|_| runtime_error("workflow agent-call count overflowed"))?;
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.borrow()
+    let sent = ctx
+        .borrow()
         .host_tx
         .send(WorkflowHostRequest::ReserveAgentCalls {
             count,
             reply: reply_tx,
-        })
-        .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
-    match reply_rx
-        .blocking_recv()
-        .map_err(|_| terminated(ControlToken::Fatal("workflow host dropped reply".into())))?
+        });
+    sent.map_err(|_| host_gone(ctx, "workflow host channel closed"))?;
+    match await_host_reply(ctx, reply_rx)
+        .map_err(|_| host_gone(ctx, "workflow host dropped reply"))?
     {
         Ok(()) => Ok(()),
         Err(HostError::AgentCallQuotaExceeded { requested, maximum }) => {
@@ -436,7 +515,7 @@ fn release_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) {
     {
         return;
     }
-    let _ = reply_rx.blocking_recv();
+    let _ = await_host_reply(ctx, reply_rx);
 }
 
 fn is_resumable_unjournaled_terminal(err: &EvalAltResult) -> bool {
@@ -560,17 +639,18 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             reserve_agent_calls(&c, live_count)?;
             let mut pending = Vec::with_capacity(requests.len());
             for (opts, payload, hash) in requests {
-                let seq = c.borrow_mut().next_seq().inspect_err(|_| {
-                    drain_parallel_replies(std::mem::take(&mut pending));
+                // Bind first: draining waits on the host and borrows `c`, so no borrow may be held.
+                let seq = c.borrow_mut().next_seq();
+                let seq = seq.inspect_err(|_| {
+                    drain_parallel_replies(&c, std::mem::take(&mut pending));
                 })?;
                 let replayed = replay_spawn_agent(&c.borrow().journal, seq, &payload, &hash);
                 match replayed {
                     Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
                     Ok(None) => {
-                        if let Err(error) =
-                            c.borrow_mut().journal.dispatch(seq, "spawn_agent", &hash)
-                        {
-                            drain_parallel_replies(pending);
+                        let dispatched = c.borrow_mut().journal.dispatch(seq, "spawn_agent", &hash);
+                        if let Err(error) = dispatched {
+                            drain_parallel_replies(&c, pending);
                             return Err(journal_fatal(error));
                         }
                         let (reply_tx, reply_rx) = oneshot::channel();
@@ -582,10 +662,8 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                             })
                             .is_err()
                         {
-                            drain_parallel_replies(pending);
-                            return Err(terminated(ControlToken::Fatal(
-                                "workflow host channel closed".into(),
-                            )));
+                            drain_parallel_replies(&c, pending);
+                            return Err(host_gone(&c, "workflow host channel closed"));
                         }
                         pending.push(PendingAgent::Live {
                             seq,
@@ -594,7 +672,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         });
                     }
                     Err(error) => {
-                        drain_parallel_replies(pending);
+                        drain_parallel_replies(&c, pending);
                         return Err(journal_fatal(error));
                     }
                 }
@@ -633,7 +711,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         hash,
                         reply_rx,
                     } => {
-                        let value = match reply_rx.blocking_recv() {
+                        let value = match await_host_reply(&c, reply_rx) {
                             Ok(Ok(result)) => {
                                 serde_json::to_value(result).unwrap_or(serde_json::Value::Null)
                             }
@@ -643,6 +721,12 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                                 host_terminal_sentinel(TERMINAL_BUDGET)
                             }
                             Ok(Err(HostError::Cancelled)) => {
+                                terminal_kind.get_or_insert_with(|| TERMINAL_CANCELLED.to_string());
+                                resumable_terminal = true;
+                                host_terminal_sentinel(TERMINAL_CANCELLED)
+                            }
+                            // A reply lost to the teardown of a stopped run is that stop (see `host_gone`).
+                            Err(_) if c.borrow().cancel.is_cancelled() => {
                                 terminal_kind.get_or_insert_with(|| TERMINAL_CANCELLED.to_string());
                                 resumable_terminal = true;
                                 host_terminal_sentinel(TERMINAL_CANCELLED)
@@ -950,6 +1034,138 @@ mod tests {
             cancel: CancellationToken::new(),
             max_ops: WorkflowRunParams::DEFAULT_MAX_OPS,
         }
+    }
+
+    /// The request a stranding host leaves behind.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Strand {
+        Reserve,
+        Release,
+        Spawn,
+        Budget,
+    }
+
+    /// A host that serves normally until it meets the request `strand` names, then stops serving and
+    /// strands that request the way tokio's mpsc does when a send races the receiver's drop: the receiver
+    /// is gone (the channel reports closed), and the request, with its reply sender, lives until the
+    /// channel's last sender is dropped. `upgrade()` returning `None` is exactly "the last sender is gone".
+    /// Any other `SpawnAgent` is answered by `spawn_reply`. `on_strand` runs once the host holds the
+    /// request and before it stops serving: that is where a test fires the run's stop signal, the way a
+    /// user's pause or stop lands while the request is in the channel and tears the host down.
+    fn spawn_stranding_host(
+        mut rx: mpsc::UnboundedReceiver<WorkflowHostRequest>,
+        senders: mpsc::WeakUnboundedSender<WorkflowHostRequest>,
+        strand: Strand,
+        spawn_reply: fn() -> Result<AgentResult, HostError>,
+        on_strand: impl FnOnce() + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let stranded = loop {
+                let Some(req) = rx.blocking_recv() else {
+                    return;
+                };
+                match (strand, req) {
+                    (Strand::Reserve, req @ WorkflowHostRequest::ReserveAgentCalls { .. })
+                    | (Strand::Release, req @ WorkflowHostRequest::ReleaseAgentCalls { .. })
+                    | (Strand::Spawn, req @ WorkflowHostRequest::SpawnAgent { .. })
+                    | (Strand::Budget, req @ WorkflowHostRequest::BudgetQuery { .. }) => break req,
+                    (_, WorkflowHostRequest::ReserveAgentCalls { reply, .. })
+                    | (_, WorkflowHostRequest::ReleaseAgentCalls { reply, .. }) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    (_, WorkflowHostRequest::SpawnAgent { reply, .. }) => {
+                        let _ = reply.send(spawn_reply());
+                    }
+                    _ => {}
+                }
+            };
+            on_strand();
+            drop(rx);
+            while senders.upgrade().is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            drop(stranded);
+        })
+    }
+
+    /// Runs the workflow on its own thread so a wedged engine is a named failure, not a hung test.
+    fn run_bounded(test: &str, params: WorkflowRunParams) -> WorkflowOutcome {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(run_workflow(params));
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(20))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "{test}: the workflow engine was still waiting on a host reply 20 s after the \
+                     host channel closed with that request stranded in it (P38 wedge)"
+                )
+            })
+    }
+
+    fn run_with_stranded(test: &str, script: &str, strand: Strand) -> WorkflowOutcome {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_stranding_host(
+            rx,
+            tx.downgrade(),
+            strand,
+            || Err(HostError::Cancelled),
+            || {},
+        );
+        let outcome = run_bounded(test, params(script, Journal::new(None), tx));
+        host.join().expect("stranding host panicked");
+        outcome
+    }
+
+    /// As `run_with_stranded`, but the run's stop signal fires while the stranded request is in the
+    /// channel, as when the user pauses or stops the run during that host call (P38-F). Engine-side a
+    /// pause and a stop are the same signal; the manager tells them apart by its pause intent.
+    fn run_stopped_with_stranded(
+        test: &str,
+        script: &str,
+        strand: Strand,
+        journal: Journal,
+    ) -> WorkflowOutcome {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stop = CancellationToken::new();
+        let stop_in_host = stop.clone();
+        let host = spawn_stranding_host(
+            rx,
+            tx.downgrade(),
+            strand,
+            || Ok(agent_result("answered")),
+            move || stop_in_host.cancel(),
+        );
+        let mut params = params(script, journal, tx);
+        params.cancel = stop;
+        let outcome = run_bounded(test, params);
+        host.join().expect("stranding host panicked");
+        outcome
+    }
+
+    /// A host that fires the run's stop signal and stops serving when the first `ReserveAgentCalls`
+    /// arrives, and only then grants it, so every request the engine sends afterwards is refused by the
+    /// closed channel. Deterministic stand-in for a send that loses the race with the host's teardown.
+    fn run_stopped_with_refused_send(test: &str, script: &str) -> WorkflowOutcome {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let stop = CancellationToken::new();
+        let stop_in_host = stop.clone();
+        let host = std::thread::spawn(move || {
+            while let Some(req) = rx.blocking_recv() {
+                if let WorkflowHostRequest::ReserveAgentCalls { reply, .. } = req {
+                    stop_in_host.cancel();
+                    drop(rx);
+                    let _ = reply.send(Ok(()));
+                    return;
+                }
+            }
+        });
+        let mut params = params(script, Journal::new(None), tx);
+        params.cancel = stop;
+        let outcome = run_bounded(test, params);
+        host.join().expect("refusing host panicked");
+        outcome
     }
 
     fn legacy_spawn_agent_hash(opts: &AgentOpts) -> String {
@@ -1321,6 +1537,281 @@ mod tests {
             matches!(replay, WorkflowOutcome::Failed { ref error } if error.contains("unknown outcome"))
         );
         assert_eq!(live_again.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn stranded_release_ack_does_not_wedge_a_cancelled_agent() {
+        let outcome = run_with_stranded(
+            "stranded_release_ack_does_not_wedge_a_cancelled_agent",
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let r = agent("work");
+                complete(r.output);
+            "#,
+            Strand::Release,
+        );
+        assert!(
+            matches!(outcome, WorkflowOutcome::Cancelled),
+            "a lost release ack must not change the cancelled outcome, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stranded_release_ack_does_not_wedge_a_cancelled_parallel() {
+        let outcome = run_with_stranded(
+            "stranded_release_ack_does_not_wedge_a_cancelled_parallel",
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let results = parallel([#{ prompt: "first" }, #{ prompt: "second" }]);
+                complete(results);
+            "#,
+            Strand::Release,
+        );
+        assert!(
+            matches!(outcome, WorkflowOutcome::Cancelled),
+            "a lost release ack must not change the cancelled outcome, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stranded_reservation_fails_the_run_instead_of_wedging_it() {
+        let outcome = run_with_stranded(
+            "stranded_reservation_fails_the_run_instead_of_wedging_it",
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let r = agent("work");
+                complete(r.output);
+            "#,
+            Strand::Reserve,
+        );
+        assert!(
+            matches!(outcome, WorkflowOutcome::Failed { ref error } if error.contains("workflow host dropped reply")),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stranded_host_call_fails_the_run_instead_of_wedging_it() {
+        let outcome = run_with_stranded(
+            "stranded_host_call_fails_the_run_instead_of_wedging_it",
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let r = agent("work");
+                complete(r.output);
+            "#,
+            Strand::Spawn,
+        );
+        assert!(
+            matches!(outcome, WorkflowOutcome::Failed { ref error } if error.contains("workflow host dropped reply")),
+            "got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stranded_parallel_agent_fails_the_run_instead_of_wedging_it() {
+        let outcome = run_with_stranded(
+            "stranded_parallel_agent_fails_the_run_instead_of_wedging_it",
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let results = parallel([#{ prompt: "first" }, #{ prompt: "second" }]);
+                complete(results);
+            "#,
+            Strand::Spawn,
+        );
+        // The second request either reached the channel before the host stopped serving (and is
+        // dropped with the receiver) or its send fails; both end the run, through the pending-reply
+        // loop or `drain_parallel_replies` respectively.
+        assert!(
+            matches!(outcome, WorkflowOutcome::Failed { ref error }
+                if error.contains("workflow host dropped reply")
+                    || error.contains("workflow host channel closed")),
+            "got {outcome:?}"
+        );
+    }
+
+    // P38-F: a pause or stop that lands while a request is lost to the host's teardown must finish the
+    // run `Cancelled` (the manager keeps a pause as `UserPaused`), not `Failed`.
+
+    const ONE_AGENT: &str = r#"
+        let meta = #{ name: "t", description: "d" };
+        let r = agent("work");
+        complete(r.output);
+    "#;
+
+    fn assert_stopped(test: &str, outcome: &WorkflowOutcome) {
+        assert!(
+            matches!(outcome, WorkflowOutcome::Cancelled),
+            "{test}: a host request lost to the teardown of a paused or stopped run must end the run \
+             Cancelled, not {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn stopped_run_with_stranded_reservation_ends_cancelled_and_resumes_live() {
+        let test = "stopped_run_with_stranded_reservation_ends_cancelled_and_resumes_live";
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.jsonl");
+        // A current (v2) journal, as after any earlier journaled step. (A journal file that was never
+        // written loads as legacy and cannot continue at all; that is independent of P38-F, see R021.)
+        let mut journal = Journal::new(Some(journal_path.clone()));
+        journal.initialize_recovery().unwrap();
+        let outcome = run_stopped_with_stranded(test, ONE_AGENT, Strand::Reserve, journal);
+        assert_stopped(test, &outcome);
+
+        // The reservation never reached the host, so nothing was dispatched: resume runs the agent live.
+        let (tx, rx) = mpsc::unbounded_channel();
+        let host = spawn_mock_host(rx, |req| {
+            if let WorkflowHostRequest::SpawnAgent { reply, .. } = req {
+                let _ = reply.send(Ok(agent_result("after resume")));
+            }
+        });
+        let journal = Journal::load(journal_path).unwrap();
+        let resumed = run_bounded(test, params(ONE_AGENT, journal, tx));
+        drop(host);
+        assert!(
+            matches!(resumed, WorkflowOutcome::Completed { ref result } if result == "after resume"),
+            "{test}: resume after the stop must run the agent live, got {resumed:?}"
+        );
+    }
+
+    #[test]
+    fn stopped_run_with_stranded_agent_host_call_ends_cancelled() {
+        let test = "stopped_run_with_stranded_agent_host_call_ends_cancelled";
+        let outcome = run_stopped_with_stranded(test, ONE_AGENT, Strand::Spawn, Journal::new(None));
+        assert_stopped(test, &outcome);
+    }
+
+    #[test]
+    fn stopped_run_with_stranded_budget_host_call_ends_cancelled() {
+        let test = "stopped_run_with_stranded_budget_host_call_ends_cancelled";
+        let outcome = run_stopped_with_stranded(
+            test,
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let b = budget();
+                complete(b);
+            "#,
+            Strand::Budget,
+            Journal::new(None),
+        );
+        assert_stopped(test, &outcome);
+    }
+
+    #[test]
+    fn stopped_parallel_with_stranded_agent_ends_cancelled_without_journaling_a_terminal() {
+        let test =
+            "stopped_parallel_with_stranded_agent_ends_cancelled_without_journaling_a_terminal";
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("journal.jsonl");
+        let outcome = run_stopped_with_stranded(
+            test,
+            // One item, so the request is always awaited in the pending-reply loop (a second one could
+            // instead be refused at send, which `stopped_parallel_whose_agent_send_is_refused…` covers).
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let results = parallel([#{ prompt: "only" }]);
+                complete(results);
+            "#,
+            Strand::Spawn,
+            Journal::new(Some(journal_path.clone())),
+        );
+        assert_stopped(test, &outcome);
+        // A journaled `dropped_reply` terminal would fail every later resume of this panel. (The
+        // dispatch intent is still recorded, as for any stop during a live agent; this checks only that
+        // no result or terminal entry was written.)
+        let journal = Journal::load(journal_path).unwrap();
+        assert_eq!(
+            journal.len(),
+            0,
+            "{test}: a stopped panel must not journal a terminal for the lost reply"
+        );
+    }
+
+    #[test]
+    fn stopped_run_whose_agent_send_is_refused_ends_cancelled() {
+        let test = "stopped_run_whose_agent_send_is_refused_ends_cancelled";
+        let outcome = run_stopped_with_refused_send(test, ONE_AGENT);
+        assert_stopped(test, &outcome);
+    }
+
+    #[test]
+    fn stopped_parallel_whose_agent_send_is_refused_ends_cancelled() {
+        let test = "stopped_parallel_whose_agent_send_is_refused_ends_cancelled";
+        let outcome = run_stopped_with_refused_send(
+            test,
+            r#"
+                let meta = #{ name: "t", description: "d" };
+                let results = parallel([#{ prompt: "first" }, #{ prompt: "second" }]);
+                complete(results);
+            "#,
+        );
+        assert_stopped(test, &outcome);
+    }
+
+    #[test]
+    fn a_host_that_vanishes_without_a_stop_still_fails_the_run() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = std::thread::spawn(move || {
+            while let Some(req) = rx.blocking_recv() {
+                if let WorkflowHostRequest::ReserveAgentCalls { reply, .. } = req {
+                    drop(rx);
+                    let _ = reply.send(Ok(()));
+                    return;
+                }
+            }
+        });
+        let outcome = run_bounded(
+            "a_host_that_vanishes_without_a_stop_still_fails_the_run",
+            params(ONE_AGENT, Journal::new(None), tx),
+        );
+        host.join().expect("host panicked");
+        assert!(
+            matches!(outcome, WorkflowOutcome::Failed { ref error } if error.contains("workflow host channel closed")),
+            "without a stop a vanished host is a failure, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn a_reply_the_host_already_received_is_still_awaited_after_its_channel_closes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let host = std::thread::spawn(move || {
+            loop {
+                match rx.blocking_recv() {
+                    Some(WorkflowHostRequest::ReserveAgentCalls { reply, .. }) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    Some(WorkflowHostRequest::SpawnAgent { reply, .. }) => {
+                        drop(rx);
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ =
+                            reply.send(Ok(agent_result("finished after the host stopped serving")));
+                        return;
+                    }
+                    Some(_) => {}
+                    None => return,
+                }
+            }
+        });
+        let outcome = run_bounded(
+            "a_reply_the_host_already_received_is_still_awaited_after_its_channel_closes",
+            params(
+                r#"
+                    let meta = #{ name: "t", description: "d" };
+                    let r = agent("work");
+                    complete(r.output);
+                "#,
+                Journal::new(None),
+                tx,
+            ),
+        );
+        host.join().expect("host panicked");
+        match outcome {
+            WorkflowOutcome::Completed { result } => assert_eq!(
+                result,
+                serde_json::json!("finished after the host stopped serving")
+            ),
+            other => panic!("an in-flight reply must still be delivered, got {other:?}"),
+        }
     }
 
     #[test]

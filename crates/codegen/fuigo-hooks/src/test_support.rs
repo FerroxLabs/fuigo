@@ -38,6 +38,18 @@ pub(crate) fn with_env_var<R>(name: &str, value: Option<&str>, f: impl FnOnce() 
     }
 }
 
+/// P70a follow-up: the fake first-party key the hook tests resolve `FUIGO_API_KEY` to.
+pub(crate) const P70A_TEST_KEY: &str = "p70a-hook-unit-FAKE-3d9e1b7c";
+
+/// Install (once per test binary; the first install wins) a credential resolver that answers `FUIGO_API_KEY` with
+/// [`P70A_TEST_KEY`] and nothing else, standing in for the shell's in-memory saved key.
+pub(crate) fn install_p70a_key_resolver() {
+    fn resolver(name: &str) -> Option<String> {
+        (name == fuigo_config::FIRST_PARTY_KEY_ENV_VAR).then(|| P70A_TEST_KEY.to_owned())
+    }
+    fuigo_config::install_credential_env_resolver(resolver);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

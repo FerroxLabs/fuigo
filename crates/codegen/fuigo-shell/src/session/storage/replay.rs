@@ -19,7 +19,7 @@ use super::{
 use crate::extensions::notification::SessionNotification;
 use crate::extensions::notification::SessionUpdate as FuigoUpdate;
 use crate::session::wire_tags::{
-    AVAILABLE_COMMANDS_UPDATE, TOOL_CALL_STATUS_IN_PROGRESS, TOOL_CALL_UPDATE,
+    AVAILABLE_COMMANDS_UPDATE, HISTORY_REPAIRED, TOOL_CALL_STATUS_IN_PROGRESS, TOOL_CALL_UPDATE,
 };
 
 /// `_meta` key holding the running token count.
@@ -84,7 +84,9 @@ pub enum ReplayedUpdate {
     /// That is how rebuilt entries keep their run-time timestamps.
     /// For a collapsed ToolCall it is the completing line's meta; `None` for start-only tools flushed at EOF.
     Acp(acp::SessionUpdate, Option<acp::Meta>),
-    Fuigo(FuigoUpdate),
+    /// The second field is the persisted line's `_meta` (its `eventId`), so a client can de-duplicate a live event the replay
+    /// already applied.
+    Fuigo(FuigoUpdate, Option<serde_json::Value>),
 }
 
 /// Collapses a ToolCall and its ToolCallUpdates into one ToolCall during replay.
@@ -277,7 +279,7 @@ pub fn replay_would_emit(
     };
     let raw_contents = std::fs::read_to_string(&path)?;
     for line in rewind_filtered_live(&raw_contents) {
-        if line_is_dropped_on_replay(line) {
+        if line_is_dropped_on_full_replay(line) {
             continue;
         }
         let Ok(SessionUpdate::Acp(notif)) = SessionUpdateEnvelope::from_str(line) else {
@@ -318,7 +320,7 @@ pub fn stream_replay_updates_at_hinted<F: FnMut(ReplayedUpdate)>(
     let mut collapser = ReplayToolCollapser::new();
     let mut forwarded = false;
     for line in live {
-        if line_is_dropped_on_replay(line) {
+        if line_is_dropped_on_full_replay(line) {
             continue;
         }
         match SessionUpdateEnvelope::from_str(line) {
@@ -330,7 +332,7 @@ pub fn stream_replay_updates_at_hinted<F: FnMut(ReplayedUpdate)>(
                     f(ReplayedUpdate::Acp(update, notif.meta));
                 }
             }
-            Ok(SessionUpdate::Fuigo(notif)) => f(ReplayedUpdate::Fuigo(notif.update)),
+            Ok(SessionUpdate::Fuigo(notif)) => f(ReplayedUpdate::Fuigo(notif.update, notif.meta)),
             Err(e) => tracing::debug!(error = %e, "skipping unparseable replay line"),
         }
     }
@@ -436,8 +438,22 @@ fn peek_line_update(line: &str) -> Option<RawUpdatePeek<'_>> {
     serde_json::from_str::<RawParamsPeek<'_>>(raw).ok()?.update
 }
 
+/// The note saved when a load repaired the session's history (P96). It stays in the transcript as the record of what was
+/// generated, but a FULL replay (a `session/load` from the start) does not show it again: the user saw it when the repair
+/// was made (P123, K14). A replay that resumes after a reconnect cursor, and the delta replay, carry events the client has
+/// not seen yet, so they keep it.
+pub(crate) fn line_is_history_repaired_note(line: &str) -> bool {
+    line.contains(&*HISTORY_REPAIRED)
+        && peek_line_update(line).is_some_and(|u| u.session_update == *HISTORY_REPAIRED)
+}
+
 pub(crate) fn line_is_dropped_on_replay(line: &str) -> bool {
     line_is_available_commands_update(line) || line_is_in_progress_tool_call_update(line)
+}
+
+/// [`line_is_dropped_on_replay`] for a replay from the start of the transcript, which also leaves out the repair note.
+pub(crate) fn line_is_dropped_on_full_replay(line: &str) -> bool {
+    line_is_dropped_on_replay(line) || line_is_history_repaired_note(line)
 }
 
 /// Extract `_meta.totalTokens` from a persisted update line without allocating a `serde_json::Value`.
@@ -528,7 +544,9 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
     let mut lines: Vec<&str> = Vec::with_capacity(filtered.len().saturating_sub(start));
     let mut total_live = 0usize;
     for (i, &line) in filtered.iter().enumerate() {
-        if line_is_dropped_on_replay(line) {
+        // A replay from the start leaves out the repair note (the user saw it when it was made); one that resumes after a
+        // cursor carries events the client has not seen, the note included.
+        if (mark_replay && line_is_dropped_on_full_replay(line)) || line_is_dropped_on_replay(line) {
             continue;
         }
         total_live += 1;

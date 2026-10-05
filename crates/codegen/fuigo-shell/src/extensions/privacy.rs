@@ -26,7 +26,8 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let params: Params = parse_params(args)?;
 
-    let auth = agent.auth_manager.auth().await.map_err(|e| {
+    // Precondition only: the PUT authenticates through its own provider below.
+    let _authenticated = agent.auth_manager.auth().await.map_err(|e| {
         tracing::warn!(error = %e, "privacy: auth resolution failed");
         crate::acp_error::auth_required(
             "Authentication required. Run `fuigo login` to re-authenticate.",
@@ -46,6 +47,8 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             agent.auth_manager.clone(),
             None,
             None,
+            Some(proxy_url.clone()),
+            "privacy",
         ),
     );
     let client = crate::http::with_auth_retry(crate::http::shared_client(), provider);
@@ -53,7 +56,11 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let resp = client
         .put(&url)
         .header("X-XAI-Token-Auth", &token_header)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity only to a FluxRouter-operated destination.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -61,7 +68,12 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .json(&body)
         .send()
         .await
-        .map_err(|e| crate::acp_error::internal_error(format!("HTTP request failed: {e}")))?;
+        .map_err(|e| {
+            crate::acp_error::internal_error(
+                crate::auth::session_delivery::bearer_refusal_text(&e)
+                    .unwrap_or_else(|| format!("HTTP request failed: {e}")),
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -79,11 +91,14 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 
     // Update local auth state to reflect the change.
-    // Use save_without_enrichment to avoid a race
-    // update() spawns a background GET /user enrichment that may read stale ACL state and overwrite the opt-out flag back to its previous value
-    let mut updated = auth.clone();
-    updated.coding_data_retention_opt_out = params.coding_data_retention_opt_out;
-    let _ = agent.auth_manager.save_without_enrichment(updated).await;
+    // Edit the latest stored credential, not `auth`: that copy predates the PUT (whose auth retry may refresh), and
+    // writing it back would restore spent tokens. No `/user` enrichment either: it may read stale ACL state and
+    // overwrite the opt-out flag back to its previous value
+    let opt_out = params.coding_data_retention_opt_out;
+    let _ = agent
+        .auth_manager
+        .edit_stored_credential(|stored| stored.coding_data_retention_opt_out = opt_out)
+        .await;
 
     to_raw_response(&serde_json::json!({
         "codingDataRetentionOptOut": params.coding_data_retention_opt_out,

@@ -8,6 +8,14 @@ fn path_keys(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| (*name).to_owned()).collect()
 }
 
+/// Budget for tests that pin a smoke-check VERDICT (valid, invalid, unparsable), not the latency budget.
+/// The product budget is [`CHECK_TIMEOUT`], wall-clock, and spans a `spawn_blocking` hop plus disk and trust
+/// reads; a loaded test host (the full `fuigo-shell` suite runs ~96 threads wide) can spend more than 100 ms on
+/// that before the script is even parsed, and the verdict test then reported "smoke check exceeded 100 ms" for a
+/// valid script. The budget itself stays pinned by `nonterminating_workflow_times_out_promptly`, which passes
+/// [`CHECK_TIMEOUT`]. `dropped_check_releases_permit_after_cancel` also uses this one: it tests cancel-on-drop.
+const VERDICT_BUDGET: Duration = Duration::from_secs(120);
+
 fn permits() -> std::sync::Arc<tokio::sync::Semaphore> {
     std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CHECKS))
 }
@@ -67,6 +75,11 @@ fn path_helper_matches_only_fuigo_workflow_rhai_files() {
 
 #[tokio::test]
 async fn valid_written_workflow_needs_no_warning() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+    let _home = fuigo_test_support::FuigoHome::new();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(".fuigo/workflows/valid.rhai");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -80,16 +93,22 @@ async fn valid_written_workflow_needs_no_warning() {
         directory.path(),
         None,
         directory.path(),
+        VERDICT_BUDGET,
     )
     .await
     .expect("workflow path")
     .expect("workflow resolution");
 
-    assert_eq!(check_snapshot(snapshot, &permits()).await, None);
+    assert_eq!(check_snapshot(snapshot, &permits(), VERDICT_BUDGET).await, None);
 }
 
 #[tokio::test]
 async fn invalid_authored_workflow_returns_path_specific_warning() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+    let _home = fuigo_test_support::FuigoHome::new();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(".fuigo/workflows/broken.rhai");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -103,11 +122,12 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
         directory.path(),
         None,
         directory.path(),
+        VERDICT_BUDGET,
     )
     .await
     .expect("workflow path")
     .expect("workflow resolution");
-    let failure = check_snapshot(snapshot, &permits())
+    let failure = check_snapshot(snapshot, &permits(), VERDICT_BUDGET)
         .await
         .expect("invalid workflow should fail its smoke check");
     let mut prompt = "The file was updated.".to_owned();
@@ -135,6 +155,7 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
             directory.path(),
             None,
             directory.path(),
+            VERDICT_BUDGET,
         )
         .await
         .is_some()
@@ -147,6 +168,7 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
             directory.path(),
             None,
             directory.path(),
+            VERDICT_BUDGET,
         )
         .await
         .is_some()
@@ -159,6 +181,7 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
             directory.path(),
             None,
             directory.path(),
+            VERDICT_BUDGET,
         )
         .await
         .is_some()
@@ -171,6 +194,7 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
             directory.path(),
             None,
             directory.path(),
+            VERDICT_BUDGET,
         )
         .await
         .is_some()
@@ -179,6 +203,11 @@ async fn invalid_authored_workflow_returns_path_specific_warning() {
 
 #[tokio::test]
 async fn parse_failure_is_returned_during_snapshot() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+    let _home = fuigo_test_support::FuigoHome::new();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(".fuigo/workflows/parse-failure.rhai");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -192,6 +221,7 @@ async fn parse_failure_is_returned_during_snapshot() {
         directory.path(),
         None,
         directory.path(),
+        VERDICT_BUDGET,
     )
     .await
     .expect("workflow path")
@@ -208,7 +238,7 @@ async fn nonterminating_workflow_times_out_promptly() {
     };
     let started = std::time::Instant::now();
 
-    let failure = check_snapshot(snapshot, &permits())
+    let failure = check_snapshot(snapshot, &permits(), CHECK_TIMEOUT)
         .await
         .expect("nonterminating workflow should time out");
 
@@ -225,7 +255,9 @@ async fn dropped_check_releases_permit_after_cancel() {
         script: workflow("loop", "loop {}"),
     };
     tokio::select! {
-        _ = check_snapshot(snapshot, &permits) => {
+        // Not the budget under test: with `CHECK_TIMEOUT` here a host stall past 100 ms makes the check's
+        // timeout and the 20 ms sleep ready together, and `select!` picks a branch at random.
+        _ = check_snapshot(snapshot, &permits, VERDICT_BUDGET) => {
             panic!("nonterminating check should still be running")
         }
         _ = tokio::time::sleep(Duration::from_millis(20)) => {}
@@ -249,6 +281,7 @@ async fn irrelevant_tool_or_path_skips_smoke_check() {
             directory.path(),
             None,
             directory.path(),
+            CHECK_TIMEOUT,
         )
         .await
         .is_none()
@@ -261,6 +294,7 @@ async fn irrelevant_tool_or_path_skips_smoke_check() {
             directory.path(),
             None,
             directory.path(),
+            CHECK_TIMEOUT,
         )
         .await
         .is_none()

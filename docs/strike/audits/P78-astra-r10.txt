@@ -1,0 +1,18 @@
+# P78 Astra round 10 (gpt-6-astra, codex exec, read-only) - audited 01115e18..0e27bfb3 (strike/p78-s20)
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `01115e18..0e27bfb3` using git and file reads only. No Cargo, builds, tests, or edits.
+
+The round 9 fix holds: activation captures an empty snapshot at generation 0 or 1. Coalescing publishes the entries at generation 1; separate processing publishes them at generation 2. Either differs from `last_gen` when the entries arrive. Only a later `poll()` delivers them, making `tick()` true; the wait cannot pass vacuously. `needs_animation()` uses `is_active()`, independent of result count. Scheduler starvation remains bounded by the deadline.
+
+Only the three previously documented LOW limitations remain:
+
+1. **LOW — STILL OPEN: temp-path scanner misses indirect paths.** [theme_pin_guard_tests.rs:816](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:816). `temp_dir().join(NAME_CONST)` or a separately bound directory escapes detection, allowing a future shared fixture collision. Existing self-tests do not cover these forms. No affected live fixture identified; no pre-landing change required.
+
+2. **LOW — STILL OPEN: indirect dashboard readers escape serialization scanning.** [session.rs:1280](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/agent_view/session.rs:1280). Session creation/loading through `apply_app_scoped_gates` can observe another test’s `FUIGO_AGENT_DASHBOARD=0`. Existing caller assertions do not check the affected visibility. Previously deferred; no newly demonstrated acceptance failure.
+
+3. **LOW — STILL OPEN: pin scanner rejects unrelated same-name bindings.** [theme_pin_guard_tests.rs:583](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:583). A nested `fn helper(_theme: ()) {}` after acquiring `_theme` triggers rejection despite retaining the outer guard. Existing self-tests do not cover this case. Deliberately conservative and absent from all five listed readers; no pre-landing change required.
+
+Earlier matcher, gutter, atomic-publication and isolation claims remain supported. No weakened assertions, remaining silent matcher waits, protected-test changes, or source-level compilation defects identified. Compilation, Clippy and runtime remain unverified.
+
+LAND

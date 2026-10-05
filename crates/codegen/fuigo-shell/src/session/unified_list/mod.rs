@@ -54,15 +54,11 @@ pub fn conversations_lane_active() -> bool {
 }
 /// Parse `fuigo/session/list` params and, under process-wide chat mode, force the conversations-only `kind` facet (see [`force_kind_chat`]).
 ///
-/// Client-sent `kind` of `chat`/`build` is honored only behind `feature = "local-workspace"` (pager welcome Local history).
-/// Chat-only Desktop/ACP agents keep the force-rewrite so `kind: ["build"]` cannot surface Build rows.
+/// A client-sent `kind` of `chat`/`build` is never honored here, so `kind: ["build"]` cannot surface Build rows.
 pub fn parse_list_req(raw: &str) -> Result<ListReq, serde_json::Error> {
     let mut req: ListReq = serde_json::from_str(raw)?;
     if crate::agent::chat_modes::process_chat_mode_enabled() {
-        let honor_client_kind = cfg!(feature = "local-workspace") && client_sent_kind_filter(&req);
-        if !honor_client_kind {
-            force_kind_chat(&mut req);
-        }
+        force_kind_chat(&mut req);
     }
     Ok(req)
 }
@@ -878,6 +874,13 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn forced_kind_serves_conversations_only() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "session::unified_list::tests::forced_kind_serves_conversations_only",
+        ) else {
+            return;
+        };
+        // Alone in its process, so the issuer no other test happened to install must be installed here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
         let addr = spawn_conversations_stub(
                 serde_json::json!({
                 "conversations": [
@@ -890,7 +893,7 @@ mod tests {
             .await;
         let _env = fuigo_test_support::EnvGuard::set(
             "FUIGO_CONVERSATIONS_BASE_URL",
-            format!("http://{addr}"),
+            front.front(&format!("http://{addr}")),
         );
         let home = tempfile::tempdir().expect("tempdir");
         let client = ConversationsClient::new(fuigo_auth_manager(home.path()));
@@ -907,7 +910,12 @@ mod tests {
             .iter()
             .map(|r| r.legacy.session_id.as_str())
             .collect();
-        assert_eq!(ids, ["c2", "c1"], "conversations only, newest first");
+        assert_eq!(
+            ids,
+            ["c2", "c1"],
+            "conversations only, newest first (partial: {:?})",
+            result.conversations_partial
+        );
         assert!(
             result
                 .rows

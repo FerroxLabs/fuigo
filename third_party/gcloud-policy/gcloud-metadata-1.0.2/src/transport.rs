@@ -85,7 +85,7 @@ mod tests {
                     Ok((mut stream, _)) => {
                         stream.set_read_timeout(Some(std::time::Duration::from_secs(2))).unwrap();
                         let mut buf = [0; 2048];
-                        stream.read(&mut buf).unwrap();
+                        let _n = stream.read(&mut buf).unwrap();
                         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
                         break;
                     }

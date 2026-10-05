@@ -782,7 +782,8 @@ pub(in crate::app::dispatch) fn set_default_selected_permission(
         .current_ui
         .default_selected_permission
         .as_deref()
-        .map_or(DefaultSelectedPermission::AlwaysAllowAllSessions, |s| {
+        // Unset means the effective default (allow once, P152): a failed write rolls back to it, never to always-approve
+        .map_or(DefaultSelectedPermission::EFFECTIVE_DEFAULT, |s| {
             DefaultSelectedPermission::from_config_value(s)
         })
         .as_canonical();

@@ -1,0 +1,203 @@
+P68 — Astra cross-model audit (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null)
+
+=== ROUND 1 — brief
+You are auditing a Rust diff in the git repo at the current directory: `git diff af0aaebcc29a19ce08b8deb08d86b82e4556438a..HEAD` (branch strike/p68). Read the diff and the surrounding code. Do not build or run anything.
+
+Context: release and dev profiles use panic = "abort". eprintln!/eprint! panic when the stderr write fails (EPIPE on a dead pipe since SIGPIPE is SIG_IGN, ENOSPC on /dev/full, EIO), so every such failure was a SIGABRT. Reproduced at the parent: `fuigo logout`, `fuigo mcp enable no-such-server`, `fuigo mcp remove no-such-server`, `fuigo plugin install ./nowhere` all die with signal 6 when stderr is a dead pipe or /dev/full.
+
+The change:
+1. New fuigo-tty-utils/src/best_effort_stderr.rs with cli_eprintln!/cli_eprint! macros (policy: BrokenPipe -> dropped + reader_gone flag; WouldBlock retried, with a "stalled" fast-fail after one exhausted budget; other errors -> dropped + hard_failure flag; never panics, never exits, never changes the exit code — justification in the module docs). best_effort_stdout.rs exposes a retry-budget variant.
+2. Every production eprintln!/eprint! in fuigo-pager, fuigo-pager-bin and fuigo-shell swept onto the macros. fuigo-pager/src/best_effort_stderr.rs now re-exports the tty-utils module (it previously had its own helpers used by headless.rs/acp/spawn.rs/main.rs).
+3. #![cfg_attr(not(test), deny(clippy::print_stderr, clippy::dbg_macro))] on fuigo-pager lib, fuigo-pager-bin main, and fuigo-shell lib (crate-wide).
+4. tracing fmt layers pin log_internal_errors(false) (tracing-subscriber reports writer errors with a raw eprintln!).
+5. local-workspace consent prompt fails closed when the prompt could not be written.
+6. fuigo-pager-bin/tests/dead_stderr_exit.rs: real-binary tests (dead pipe, /dev/full, closed fd 2, live control) for 7 commands.
+7. fuigo-agent prompt/skills.rs test an_overrun_scan_still_populates_the_cache_for_the_next_session: fixed 1200 ms sleep replaced by waiting on the in-flight watch channel (signalled after the cache write) plus a cache-presence check.
+
+Audit for: (a) any remaining production path in those three crates that can still panic on a failed stderr write (raw eprintln!/eprint!, dbg!, writeln!(stderr()).unwrap()/expect, panic hooks, logging layers); (b) correctness of the policy and its exit-code justification, including the stalled/WouldBlock logic and thread-safety; (c) behaviour changes from swapping the pager's old best_effort_stderr helpers (eprint_line, eprint_line_reported, write_line) for the new ones — e.g. acp/spawn.rs uses eprint_line_reported's return value; (d) whether the test wait in (7) is race-free and cannot pass vacuously; (e) test quality and missing cases.
+Classify each finding BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 1 — report (diff af0aaebc..d6f83e86, codex rc=0)
+tokens used
+144,932
+Static review of `af0aaeb..d6f83e86` on `strike/p68`; no builds or tests run.
+
+1. **HIGH — Reachable telemetry paths still panic on failed stderr writes.**  
+   [main.rs:216](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-bin/src/main.rs:216) and [tracing.rs:397](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/tracing.rs:397) install telemetry components containing raw `eprintln!` calls:
+   - [otel_layer/mod.rs:84](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:84): invalid `FUIGO_OTEL_FILTER`.
+   - [instrumentation.rs:210](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:210): instrumentation directory/file failures; additional calls at 224, 275 and 290.
+   - [external/providers.rs:176](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/external/providers.rs:176): enabled console log exporter; metric exporter at 199. Console exporters remain permitted for CLI/TUI entrypoints.
+
+   These implementations are outside the three swept crates, but their production callers are inside the audited paths. For example, `logout` initializes instrumentation before executing logout; `FUIGO_INSTRUMENTATION=log` with `FUIGO_INSTRUMENTATION_LOG=/dev/null/p68.json` reaches the directory-error print. A dead stderr still turns that recoverable failure into an abort. These are pre-existing gaps left unresolved, not newly introduced regressions. Neither the crate-local Clippy denies nor `log_internal_errors(false)` covers them. Convert these reachable prints and add explicit regression cases—the current fixture removes the `FUIGO_*` settings needed to trigger them.
+
+2. **MEDIUM — The new consent failure branch lacks regression coverage.**  
+   [session_startup.rs:566](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/session_startup.rs:566). The branch correctly returns before reading stdin or recording acknowledgment when printing fails. However, the existing test at 2647 supplies `stdin_is_terminal=false`, so it exits before this branch. None of the seven binary cases exercises it. Add a case with terminal stdin, no acknowledgment and failing stderr; assert refusal and no acknowledgment file, with a successful-prompt control.
+
+3. **LOW — Retrying the join notice extends the advertised join timeout.**  
+   [acp/spawn.rs:151](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/acp/spawn.rs:151). The replacement helper can now spend 250 ms retrying `WouldBlock`, but the following receive still waits `timeout - quiet`. A saturated nonblocking terminal therefore adds the diagnostic retry time to the shutdown grace. Preserve the deadline by accounting for elapsed time and bounding the notice write by the remaining allowance.
+
+The remaining review conclusions:
+
+- I found no remaining production raw `eprintln!`/`eprint!`/`dbg!` or stderr-write `unwrap`/`expect` in the three crate sources themselves. Inspected terminal writes propagate or discard errors; the panic hook adds no direct panicking stderr print.
+- The core policy is sound for diagnostic output. Partial writes retain their offset, retry counts span the whole call, and sticky failure flags do not alter exit status. Production calls hold stderr’s lock across stalled-state inspection, retries and updates; relaxed atomics introduce no concurrent-writer race there. The retry budget does **not** bound a blocking syscall or lock acquisition.
+- `eprint_line_reported` retains its complete-line success meaning, preserving `notice_shown`. Generic `write_line` now additionally flushes and retries; unlike process-stderr helpers, it does not update global flags or use the stalled state.
+- The cache wait is race-free for this fixture: `wait_for` observes already-signaled completion, registry removal follows cache insertion, and the cache-presence, skill-content and scan-count assertions prevent vacuous success.
+- The binary controls meaningfully pin messages and exit codes. Further useful coverage is a real nonblocking stderr stall/recovery, concurrent writers, and partial progress followed by `WouldBlock`. Closed-fd coverage verifies startup behavior, not an actual failed write.
+
+VERDICT: REJECT — reachable telemetry stderr prints still permit the SIGABRT failure this change aims to eliminate.
+CODEX_RC=0
+
+=== ROUND 2 — brief
+Round 2 audit of the Rust diff `git diff af0aaebcc29a19ce08b8deb08d86b82e4556438a..HEAD` in the repo at the current directory (branch strike/p68). Read the diff and surrounding code; do not build or run.
+
+Your round-1 report on this branch (at d6f83e86) is summarised here:
+1. HIGH: fuigo-telemetry (otel_layer/mod.rs:84, instrumentation.rs:210/224/275/290, external/providers.rs:176/199) has raw eprintln! reachable from the pager's startup; with a dead stderr it still aborts. The builder REPRODUCED this at the tip (`FUIGO_INSTRUMENTATION=log FUIGO_INSTRUMENTATION_LOG=/dev/null/p68.json fuigo logout` and `FUIGO_OTEL_FILTER='[[[bad' fuigo logout` with stderr a dead pipe: signal 6 at parent and tip). This packet's ownership is fixed by the coordinator: fuigo-tty-utils helper, the eprintln sites IN fuigo-pager / fuigo-pager-bin / fuigo-shell, and one fuigo-agent test; anything else must be a proposal, not a fix. fuigo-telemetry is a different crate, so it is recorded as proposal P1 (with the repro) in the receipt, not changed here. Please judge the diff against that ownership: say whether this finding is a defect IN the diff or a pre-existing out-of-scope gap.
+2. MEDIUM: the local-workspace consent fail-closed branch lacked coverage. The `local-workspace` cargo feature does not compile at the parent under cargo (unresolved crate::gateway_bridge), so the branch could not be tested; the builder reverted it to a plain cli_eprint! sweep (no behaviour change beyond not aborting) and records fail-closed as a proposal.
+3. LOW: acp/spawn.rs join notice could spend 250 ms retrying WouldBlock. Fixed: eprint_line / eprint_line_reported are now one-attempt (zero WouldBlock budget), and a one-attempt refusal does not mark the stream stalled; test added.
+Also changed since: fuigo-agent test `an_overrun_scan_still_populates_the_cache_for_the_next_session` now carries #[serial_test::serial(home_env)]. Root cause found: fuigo_home() follows $HOME (fuigo-dirs memoises on inputs), the cache key carries fuigo_home and the fingerprint stamps HOME-relative vendor roots; other fuigo-agent tests (serial(home_env)) repoint HOME process-wide, which turns the second discovery into a cache miss and a second scan ("left: 2 right: 1"). A hand-edit that repoints HOME between the two discoveries reproduces exactly that. The landing-signal wait replaces the old fixed sleep.
+
+Audit for: anything in round 1 not actually addressed; new problems introduced by the round-2 changes; whether serial(home_env) on this one test is sufficient for THIS test (other tests in the module with the same exposure would be proposals); remaining production raw stderr prints in the three crates. Classify BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 2 — report (diff af0aaebc..46c85450, codex rc=0)
+tokens used
+136,335
+Audited `af0aaebc..46c85450` and surrounding code. No builds or tests run. **No BLOCKER, HIGH, or MEDIUM defect identified in the owned diff.**
+
+- **LOW — new test fragility:** [fuigo-tty-utils/src/best_effort_stderr.rs:331](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-tty-utils/src/best_effort_stderr.rs:331). The `< 10 ms` assertion can fail if the test thread is descheduled, despite correct zero-retry behavior. Remove the wall-clock assertion; retain the deterministic checks for `Outcome::Failed`, exactly one write call, and unchanged stalled state.
+
+Round-1 disposition:
+
+- **HIGH — pre-existing, out-of-scope gap:** `fuigo-telemetry/src/otel_layer/mod.rs:84`, `instrumentation.rs:210/224/275/290`, and `external/providers.rs:176/199` retain raw `eprintln!`. That crate is unchanged by this diff. Together with the supplied parent-and-tip reproduction, this belongs in **proposal P1**, not as a defect introduced by this packet. Whole-program dead-stderr safety remains incomplete.
+- **MEDIUM — coverage concern resolved by withdrawal:** [fuigo-pager/src/app/session_startup.rs:564](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/session_startup.rs:564) now contains only the print replacement. The untested fail-closed branch is gone; consent hardening remains a separate proposal.
+- **LOW — shutdown retry regression fixed:** [fuigo-tty-utils/src/best_effort_stderr.rs:148](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-tty-utils/src/best_effort_stderr.rs:148) passes zero WouldBlock retries, and line 89 prevents a zero-budget refusal from marking the stream stalled. The ACP join notice reaches this helper.
+
+**`serial(home_env)` is sufficient for this test’s identified HOME race.** At [fuigo-agent/src/prompt/skills.rs:3360](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-agent/src/prompt/skills.rs:3360), it shares the lock used by the same-process HOME-mutating tests. The landing helper waits for completion and checks the exact cache key. Other exposed tests, such as `second_session_start_hits_the_cache` at line 3545, remain proposal territory.
+
+**Remaining production raw prints:** none found for `eprintln!`, `eprint!`, or `dbg!` in `fuigo-pager`, `fuigo-pager-bin`, or `fuigo-shell`. Remaining macro occurrences are comments, tests, or benchmarks.
+
+VERDICT: APPROVE WITH CHANGES — remove the scheduler-sensitive 10 ms assertion from the new zero-budget test.
+CODEX_RC=0
+
+=== Disposition after round 2: the one LOW (wall-clock < 10 ms assertion) removed in 0828b7cc; no other change.
+
+=== ROUND 3 — brief
+Round 3 audit, Rust repo at the current directory, branch strike/p68. Audit `git diff 1ff30971ca2785c78f8a8b7e37fb65aa48c93c03..HEAD` (the new work), with `git diff af0aaebcc29a19ce08b8deb08d86b82e4556438a..HEAD` as the whole packet for context. Read code; do not build or run.
+
+New work (the coordinator extended ownership to these files):
+P1. fuigo-telemetry: the 7 raw eprintln! (otel_layer/mod.rs invalid FUIGO_OTEL_FILTER, instrumentation.rs log/chrome dir/file failures, external/providers.rs console log/metric exporters) -> fuigo_tty_utils::cli_eprintln!; #![cfg_attr(not(test), deny(clippy::print_stderr, clippy::dbg_macro))] in fuigo-telemetry/src/lib.rs. fuigo-pager-bin/tests/dead_stderr_exit.rs gains TELEMETRY_CASES run with env (FUIGO_OTEL_FILTER='[[[bad'; FUIGO_INSTRUMENTATION=log|chrome with FUIGO_INSTRUMENTATION_LOG=/dev/null/...), under dead pipe, /dev/full, closed and live. Before this, `FUIGO_OTEL_FILTER='[[[bad' fuigo logout` with a dead stderr died with signal 6.
+P2. fuigo-agent prompt/skills.rs discovery_budget_tests: every test that discovers now carries #[serial_test::serial(home_env)] (root cause: fuigo_home() follows $HOME, the crate's home_env tests repoint HOME process-wide, so a HOME flip between two discoveries is a cache miss and a second scan).
+P4. fuigo-pager scrollback/blocks/user.rs: `skill_without_args_all_teal` failed at the parent with fg Rgb(255,209,102) vs Blue. Root cause: `terminal_theme_prompt_is_bold_and_bandless` holds theme::cache::pin_theme() and sets ThemeKind::Terminal process-wide; the unpinned tests render under one theme and compare to Theme::current() under another. Every test in user.rs that reads Theme::current() now holds pin_theme().
+
+Audit for: any remaining raw stderr print in fuigo-telemetry production code or other panicking stderr paths there (fmt layers with log_internal_errors, writers that unwrap); whether the console exporters' best-effort printing is correct (they run on exporter threads); whether the test fixture actually exercises each telemetry path (env names/values, mode parsing, that chrome mode reaches its dir-creation print); whether serial(home_env) is complete for the module and whether pin_theme is sufficient for user.rs (are there other theme mutators in fuigo-pager tests that do NOT take the lock, making pin_theme insufficient?); anything else wrong. Classify BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 3 — report (codex rc=0)
+tokens used
+117,574
+Audited `strike/p68` at `00e6cf7ad4bca7fff455a586deb6773837b51097`. Source inspection only; no builds or tests run.
+
+1. **BLOCKER — New integration fixture does not compile.** [dead_stderr_exit.rs:242](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-bin/tests/dead_stderr_exit.rs:242)  
+   Both iterator mappings copy `*code`, so the loop receives an `i32`. `Some(*code)` then attempts to dereference that integer, producing E0614. Change this occurrence to `Some(code)`. This blocks the entire Unix integration-test target.
+
+2. **HIGH — Chrome instrumentation still has a reachable panicking writer.** [instrumentation.rs:299](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:299)  
+   The raw file is passed to locked dependency `tracing-chrome 0.7.2`, whose worker unwraps writes and flushes—including its final flush at dependency `src/lib.rs:400`. With `FUIGO_INSTRUMENTATION=chrome` and `FUIGO_INSTRUMENTATION_LOG=/dev/full`, opening succeeds but flushing fails. `logout` explicitly finalizes instrumentation, reaching that flush. Under `panic=abort`, this remains a process abort. A trace destination pointing to `/dev/stderr` similarly exposes dead-stderr writes.
+
+   Under unwinding, the dependency also calls raw `eprintln!` when joining a panicked worker (`src/lib.rs:236`). This is a **pre-existing gap within the requested writer audit**, not introduced by the seven replacements. Use a failure-tolerant writer boundary and cover post-open write failure; the current directory-failure fixture never constructs this writer.
+
+3. **MEDIUM — Theme locking remains incomplete.** [bg_task.rs:450](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/scrollback/blocks/bg_task.rs:450), [text_selection.rs:3611](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/scrollback/text_selection.rs:3611)  
+   Both tests directly set `FuigoNight` without acquiring the shared lock. Their comments say “Pin theme,” but `cache::set()` does not lock. Either can overwrite `Terminal` while [user.rs:618](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/scrollback/blocks/user.rs:618) holds `pin_theme()`, invalidating its bandless/bold assertions. Replace these test-local setters with guards held through their assertions. These existing mutators prevent P4 from fully resolving the module’s race.
+
+The remaining requested checks:
+
+- **Direct telemetry prints:** All seven production sites now use `cli_eprintln!`; no remaining raw `eprint!`, `eprintln!`, or `dbg!` invocation found in telemetry source.
+- **Fmt layers:** None enables `log_internal_errors`. Locked `tracing-subscriber 0.3.23` defaults it to false, so its event-writer-error reporting path is disabled. Explicitly pinning false would be defensive, not a current defect.
+- **Console exporters:** The replacement is appropriate on exporter threads: synchronous locked stderr writes, atomic bookkeeping, no Tokio requirement, recursive tracing, or process-exit behavior. Dropping failed diagnostic output and returning `Ok(())` matches the stated best-effort policy.
+- **Fixture routing:** After fixing compilation, all three configured cases source-trace correctly. Environment overrides survive the scrub; `log` and `chrome` parse correctly; `/dev/null/...` reaches each mode’s directory-creation diagnostic. Coverage is **three of seven replaced sites**: it does not exercise either file-open diagnostic or either console exporter.
+- **HOME serialization:** All ten discovery-performing tests in `discovery_budget_tests` carry `serial(home_env)`. The remaining parser-only test does not need it. The identified HOME-mutating tests use the same lock.
+
+VERDICT: REJECT — the new fixture cannot compile, Chrome retains a panicking output path, and theme-test locking remains incomplete.
+
+=== ROUND 4 — brief
+Round 4 audit, Rust repo at the current directory, branch strike/p68 (HEAD b284c1b5). Audit `git diff 00e6cf7ad4bca7fff455a586deb6773837b51097..HEAD` (fixes for your round-3 report) and re-check `git diff 1ff30971ca2785c78f8a8b7e37fb65aa48c93c03..HEAD` (the whole extension). Read code; do not build or run.
+
+Your round 3: VERDICT: REJECT — (1) BLOCKER fixture did not compile (`Some(*code)` on an i32) at dead_stderr_exit.rs; (2) HIGH tracing-chrome 0.7.2 worker unwraps writes/final flush, so FUIGO_INSTRUMENTATION=chrome + FUIGO_INSTRUMENTATION_LOG=/dev/full aborts (the builder reproduced this at the parent even with a LIVE stderr: panicked at tracing-chrome-0.7.2/src/lib.rs:400:27 ... StorageFull, signal 6); (3) MEDIUM bg_task.rs:450 and text_selection.rs:3611 set FuigoNight without the theme test lock; also coverage was 3 of 7 telemetry sites.
+Fixes: (1) `Some(code)`. (2) fuigo-telemetry/src/instrumentation.rs `BestEffortFile(std::fs::File)` wraps the trace file for BOTH the chrome layer and the tracing-appender non_blocking log writer: write errors other than Interrupted report the whole buffer written, flush errors are dropped; unit test on /dev/full (Linux). (3) both tests now hold `pin_theme()`. Fixture now has 7 telemetry cases: bad FUIGO_OTEL_FILTER; log and chrome with an uncreatable directory (/dev/null/...); log and chrome with the path "/" (open fails: is a directory); log and chrome with /dev/full (opens, every write fails). The console exporters (FUIGO_EXTERNAL_OTEL=1 + OTEL_*_EXPORTER=console) print nothing during `logout` at the parent (probed), so they are covered by the sweep and the print_stderr deny, not by a binary case.
+
+Audit for: correctness of BestEffortFile (Write contract: returning Ok(buf.len()) on error, Ok(0) handling, Interrupted, partial writes; any way tracing-chrome or tracing-appender can still panic or eprintln on these writers; `/dev/stderr` as a trace path with a dead stderr); whether the fixture's /dev/full and "/" cases reach the intended paths; whether theme locking in fuigo-pager lib tests is now sufficient for user.rs (list any remaining unlocked mutators of theme kind, terminal-native lock or color level in fuigo-pager's lib tests); anything else. Classify BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 4 — report (codex rc=0)
+tokens used
+142,450
+Audited both requested diffs at `b284c1b55f549e7ee45cb688886f27ffca5d1bea`. No builds, tests, or application execution. No BLOCKER or HIGH defect found.
+
+- **MEDIUM — remaining indirect theme mutation bypasses the test lock.** [theme/cache.rs:79](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-render/src/theme/cache.rs:79) lazily loads configuration and calls `store_kind()` without the shared test lock. Pager test cleanup resets `LOADED=false` at [dispatch/tests/mod.rs:1003](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs:1003) and [commands/theme.rs:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/slash/commands/theme.rs:153). An unlocked reader—for example [prompt_widget/tests.rs:661](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/views/prompt_widget/tests.rs:661)—can start loading, another test can acquire `pin_theme()` and set its theme, and the first reader can subsequently overwrite it with the configured theme. This is pre-existing, but means the locking is not fully sufficient for `user.rs`. Prevent an in-flight lazy seed from overwriting a later explicit set, or make test initialization deterministic. **No remaining explicit unlocked setters of theme kind, terminal-native lock, or color level were found in pager lib tests.**
+
+- **MEDIUM — the log `/dev/full` case does not exercise a failed write.** [dead_stderr_exit.rs:134](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-bin/tests/dead_stderr_exit.rs:134) runs empty-home `logout`, which emits no event targeting `fuigo_instrumentation`. The log layer filters for that target; `finalize_and_exit`’s ordinary exit event does not qualify. Consequently, the worker reaches shutdown/flush without writing log bytes, and `File::flush()` is a no-op. The wrapper unit test exercises ENOSPC directly, but this binary case does not prove appender write-path coverage. Add a deterministic instrumentation event and a writable-file control proving bytes were emitted; on Linux, also reject unexpected trace-open failure diagnostics.
+
+The remaining requested checks pass source review:
+
+- **`BestEffortFile` is correct for its deliberately lossy contract** at [instrumentation.rs:211](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:211). Returning the buffer length means the adapter consumed and discarded it. Nonempty `Ok(0)` cannot become `WriteZero`; empty buffers return zero; partial writes preserve progress; `Interrupted` is retried by the callers’ `write_all` paths.
+- Chrome 0.7.2’s buffering and appender 0.2.4’s worker both reach the wrapper. These write failures cannot reach Chrome’s write/flush unwraps or appender’s flush-error `eprintln!`. A dead `/dev/stderr` is likewise handled: opening fails through the safe diagnostic path, or writing returns an error the wrapper swallows.
+- `/` has no parent, so directory creation is skipped and file opening fails as intended. Chrome `/dev/full` reaches ENOSPC when its mandatory JSON framing is flushed during shutdown, even without events. Non-Linux fallback is only open-failure coverage.
+- `Some(code)` fixes the identified type error. Both previously bare theme setters now hold `pin_theme()`. The telemetry print sweep, console-exporter replacements, and added discovery-test serialization show no further defect.
+
+VERDICT: APPROVE WITH CHANGES — close the lazy theme-seeding race and make the log /dev/full fixture exercise an actual write.
+
+=== ROUND 5 — brief
+Round 5 audit, Rust repo at the current directory, branch strike/p68 (HEAD 4383f32e). Audit `git diff b284c1b55f549e7ee45cb688886f27ffca5d1bea..HEAD` (fixes for your round 4) and re-confirm `git diff 1ff30971ca2785c78f8a8b7e37fb65aa48c93c03..HEAD`. Read code only.
+
+Your round 4: no BLOCKER/HIGH; VERDICT: APPROVE WITH CHANGES — (M1) lazy theme seeding: `reset_for_test` leaves LOADED=false at the end of the pager's with_theme_test_env (app/dispatch/tests/mod.rs) and slash/commands/theme.rs with_test_env, so the next unlocked Theme::current() seeds from disk outside the lock, overwriting a pin_theme() holder's kind; (M2) the log-mode /dev/full binary case never writes (logout emits no instrumentation event).
+Fixes: (M1) both cleanups now call cache::set(FuigoNight) after the final reset_for_test, still under the theme lock, so LOADED stays true. (M2) the binary case comment now says what it pins and what it does not; fuigo-telemetry gains `the_appender_worker_over_a_full_disk_drains_without_panicking`, which drives tracing_appender::non_blocking over BestEffortFile(/dev/full) with 64 lines and drops the guard.
+
+Check whether M1/M2 are actually closed, whether any other path in fuigo-pager's lib tests leaves LOADED=false or mutates theme kind / terminal-native lock / color level without the lock (list them with file:line), and anything new. Classify BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 5 — report (codex rc=0)
+tokens used
+119,041
+Read-only audit of both requested diffs at `4383f32e7db0e7a946319f82ce9f4b1cb176a02e`, branch `strike/p68`. No builds or tests run. **No BLOCKER/HIGH found; two MEDIUM issues remain.**
+
+1. **MEDIUM — M1 is narrowed, but the lazy-seeding race remains.**  
+   The added `set(FuigoNight)` correctly leaves `LOADED=true` on normal return. However, these four reset sites still temporarily publish `false`:
+
+   - [app/dispatch/tests/mod.rs:997](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs:997) — setup.
+   - [app/dispatch/tests/mod.rs:1003](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs:1003) — cleanup.
+   - [slash/commands/theme.rs:146](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/slash/commands/theme.rs:146) — setup.
+   - [slash/commands/theme.rs:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/slash/commands/theme.rs:153) — cleanup.
+
+   An unlocked `Theme::current()` can observe that false value and start loading disk configuration. The helper then reseeds and releases its lock; another test pins its theme; the outstanding reader finally executes the unconditional [cache.rs:83](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-render/src/theme/cache.rs:83) store, overwriting the pin. `current_kind()` neither acquires the test lock nor checks whether its load became stale.
+
+   **Required correction:** ordinary test setup/cleanup must keep the cache loaded throughout, with deterministic initial test state, or lazy seeding must be coordinated with explicit setters. Appending a setter after an unloaded reset does not provide that guarantee.
+
+2. **MEDIUM — M2 now exercises queued writes, but does not verify worker survival or drainage.**  
+   [instrumentation.rs:729](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:729) uses the default lossy appender. Its `write()` returns success even when the worker’s channel is disconnected. At [instrumentation.rs:733](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:733), dropping the guard does not join the worker or propagate its panic: locked dependency `tracing-appender 0.2.4` ignores disconnected shutdown and the shutdown-wait result.
+
+   Consequently, under the normal unwinding test harness, the worker can panic while this test passes. There is also no assertion that all queued bytes reached the underlying writer.
+
+   The revised binary comment accurately closes the misleading coverage claim, and the new test addresses “never writes.” **The claimed regression protection remains incomplete.** Add observable worker completion/write accounting and a failure signal that reaches the test; verify that a deliberately panicking worker fails it.
+
+For the requested pager-lib inventory, I found **no additional explicit unlocked theme-kind, terminal-native-lock, or color-level setters**, and no additional normal-return cleanup leaving `LOADED=false`. The remaining unlocked mutation is the lazy-seeding path above. The render crate’s own `#[cfg(test)]` cleanup is in a separate test binary.
+
+The remaining cumulative changes—telemetry print replacements and file wrapper, HOME serialization, and added pager theme guards—introduce no further finding on inspection.
+
+VERDICT: APPROVE WITH CHANGES — eliminate the transient lazy-theme seeding race and make the appender test observe worker completion and failure.
+
+=== ROUND 6 — brief
+Round 6 (final) audit, Rust repo at the current directory, branch strike/p68 (HEAD 496fd794). Audit `git diff 4383f32e7db0e7a946319f82ce9f4b1cb176a02e..HEAD` and give a final judgement on `git diff 1ff30971ca2785c78f8a8b7e37fb65aa48c93c03..HEAD`. Read code only.
+
+Your round 5: no BLOCKER/HIGH; two MEDIUMs. (M2) the appender test did not observe worker survival: now `the_appender_worker_survives_every_failed_write` uses NonBlockingBuilder::lossy(false) over BestEffortFile(Refusing) where Refusing counts write attempts and fails every write/flush; it writes 64 single-call lines and waits (≤30 s) until 64 attempts, so a worker that died on a failed write stops the count early; BestEffortFile is now generic over W: Write (default File). (M1) the transient LOADED=false inside the theme lock during reset_for_test: closing it needs a change to fuigo-pager-render's theme cache (a reset that keeps LOADED, or current_kind honouring the test lock), which is outside this packet's files; the builder records it as a proposal. Note load_from_disk only stores when the config names a theme. Evidence the builder has (for your information): forced repro with a 300 ms sleep inside the Terminal-theme test: parent 19/20 runs fail, tip 0/20; loaded 100 runs of user::tests+theme tests: parent 20/100 fail, tip 0/100.
+
+Classify any remaining BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: "VERDICT: APPROVE" or "VERDICT: APPROVE WITH CHANGES — <reason>" or "VERDICT: REJECT — <reason>".
+
+=== ROUND 6 — report (codex rc=0)
+tokens used
+96,076
+Reviewed both requested diffs at `496fd794904d152f64fa688c74272d95c0b2fd80`, code only. No BLOCKER/HIGH findings or new MEDIUM/LOW defects.
+
+- **M2 resolved:** [instrumentation.rs:738](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-telemetry/src/instrumentation.rs:738) now observes worker-side write attempts. The non-lossy channel and 64 single-call writes make the counter meaningful; premature worker death cannot pass merely because enqueueing succeeded. Making `BestEffortFile` generic preserves its production behavior.
+
+- **MEDIUM M1 remains, deferred:** [theme.rs:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/slash/commands/theme.rs:153) and [dispatch/tests/mod.rs:1003](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs:1003) still briefly clear `LOADED`. An unlocked reader can enter [cache.rs:79](/Volumes/Mando/WaylandBots/Fuigo/wt-p68/crates/codegen/fuigo-pager-render/src/theme/cache.rs:79), begin loading a **recognized configured theme**, and store it after another test pins its theme. With no recognized configured theme, that overwrite does not occur. Closing this requires the separate cache change already proposed. This is a pre-existing residual race, not a regression introduced by this packet.
+
+The cumulative changes improve test isolation and correctly protect the affected telemetry writers from diagnostic I/O failures. The supplied repeated-run results support that improvement but do not eliminate M1’s interleaving. I did not independently execute tests.
+
+I approve the bounded packet with M1 retained as the explicit follow-up; no additional in-packet changes are required.
+
+VERDICT: APPROVE

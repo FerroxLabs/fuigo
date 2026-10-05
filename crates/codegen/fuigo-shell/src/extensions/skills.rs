@@ -292,7 +292,7 @@ pub async fn handle(
                     !(i == &p || p.starts_with(i.as_str()) || i.starts_with(p.as_str()))
                 });
                 if !cfg.skills.paths.contains(&p) {
-                    cfg.skills.paths.push(p);
+                    cfg.skills.paths.push(p.clone());
                 }
             })
             .await
@@ -623,6 +623,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn test_resolve_tilde_path() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use fuigo_test_support::env::EnvGuard;
 
         let tmp = tempfile::tempdir().unwrap();

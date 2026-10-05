@@ -1,0 +1,61 @@
+Astra round 2 (codex 0.160.0 project-local, model gpt-6-astra, --sandbox read-only, run from the Mac worktree), audited fc3ccb94..69a98f62.
+Brief: docs/strike/audits/p90-astra-brief-r2.txt. Raw transcript (10113 lines) not committed; sha256 322848862e91b0cee39862d4e54fa16c74e27dc1803e20e04a064a600ea9d000; copy at hetzner-dsm:/root/fuigo-builds/p90-audits/p90-astra-r2.raw.txt
+
+Read-only audit of `fc3ccb94..69a98f62` complete. **Five defects remain.** No builds, Cargo, tests, or file modifications were performed. `git diff --check` passed; the worktree remains clean.
+
+1. **HIGH — H1 remains: explicit keyless loopback helpers still reach the paid fallback.**  
+   [agent/config.rs:5647](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5647) excludes `is_fuigo_api_url()` from the new early return. That predicate accepts `localhost`, `127.0.0.1`, and `::1` on arbitrary ports through [util/mod.rs:715](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell-base/src/util/mod.rs:715).
+
+   **Scenario:** explicitly select a keyless helper at `http://127.0.0.1:11434/v1` while a deployment key or `FUIGO_API_KEY` exists. Resolution falls through to the inference gateway, attaches that credential, and returns `Some`; the image fallback refusal therefore never runs. Explicit stamping preserves the wrong route.
+
+   **Test:** the newly added [explicit_keyless_local_helper_keeps_its_own_route_without_a_credential](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config_tests.rs:8338) exercises this production resolver. Source tracing predicts it already fails at line 8359 under its intended default configuration.
+
+2. **HIGH — H3 introduces provenance from a different config snapshot.**  
+   [config/mod.rs:548](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/config/mod.rs:548) obtains provenance from the process-global *latest* successful read, independently of the `raw_config` being resolved at [agent/config.rs:2348](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:2348). Runtime resolution and model reload use the same pattern.
+
+   **Scenario:** one reader obtains config A with explicit `local-a`; a concurrent reader loads a subsequent edit selecting `local-b` and replaces the global cache; the first reader then resolves A against B’s provenance. `local-a` becomes `Default`, allowing subscription stamping to send images to the subscription provider despite both user choices being local. The background config reloader provides a concrete concurrent reader.
+
+   **Test:** `campaign_patched_helper_models_are_not_explicit` supplies matching snapshots directly. It neither exercises this cache association nor detects reverting the production callers to campaign-contaminated resolution. Carry the campaign-free layers alongside their effective config.
+
+3. **MEDIUM — Explicit summary/classifier helpers still silently fall back to the subscription.**  
+   [agent_ops.rs:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:214) and [sampler_turn.rs:1077](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:1077).
+
+   **Scenario:** explicitly configure either helper with an authentication provider whose token is unavailable. The auxiliary resolver returns `None`; summary generation clones the primary subscription config, and the classifier uses its session fallback. Only image description checks `image_describe_fallback_refused`. The comment allowing this behavior does not satisfy the stated “explicit helper keeps its own route” contract.
+
+   **Test:** no added test exercises these production fallback branches with `Explicit`. The image refusal test checks only the predicate.
+
+4. **MEDIUM — M4 compares subscription providers, not subscription accounts.**  
+   [agent/config.rs:5769](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/config.rs:5769).
+
+   **Scenario:** the active session uses ChatGPT account A, while a remote/default helper resolves to a model pinned to ChatGPT account B. Both carry `SubscriptionKind::Chatgpt`, so replacement is skipped. The helper retains B’s account-bound resolver, established at [inference.rs:72](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/auth/subscription/inference.rs:72), and sends the helper request under B.
+
+   **Test:** `default_helper_on_another_subscription_follows_the_active_one` catches ChatGPT/xAI regression, but its same-provider case contains no account-bound resolvers and explicitly preserves the helper. It misses this case.
+
+5. **MEDIUM — M5 remains incomplete: malformed headers can still exchange a code or abort login.**  
+   [flow.rs:417](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/auth/subscription/flow.rs:417) accepts every ASCII graphic character in header names and performs no header-value validation.
+
+   **Scenario:** send `GET /callback?state=<correct-state>&error=access_denied HTTP/1.1` followed by `Host: localhost` and `Bad(Name): x`. The invalid header name passes validation and terminates login. Replacing the error with `code=x` starts exchange. A header value containing NUL also passes. These are invalid HTTP fields under [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html#section-5.6.2).
+
+   **Test:** the production socket test catches missing colons and malformed request lines, but contains neither invalid header-name delimiters nor invalid field-value bytes.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Full requested diff and regression tests reviewed read-only |
+| H1 | ⬜ Pending | Local keyless routing remains broken |
+| H2 | ✅ Done | Original spawn-time slug/provenance mismatch corrected in source |
+| H3 | ⬜ Pending | Campaign exclusion works with paired inputs; production snapshot association is unsafe |
+| M4 | ⬜ Pending | Cross-provider case corrected; cross-account case remains |
+| M5 | ⬜ Pending | Request-line checks improved; malformed headers remain actionable |
+| L6 | ✅ Done | Incomplete reads now attempt HTTP 400 before being ignored |
+| F3 / F5 | ✅ Done | No additional source defect found in binding rules, logout locking/deletion, or help/guide claims |
+
+Test assessment: callback tests use real production listeners and a local exchange server; they would detect restoration of the request cap, serial reads, the covered malformed heads, and missing EOF responses. They do not establish the exact 32-connection limit or five-second timeout-response behavior. Duplicate-state coverage uses two incorrect states, missing the discriminating correct-plus-duplicate case.
+
+Logout tests exercise the actual store, an in-flight refresh, stash cleanup, and the CLI subprocess. The refresh race is within one process; concurrent cross-process behavior is not directly tested.
+
+F6 coverage is mainly resolver/getter-level. Reverting the image call-site snapshot change or deleting its refusal guard can leave those isolated tests passing. No added test proves all three helper routes and credentials on the wire.
+
+DO-NOT-LAND
+
+
+exit=0

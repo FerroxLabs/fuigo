@@ -963,6 +963,9 @@ async fn persist_setting_type_mismatch_errors_combine_queued_prompts() {
 /// Type-mismatch for `simple_mode`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_simple_mode() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::settings::SettingValue;
     let r = persist_setting("simple_mode", SettingValue::Int(42)).await;
     let err = r.expect_err("simple_mode with Int payload must return Err");
@@ -995,6 +998,7 @@ fn spawn_fake_acp_agent(
 /// Redirect `FUIGO_HOME` to a tempdir for test isolation.
 fn setup_fuigo_home_in_tempdir() -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir creation");
+    crate::test_util::require_own_process_for("FUIGO_HOME");
     unsafe {
         std::env::set_var("FUIGO_HOME", tmp.path());
     }
@@ -1077,6 +1081,9 @@ fn unregister_best_effort_swallows_io_error() {
 /// BestEffort path fires exactly one ACP notification regardless of disk outcome.
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use agent_client_protocol as acp;
     let _guard = setup_fuigo_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1110,6 +1117,9 @@ async fn persist_permission_mode_acp_notification_fires_once_on_best_effort() {
 /// WithRollback: notification count matches disk outcome (1 on Ok, 0 on Err).
 #[tokio::test]
 async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollback() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use agent_client_protocol as acp;
     let _guard = setup_fuigo_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1147,6 +1157,9 @@ async fn persist_permission_mode_acp_notification_gated_on_disk_for_with_rollbac
 /// `session_id: None` suppresses ACP notification unconditionally.
 #[tokio::test]
 async fn persist_permission_mode_no_session_id_suppresses_acp() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _guard = setup_fuigo_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let counter = spawn_fake_acp_agent(rx);
@@ -1169,6 +1182,9 @@ async fn persist_permission_mode_no_session_id_suppresses_acp() {
 /// BestEffort with a disk failure must not return `SettingPersisted`.
 #[tokio::test]
 async fn persist_permission_mode_best_effort_failure_returns_dedicated_variant() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _guard = setup_fuigo_home_in_tempdir();
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let _counter = spawn_fake_acp_agent(rx);
@@ -2443,140 +2459,6 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
         &serde_json::Value::Object(meta.clone()),
     );
 }
-/// The attach stamp keeps the existing workspace and local intent; envId and Direct hub stay stripped.
-#[cfg(feature = "local-workspace")]
-#[test]
-fn scrub_chat_workspace_matrix_attach_exception() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let mut meta = Some(acp::Meta::new());
-    {
-        let obj = meta.as_mut().unwrap();
-        obj.insert("envId".into(), serde_json::json!("env-x"));
-        obj.insert("fuigo/cloud_server_id".into(), serde_json::json!("hub-x"));
-        obj.insert(
-            "fuigo/cloud_existing_workspace".into(),
-            serde_json::json!({"server_id": "srv-x", "cwd": "/ws"}),
-        );
-    }
-    scrub_chat_workspace_bind_meta(&mut meta);
-    let scrubbed = meta.as_ref().unwrap();
-    assert!(scrubbed.get("envId").is_none());
-    assert!(scrubbed.get("fuigo/cloud_server_id").is_none());
-    assert!(scrubbed.get("fuigo/cloud_existing_workspace").is_none());
-    let mut meta = Some(acp::Meta::new());
-    apply_local_workspace_meta(
-        &mut meta,
-        &LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv-dogfood".into()),
-        },
-    );
-    {
-        let obj = meta.as_mut().unwrap();
-        obj.insert("envId".into(), serde_json::json!("env-must-go"));
-        obj.insert("fuigo/cloud_server_id".into(), serde_json::json!("hub-must-go"));
-    }
-    scrub_chat_workspace_bind_meta(&mut meta);
-    let scrubbed = meta.as_ref().unwrap();
-    assert!(scrubbed.get("envId").is_none(), "envId must stay scrubbed");
-    assert!(
-            scrubbed.get("fuigo/cloud_server_id").is_none(),
-            "Direct hub must stay scrubbed"
-        );
-    assert_eq!(
-            scrubbed["fuigo/cloud_existing_workspace"]["server_id"],
-            "srv-dogfood"
-        );
-    assert_eq!(scrubbed["fuigo/local_workspace"]["mode"], "attach");
-    assert_eq!(scrubbed["fuigo/local_workspace"]["server_id"], "srv-dogfood");
-    assert_eq!(scrubbed["fuigo/local_workspace"]["cwd"], "/tmp/repo");
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn to_meta_chat_attach_stamps_local_and_existing() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let flags = SessionFlags {
-        chat_mode: true,
-        local_workspace: Some(LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv-1".into()),
-        }),
-        ..Default::default()
-    };
-    let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["fuigo/session"]["kind"], "chat");
-    assert_eq!(meta["fuigo/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["fuigo/cloud_existing_workspace"]["server_id"], "srv-1");
-    assert!(meta.get("envId").is_none());
-    assert!(meta.get("fuigo/cloud_server_id").is_none());
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn to_meta_chat_own_stamps_intent_without_existing() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let flags = SessionFlags {
-        chat_mode: true,
-        local_workspace: Some(LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Own,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo-own")),
-            server_id: None,
-        }),
-        ..Default::default()
-    };
-    let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["fuigo/local_workspace"]["mode"], "own");
-    assert_eq!(meta["fuigo/local_workspace"]["cwd"], "/tmp/repo-own");
-    assert!(meta["fuigo/local_workspace"].get("server_id").is_none());
-    assert!(
-            meta.get("fuigo/cloud_existing_workspace").is_none(),
-            "own must not stamp existing; shell mints server_id"
-        );
-    assert!(meta.get("envId").is_none());
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn reject_non_fs_only_advertised_tools_matrix() {
-    let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
-    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
-    assert!(
-            reject_non_fs_only_advertised_tools(None)
-                .unwrap_err()
-                .contains("uncheckable")
-        );
-    assert!(
-            reject_non_fs_only_advertised_tools(Some(&[][..]))
-                .unwrap_err()
-                .contains("empty")
-        );
-    let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
-    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
-    assert!(err.contains("FS-only"), "{err}");
-    assert!(err.contains("workspace.bash"), "{err}");
-    assert!(err.contains("terminal.exec"), "{err}");
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
-    use crate::app::session_startup::{LocalWorkspaceConfig, LocalWorkspaceMode};
-    let flags = SessionFlags {
-        chat_mode: false,
-        local_workspace: Some(LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv-wt".into()),
-        }),
-        ..Default::default()
-    };
-    let mut meta = flags.to_meta();
-    finalize_chat_session_meta(&mut meta, true, &flags);
-    let meta = meta.expect("meta");
-    assert_eq!(meta["fuigo/session"]["kind"], "chat");
-    assert_eq!(meta["fuigo/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["fuigo/cloud_existing_workspace"]["server_id"], "srv-wt");
-    assert!(meta.get("envId").is_none());
-}
 #[test]
 fn to_meta_yolo_suppresses_auto_mode() {
     let flags = SessionFlags {
@@ -3038,5 +2920,43 @@ fn picker_relabels_remote_rows_with_one_batched_local_resolution() {
     assert_eq!(
         sources,
         [("r1", "remote"), ("r2", "local"), ("r3", "remote"), ("l1", "local")]
+    );
+}
+/// P42 (audit round 6): the shell's typed error for a refused session destination (no `http_status`,
+/// `error_kind` `auth_destination_refused`) renders with its `[endpoints]` remedy and no 401 copy.
+#[test]
+fn format_acp_error_refused_destination_keeps_the_remedy() {
+    use fuigo_shell::extensions::notification::{
+        AUTH_DESTINATION_REFUSED_ERROR_TYPE, AUTH_DESTINATION_REFUSED_REMEDY,
+        auth_destination_refused_message,
+    };
+    let err = acp::Error::internal_error()
+        .data(
+            serde_json::json!({
+            "message": auth_destination_refused_message(
+                "http://127.0.0.1:9/v1",
+                "  Model:     p42-model\n  Auth:      Oidc\n  Version:   1.0.21",
+            ),
+            "error_kind": AUTH_DESTINATION_REFUSED_ERROR_TYPE
+        }),
+        );
+    assert_eq!(http_status_from_error(&err), None);
+    let text = format_acp_error(&err, false);
+    assert!(text.contains(AUTH_DESTINATION_REFUSED_REMEDY), "{text}");
+    assert!(!text.contains("(401)") && !text.contains("Model:"), "{text}");
+    assert!(!text.contains("Try sending again"), "configuration fix, no retry advice: {text}");
+}
+
+/// P119: a disk-full failure whose text the shell scrubbed still shows the disk-full copy, from the verdict.
+#[test]
+fn format_acp_error_disk_full_verdict_outranks_scrubbed_text() {
+    let err = acp::Error::internal_error().data(serde_json::json!({
+        "message": "write failed: <redacted> (os error 28)",
+        "error_kind": "session_storage",
+        "verdicts": { "diskFull": true },
+    }));
+    assert_eq!(
+        format_acp_error(&err, false),
+        fuigo_fast_worktree::ENOSPC_OS_MESSAGE
     );
 }

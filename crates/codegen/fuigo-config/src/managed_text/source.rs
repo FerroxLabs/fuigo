@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use super::{ManagedConfigError, ManagedConfigPlan};
@@ -60,7 +61,12 @@ impl ParentPlan {
                     }
                     chain.push(PathIdentity {
                         path: current.clone(),
-                        identity: FileIdentity::from_metadata(&metadata),
+                        identity: FileIdentity::of_entry(&current, &metadata).map_err(
+                            |source| ManagedConfigError::Read {
+                                path: current.clone(),
+                                source,
+                            },
+                        )?,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -113,11 +119,13 @@ impl ParentPlan {
         for expected in &self.existing_chain {
             let metadata = fs::symlink_metadata(&expected.path)
                 .map_err(|_| ManagedConfigError::ParentChanged(expected.path.clone()))?;
-            if metadata.file_type().is_symlink()
-                || !metadata.is_dir()
-                || FileIdentity::from_metadata(&metadata) != expected.identity
-            {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(ManagedConfigError::ParentChanged(expected.path.clone()));
+            }
+            // An identity that cannot be read is a parent that changed.
+            match FileIdentity::of_entry(&expected.path, &metadata) {
+                Ok(identity) if identity == expected.identity => {}
+                _ => return Err(ManagedConfigError::ParentChanged(expected.path.clone())),
             }
         }
         Ok(())
@@ -128,6 +136,9 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
+    // Unix syncs through it; elsewhere it only names the directory the
+    // identity was read from.
+    #[cfg_attr(not(unix), allow(dead_code))]
     directory: fs::File,
 }
 
@@ -140,13 +151,15 @@ impl ParentAnchor {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ManagedConfigError::ParentChanged(path.to_path_buf()));
         }
-        let directory = fs::File::open(path).map_err(|source| ManagedConfigError::Read {
+        let read_error = |source| ManagedConfigError::Read {
             path: path.to_path_buf(),
             source,
-        })?;
+        };
+        let directory = open_directory(path).map_err(read_error)?;
+        let identity = FileIdentity::of_open(&directory, &metadata).map_err(read_error)?;
         Ok(Self {
             path: path.to_path_buf(),
-            identity: FileIdentity::from_metadata(&metadata),
+            identity,
             directory,
         })
     }
@@ -182,19 +195,92 @@ struct PathIdentity {
     identity: FileIdentity,
 }
 
+/// Which file an entry is, as far as the file system tells: equal for the
+/// same file however its contents, times or name change, different for any
+/// other file that exists at the same time. That detects a replacement while
+/// the original still exists (a rename swap, the usual atomic write). It is
+/// not, alone, proof against delete-then-recreate: no handle is kept between
+/// plan and apply, and a file system may hand a deleted file's id to a later
+/// one (Unix inode numbers and the 64-bit index of FAT-like volumes are
+/// reused readily; NTFS and ReFS ids were not seen to repeat).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct FileIdentity {
+pub(crate) struct FileIdentity {
     #[cfg(unix)]
     dev: u64,
     #[cfg(unix)]
     ino: u64,
-    #[cfg(not(unix))]
+    // Windows: the volume serial number and the file id. Not the length and
+    // the modified time: a directory's modified time moves whenever an entry
+    // is created in it, so every parent directory would "change" under the
+    // transaction's own backup and temp files, and under any other writer in
+    // an ancestor.
+    #[cfg(windows)]
+    volume: u64,
+    #[cfg(windows)]
+    id: u128,
+    // Which query answered (128-bit id or the 64-bit index). Two answers from
+    // different queries never compare equal.
+    #[cfg(windows)]
+    wide: bool,
+    #[cfg(not(any(unix, windows)))]
     len: u64,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     modified: Option<std::time::SystemTime>,
 }
 
 impl FileIdentity {
+    /// Identity of the entry at `path` itself (a link is not followed);
+    /// `metadata` is its `symlink_metadata`.
+    fn of_entry(path: &Path, metadata: &fs::Metadata) -> io::Result<Self> {
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            Ok(Self::from_metadata(metadata))
+        }
+        #[cfg(windows)]
+        {
+            let _ = metadata;
+            Self::from_handle(&open_for_identity(path, false)?)
+        }
+    }
+
+    /// Identity of the file `path` resolves to (links are followed);
+    /// `metadata` is its `metadata`.
+    fn of_target(path: &Path, metadata: &fs::Metadata) -> io::Result<Self> {
+        #[cfg(not(windows))]
+        {
+            let _ = path;
+            Ok(Self::from_metadata(metadata))
+        }
+        #[cfg(windows)]
+        {
+            let _ = metadata;
+            Self::of_file(path)
+        }
+    }
+
+    /// Identity of the file `path` resolves to right now.
+    #[cfg(windows)]
+    pub(crate) fn of_file(path: &Path) -> io::Result<Self> {
+        Self::from_handle(&open_for_identity(path, true)?)
+    }
+
+    /// Identity of an open directory; on Windows the handle supplies it,
+    /// elsewhere `metadata` (read before the open) does.
+    fn of_open(file: &fs::File, metadata: &fs::Metadata) -> io::Result<Self> {
+        #[cfg(not(windows))]
+        {
+            let _ = file;
+            Ok(Self::from_metadata(metadata))
+        }
+        #[cfg(windows)]
+        {
+            let _ = metadata;
+            Self::from_handle(file)
+        }
+    }
+
+    #[cfg(not(windows))]
     fn from_metadata(metadata: &fs::Metadata) -> Self {
         #[cfg(unix)]
         {
@@ -212,6 +298,125 @@ impl FileIdentity {
             }
         }
     }
+
+    /// The 128-bit id where the file system has one (NTFS, and ReFS, whose
+    /// ids do not fit 64 bits); the 64-bit index where it does not (FAT, some
+    /// network shares). Any other failure of the first query is an error, not
+    /// a reason to answer with the weaker one.
+    #[cfg(windows)]
+    fn from_handle(file: &fs::File) -> io::Result<Self> {
+        match Self::wide_from_handle(file)? {
+            Some(identity) => Ok(identity),
+            None => Self::narrow_from_handle(file),
+        }
+    }
+
+    /// `None`: this file system does not answer the 128-bit query.
+    #[cfg(windows)]
+    fn wide_from_handle(file: &fs::File) -> io::Result<Option<Self>> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            FILE_ID_INFO, FileIdInfo, GetFileInformationByHandleEx,
+        };
+        const ERROR_INVALID_FUNCTION: i32 = 1;
+        const ERROR_NOT_SUPPORTED: i32 = 50;
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: the handle is open for the duration of the call; `info` is a
+        // valid, writable FILE_ID_INFO of exactly the size passed.
+        let read = unsafe {
+            GetFileInformationByHandleEx(
+                HANDLE(file.as_raw_handle()),
+                FileIdInfo,
+                (&raw mut info).cast(),
+                size_of::<FILE_ID_INFO>() as u32,
+            )
+        };
+        match read.map_err(|error| win32_io_error(&error)) {
+            Ok(()) => Ok(Some(Self {
+                volume: info.VolumeSerialNumber,
+                id: u128::from_le_bytes(info.FileId.Identifier),
+                wide: true,
+            })),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
+                ) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    #[cfg(windows)]
+    fn narrow_from_handle(file: &fs::File) -> io::Result<Self> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: the handle is open for the duration of the call and `info`
+        // is a valid out-pointer.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(|error| win32_io_error(&error))?;
+        Ok(Self {
+            volume: u64::from(info.dwVolumeSerialNumber),
+            id: u128::from((u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)),
+            wide: false,
+        })
+    }
+}
+
+/// The `windows` crate reports a failed call as an HRESULT; `io::Error` wants
+/// the Win32 code inside it (so that 5 is `PermissionDenied`, and so on).
+#[cfg(windows)]
+fn win32_io_error(error: &windows::core::Error) -> io::Error {
+    const FACILITY_WIN32: u32 = 0x8007;
+    let code = error.code().0 as u32;
+    if code >> 16 == FACILITY_WIN32 {
+        io::Error::from_raw_os_error((code & 0xFFFF) as i32)
+    } else {
+        io::Error::other(error.clone())
+    }
+}
+
+/// Opens the parent directory that anchors a transaction.
+fn open_directory(path: &Path) -> io::Result<fs::File> {
+    #[cfg(windows)]
+    {
+        open_for_identity(path, false)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::File::open(path)
+    }
+}
+
+/// Opens a file or a directory only to ask what it is. Plain `File::open`
+/// cannot open a directory on Windows ("Access is denied"): that takes
+/// `FILE_FLAG_BACKUP_SEMANTICS`. No read or write access is requested (as
+/// `lstat` needs none), and every sharing mode is granted so the handle never
+/// stops another process from writing, renaming or removing the entry.
+/// `follow_links == false` opens a symlink or junction itself, not its target.
+#[cfg(windows)]
+fn open_for_identity(path: &Path, follow_links: bool) -> io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const SHARE_READ_WRITE_DELETE: u32 = 0x1 | 0x2 | 0x4;
+    let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+    if !follow_links {
+        flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+    }
+    fs::OpenOptions::new()
+        .access_mode(0)
+        .share_mode(SHARE_READ_WRITE_DELETE)
+        .custom_flags(flags)
+        .open(path)
 }
 
 pub(super) fn absolute_lexical(path: &Path) -> Result<PathBuf, ManagedConfigError> {
@@ -382,7 +587,12 @@ pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError
         hash: blake3::hash(&bytes).to_hex().to_string(),
         bytes: Some(bytes),
         mode: file_mode(&metadata),
-        identity: Some(FileIdentity::from_metadata(&metadata)),
+        identity: Some(FileIdentity::of_target(path, &metadata).map_err(|source| {
+            ManagedConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            }
+        })?),
     })
 }
 
@@ -418,4 +628,210 @@ fn default_mode() -> Option<u32> {
 #[cfg(not(unix))]
 fn default_mode() -> Option<u32> {
     None
+}
+
+#[cfg(all(test, windows))]
+pub(super) mod windows_tests {
+    use super::*;
+
+    /// A junction: the directory link that needs no privilege to create.
+    /// Both paths are quoted for `cmd` (so `&`, spaces and the like in a temp
+    /// path stay part of the name) and the wait is bounded.
+    pub(in crate::managed_text) fn junction(link: &Path, target: &Path) {
+        use std::os::windows::process::CommandExt as _;
+        for path in [link, target] {
+            // The two things quoting cannot protect from `cmd`.
+            assert!(
+                !path.to_string_lossy().contains(['%', '"']),
+                "junction fixture cannot name {}",
+                path.display()
+            );
+        }
+        #[allow(clippy::disallowed_methods)]
+        // The fixture's child is waited on with a bound below
+        let mut child = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .raw_arg(format!("\"{}\" \"{}\"", link.display(), target.display()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = std::time::Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                let _ = child.kill();
+                panic!("mklink /J did not finish within 30 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(status.success(), "mklink /J failed: {status}");
+    }
+
+    fn entry(path: &Path) -> FileIdentity {
+        FileIdentity::of_entry(path, &fs::symlink_metadata(path).unwrap()).unwrap()
+    }
+
+    fn target(path: &Path) -> FileIdentity {
+        FileIdentity::of_target(path, &fs::metadata(path).unwrap()).unwrap()
+    }
+
+    /// The identity names the file: it survives a rewrite, a rename and new
+    /// entries in a directory, and no two live entries share one.
+    #[test]
+    fn an_identity_follows_the_file_not_its_contents_times_or_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("directory");
+        fs::create_dir(&directory).unwrap();
+        let file = directory.join("file");
+        fs::write(&file, "one").unwrap();
+        let other = directory.join("other");
+        fs::write(&other, "one").unwrap();
+
+        let directory_identity = entry(&directory);
+        let file_identity = target(&file);
+        assert_eq!(entry(&file), file_identity);
+        assert_eq!(FileIdentity::of_file(&file).unwrap(), file_identity);
+        assert_ne!(file_identity, target(&other));
+        assert_ne!(file_identity, directory_identity);
+
+        fs::write(&file, "a longer second version").unwrap();
+        fs::write(directory.join("third"), "x").unwrap();
+        assert_eq!(target(&file), file_identity);
+        assert_eq!(entry(&directory), directory_identity);
+
+        let renamed = temp.path().join("renamed");
+        fs::rename(&directory, &renamed).unwrap();
+        assert_eq!(entry(&renamed), directory_identity);
+        assert_eq!(target(&renamed.join("file")), file_identity);
+
+        // The anchor's handle names the same directory as the path does.
+        let anchor = ParentAnchor::capture(&renamed).unwrap();
+        assert_eq!(anchor.identity, directory_identity);
+        anchor.revalidate().unwrap();
+    }
+
+    /// `of_entry` is `lstat`: a junction has its own identity. `of_target`
+    /// is `stat`: through the junction it is the directory behind it.
+    #[test]
+    fn a_junction_has_its_own_identity_and_its_target_s_only_when_followed() {
+        // `&` and a space in the names: the fixture must not be shell-parsed.
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real & true");
+        fs::create_dir(&real).unwrap();
+        let link = temp.path().join("link & alias");
+        junction(&link, &real);
+
+        assert_ne!(entry(&link), entry(&real));
+        assert_eq!(target(&link), entry(&real));
+    }
+
+    /// The 64-bit index (the answer on file systems without 128-bit ids) is an
+    /// identity too, and is never mistaken for a 128-bit answer.
+    #[test]
+    fn the_64_bit_index_identifies_files_and_never_equals_a_128_bit_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let one = temp.path().join("one");
+        let two = temp.path().join("two");
+        fs::write(&one, "same").unwrap();
+        fs::write(&two, "same").unwrap();
+        let narrow = |path: &Path| {
+            FileIdentity::narrow_from_handle(&open_for_identity(path, true).unwrap()).unwrap()
+        };
+
+        assert_eq!(narrow(&one), narrow(&one));
+        assert_ne!(narrow(&one), narrow(&two));
+        assert_eq!(narrow(temp.path()), narrow(temp.path()));
+        assert!(!narrow(&one).wide);
+
+        let handle = open_for_identity(&one, true).unwrap();
+        let chosen = FileIdentity::of_file(&one).unwrap();
+        match FileIdentity::wide_from_handle(&handle).unwrap() {
+            // This volume has 128-bit ids (NTFS, ReFS): that is the answer,
+            // and it is not the narrow one.
+            Some(wide) => {
+                assert!(wide.wide);
+                assert_eq!(chosen, wide);
+                assert_ne!(chosen, narrow(&one));
+            }
+            // It has not: the narrow one is the answer.
+            None => assert_eq!(chosen, narrow(&one)),
+        }
+    }
+
+    /// A measurement, not a guarantee: on a volume with 128-bit ids, 200
+    /// rounds of deleting a file and creating it again under the same name,
+    /// with the same bytes, never brought an identity back. It does not show
+    /// that an id can never be reused, and a plan is still not protected
+    /// against delete-then-recreate (see `FileIdentity`).
+    #[test]
+    fn two_hundred_recreations_of_a_file_never_repeat_a_128_bit_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("file");
+        fs::write(&path, "same").unwrap();
+        let original = FileIdentity::of_file(&path).unwrap();
+        if !original.wide {
+            // A 64-bit index may be reused; nothing to assert on this volume.
+            return;
+        }
+        let mut seen = HashSet::from([(original.volume, original.id)]);
+        for round in 0..200 {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, "same").unwrap();
+            let recreated = FileIdentity::of_file(&path).unwrap();
+            assert!(
+                seen.insert((recreated.volume, recreated.id)),
+                "round {round}: {recreated:?} was seen before"
+            );
+        }
+    }
+
+    /// A failed Win32 call keeps its Win32 meaning as an `io::Error`.
+    #[test]
+    fn a_win32_failure_keeps_its_error_kind() {
+        use windows::core::{Error, HRESULT};
+        let denied = win32_io_error(&Error::from(HRESULT::from_win32(5)));
+        assert_eq!(denied.raw_os_error(), Some(5));
+        assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+        let missing = win32_io_error(&Error::from(HRESULT::from_win32(2)));
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+        // Not a Win32 code: carried as is, never misread as one.
+        let other = win32_io_error(&Error::from(HRESULT(0x8000_4005_u32 as i32)));
+        assert_eq!(other.raw_os_error(), None);
+    }
+
+    /// The anchor's handle asks for no access and shares everything: while it
+    /// is held, others still create, replace and delete files in the
+    /// directory, and rename or remove the directory itself. (Windows does
+    /// refuse to rename a directory ABOVE any open handle, this one or the
+    /// transaction's lock file alike; that lasts for one apply and ends when
+    /// the anchor is dropped.)
+    #[test]
+    fn a_held_anchor_does_not_stop_work_in_or_on_the_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let outer = temp.path().join("outer");
+        let directory = outer.join("directory");
+        fs::create_dir_all(&directory).unwrap();
+        let anchor = ParentAnchor::capture(&directory).unwrap();
+
+        fs::write(directory.join("a"), "a").unwrap();
+        fs::write(directory.join("b"), "b").unwrap();
+        fs::rename(directory.join("b"), directory.join("a")).unwrap();
+        fs::remove_file(directory.join("a")).unwrap();
+        anchor.revalidate().unwrap();
+
+        let renamed = outer.join("renamed");
+        fs::rename(&directory, &renamed).unwrap();
+        assert!(matches!(
+            anchor.revalidate(),
+            Err(ManagedConfigError::Read { .. })
+        ));
+        fs::remove_dir(&renamed).unwrap();
+        assert!(!renamed.exists());
+
+        drop(anchor);
+        fs::rename(&outer, temp.path().join("outer-renamed")).unwrap();
+    }
 }

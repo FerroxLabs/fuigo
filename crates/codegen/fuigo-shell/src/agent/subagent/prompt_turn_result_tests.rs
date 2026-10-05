@@ -367,3 +367,28 @@ async fn session_error_and_cancelled_channel_drop_preserve_partial_text() {
         (true, Some("Subagent was cancelled"), "partial", true, true,),
     );
 }
+
+/// P70b: the child's session error is the one source of the task tool error, the tool-call content, the failure
+/// hooks, the `SubagentFinished` notification, `meta.json` and the status DTO. A credential the child sent and its
+/// provider echoed is replaced here, once, for all of them.
+#[test]
+fn a_child_session_error_has_sent_credentials_replaced_at_its_source() {
+    const CRED: &str = "p70b-child-cred-0123456789";
+    fuigo_telemetry::sent_credentials::record(CRED);
+    let error = serde_json::from_value::<agent_client_protocol::Error>(serde_json::json!({
+        "code": -32603,
+        "message": "Internal error",
+        "data": { "message": format!("API error (status 400): bad key {CRED}"), "error_kind": "api" },
+    }))
+    .expect("valid ACP error");
+    let reduced = reduce(
+        Ok(Err(error)),
+        PromptTurnResultMode::ParentFollowup,
+        "partial",
+        false,
+    );
+    let shown = reduced.result.error.expect("a failed child reports an error");
+    assert!(!shown.contains(CRED), "{shown}");
+    assert!(shown.starts_with("Session error: "), "{shown}");
+    assert!(shown.contains("bad key <redacted>"), "{shown}");
+}

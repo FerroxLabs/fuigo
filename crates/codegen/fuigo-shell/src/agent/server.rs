@@ -31,15 +31,14 @@ use tokio::time::Duration;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{info, warn};
 
-use agent_client_protocol as acp;
 use fuigo_acp_lib::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
-    AcpClientMessage, LineBufferedRead,
+    AcpClientMessage,
 };
 
 use crate::agent::config::{Config as AgentConfig, ModelEntry};
 use crate::agent::models::{ModelFetchAuth, prefetch_models_blocking};
-use crate::agent::mvp_agent::MvpAgent;
+use crate::agent::mvp_agent::{MvpAgent, MvpAgentHandle};
 
 use indexmap::IndexMap;
 
@@ -53,12 +52,27 @@ const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 const KEEPALIVE_INTERVAL_SECS: u64 = 15;
 
 /// Configuration for the agent WebSocket server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Address to bind the server to
     pub bind_addr: SocketAddr,
     /// Secret token for client authentication (required)
     pub secret: String,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            bind_addr,
+            secret: _,
+        } = self;
+        f.debug_struct("ServerConfig")
+            .field("bind_addr", bind_addr)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Shared state for the WebSocket server.
@@ -94,10 +108,23 @@ struct NewConnectionChannels {
     to_ws_tx: mpsc::UnboundedSender<String>,
 }
 
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(serde::Deserialize, Default)]
 pub(crate) struct WsQueryParams {
     #[serde(rename = "server-key")]
     pub server_key: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for WsQueryParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_key,
+        } = self;
+        f.debug_struct("WsQueryParams")
+            .field("server_key", &server_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Validate the bearer token from request headers or query parameters.
@@ -107,14 +134,29 @@ fn validate_auth(headers: &HeaderMap, query: &WsQueryParams, expected_secret: &s
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
     {
-        return token == expected_secret;
+        return secret_matches(token, expected_secret);
     }
 
     if let Some(ref key) = query.server_key {
-        return key == expected_secret;
+        return secret_matches(key, expected_secret);
     }
 
     false
+}
+
+/// P82: whether `presented` is the server secret. Both are hashed to 32 bytes and all 32 are compared, so how long the
+/// comparison takes no longer tells a peer how many leading characters it guessed right (the `==` it replaces stopped
+/// at the first differing byte). Hashing takes time in proportion to each input's length; the presented one is the
+/// peer's own. This is a source-level property: nothing here stops a compiler from shortening the fold. An empty
+/// secret admits nobody: with it, an empty `?server-key=` or `Bearer ` header would have been a match.
+fn secret_matches(presented: &str, expected_secret: &str) -> bool {
+    use sha2::{Digest as _, Sha256};
+    if expected_secret.is_empty() {
+        return false;
+    }
+    let presented = Sha256::digest(presented.as_bytes());
+    let expected = Sha256::digest(expected_secret.as_bytes());
+    presented.iter().zip(expected.iter()).fold(0u8, |differ, (a, b)| differ | (a ^ b)) == 0
 }
 
 /// WebSocket upgrade handler with authentication.
@@ -499,7 +541,7 @@ async fn run_persistent_agent(
 /// Set up a new ACP connection for a WebSocket connection, reusing the existing MvpAgent.
 /// The relay destination is updated so that session actor notifications flow to the new client.
 fn setup_acp_connection(
-    agent: Rc<MvpAgent>,
+    agent: Rc<MvpAgentHandle>,
     channels: NewConnectionChannels,
     relay_dest: RelayDest,
 ) {
@@ -519,10 +561,8 @@ fn setup_acp_connection(
     *relay_dest.borrow_mut() = Some(conn_gw_tx);
 
     // `Agent` is implemented for `Rc<T: Agent>` so this works.
-    let incoming = LineBufferedRead::spawn_local(incoming);
-    let (conn, handle_io) = acp::AgentSideConnection::new(agent, outgoing, incoming, |fut| {
-        tokio::task::spawn_local(fut);
-    });
+    let (conn, handle_io) =
+        crate::agent::credential_scrub::agent_side_connection(agent, outgoing, incoming);
     tokio::task::spawn_local(
         GatewayReceiver::new(conn_gw_rx, conn)
             .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)

@@ -33,36 +33,37 @@ impl ModelSource for OaiModelSource {
         let mut request = client.get(&self.endpoint.url);
         match self.endpoint.auth {
             EndpointAuth::ApiKey => {
+                // P42: the session-token fallback is a session delivery, so it asks the one predicate.
                 let api_key = crate::agent::auth_method::read_fuigo_api_key_env()
                     .or_else(|_| {
-                        auth.map(|a| a.key.clone())
-                            .ok_or(std::env::VarError::NotPresent)
+                        auth.filter(|a| {
+                            !crate::auth::session_delivery::is_session_credential(a)
+                                || crate::auth::session_delivery::session_may_reach(&self.endpoint.url)
+                        })
+                        .map(|a| a.key.clone())
+                        .ok_or(std::env::VarError::NotPresent)
                     })
                     .map_err(|_| {
                         BackendError::Auth(
                             "No API key for custom models endpoint. Set FUIGO_API_KEY.".into(),
                         )
                     })?;
+                // P70b: a failed fetch logs the response body; record the bearer so a log sink can scrub an echo.
+                fuigo_telemetry::sent_credentials::record(&api_key);
                 request = request.header("Authorization", format!("Bearer {}", api_key));
             }
             EndpointAuth::Session => {
                 let auth = auth
                     .filter(|_| ActiveAuthBackend::default().is_fuigo_authority())
+                    // P42: one session-delivery predicate for the catalogue URL too.
+                    .filter(|a| {
+                        !crate::auth::session_delivery::is_session_credential(a)
+                            || crate::auth::session_delivery::session_may_reach(&self.endpoint.url)
+                    })
                     .ok_or_else(|| {
                         BackendError::Auth("No auth credentials for cli-chat-proxy".into())
                     })?;
-                request = request
-                    .header("Authorization", format!("Bearer {}", &auth.key))
-                    .header("X-XAI-Token-Auth", "xai-grok-cli")
-                    .header("x-userid", &auth.user_id)
-                    .header("x-fuigo-client-version", fuigo_version::VERSION)
-                    .header(
-                        crate::http::CLIENT_MODE_HEADER,
-                        crate::http::process_client_mode(),
-                    );
-                if let Some(email) = &auth.email {
-                    request = request.header("x-email", email);
-                }
+                request = apply_session_headers(request, auth, &self.endpoint.url);
             }
         }
         let response = fuigo_extra_ca::dispatch::send_blocking(request)?;
@@ -127,12 +128,69 @@ impl ListModelsEndpoint {
         }
     }
 }
+/// The session-auth headers on a models fetch. P43: the account id, e-mail and client version
+/// go only to a FluxRouter-operated models endpoint; a configured models host (`[endpoints]
+/// models_base_url`, any gateway) gets the bearer and none of them.
+fn apply_session_headers(
+    request: reqwest::blocking::RequestBuilder,
+    auth: &crate::auth::FuigoAuth,
+    url: &str,
+) -> reqwest::blocking::RequestBuilder {
+    let identity = fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url);
+    let mut pairs = vec![
+        ("x-userid", auth.user_id.as_str()),
+        ("x-fuigo-client-version", fuigo_version::VERSION),
+    ];
+    if let Some(email) = &auth.email {
+        pairs.push(("x-email", email.as_str()));
+    }
+    // P70b: a failed fetch logs the response body; record the bearer so a log sink can scrub an echo.
+    fuigo_telemetry::sent_credentials::record(&auth.key);
+    request
+        .header("Authorization", format!("Bearer {}", &auth.key))
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .headers(identity.header_map(pairs))
+        .header(
+            crate::http::CLIENT_MODE_HEADER,
+            crate::http::process_client_mode(),
+        )
+}
 #[cfg(test)]
 mod tests {
+    /// P43. Both sides of the models-fetch session headers, on the request that is sent.
+    #[test]
+    fn session_model_fetch_carries_identity_only_to_fluxrouter() {
+        let auth = crate::auth::FuigoAuth {
+            key: "token".into(),
+            user_id: "acct-1".into(),
+            email: Some("a@b.example".into()),
+            ..Default::default()
+        };
+        let client = fuigo_extra_ca::build_blocking_reqwest_client(|builder| builder).unwrap();
+        let url = "https://api.fluxrouter.ai/v1/models";
+        let request = super::apply_session_headers(client.get(url), &auth, url).build().unwrap();
+        assert_eq!(request.headers()["x-userid"], "acct-1");
+        assert_eq!(request.headers()["x-email"], "a@b.example");
+        assert!(request.headers().contains_key("x-fuigo-client-version"));
+        for url in [
+            "https://gateway.example/v1/models",
+            "http://127.0.0.1:8080/v1/models",
+            "http://api.fluxrouter.ai/v1/models",
+        ] {
+            let request = super::apply_session_headers(client.get(url), &auth, url).build().unwrap();
+            for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+                assert!(!request.headers().contains_key(name), "{url} got {name}");
+            }
+            assert_eq!(request.headers()["authorization"], "Bearer token");
+        }
+    }
     use super::*;
     #[test]
     #[serial_test::serial]
     fn models_fetch_endpoint_matches_auth_mode() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use crate::agent::config::EndpointsConfig;
         use crate::agent::models::ModelFetchAuth;
         for k in [

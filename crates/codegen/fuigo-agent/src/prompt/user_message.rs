@@ -33,6 +33,10 @@ fn neutralize_file_rule_content(content: &str) -> String {
         .replace("<system-reminder>", "&lt;system-reminder>")
         .replace("</system_reminder>", "&lt;/system_reminder>")
         .replace("<system_reminder>", "&lt;system_reminder>")
+        // Fuigo frames recalled memory in memory-context tags; repo text must not
+        // open or close one (P91 R1). Prefix match also covers attribute forms.
+        .replace("</memory-context", "&lt;/memory-context")
+        .replace("<memory-context", "&lt;memory-context")
 }
 /// Keep markdown headings on their own line instead of glued to the opening tag (`<user_rule># Personal Rules` is not a heading).
 fn push_rule_body(out: &mut String, content: &str) {

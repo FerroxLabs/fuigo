@@ -71,6 +71,64 @@ impl RelayConfig {
             auth_manager,
         })
     }
+    /// P77: the identity-disclosure decision for the relay this config connects to, taken on the URL the socket is
+    /// opened to and by the same rule as the handshake's identity headers (`build_relay_request`): `wss` to the
+    /// FluxRouter API host. Body-carried machine identity sent over the relay (the host name in an `initialize`
+    /// response: relay sync's own, and the agent's when the relay is bridged to it) follows it.
+    pub(crate) fn identity_disclosure(&self) -> fuigo_extra_ca::fluxrouter::IdentityDisclosure {
+        fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(&self.ws_url)
+    }
+    /// P81: what the socket writer of this relay decides body-carried identity with: the URL the socket is opened to
+    /// (so the decision and the pseudonym's origin are the same URL) and this machine's persisted id.
+    pub(crate) fn body_identity(&self) -> RelayBodyIdentity {
+        RelayBodyIdentity::for_relay(&self.ws_url, fuigo_telemetry::id::agent_id)
+    }
+    /// P93: whether the agent may be BRIDGED to this relay (headless-relay and leader mode), decided on the URL the
+    /// socket is opened to: a FluxRouter-operated relay, or one whose origin the user opted in to
+    /// ([`crate::agent::relay_opt_in`]).
+    pub(crate) fn bridge_trust(
+        &self,
+    ) -> Result<
+        crate::agent::relay_opt_in::RelayBridgeTrust,
+        crate::agent::relay_opt_in::RelayOptInRefused,
+    > {
+        crate::agent::relay_opt_in::relay_bridge_gate(&self.ws_url)
+    }
+    /// P125: whether a TUI session may be SYNCED to this relay (it receives the session transcript): the same rule as
+    /// [`Self::bridge_trust`], decided on the URL the socket is opened to.
+    pub(crate) fn sync_trust(
+        &self,
+    ) -> Result<
+        crate::agent::relay_opt_in::RelayBridgeTrust,
+        crate::agent::relay_opt_in::RelayOptInRefused,
+    > {
+        crate::agent::relay_opt_in::relay_sync_gate(&self.ws_url)
+    }
+}
+/// P81: the body-identity decision for ONE relay, as the socket writer applies it ([`relay_outbound_frame`]).
+///
+/// Built from the relay URL alone: the disclosure decision (`wss` to the FluxRouter API host, the handshake's rule)
+/// and the origin the machine-id pseudonym is scoped to can therefore never come from two different URLs.
+/// `machine_id` is read only when a frame names the field, and only for a relay that is not FluxRouter-operated.
+#[derive(Clone, Debug)]
+pub(crate) struct RelayBodyIdentity {
+    disclosure: fuigo_extra_ca::fluxrouter::IdentityDisclosure,
+    relay_url: String,
+    machine_id: fn() -> String,
+}
+impl RelayBodyIdentity {
+    pub(crate) fn for_relay(relay_url: &str, machine_id: fn() -> String) -> Self {
+        Self {
+            disclosure: fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(relay_url),
+            relay_url: relay_url.to_owned(),
+            machine_id,
+        }
+    }
+    /// The key this relay receives in place of `machine_id`: P54's published pseudonym, scoped to the relay's origin
+    /// (stable across reconnects and restarts for one relay, unrelated at every other relay).
+    fn machine_key(&self, machine_id: &str) -> String {
+        fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for_websocket(&self.relay_url, machine_id)
+    }
 }
 /// Callback type for first connection event.
 pub(crate) type FirstConnectCallback = Box<dyn FnOnce() + Send + 'static>;
@@ -198,7 +256,7 @@ async fn attempt_auth_recovery(
                 None,
                 Some(serde_json::json!({
                     "context": context,
-                    "key_prefix": fuigo_auth::bearer_suffix(&new_auth.key),
+                    "key_prefix": fuigo_auth::bearer_fingerprint(&new_auth.key),
                 })),
             );
             false
@@ -210,7 +268,7 @@ async fn attempt_auth_recovery(
                 None,
                 Some(serde_json::json!({
                     "context": context,
-                    "new_key_prefix": fuigo_auth::bearer_suffix(&new_auth.key),
+                    "new_key_prefix": fuigo_auth::bearer_fingerprint(&new_auth.key),
                 })),
             );
             config.auth = new_auth;
@@ -238,6 +296,27 @@ async fn attempt_auth_recovery(
     }
 }
 /// Internal function that runs the reconnection loop.
+/// The HTTP CONNECT proxy for the relay's destination (`resolve` is `proxy::resolve_proxy_for_host` in production),
+/// logged once when there is one. P70a (Astra r4): a proxy URL taken from `HTTPS_PROXY` may carry a user name and
+/// password (`http://alice:secret@proxy:3128`), so the log line prints only the address the tunnel dials (P113,
+/// Astra r1 #5: `redact_url` kept a password holding an unencoded `/` as a path); the URL returned for the
+/// connection is unchanged.
+pub(super) fn relay_proxy_for(
+    ws_url: &str,
+    resolve: impl FnOnce(&str) -> Option<String>,
+) -> Option<String> {
+    let target_host = url::Url::parse(ws_url).ok().and_then(|u| u.host_str().map(str::to_owned));
+    let proxy_url = target_host.as_deref().and_then(resolve);
+    if let Some(ref url) = proxy_url {
+        info!(
+            proxy = %proxy::proxy_address_for_log(url),
+            target = target_host.as_deref().unwrap_or("unknown"),
+            "Using HTTP CONNECT proxy for relay connections"
+        );
+    }
+    proxy_url
+}
+
 async fn run_relay_loop(
     mut config: RelayConfig,
     to_agent_tx: mpsc::UnboundedSender<String>,
@@ -245,22 +324,16 @@ async fn run_relay_loop(
     cancel: CancellationToken,
     mut on_first_connect: Option<FirstConnectCallback>,
 ) {
+    // P47: a relay URL that may not receive the session token is a configuration fact no reconnect can change, so
+    // the relay stops here, once, and says why (the gate also logs the refusal with its remedy).
+    if let Err(refused) = relay_destination_gate(&config) {
+        tprintln!("Fuigo relay disabled: {refused}");
+        return;
+    }
     let mut reconnect_attempts = 0u32;
     let mut delay_secs = BASE_DELAY_SECS;
     let mut first_connection = true;
-    let target_host = url::Url::parse(&config.ws_url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_string()));
-    let proxy_url = target_host
-        .as_deref()
-        .and_then(proxy::resolve_proxy_for_host);
-    if let Some(ref url) = proxy_url {
-        info!(
-            proxy = %url,
-            target = target_host.as_deref().unwrap_or("unknown"),
-            "Using HTTP CONNECT proxy for relay connections"
-        );
-    }
+    let proxy_url = relay_proxy_for(&config.ws_url, proxy::resolve_proxy_for_host);
     loop {
         if cancel.is_cancelled() {
             info!("Relay connection cancelled, stopping");
@@ -269,7 +342,7 @@ async fn run_relay_loop(
         tracing::info!(
             target: crate::instrumentation::TARGET,
             event = "relay_connecting",
-            ws_url = %config.ws_url,
+            ws_url = %fuigo_auth::redact_url(&config.ws_url),
             attempt = reconnect_attempts,
         );
         match connect_to_relay(&config, proxy_url.as_deref(), &cancel).await {
@@ -277,7 +350,7 @@ async fn run_relay_loop(
                 tracing::info!(
                     target: crate::instrumentation::TARGET,
                     event = "relay_connected",
-                    ws_url = %config.ws_url,
+                    ws_url = %fuigo_auth::redact_url(&config.ws_url),
                 );
                 reconnect_attempts = 0;
                 delay_secs = BASE_DELAY_SECS;
@@ -288,7 +361,14 @@ async fn run_relay_loop(
                     first_connection = false;
                 }
                 let result =
-                    run_websocket_session(ws, &to_agent_tx, &mut agent_to_ws_rx, &cancel).await;
+                    run_websocket_session(
+                        ws,
+                        &to_agent_tx,
+                        &mut agent_to_ws_rx,
+                        &cancel,
+                        &config.body_identity(),
+                    )
+                    .await;
                 match result {
                     Ok(SessionEndReason::Normal) => {
                         info!("WebSocket session ended normally");
@@ -308,7 +388,7 @@ async fn run_relay_loop(
                 tracing::info!(
                     target: crate::instrumentation::TARGET,
                     event = "relay_disconnected",
-                    ws_url = %config.ws_url,
+                    ws_url = %fuigo_auth::redact_url(&config.ws_url),
                 );
                 tprintln!("Disconnected from Fuigo WebSocket server");
                 info!("WebSocket disconnected, will reconnect");
@@ -318,7 +398,7 @@ async fn run_relay_loop(
                 tracing::info!(
                     target: crate::instrumentation::TARGET,
                     event = "relay_connection_failed",
-                    ws_url = %config.ws_url,
+                    ws_url = %fuigo_auth::redact_url(&config.ws_url),
                     error = %e,
                     handshake_401,
                 );
@@ -356,8 +436,21 @@ pub(crate) enum SessionEndReason {
     /// Authentication error that may be recoverable with token refresh
     AuthError,
 }
+/// P47: the relay's session token goes only where the service-endpoint trust class admits `ws_url` (`wss`, not
+/// loopback; the configured relay URL from `FuigoComConfig` is the service base).
+fn relay_destination_gate(
+    config: &RelayConfig,
+) -> Result<(), fuigo_extra_ca::service_trust::RefusedServiceDestination> {
+    crate::auth::session_delivery::service_session_gate(
+        &config.auth,
+        &config.ws_url,
+        Some(&config.ws_url),
+        "relay",
+    )
+}
 /// Build an HTTP request with the relay authentication headers.
 fn build_relay_request(config: &RelayConfig) -> anyhow::Result<axum::http::Request<()>> {
+    relay_destination_gate(config)?;
     let mut req = config.ws_url.clone().into_client_request()?;
     req.headers_mut().insert(
         "Origin",
@@ -371,14 +464,18 @@ fn build_relay_request(config: &RelayConfig) -> anyhow::Result<axum::http::Reque
         "X-XAI-Token-Auth",
         axum::http::header::HeaderValue::from_str(&config.token_header)?,
     );
-    req.headers_mut().insert(
-        "x-userid",
-        axum::http::header::HeaderValue::from_str(&config.auth.user_id)?,
-    );
-    req.headers_mut().insert(
-        "x-fuigo-client-version",
-        axum::http::header::HeaderValue::from_static(fuigo_version::VERSION),
-    );
+    // P43: identity only to a FluxRouter-operated destination (`wss` to the compiled host).
+    // The account id was previously required (an invalid one failed the handshake); it still is
+    // when it is going to be sent.
+    let identity =
+        fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(&config.ws_url);
+    if identity.is_permitted() {
+        axum::http::header::HeaderValue::from_str(&config.auth.user_id)?;
+    }
+    req.headers_mut().extend(identity.header_map([
+        ("x-userid", config.auth.user_id.as_str()),
+        ("x-fuigo-client-version", fuigo_version::VERSION),
+    ]));
     req.headers_mut().insert(
         crate::http::CLIENT_MODE_HEADER,
         axum::http::header::HeaderValue::from_static(crate::http::process_client_mode()),
@@ -446,6 +543,7 @@ pub(crate) async fn run_websocket_session<S>(
     to_agent_tx: &mpsc::UnboundedSender<String>,
     from_agent_rx: &mut mpsc::UnboundedReceiver<String>,
     cancel: &CancellationToken,
+    identity: &RelayBodyIdentity,
 ) -> anyhow::Result<SessionEndReason>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
@@ -456,8 +554,226 @@ where
         from_agent_rx,
         cancel,
         Duration::from_secs(READ_LIVENESS_TIMEOUT_SECS),
+        identity,
     )
     .await
+}
+/// P77, P81: what is written to the relay for one outbound frame (an empty string: nothing).
+///
+/// Everything the agent emits is forwarded to the relay verbatim when the relay is bridged to it (`agent/app.rs`:
+/// headless-relay mode, and leader mode, where the relay also sees the responses to local IPC clients). That includes
+/// the agent responses that carry machine identity. They follow the P54 rule for body-carried identity:
+///
+/// * the OS host name (P77): the ACP `initialize` response (`result._meta.hostname`, this machine) and the
+///   `fuigo/session/list` response (the rows' `hostname` under `result.result.sessions[]`, this machine's and the
+///   account's other machines' names as the session registry returned them) lose the field;
+/// * the persisted machine id (P81): the ACP `initialize` response's `result._meta.agentId`, when it IS this machine's
+///   id, becomes the relay-origin pseudonym ([`RelayBodyIdentity::machine_key`]). The relay keys an agent on that
+///   field (relay sync supplies one on every connection too), so it is replaced, not removed. Any other value there
+///   is left alone: relay sync's own `initialize` carries the session-scoped `"<agent type>-<session id>"`, a
+///   correlation id, not identity. `agentInstanceId` is a per-process random and is not identity either (P15-R).
+/// * the account (P81): who is signed in, as the agent's auth responses report it. The `authenticate` response
+///   (`result._meta`, `auth::AuthMeta`) and `fuigo/auth/check_subscription` (`result.meta`, the same type) lose
+///   [`ACCOUNT_META_KEYS`]; `fuigo/auth/info` and `fuigo/auth/logout` (fields directly under `result`) lose
+///   [`ACCOUNT_INFO_KEYS`]. Nothing at the relay needs them as a key, so they are omitted, as the handshake's
+///   `x-userid` already is (P43). What the account may DO (roles, subscription tier, access gate, data-retention
+///   choice, ZDR) is not who it is, and stays. The cloud-environment responses (`fuigo/cloud/env/list`:
+///   `result.environments[].environment`; `fuigo/cloud/env/create` and `update`: `result.environment.environment`)
+///   carry the owning account and team ids as the backend returned them, and lose [`ENVIRONMENT_OWNER_KEYS`].
+///
+/// A FluxRouter-operated relay gets every frame untouched, byte for byte. Any other relay gets a RESPONSE (a frame
+/// with a `result` and no `method`) with those fields withheld; nothing else is changed (the same key elsewhere is
+/// application data: an MCP setup value, the embedder's agent metadata), requests and notifications are never
+/// rewritten, and a frame is not read at all unless it contains one of the quoted keys.
+///
+/// The frame is read one level at a time with every other value kept as raw text, so the rest of it is written back
+/// byte for byte and the parser's nesting limit does not apply to it. Fails closed: a frame that contains one of the
+/// quoted keys and is not a JSON object is not sent to such a relay, because whether it carries identity cannot be
+/// decided.
+///
+/// P82: before any of that, the credential fields of a frame are withheld from such a relay
+/// ([`super::relay_credentials::withhold_credentials`]; an empty string when they cannot be decided).
+pub(crate) fn relay_outbound_frame(identity: &RelayBodyIdentity, msg: String) -> String {
+    let msg = super::relay_credentials::withhold_credentials(identity.disclosure, msg);
+    if identity.disclosure.is_permitted() || !RELAY_IDENTITY_KEYS.iter().any(|key| msg.contains(key)) {
+        return msg;
+    }
+    match withhold_response_identity(identity, &msg) {
+        Ok(Some(rewritten)) => rewritten,
+        Ok(None) => msg,
+        Err(error) => {
+            warn!(%error, "relay: an outbound frame that names an identity field could not be read; not sent to this relay");
+            String::new()
+        }
+    }
+}
+/// The quoted keys [`relay_outbound_frame`] looks for before it reads a frame: every field it can withhold.
+const RELAY_IDENTITY_KEYS: [&str; 14] = [
+    "\"hostname\"",
+    "\"agentId\"",
+    "\"email\"",
+    "\"team_id\"",
+    "\"team_name\"",
+    "\"firstName\"",
+    "\"lastName\"",
+    "\"profileImageUrl\"",
+    "\"teamId\"",
+    "\"teamName\"",
+    "\"organizationId\"",
+    "\"organizationName\"",
+    "\"principalId\"",
+    "\"userId\"",
+];
+/// Who is signed in, in `auth::AuthMeta` (snake case): the `_meta` of the `authenticate` response and the `meta` of
+/// `fuigo/auth/check_subscription`.
+const ACCOUNT_META_KEYS: [&str; 3] = ["email", "team_id", "team_name"];
+/// Who is signed in, directly under the result of `fuigo/auth/info` (`AuthInfoResponse`, camel case) and of
+/// `fuigo/auth/logout` (`email`).
+const ACCOUNT_INFO_KEYS: [&str; 9] = [
+    "email",
+    "firstName",
+    "lastName",
+    "profileImageUrl",
+    "teamId",
+    "teamName",
+    "organizationId",
+    "organizationName",
+    "principalId",
+];
+/// The account and team that own a cloud environment (`SandboxEnvironment`, camel case), in the `environment` object of
+/// each `SandboxEnvironmentWithMetadata` the cloud-environment responses return.
+const ENVIRONMENT_OWNER_KEYS: [&str; 2] = ["userId", "teamId"];
+/// A JSON object read ONE level deep: keys in order, values as raw text.
+type RawObject = indexmap::IndexMap<String, Box<serde_json::value::RawValue>>;
+/// `frame` with the identity fields of an agent response withheld; `None` when there is nothing to withhold (not a
+/// response, or a response without those fields).
+fn withhold_response_identity(identity: &RelayBodyIdentity, frame: &str) -> serde_json::Result<Option<String>> {
+    let mut frame: RawObject = serde_json::from_str(frame)?;
+    if frame.contains_key("method") {
+        return Ok(None);
+    }
+    let Some(mut result) = frame
+        .get("result")
+        .and_then(|raw| serde_json::from_str::<RawObject>(raw.get()).ok())
+    else {
+        return Ok(None);
+    };
+    // ACP `initialize`: `result._meta.hostname` and `result._meta.agentId`. ACP `authenticate`: the account in
+    // `result._meta`.
+    let mut withheld = withhold_in(&mut result, "_meta", |meta: &mut RawObject| {
+        let hostname = meta.shift_remove("hostname").is_some();
+        let machine_id = pseudonymise_machine_id(meta, identity)?;
+        let account = withhold_keys(meta, &ACCOUNT_META_KEYS);
+        Ok(hostname | machine_id | account)
+    })?;
+    // `fuigo/auth/check_subscription`: the same account metadata under `result.meta`.
+    withheld |= withhold_in(&mut result, "meta", |meta: &mut RawObject| Ok(withhold_keys(meta, &ACCOUNT_META_KEYS)))?;
+    // `fuigo/session/list`: the rows sit under the extension-method envelope's own `result` (`ExtMethodResult`);
+    // rows directly under the response's result are covered too.
+    withheld |= withhold_in(&mut result, "result", withhold_session_rows)?;
+    withheld |= withhold_session_rows(&mut result)?;
+    // `fuigo/auth/info`, `fuigo/auth/logout`: the account directly under the result.
+    withheld |= withhold_keys(&mut result, &ACCOUNT_INFO_KEYS);
+    // `fuigo/cloud/env/list`: every row of `result.environments`; `fuigo/cloud/env/create` and `update`: the one
+    // `result.environment`. Each is a `SandboxEnvironmentWithMetadata`, whose `environment` names its owner.
+    withheld |= withhold_environment_rows(&mut result)?;
+    withheld |= withhold_in(&mut result, "environment", withhold_environment_owner)?;
+    if !withheld {
+        return Ok(None);
+    }
+    frame.insert("result".to_owned(), serde_json::value::to_raw_value(&result)?);
+    serde_json::to_string(&frame).map(Some)
+}
+/// Remove every one of `keys` from `object`, whatever its value.
+fn withhold_keys(object: &mut RawObject, keys: &[&str]) -> bool {
+    let mut withheld = false;
+    for key in keys {
+        withheld |= object.shift_remove(*key).is_some();
+    }
+    withheld
+}
+/// Replace `meta.agentId` by the relay's pseudonym for it when its value is this machine's persisted id (in place:
+/// the key keeps its position). Any other value, of any type, is not the machine id and is left as it is.
+fn pseudonymise_machine_id(meta: &mut RawObject, identity: &RelayBodyIdentity) -> serde_json::Result<bool> {
+    let Some(sent) = meta
+        .get("agentId")
+        .and_then(|raw| serde_json::from_str::<String>(raw.get()).ok())
+    else {
+        return Ok(false);
+    };
+    if sent != (identity.machine_id)() {
+        return Ok(false);
+    }
+    meta.insert("agentId".to_owned(), serde_json::value::to_raw_value(&identity.machine_key(&sent))?);
+    Ok(true)
+}
+/// Apply `edit` to the object at `parent[key]`, and write it back if `edit` changed it.
+fn withhold_in(
+    parent: &mut RawObject,
+    key: &str,
+    edit: impl FnOnce(&mut RawObject) -> serde_json::Result<bool>,
+) -> serde_json::Result<bool> {
+    let Some(mut child) = parent
+        .get(key)
+        .and_then(|raw| serde_json::from_str::<RawObject>(raw.get()).ok())
+    else {
+        return Ok(false);
+    };
+    if !edit(&mut child)? {
+        return Ok(false);
+    }
+    parent.insert(key.to_owned(), serde_json::value::to_raw_value(&child)?);
+    Ok(true)
+}
+/// Remove `hostname` from every row of `object.sessions`.
+fn withhold_session_rows(object: &mut RawObject) -> serde_json::Result<bool> {
+    let Some(mut rows) = object
+        .get("sessions")
+        .and_then(|raw| serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok())
+    else {
+        return Ok(false);
+    };
+    let mut withheld = false;
+    for row in &mut rows {
+        if let Ok(mut fields) = serde_json::from_str::<RawObject>(row.get())
+            && fields.shift_remove("hostname").is_some()
+        {
+            *row = serde_json::value::to_raw_value(&fields)?;
+            withheld = true;
+        }
+    }
+    if withheld {
+        object.insert("sessions".to_owned(), serde_json::value::to_raw_value(&rows)?);
+    }
+    Ok(withheld)
+}
+/// Remove the owner ids from `with_metadata.environment` (one `SandboxEnvironmentWithMetadata`).
+fn withhold_environment_owner(with_metadata: &mut RawObject) -> serde_json::Result<bool> {
+    withhold_in(with_metadata, "environment", |environment: &mut RawObject| {
+        Ok(withhold_keys(environment, &ENVIRONMENT_OWNER_KEYS))
+    })
+}
+/// Remove the owner ids from every row of `object.environments`.
+fn withhold_environment_rows(object: &mut RawObject) -> serde_json::Result<bool> {
+    let Some(mut rows) = object
+        .get("environments")
+        .and_then(|raw| serde_json::from_str::<Vec<Box<serde_json::value::RawValue>>>(raw.get()).ok())
+    else {
+        return Ok(false);
+    };
+    let mut withheld = false;
+    for row in &mut rows {
+        if let Ok(mut with_metadata) = serde_json::from_str::<RawObject>(row.get())
+            && withhold_environment_owner(&mut with_metadata)?
+        {
+            *row = serde_json::value::to_raw_value(&with_metadata)?;
+            withheld = true;
+        }
+    }
+    if withheld {
+        object.insert("environments".to_owned(), serde_json::value::to_raw_value(&rows)?);
+    }
+    Ok(withheld)
 }
 /// [`run_websocket_session`] with an explicit read-liveness window (separate entry point so tests can use a short deadline).
 pub(crate) async fn run_websocket_session_with_liveness<S>(
@@ -466,12 +782,17 @@ pub(crate) async fn run_websocket_session_with_liveness<S>(
     from_agent_rx: &mut mpsc::UnboundedReceiver<String>,
     cancel: &CancellationToken,
     liveness: Duration,
+    identity: &RelayBodyIdentity,
 ) -> anyhow::Result<SessionEndReason>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static,
 {
     let (mut ws_outbound, mut ws_inbound) = ws.split();
     let (auth_error_tx, mut auth_error_rx) = mpsc::channel::<()>(1);
+    // P82: the reader answers a request this relay may not make (`relay_credentials::gate_relay_message`) through the
+    // writer, the socket's only writer; the request never reaches the agent.
+    let (refusal_tx, mut refusal_rx) = mpsc::unbounded_channel::<String>();
+    let relay_is_fluxrouter = identity.disclosure.is_permitted();
     let cancel_read = cancel.clone();
     let read_from_ws = async move {
         loop {
@@ -530,10 +851,24 @@ where
                             debug!(bytes = trimmed_end.len(), "received WS text -> agent");
 
                             let mut json = json;
-                            let outbound = if declare_relay_client_capabilities(&mut json) {
-                                json.to_string()
+                            let outbound = if relay_is_fluxrouter {
+                                if declare_relay_client_capabilities(&mut json) {
+                                    json.to_string()
+                                } else {
+                                    trimmed_end.to_string()
+                                }
                             } else {
-                                trimmed_end.to_string()
+                                // P82: any other relay is never handed a credential, and the agent reads exactly
+                                // the message that was decided on.
+                                declare_relay_client_capabilities(&mut json);
+                                match super::relay_credentials::gate_relay_message(&json) {
+                                    super::relay_credentials::RelayMessage::Forward(line) => line,
+                                    super::relay_credentials::RelayMessage::Refuse(answer) => {
+                                        let _ = refusal_tx.send(answer);
+                                        continue;
+                                    }
+                                    super::relay_credentials::RelayMessage::Drop => continue,
+                                }
                             };
                             if to_agent_tx.send(outbound).is_err() {
                                 warn!("Failed to forward message to agent - channel closed");
@@ -546,6 +881,32 @@ where
                                 let s = s.trim_end_matches(['\r', '\n']);
                                 if s.is_empty() {
                                     debug!("received empty WS binary frame - skipping");
+                                    continue;
+                                }
+                                if !relay_is_fluxrouter {
+                                    // P82: the agent reads this frame line by line; each line is gated as a text
+                                    // message is, and one it cannot read is not handed to it.
+                                    let mut agent_gone = false;
+                                    for line in s.split('\n') {
+                                        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else {
+                                            continue;
+                                        };
+                                        match super::relay_credentials::gate_relay_message(&json) {
+                                            super::relay_credentials::RelayMessage::Forward(line) => {
+                                                if to_agent_tx.send(line).is_err() {
+                                                    agent_gone = true;
+                                                    break;
+                                                }
+                                            }
+                                            super::relay_credentials::RelayMessage::Refuse(answer) => {
+                                                let _ = refusal_tx.send(answer);
+                                            }
+                                            super::relay_credentials::RelayMessage::Drop => {}
+                                        }
+                                    }
+                                    if agent_gone {
+                                        break;
+                                    }
                                     continue;
                                 }
                                 debug!(bytes = s.len(), "received WS binary(utf8) -> agent");
@@ -591,8 +952,10 @@ where
     let write_to_ws = async move {
         let mut keepalive = tokio::time::interval(Duration::from_secs(KEEPALIVE_INTERVAL_SECS));
         loop {
-            tokio::select! {
+            let msg = tokio::select! {
                 _ = cancel_write.cancelled() => break,
+                // P82: the answer to a request this relay may not make (it never reached the agent).
+                Some(refused) = refusal_rx.recv() => refused,
                 msg_opt = from_agent_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
@@ -619,13 +982,7 @@ where
                                     debug!("acp_outbound::response");
                                 }
                             }
-
-                            if !msg.is_empty()
-                                && let Err(e) = ws_outbound.send(Message::Text(Utf8Bytes::from(msg))).await
-                            {
-                                warn!(error = ?e, "failed to send to WS");
-                                break;
-                            }
+                            msg
                         }
                         None => {
                             info!("Agent outbound channel closed");
@@ -639,7 +996,15 @@ where
                         tprintln!("ws::keep_alive::error::{:?}", &e);
                         break;
                     }
+                    continue;
                 }
+            };
+            let msg = relay_outbound_frame(identity, msg);
+            if !msg.is_empty()
+                && let Err(e) = ws_outbound.send(Message::Text(Utf8Bytes::from(msg))).await
+            {
+                warn!(error = ?e, "failed to send to WS");
+                break;
             }
         }
         anyhow::Ok(())
@@ -700,10 +1065,49 @@ fn declare_relay_client_capabilities(frame: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P43 hostile: a relay that is not FluxRouter-operated gets neither the account id nor the
+    /// client version on the handshake; `wss` to FluxRouter still does.
+    #[test]
+    fn relay_handshake_carries_identity_only_to_fluxrouter() {
+        let config = |ws_url: &str| RelayConfig {
+            ws_url: ws_url.to_string(),
+            ws_origin: "https://origin.example".to_string(),
+            token_header: "xai-grok-cli".to_string(),
+            auth: FuigoAuth {
+                key: "tok".into(),
+                user_id: "acct-1".into(),
+                ..Default::default()
+            },
+            auth_manager: None,
+        };
+        let req = build_relay_request(&config("wss://api.fluxrouter.ai/ws/relay")).unwrap();
+        assert_eq!(req.headers()["x-userid"], "acct-1");
+        assert!(req.headers().contains_key("x-fuigo-client-version"));
+        // P47: a `ws://` or loopback relay never gets the session token, so no request is built at all.
+        for url in ["ws://api.fluxrouter.ai/ws/relay", "ws://127.0.0.1:9/ws"] {
+            assert!(build_relay_request(&config(url)).is_err(), "{url}");
+        }
+        for url in ["wss://relay.example/ws"] {
+            let req = build_relay_request(&config(url)).unwrap();
+            for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+                assert!(!req.headers().contains_key(name), "{url} got {name}");
+            }
+            assert_eq!(req.headers()["authorization"], "Bearer tok");
+        }
+    }
     use crate::auth::AuthMode;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio_tungstenite::tungstenite::{Utf8Bytes, protocol::Role};
+    /// The machine id the P81 unit tests give the writer (the production one is `fuigo_telemetry::id::agent_id`).
+    const P81_MACHINE_ID: &str = "5d1f0c2a-7a7a-4b4b-8c8c-0123456789ab";
+    fn p81_machine_id() -> String {
+        P81_MACHINE_ID.to_owned()
+    }
+    /// The decision for a relay that is not FluxRouter-operated (no URL at all: withholding is the default).
+    fn p77_withheld() -> RelayBodyIdentity {
+        RelayBodyIdentity::for_relay("", p81_machine_id)
+    }
     /// Create an in-memory WebSocket pair (no network, no handshake needed).
     async fn ws_pair() -> (
         tokio_tungstenite::WebSocketStream<tokio::io::DuplexStream>,
@@ -760,7 +1164,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out")
@@ -788,7 +1192,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out")
@@ -807,7 +1211,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out")
@@ -829,6 +1233,7 @@ mod tests {
                 &mut agent_out_rx,
                 &cancel,
                 Duration::from_millis(100),
+                &p77_withheld(),
             ),
         )
         .await
@@ -865,6 +1270,7 @@ mod tests {
                 &mut agent_out_rx,
                 &cancel,
                 Duration::from_millis(200),
+                &p77_withheld(),
             ),
         )
         .await
@@ -900,7 +1306,7 @@ mod tests {
         });
         let _result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out");
@@ -937,7 +1343,7 @@ mod tests {
         });
         let _result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out");
@@ -971,7 +1377,7 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(5),
-            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel),
+            run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &p77_withheld()),
         )
         .await
         .expect("test timed out")
@@ -979,6 +1385,51 @@ mod tests {
         assert_eq!(result, SessionEndReason::Normal);
     }
     /// Helper to create a test FuigoAuth with the given key.
+    /// P47: a session-token relay reaches its mock only as the configured `wss` origin through the P42 TLS front
+    /// (see `agent::app::tests::relay_child`); each such test runs alone in a fresh process.
+    fn fronted_child(test: &str) -> Option<crate::test_support::session_wire::SessionFront> {
+        fuigo_test_support::env::fresh_process_home(&format!("agent::relay::tests::{test}"))?;
+        Some(crate::test_support::session_wire::SessionFront::start())
+    }
+    fn fronted_ws(
+        front: &crate::test_support::session_wire::SessionFront,
+        addr: std::net::SocketAddr,
+    ) -> (String, String) {
+        let https = front.front(&format!("http://{addr}/"));
+        (
+            format!("{}/", https.replacen("https://", "wss://", 1)),
+            "https://api.fluxrouter.ai".to_string(),
+        )
+    }
+    /// P47: the gate itself — `wss` to an admitted origin passes; `ws`, loopback and other origins never do.
+    #[test]
+    fn p47_relay_destination_gate_follows_the_service_trust_class() {
+        crate::agent::config::Config::install_test_trusted_origins();
+        let config = |ws_url: &str| RelayConfig {
+            ws_url: ws_url.to_string(),
+            ws_origin: "https://api.fluxrouter.ai".to_string(),
+            token_header: "t".to_string(),
+            auth: test_auth("p47-relay-session"),
+            auth_manager: None,
+        };
+        assert!(relay_destination_gate(&config("wss://api.fluxrouter.ai/")).is_ok());
+        for refused in [
+            "ws://api.fluxrouter.ai/",
+            "ws://127.0.0.1:9/",
+            "wss://127.0.0.1:9/",
+            "wss://localhost/",
+            "wss://[::1]:9/",
+        ] {
+            let err = relay_destination_gate(&config(refused)).expect_err(refused);
+            assert!(err.to_string().contains("The request was not made"), "{refused}: {err}");
+            let built = build_relay_request(&config(refused));
+            assert!(built.is_err(), "{refused}: the request must not even be built");
+        }
+        // A static API key is not a session token and keeps its own rules.
+        let mut api_key = config("ws://127.0.0.1:9/");
+        api_key.auth.auth_mode = AuthMode::ApiKey;
+        assert!(relay_destination_gate(&api_key).is_ok());
+    }
     fn test_auth(key: &str) -> FuigoAuth {
         FuigoAuth {
             key: key.to_string(),
@@ -1152,6 +1603,9 @@ mod tests {
     }
     #[tokio::test]
     async fn test_auth_refresh_via_auth_manager_on_auth_error() {
+        let Some(front) = fronted_child("test_auth_refresh_via_auth_manager_on_auth_error") else {
+            return;
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let connection_count = Arc::new(AtomicU32::new(0));
@@ -1189,9 +1643,10 @@ mod tests {
         let am = Arc::new(AuthManager::new(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("new-key"));
+        let (ws_url, ws_origin) = fronted_ws(&front, addr);
         let config = RelayConfig {
-            ws_url: format!("ws://{}", addr),
-            ws_origin: format!("http://{}", addr),
+            ws_url,
+            ws_origin,
             token_header: "test-token".to_string(),
             auth: test_auth("old-key"),
             auth_manager: Some(am),
@@ -1209,6 +1664,9 @@ mod tests {
     }
     #[tokio::test]
     async fn test_auth_refresh_failure_continues_with_backoff() {
+        let Some(front) = fronted_child("test_auth_refresh_failure_continues_with_backoff") else {
+            return;
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let connection_count = Arc::new(AtomicU32::new(0));
@@ -1242,9 +1700,10 @@ mod tests {
         let am = Arc::new(AuthManager::new(dir.path(), cfg));
         am.hot_swap(test_auth("old-key"));
         write_test_auth_to_disk(dir.path(), &scope, &test_auth("old-key"));
+        let (ws_url, ws_origin) = fronted_ws(&front, addr);
         let config = RelayConfig {
-            ws_url: format!("ws://{}", addr),
-            ws_origin: format!("http://{}", addr),
+            ws_url,
+            ws_origin,
             token_header: "test-token".to_string(),
             auth: test_auth("old-key"),
             auth_manager: Some(am),
@@ -1319,5 +1778,938 @@ mod tests {
             assert!(!declare_relay_client_capabilities(&mut frame));
             assert_eq!(frame, original);
         }
+    }
+
+    // ===== P77: the host name in an `initialize` response follows the relay's operator =====
+
+    fn p77_identity(relay_url: &str) -> RelayBodyIdentity {
+        RelayBodyIdentity::for_relay(relay_url, p81_machine_id)
+    }
+    /// The agent's ACP `initialize` response, as the bridge hands it to the relay writer.
+    fn p77_initialize_response() -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": { "loadSession": true },
+                "_meta": {
+                    "fuigoShell": true,
+                    "currentWorkingDirectory": "/work/proj",
+                    "agentVersion": "1.0.0",
+                    "hostname": "My_Laptop.local",
+                    "modelState": { "ratio": 0.5 },
+                    "metadata": { "hostname": "service.example" },
+                }
+            }
+        })
+        .to_string()
+    }
+    const P77_FLUXROUTER_RELAYS: [&str; 2] = ["wss://api.fluxrouter.ai/ws/relay", "WSS://API.FLUXROUTER.AI./ws"];
+    const P77_OTHER_RELAYS: [&str; 6] = [
+        "wss://relay.example/ws",
+        "ws://api.fluxrouter.ai/ws/relay",
+        "https://api.fluxrouter.ai/ws/relay",
+        "wss://api.fluxrouter.ai.evil.example/ws",
+        "not a url",
+        "",
+    ];
+    /// The agent's `fuigo/session/list` response, produced by the real response types (`ExtMethodResult` around
+    /// `ext_list_response`), as the JSON-RPC response ACP writes: the extension response is the `result`. Rows carry
+    /// the host names the session registry returned.
+    fn p77_real_session_list_response() -> String {
+        use crate::session::{merge::MergedSession, result::ExtMethodResult, unified_list};
+        let registry = unified_list::facet_registry();
+        let rows: Vec<unified_list::UnifiedRow> = [
+            ("s1", Some("My_Laptop.local")),
+            ("s2", Some("other-box")),
+            ("s3", None),
+            ("s4", Some("fourth-box")),
+        ]
+        .into_iter()
+        .map(|(id, hostname)| {
+            unified_list::merged_session_to_row(
+                MergedSession {
+                    session_id: id.into(),
+                    summary: "a summary".into(),
+                    updated_at: "2026-06-18T20:10:00Z".into(),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    cwd: "/work/proj".into(),
+                    hostname: hostname.map(Into::into),
+                    source: "both".into(),
+                    ..Default::default()
+                },
+                registry,
+            )
+        })
+        .collect();
+        let facets = registry.summarize_window(&rows);
+        let response = ExtMethodResult::success(unified_list::ext_list_response(unified_list::UnifiedListResult {
+            rows,
+            next_cursor: None,
+            facets,
+            conversations_partial: None,
+            scope: unified_list::ListScope::Cwd,
+        }))
+        .to_ext_response()
+        .expect("the list response serialises");
+        format!(r#"{{"jsonrpc":"2.0","id":9,"result":{}}}"#, response.0.get())
+    }
+    /// The same rows directly under the response's result (no envelope).
+    fn p77_session_list_response() -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "result": {
+                "sessions": [
+                    { "sessionId": "s1", "cwd": "/work/proj", "hostname": "My_Laptop.local", "source": "both", "title": "one" },
+                    { "sessionId": "s2", "cwd": "/srv", "source": "local", "title": "two" },
+                    { "sessionId": "s3", "cwd": "/srv", "hostname": "other-box", "source": "remote", "title": "three" },
+                ],
+                "_meta": { "partial": { "conversations": false } }
+            }
+        })
+        .to_string()
+    }
+    /// P77: a FluxRouter-operated relay gets every frame byte for byte; any other relay gets a RESPONSE without any
+    /// `hostname` field (`initialize`: `result._meta.hostname`; `fuigo/session/list`: every row's), everything else in
+    /// it unchanged and in the same order; requests, notifications and frames without the field are passed through
+    /// untouched whatever they contain.
+    #[test]
+    fn p77_relay_outbound_frame_withholds_the_hostname_from_a_non_fluxrouter_relay() {
+        let response = p77_initialize_response();
+        assert!(response.contains("My_Laptop.local"), "positive control");
+        for url in P77_FLUXROUTER_RELAYS {
+            assert_eq!(relay_outbound_frame(&p77_identity(url), response.clone()), response, "{url}");
+        }
+        let expected = response.replace(r#""hostname":"My_Laptop.local","#, "");
+        assert_ne!(expected, response, "the fixture has the field where the replace looks for it");
+        for url in P77_OTHER_RELAYS {
+            let sent = relay_outbound_frame(&p77_identity(url), response.clone());
+            assert_eq!(sent, expected, "{url}");
+            assert!(!sent.to_lowercase().contains("laptop"), "{url}: {sent}");
+            let parsed: serde_json::Value = serde_json::from_str(&sent).unwrap();
+            assert!(parsed["result"]["_meta"].get("hostname").is_none(), "{url}");
+        }
+        assert_eq!(relay_outbound_frame(&p77_withheld(), response.clone()), expected, "withholding is the default");
+        // The session list: every row's host name, this machine's and the others'.
+        let list = p77_session_list_response();
+        let list_expected = list
+            .replace(r#""hostname":"My_Laptop.local","#, "")
+            .replace(r#""hostname":"other-box","#, "");
+        assert_eq!(list_expected.len() + 52, list.len(), "the fixture has both fields where the replace looks");
+        for url in P77_FLUXROUTER_RELAYS {
+            assert_eq!(relay_outbound_frame(&p77_identity(url), list.clone()), list, "{url}");
+        }
+        for url in P77_OTHER_RELAYS {
+            let sent = relay_outbound_frame(&p77_identity(url), list.clone());
+            assert_eq!(sent, list_expected, "{url}");
+            assert!(!sent.contains("hostname") && !sent.contains("Laptop") && !sent.contains("other-box"), "{sent}");
+        }
+        // The real response: the rows are under the extension envelope's own `result`.
+        let real = p77_real_session_list_response();
+        let parsed: serde_json::Value = serde_json::from_str(&real).unwrap();
+        for (row, host) in [(0, "My_Laptop.local"), (1, "other-box"), (3, "fourth-box")] {
+            assert_eq!(parsed["result"]["result"]["sessions"][row]["hostname"], host, "positive control: {real}");
+        }
+        assert!(parsed["result"]["result"]["sessions"][2].get("hostname").is_none(), "{real}");
+        let real_expected = real
+            .replace(r#""hostname":"My_Laptop.local","#, "")
+            .replace(r#""hostname":"other-box","#, "")
+            .replace(r#""hostname":"fourth-box","#, "");
+        assert_eq!(real_expected.len() + 52 + 24, real.len(), "the three fields are where the replace looks");
+        for url in P77_FLUXROUTER_RELAYS {
+            assert_eq!(relay_outbound_frame(&p77_identity(url), real.clone()), real, "{url}");
+        }
+        for url in P77_OTHER_RELAYS {
+            let sent = relay_outbound_frame(&p77_identity(url), real.clone());
+            assert_eq!(sent, real_expected, "{url}");
+            for gone in ["Laptop", "other-box", "fourth-box", "\"hostname\""] {
+                assert!(!sent.contains(gone), "{url}: {gone} in {sent}");
+            }
+        }
+        // Not one of the two identity fields: untouched, byte for byte. A `hostname` elsewhere in a response is
+        // application data (an MCP setup value, the embedder's agent metadata); a session update or a request carries
+        // the user's own content; an error has no result.
+        for untouched in [
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "servers": [{ "name": "db", "setupValues": { "hostname": "db.example" } }] } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "result": { "hostname": "x", "_meta": { "hostname": "y" }, "servers": [{ "hostname": "db.example" }] } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 3, "result": { "hostname": "x", "a": [{ "hostname": "y" }], "sessions": "none", "_meta": [1] } }).to_string(),
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "update": { "text": "{\"hostname\": 1}", "hostname": "x" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "session/request_permission", "params": { "hostname": "x" }, "result": { "_meta": { "hostname": "y" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 6, "error": { "code": -1, "message": "no", "data": { "hostname": "x" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 3, "result": { "text": "the \"hostname\" key", "_meta": { "other": 1.50 } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 4, "result": { "ok": true } }).to_string(),
+            String::new(),
+        ] {
+            assert_eq!(relay_outbound_frame(&p77_withheld(), untouched.clone()), untouched);
+        }
+        // A non-string value is withheld like any other.
+        assert_eq!(
+            relay_outbound_frame(&p77_withheld(), r#"{"id":1,"result":{"_meta":{"hostname":null,"a":1},"sessions":[{"hostname":7,"b":2},3]}}"#.to_string()),
+            r#"{"id":1,"result":{"_meta":{"a":1},"sessions":[{"b":2},3]}}"#
+        );
+        // All three places in one response: no removal hides another.
+        assert_eq!(
+            relay_outbound_frame(&p77_withheld(), r#"{"id":1,"result":{"_meta":{"hostname":"h","a":1},"result":{"sessions":[{"hostname":"h","b":2}]},"sessions":[{"hostname":"h","c":3}]}}"#.to_string()),
+            r#"{"id":1,"result":{"_meta":{"a":1},"result":{"sessions":[{"b":2}]},"sessions":[{"c":3}]}}"#
+        );
+        // Every other value is carried as raw text: written back byte for byte (number spellings, escapes), and
+        // however deeply nested. 200 nested arrays exceed the nesting limit of a full parse.
+        assert_eq!(
+            relay_outbound_frame(&p77_withheld(), r#"{"id":1.0e0,"result":{"_meta":{"a":1.50,"hostname":"h","b":"\u00e9"},"x":[ 1 , 2 ]},"z":18446744073709551616}"#.to_string()),
+            r#"{"id":1.0e0,"result":{"_meta":{"a":1.50,"b":"\u00e9"},"x":[ 1 , 2 ]},"z":18446744073709551616}"#
+        );
+        let deep = format!(
+            r#"{{"jsonrpc":"2.0","id":8,"result":{{"_meta":{{"hostname":"My_Laptop.local","metadata":{}0{}}}}}}}"#,
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&deep).is_err(), "positive control: too deep for a full parse");
+        assert_eq!(
+            relay_outbound_frame(&p77_withheld(), deep.clone()),
+            deep.replace(r#""hostname":"My_Laptop.local","#, ""),
+            "a valid deep response is delivered, without the host name"
+        );
+        // Fails closed: a frame that names the field and is not a JSON object is not sent to a non-FluxRouter relay
+        // (and is sent, untouched, to a FluxRouter one).
+        for unreadable in [
+            r#"not json "hostname""#.to_string(),
+            r#"[{"result":{"_meta":{"hostname":"h"}}}]"#.to_string(),
+            r#"{"result":{"_meta":{"hostname":"h"}}"#.to_string(),
+        ] {
+            assert_eq!(relay_outbound_frame(&p77_withheld(), unreadable.clone()), "", "{unreadable}");
+            for url in P77_FLUXROUTER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), unreadable.clone()), unreadable, "{url}");
+            }
+        }
+    }
+    /// P77, through the real socket writer: what the relay receives for the agent's `initialize` response.
+    #[tokio::test]
+    async fn p77_ws_session_writes_the_initialize_response_by_relay_operator() {
+        let response = p77_initialize_response();
+        let expected = response.replace(r#""hostname":"My_Laptop.local","#, "");
+        for (url, want) in [
+            ("wss://api.fluxrouter.ai/ws/relay", &response),
+            ("wss://relay.example/ws", &expected),
+            ("ws://api.fluxrouter.ai/ws/relay", &expected),
+        ] {
+            let (client_ws, server_ws) = ws_pair().await;
+            let (_server_tx, mut server_rx) = server_ws.split();
+            let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
+            let (agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
+            let cancel = CancellationToken::new();
+            let update = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "hostname": "x" } }).to_string();
+            agent_out_tx.send(response.clone()).unwrap();
+            agent_out_tx.send(update.clone()).unwrap();
+            let identity = p77_identity(url);
+            let session = run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, &identity);
+            let read = async {
+                let mut frames = Vec::new();
+                while frames.len() < 2 {
+                    match server_rx.next().await {
+                        Some(Ok(Message::Text(text))) => frames.push(text.to_string()),
+                        Some(Ok(_)) => continue,
+                        other => panic!("{url}: the relay side saw {other:?} after {frames:?}"),
+                    }
+                }
+                cancel.cancel();
+                frames
+            };
+            let (ended, got) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(session, read) })
+                .await
+                .expect("test timed out");
+            assert_eq!(ended.expect("session ends cleanly on cancel"), SessionEndReason::Normal, "{url}");
+            // The response as this relay may see it, then the next frame: the writer keeps going, and a notification
+            // is never rewritten.
+            assert_eq!(got, [want.clone(), update], "{url}");
+        }
+    }
+    /// P77 source pin: the relay socket has one text writer, every frame goes through `relay_outbound_frame` on its
+    /// way to it, and the decision it is given is the one for the URL this loop connects to.
+    #[test]
+    fn p77_relay_writer_is_gated_on_the_connected_relay() {
+        let src = include_str!("relay.rs");
+        let prod = src.split("\n#[cfg(test)]").next().unwrap();
+        let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(flat.matches("ws_outbound.send(Message::Text(").count(), 1, "one text writer");
+        assert_eq!(flat.matches("relay_outbound_frame(").count(), 2, "definition + the one use");
+        assert_eq!(flat.matches("run_websocket_session(").count(), 1, "the one caller");
+        for pinned in [
+            "let msg = relay_outbound_frame(identity, msg); if !msg.is_empty() && let Err(e) = \
+             ws_outbound.send(Message::Text(Utf8Bytes::from(msg))).await",
+            "run_websocket_session( ws, &to_agent_tx, &mut agent_to_ws_rx, &cancel, &config.body_identity(), ) \
+             .await;",
+            "Duration::from_secs(READ_LIVENESS_TIMEOUT_SECS), identity, ) .await",
+            "if identity.disclosure.is_permitted() || !RELAY_IDENTITY_KEYS.iter().any(|key| msg.contains(key)) { \
+             return msg; }",
+            "const RELAY_IDENTITY_KEYS: [&str; 14] = [ \"\\\"hostname\\\"\", \"\\\"agentId\\\"\", \"\\\"email\\\"\", \
+             \"\\\"team_id\\\"\", \"\\\"team_name\\\"\", \"\\\"firstName\\\"\", \"\\\"lastName\\\"\", \
+             \"\\\"profileImageUrl\\\"\", \"\\\"teamId\\\"\", \"\\\"teamName\\\"\", \"\\\"organizationId\\\"\", \
+             \"\\\"organizationName\\\"\", \"\\\"principalId\\\"\", \"\\\"userId\\\"\", ];",
+            // P81: the writer's decision and the pseudonym's origin are both the URL the loop connects to, and the
+            // machine id is the persisted one.
+            "pub(crate) fn body_identity(&self) -> RelayBodyIdentity { RelayBodyIdentity::for_relay(&self.ws_url, \
+             fuigo_telemetry::id::agent_id) }",
+            "disclosure: fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(relay_url), \
+             relay_url: relay_url.to_owned(), machine_id, }",
+            "fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for_websocket(&self.relay_url, machine_id)",
+            "pub(crate) fn identity_disclosure(&self) -> fuigo_extra_ca::fluxrouter::IdentityDisclosure { \
+             fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(&self.ws_url) }",
+            "connect_to_relay(&config",
+        ] {
+            assert!(flat.contains(pinned), "{pinned}");
+        }
+    }
+    // ===== P81: the persisted machine id in the agent's `initialize` response follows the relay's operator =====
+
+    /// The agent's ACP `initialize` response as the bridge hands it to the relay writer, with the fields
+    /// `acp_agent.rs` puts in `_meta` (the machine id, the per-process instance id, the host name).
+    fn p81_initialize_response(agent_id: &str) -> String {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 0,
+            "result": {
+                "protocolVersion": 1,
+                "agentCapabilities": { "loadSession": true },
+                "_meta": {
+                    "fuigoShell": true,
+                    "currentWorkingDirectory": "/work/proj",
+                    "agentVersion": "1.0.0",
+                    "agentId": agent_id,
+                    "agentInstanceId": "0b5c2d7e-1111-4222-8333-444455556666",
+                    "hostname": "My_Laptop.local",
+                    "modelState": { "ratio": 0.5 },
+                    "metadata": { "agentId": agent_id, "hostname": "service.example" },
+                }
+            }
+        })
+        .to_string()
+    }
+    /// What a relay that is not FluxRouter-operated receives for [`p81_initialize_response`]: no host name, and the
+    /// pseudonym in place of the machine id, everything else byte for byte.
+    fn p81_withheld_initialize_response(relay_url: &str, agent_id: &str) -> String {
+        let response = p81_initialize_response(agent_id);
+        let key = fuigo_extra_ca::fluxrouter::destination_pseudonym(relay_url, agent_id);
+        // The id as JSON writes it (a configured `FUIGO_AGENT_ID` may need escapes); the key never does.
+        let written = serde_json::to_string(agent_id).unwrap();
+        let expected = response
+            .replace(r#""hostname":"My_Laptop.local","#, "")
+            .replacen(&format!(r#""agentId":{written},"agentInstanceId""#), &format!(r#""agentId":"{key}","agentInstanceId""#), 1);
+        assert_eq!(expected.len() + 29 + written.len(), response.len() + key.len() + 2, "the host name is where the replace looks");
+        assert!(expected.contains(&format!(r#""agentVersion":"1.0.0","agentId":"{key}","agentInstanceId""#)), "so is the machine id");
+        expected
+    }
+    /// P81 hostile: a relay that is not FluxRouter-operated never receives the persisted machine id in the agent's
+    /// `initialize` response; it receives P54's pseudonym for its own origin, in the same place. A FluxRouter relay
+    /// receives the response byte for byte. Only that field, only when it IS the machine id.
+    #[test]
+    fn p81_relay_outbound_frame_pseudonymises_the_machine_id_for_a_non_fluxrouter_relay() {
+        let response = p81_initialize_response(P81_MACHINE_ID);
+        assert_eq!(response.matches(P81_MACHINE_ID).count(), 2, "positive control: `_meta.agentId` and the embedder's metadata");
+        for url in P77_FLUXROUTER_RELAYS {
+            assert_eq!(relay_outbound_frame(&p77_identity(url), response.clone()), response, "{url}");
+        }
+        for url in P77_OTHER_RELAYS {
+            let sent = relay_outbound_frame(&p77_identity(url), response.clone());
+            assert_eq!(sent, p81_withheld_initialize_response(url, P81_MACHINE_ID), "{url}");
+            let parsed: serde_json::Value = serde_json::from_str(&sent).unwrap();
+            let meta = &parsed["result"]["_meta"];
+            let key = fuigo_extra_ca::fluxrouter::destination_pseudonym(url, P81_MACHINE_ID);
+            assert_eq!(meta["agentId"], key.as_str(), "{url}");
+            assert_ne!(key, P81_MACHINE_ID, "{url}");
+            assert_eq!(key.len(), 36, "{url}: UUID-shaped, as the id it stands for");
+            // The per-process instance id is a correlation id (P15-R) and the embedder's own metadata is application
+            // data: both pass.
+            assert_eq!(meta["agentInstanceId"], "0b5c2d7e-1111-4222-8333-444455556666", "{url}");
+            assert_eq!(meta["metadata"]["agentId"], P81_MACHINE_ID, "{url}");
+            assert!(meta.get("hostname").is_none(), "{url}");
+            // The key keeps its position.
+            let keys: Vec<&str> = meta.as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(
+                keys,
+                ["fuigoShell", "currentWorkingDirectory", "agentVersion", "agentId", "agentInstanceId", "modelState", "metadata"],
+                "{url}"
+            );
+        }
+        // The machine id alone (no host name in the response): still replaced. A removal does not hide it and it does
+        // not hide a removal.
+        let only_id = format!(r#"{{"id":1,"result":{{"_meta":{{"a":1,"agentId":"{P81_MACHINE_ID}","b":2}}}}}}"#);
+        let key = fuigo_extra_ca::fluxrouter::destination_pseudonym("wss://relay.example/ws", P81_MACHINE_ID);
+        assert_eq!(
+            relay_outbound_frame(&p77_identity("wss://relay.example/ws"), only_id),
+            format!(r#"{{"id":1,"result":{{"_meta":{{"a":1,"agentId":"{key}","b":2}}}}}}"#)
+        );
+        let id_then_host = format!(r#"{{"id":1,"result":{{"_meta":{{"agentId":"{P81_MACHINE_ID}","hostname":"h"}},"sessions":[{{"hostname":"h","c":3}}]}}}}"#);
+        assert_eq!(
+            relay_outbound_frame(&p77_identity("wss://relay.example/ws"), id_then_host),
+            format!(r#"{{"id":1,"result":{{"_meta":{{"agentId":"{key}"}},"sessions":[{{"c":3}}]}}}}"#)
+        );
+        // Not the machine id: untouched, byte for byte. Relay sync's own `initialize` carries the session-scoped
+        // `"<agent type>-<session id>"` there (a correlation id); an id that merely contains or resembles the machine
+        // id, or is not a string, is not it; the same key anywhere else is application data; requests and
+        // notifications are never rewritten; an error has no result.
+        let other_id = P81_MACHINE_ID.replace("5d1f", "5d1e");
+        for untouched in [
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "protocolVersion": 1, "_meta": { "agentType": "tui", "agentId": "tui-sess-1", "sessionId": "sess-1", "currentWorkingDirectory": "/w" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "_meta": { "agentId": format!("tui-{P81_MACHINE_ID}") } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "_meta": { "agentId": other_id } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "_meta": { "agentId": P81_MACHINE_ID.to_uppercase() } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "_meta": { "agentId": [P81_MACHINE_ID] } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 0, "result": { "_meta": { "agentId": null } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "agentId": P81_MACHINE_ID, "agents": [{ "agentId": P81_MACHINE_ID }], "_meta": [1] } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "result": { "agentId": P81_MACHINE_ID, "_meta": { "agentId": P81_MACHINE_ID } } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "_meta": { "agentId": P81_MACHINE_ID } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "session/request_permission", "params": {}, "result": { "_meta": { "agentId": P81_MACHINE_ID } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 6, "error": { "code": -1, "message": "no", "data": { "_meta": { "agentId": P81_MACHINE_ID } } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 3, "result": { "text": "the \"agentId\" key", "_meta": { "other": 1.50 } } }).to_string(),
+        ] {
+            for url in P77_OTHER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), untouched.clone()), untouched, "{url}");
+            }
+        }
+        // Every other value is carried as raw text and written back byte for byte, however deeply nested (200 nested
+        // arrays exceed the nesting limit of a full parse): a valid response is delivered, with the pseudonym.
+        let deep = format!(
+            r#"{{"jsonrpc":"2.0","id":1.0e0,"result":{{"_meta":{{"a":1.50,"agentId":"{P81_MACHINE_ID}","b":"\u00e9","metadata":{}0{}}},"x":[ 1 , 2 ]}},"z":18446744073709551616}}"#,
+            "[".repeat(200),
+            "]".repeat(200)
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&deep).is_err(), "positive control: too deep for a full parse");
+        assert_eq!(
+            relay_outbound_frame(&p77_identity("wss://relay.example/ws"), deep.clone()),
+            deep.replace(P81_MACHINE_ID, &key)
+        );
+        // Fails closed: a frame that names the field and is not a JSON object is not sent to a relay that is not
+        // FluxRouter-operated (and is sent, untouched, to a FluxRouter one).
+        for unreadable in [
+            format!(r#"not json "agentId" {P81_MACHINE_ID}"#),
+            format!(r#"[{{"result":{{"_meta":{{"agentId":"{P81_MACHINE_ID}"}}}}}}]"#),
+            format!(r#"{{"result":{{"_meta":{{"agentId":"{P81_MACHINE_ID}"}}}}"#),
+        ] {
+            for url in P77_OTHER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), unreadable.clone()), "", "{url}: {unreadable}");
+            }
+            for url in P77_FLUXROUTER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), unreadable.clone()), unreadable, "{url}");
+            }
+        }
+    }
+    /// What the relay side of an in-memory socket receives when the agent emits `frames` through the real writer.
+    async fn p81_relay_receives(identity: &RelayBodyIdentity, frames: &[String]) -> Vec<String> {
+        p81_relay_receives_n(identity, frames, frames.len()).await
+    }
+    /// The first `delivered` text frames the relay side receives when the agent emits `frames`.
+    async fn p81_relay_receives_n(identity: &RelayBodyIdentity, frames: &[String], delivered: usize) -> Vec<String> {
+        let (client_ws, server_ws) = ws_pair().await;
+        let (_server_tx, mut server_rx) = server_ws.split();
+        let (to_agent_tx, _to_agent_rx) = mpsc::unbounded_channel::<String>();
+        let (agent_out_tx, mut agent_out_rx) = mpsc::unbounded_channel::<String>();
+        let cancel = CancellationToken::new();
+        for frame in frames {
+            agent_out_tx.send(frame.clone()).unwrap();
+        }
+        let session = run_websocket_session(client_ws, &to_agent_tx, &mut agent_out_rx, &cancel, identity);
+        let read = async {
+            let mut got = Vec::new();
+            while got.len() < delivered {
+                match server_rx.next().await {
+                    Some(Ok(Message::Text(text))) => got.push(text.to_string()),
+                    Some(Ok(_)) => continue,
+                    other => panic!("the relay side saw {other:?} after {got:?}"),
+                }
+            }
+            cancel.cancel();
+            got
+        };
+        let (ended, got) = tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(session, read) })
+            .await
+            .expect("test timed out");
+        assert_eq!(ended.expect("session ends cleanly on cancel"), SessionEndReason::Normal);
+        got
+    }
+    fn p81_relay_config(ws_url: &str) -> RelayConfig {
+        RelayConfig {
+            ws_url: ws_url.to_string(),
+            ws_origin: "https://origin.example".to_string(),
+            token_header: "t".to_string(),
+            auth: test_auth("p81-relay-session"),
+            auth_manager: None,
+        }
+    }
+    /// P81, through the real socket writer and the production decision (`RelayConfig::body_identity`, so the machine
+    /// id is the persisted one this process reads): what each relay receives for the agent's `initialize` response,
+    /// and that the key is the same on every connection to one relay and after a restart, and different per relay.
+    #[tokio::test]
+    async fn p81_ws_session_writes_the_machine_id_by_relay_operator_and_keeps_one_key_per_relay() {
+        let machine_id = fuigo_telemetry::id::agent_id();
+        assert!(!machine_id.is_empty(), "positive control: this process has a machine id");
+        let response = p81_initialize_response(&machine_id);
+        let update = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "agentId": "x" } }).to_string();
+        let frames = [response.clone(), update.clone()];
+        // FluxRouter-operated relay: byte for byte.
+        let flux = p81_relay_config("wss://api.fluxrouter.ai/ws/relay").body_identity();
+        assert_eq!(p81_relay_receives(&flux, &frames).await, frames);
+        // Any other relay: the pseudonym for ITS origin; the next frame follows (the writer keeps going).
+        let mut keys = Vec::new();
+        for url in ["wss://relay.example/ws", "wss://other-relay.example/ws", "ws://api.fluxrouter.ai/ws/relay"] {
+            let expected = p81_withheld_initialize_response(url, &machine_id);
+            // The first connection, a reconnect of the same loop (the same `RelayConfig`, as `run_relay_loop` holds
+            // it), and a restart (a new `RelayConfig` for the same URL; the machine id is the persisted one).
+            let config = p81_relay_config(url);
+            for identity in [config.body_identity(), config.body_identity(), p81_relay_config(url).body_identity()] {
+                let got = p81_relay_receives(&identity, &frames).await;
+                assert_eq!(got, [expected.clone(), update.clone()], "{url}");
+                // `_meta.agentId` is not the machine id any more; the embedder's own metadata (application data) still
+                // carries its copy.
+                let sent: serde_json::Value = serde_json::from_str(&got[0]).unwrap();
+                assert_ne!(sent["result"]["_meta"]["agentId"], machine_id.as_str(), "{url}: {got:?}");
+                assert_eq!(sent["result"]["_meta"]["metadata"]["agentId"], machine_id.as_str(), "{url}: {got:?}");
+            }
+            let parsed: serde_json::Value = serde_json::from_str(&expected).unwrap();
+            keys.push(parsed["result"]["_meta"]["agentId"].as_str().unwrap().to_owned());
+        }
+        assert_eq!(keys[0], fuigo_extra_ca::fluxrouter::destination_pseudonym("wss://relay.example", &machine_id));
+        assert_eq!(keys[0], fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for_websocket("wss://relay.example/other/path", &machine_id), "one key per relay origin, whatever the path");
+        assert!(keys[0] != keys[1] && keys[1] != keys[2] && keys[0] != keys[2], "one key per relay: {keys:?}");
+        assert!(keys.iter().all(|key| *key != machine_id), "{keys:?}");
+    }
+    // ===== P81: who is signed in, in the agent's auth responses, follows the relay's operator =====
+
+    const P81_ACCOUNT_VALUES: [&str; 9] = [
+        "ada@corp.example",
+        "Ada",
+        "Lovelace",
+        "asset-77",
+        "team-7f3e",
+        "Analytical Engines",
+        "org-19c2",
+        "Corp Example",
+        "principal-51aa",
+    ];
+    /// `auth::AuthMeta` (the real type) as the agent fills it for a team session.
+    fn p81_auth_meta() -> serde_json::Value {
+        serde_json::to_value(crate::auth::AuthMeta {
+            email: Some("ada@corp.example".into()),
+            auth_mode: Some("Oidc".into()),
+            team_id: Some("team-7f3e".into()),
+            team_name: Some("Analytical Engines".into()),
+            team_role: Some("admin".into()),
+            subscription_tier: Some("Pro".into()),
+            gate: Some(crate::auth::GateInfo { message: "upgrade".into() }),
+            ..Default::default()
+        })
+        .unwrap()
+    }
+    /// The four agent responses that say who is signed in, as ACP writes them, with what a relay that is not
+    /// FluxRouter-operated receives for each.
+    fn p81_account_responses() -> Vec<(&'static str, String, String)> {
+        // `authenticate`: `AuthenticateResponse` with `AuthMeta` as its `_meta`.
+        let authenticate = format!(
+            r#"{{"jsonrpc":"2.0","id":1,"result":{}}}"#,
+            serde_json::to_string(&agent_client_protocol::AuthenticateResponse::new().meta(p81_auth_meta().as_object().cloned())).unwrap()
+        );
+        // `fuigo/auth/check_subscription`: the same metadata under `meta` (`extensions/auth.rs`).
+        let check = json!({ "jsonrpc": "2.0", "id": 2, "result": { "authenticated": true, "meta": p81_auth_meta() } }).to_string();
+        let meta_removed = |frame: &str| {
+            frame
+                .replace(r#""email":"ada@corp.example","#, "")
+                .replace(r#""team_id":"team-7f3e","team_name":"Analytical Engines","#, "")
+        };
+        // `fuigo/auth/info`: `AuthInfoResponse`, every field, in its order (`extensions/auth.rs`).
+        let info = json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "methodId": "fuigo.com",
+                "email": "ada@corp.example",
+                "firstName": "Ada",
+                "lastName": "Lovelace",
+                "profileImageUrl": "fuigo-asset:///asset-77",
+                "teamId": "team-7f3e",
+                "teamName": "Analytical Engines",
+                "teamRole": "admin",
+                "organizationId": "org-19c2",
+                "organizationName": "Corp Example",
+                "organizationRole": "member",
+                "principalType": "Team",
+                "principalId": "principal-51aa",
+                "userBlockedReason": null,
+                "teamBlockedReasons": ["BLOCKED_REASON_NO_LOGS"],
+                "codingDataRetentionOptOut": true,
+            }
+        })
+        .to_string();
+        let info_withheld = r#"{"jsonrpc":"2.0","id":3,"result":{"methodId":"fuigo.com","teamRole":"admin","organizationRole":"member","principalType":"Team","userBlockedReason":null,"teamBlockedReasons":["BLOCKED_REASON_NO_LOGS"],"codingDataRetentionOptOut":true}}"#;
+        // `fuigo/auth/logout` (`extensions/auth.rs`).
+        let logout = json!({ "jsonrpc": "2.0", "id": 4, "result": { "ok": true, "was_logged_in": true, "email": "ada@corp.example", "api_key_still_set": false } }).to_string();
+        let logout_withheld = r#"{"jsonrpc":"2.0","id":4,"result":{"ok":true,"was_logged_in":true,"api_key_still_set":false}}"#;
+        vec![
+            ("authenticate", authenticate.clone(), meta_removed(&authenticate)),
+            ("check_subscription", check.clone(), meta_removed(&check)),
+            ("info", info, info_withheld.to_owned()),
+            ("logout", logout, logout_withheld.to_owned()),
+        ]
+    }
+    /// P81 hostile: a relay that is not FluxRouter-operated does not learn who is signed in from the agent's auth
+    /// responses; a FluxRouter relay receives them byte for byte. What the account may do (role, tier, gate,
+    /// retention choice) is delivered either way.
+    #[test]
+    fn p81_relay_outbound_frame_withholds_the_account_from_a_non_fluxrouter_relay() {
+        for (name, response, withheld) in p81_account_responses() {
+            assert_ne!(response, withheld, "{name}: the fixture has the fields where the replace looks");
+            assert!(P81_ACCOUNT_VALUES.iter().any(|value| response.contains(value)), "{name}: positive control");
+            for url in P77_FLUXROUTER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), response.clone()), response, "{name} {url}");
+            }
+            for url in P77_OTHER_RELAYS {
+                let sent = relay_outbound_frame(&p77_identity(url), response.clone());
+                assert_eq!(sent, withheld, "{name} {url}");
+                for value in P81_ACCOUNT_VALUES {
+                    assert!(!sent.contains(value), "{name} {url}: {value} in {sent}");
+                }
+                for key in RELAY_IDENTITY_KEYS {
+                    assert!(!sent.contains(key), "{name} {url}: {key} in {sent}");
+                }
+            }
+        }
+        // Both metadata frames keep everything that is not who the account is.
+        let (_, _, authenticate) = &p81_account_responses()[0];
+        assert_eq!(
+            authenticate,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":1,"result":{{"_meta":{{"auth_mode":"Oidc","is_zdr":false,"team_role":"admin","coding_data_retention_opt_out":{},"show_resolved_model":null,"gate":{{"message":"upgrade"}},"subscription_tier":"Pro","feedback_trace_offer":false}}}}}}"#,
+                crate::auth::default_coding_data_retention_opt_out()
+            )
+        );
+        // Each key is withheld on its own, whatever its value, and one removal hides no other: `_meta`, `meta`, the
+        // session rows and the result's own fields in one response.
+        for key in ACCOUNT_META_KEYS {
+            for place in ["_meta", "meta"] {
+                assert_eq!(
+                    relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"{place}":{{"a":1,"{key}":null,"b":2}}}}}}"#)),
+                    format!(r#"{{"id":1,"result":{{"{place}":{{"a":1,"b":2}}}}}}"#),
+                    "{place}.{key}"
+                );
+            }
+        }
+        for key in ACCOUNT_INFO_KEYS {
+            assert_eq!(
+                relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"a":1,"{key}":7,"b":2}}}}"#)),
+                r#"{"id":1,"result":{"a":1,"b":2}}"#,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            relay_outbound_frame(
+                &p77_withheld(),
+                r#"{"id":1,"result":{"_meta":{"hostname":"h","email":"e","a":1},"meta":{"team_id":"t","b":2},"result":{"sessions":[{"hostname":"h","c":3}]},"sessions":[{"hostname":"h","d":4}],"principalId":"p","e":5}}"#.to_string()
+            ),
+            r#"{"id":1,"result":{"_meta":{"a":1},"meta":{"b":2},"result":{"sessions":[{"c":3}]},"sessions":[{"d":4}],"e":5}}"#
+        );
+        // Not one of those places: untouched, byte for byte. The same key elsewhere is application data (a commit's
+        // author, an enveloped extension result, a tool's output); camel-case keys are not read in the metadata and
+        // snake-case keys are not read under the result; requests, notifications and errors are never rewritten.
+        for untouched in [
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "commit": { "author": { "name": "Ada", "email": "ada@corp.example" } } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "result": { "email": "ada@corp.example", "teamId": "team-7f3e", "meta": { "email": "x" }, "_meta": { "team_id": "t" } } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "_meta": { "teamId": "t", "firstName": "Ada", "principalId": "p" }, "meta": { "organizationId": "o" }, "team_id": "t", "team_name": "n" } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "users": [{ "email": "ada@corp.example", "teamId": "t" }], "meta": [1], "_meta": "none" } }).to_string(),
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "email": "ada@corp.example", "_meta": { "email": "ada@corp.example" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "fuigo/ask_user_question", "params": { "email": "x" }, "result": { "email": "y" } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 6, "error": { "code": -1, "message": "no", "data": { "email": "ada@corp.example" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 3, "result": { "text": "the \"email\" key", "role": "admin" } }).to_string(),
+        ] {
+            for url in P77_OTHER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), untouched.clone()), untouched, "{url}");
+            }
+        }
+        // Fails closed, for every key the writer can withhold: a frame that names one and is not a JSON object is not
+        // sent to a relay that is not FluxRouter-operated (and is sent, untouched, to a FluxRouter one).
+        for key in RELAY_IDENTITY_KEYS {
+            for unreadable in [
+                format!("not json {key}"),
+                format!(r#"[{{"result":{{{key}:"v"}}}}]"#),
+                format!(r#"{{"result":{{{key}:"v"}}"#),
+            ] {
+                assert_eq!(relay_outbound_frame(&p77_withheld(), unreadable.clone()), "", "{unreadable}");
+                for url in P77_FLUXROUTER_RELAYS {
+                    assert_eq!(relay_outbound_frame(&p77_identity(url), unreadable.clone()), unreadable, "{url}");
+                }
+            }
+        }
+        // The keys the writer looks for are exactly the ones it can withhold.
+        let mut read: Vec<String> = ["hostname", "agentId"].into_iter().chain(ACCOUNT_META_KEYS).chain(ACCOUNT_INFO_KEYS).chain(ENVIRONMENT_OWNER_KEYS).map(|key| format!("\"{key}\"")).collect();
+        read.sort();
+        read.dedup();
+        let mut looked_for: Vec<String> = RELAY_IDENTITY_KEYS.iter().map(|key| (*key).to_owned()).collect();
+        looked_for.sort();
+        assert_eq!(read, looked_for);
+    }
+    /// P81, through the real socket writer: the four auth responses, then the next frame, per relay operator.
+    #[tokio::test]
+    async fn p81_ws_session_writes_the_account_by_relay_operator() {
+        let responses = p81_account_responses();
+        let update = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "email": "x" } }).to_string();
+        let mut frames: Vec<String> = responses.iter().map(|(_, response, _)| response.clone()).collect();
+        frames.push(update.clone());
+        let mut withheld: Vec<String> = responses.iter().map(|(_, _, withheld)| withheld.clone()).collect();
+        withheld.push(update);
+        for (url, want) in [
+            ("wss://api.fluxrouter.ai/ws/relay", &frames),
+            ("wss://relay.example/ws", &withheld),
+            ("ws://api.fluxrouter.ai/ws/relay", &withheld),
+        ] {
+            let got = p81_relay_receives(&p81_relay_config(url).body_identity(), &frames).await;
+            assert_eq!(&got, want, "{url}");
+        }
+    }
+    // ===== P81 (Astra round 1): cloud-environment owners, value kinds, raw values, the writer after a dropped frame =====
+
+    /// The cloud-environment responses, built from the REAL wire types exactly as `acp_agent.rs` builds them
+    /// (`json!({ "environments": resp.environments })`, `json!({ "environment": resp.environment })`), with what a relay
+    /// that is not FluxRouter-operated receives.
+    fn p81_environment_responses() -> Vec<(&'static str, String, String)> {
+        use crate::remote::{SandboxEnvironment, SandboxEnvironmentVariable, SandboxEnvironmentWithMetadata};
+        let environment = |id: &str, owner: Option<&str>, team: Option<&str>| SandboxEnvironmentWithMetadata {
+            environment: Some(SandboxEnvironment {
+                environment_id: Some(id.to_owned()),
+                user_id: owner.map(str::to_owned),
+                team_id: team.map(str::to_owned),
+                name: Some("build box".to_owned()),
+                ..Default::default()
+            }),
+            environment_variables: vec![SandboxEnvironmentVariable { key: Some("CI".to_owned()), value: Some("1".to_owned()) }],
+            secrets: Vec::new(),
+            user_role: Some("OWNER".to_owned()),
+        };
+        let rows = vec![
+            environment("env-1", Some("acct-7f3e"), Some("team-7f3e")),
+            environment("env-2", Some("acct-7f3e"), None),
+            SandboxEnvironmentWithMetadata { environment: None, ..environment("env-3", None, None) },
+            environment("env-4", Some("acct-other"), Some("team-other")),
+        ];
+        let list = format!(r#"{{"jsonrpc":"2.0","id":7,"result":{}}}"#, json!({ "environments": rows }));
+        let one = format!(r#"{{"jsonrpc":"2.0","id":8,"result":{}}}"#, json!({ "environment": rows[0] }));
+        // P82 (stacked on this packet) also withholds the environments' scripts and variable values from such a relay.
+        let withheld = |frame: &str| {
+            frame
+                .replace(r#""userId":"acct-7f3e","teamId":"team-7f3e","#, "")
+                .replace(r#""userId":"acct-7f3e","teamId":null,"#, "")
+                .replace(r#""userId":"acct-other","teamId":"team-other","#, "")
+                .replace(r#""setupScript":null,"maintenanceScript":null,"#, "")
+                .replace(r#"{"key":"CI","value":"1"}"#, r#"{"key":"CI"}"#)
+        };
+        vec![("list", list.clone(), withheld(&list)), ("create / update", one.clone(), withheld(&one))]
+    }
+    /// P81 hostile (Astra round 1, HIGH): the cloud-environment responses name the owning account and team; a relay
+    /// that is not FluxRouter-operated does not receive those ids, in any row, and receives everything else.
+    #[test]
+    fn p81_relay_outbound_frame_withholds_environment_owners_from_a_non_fluxrouter_relay() {
+        for (name, response, withheld) in p81_environment_responses() {
+            let parsed: serde_json::Value = serde_json::from_str(&response).unwrap();
+            let first = if name == "list" { &parsed["result"]["environments"][0] } else { &parsed["result"]["environment"] };
+            assert_eq!(first["environment"]["userId"], "acct-7f3e", "{name}: positive control, the real path: {response}");
+            assert_eq!(first["environment"]["teamId"], "team-7f3e", "{name}: {response}");
+            assert_eq!(first["userRole"], "OWNER", "{name}: {response}");
+            assert_ne!(response, withheld, "{name}: the fields are where the replace looks");
+            for url in P77_FLUXROUTER_RELAYS {
+                assert_eq!(relay_outbound_frame(&p77_identity(url), response.clone()), response, "{name} {url}");
+            }
+            for url in P77_OTHER_RELAYS {
+                let sent = relay_outbound_frame(&p77_identity(url), response.clone());
+                assert_eq!(sent, withheld, "{name} {url}");
+                for gone in ["acct-7f3e", "team-7f3e", "acct-other", "team-other", "\"userId\"", "\"teamId\""] {
+                    assert!(!sent.contains(gone), "{name} {url}: {gone} in {sent}");
+                }
+                for kept in ["env-1", "build box", "\"userRole\":\"OWNER\"", "\"environmentVariables\""] {
+                    assert!(sent.contains(kept), "{name} {url}: {kept} missing from {sent}");
+                }
+            }
+        }
+        let (_, list, list_withheld) = &p81_environment_responses()[0];
+        assert_eq!(list.matches("\"userId\"").count(), 3, "three rows name an owner (the third has no environment)");
+        assert_eq!(list_withheld.matches("\"environmentId\"").count(), 3);
+        // Each key on its own, in both places, whatever its value; and next to every other place in one response.
+        for key in ENVIRONMENT_OWNER_KEYS {
+            assert_eq!(
+                relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"environments":[{{"environment":{{"a":1,"{key}":null}},"b":2}},3]}}}}"#)),
+                r#"{"id":1,"result":{"environments":[{"environment":{"a":1},"b":2},3]}}"#,
+                "{key}"
+            );
+            assert_eq!(
+                relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"environment":{{"environment":{{"{key}":true,"a":1}},"b":2}}}}}}"#)),
+                r#"{"id":1,"result":{"environment":{"environment":{"a":1},"b":2}}}"#,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            relay_outbound_frame(
+                &p77_withheld(),
+                r#"{"id":1,"result":{"_meta":{"email":"e","a":1},"environments":[{"environment":{"userId":"u","b":2}},{"environment":{"teamId":"t","c":3}}],"environment":{"environment":{"userId":"u","d":4}},"lastName":"n","e":5}}"#.to_string()
+            ),
+            r#"{"id":1,"result":{"_meta":{"a":1},"environments":[{"environment":{"b":2}},{"environment":{"c":3}}],"environment":{"environment":{"d":4}},"e":5}}"#
+        );
+        // Not those places: untouched. `userId` directly under the result, under a row, or under `environment` itself
+        // is not a `SandboxEnvironment`'s owner; rows that are not objects and requests are left alone.
+        for untouched in [
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "userId": "u", "environments": [{ "userId": "u", "environment": [1] }, 3], "environment": { "userId": "u", "environment": "none" } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "environments": { "environment": { "userId": "u" } }, "environment": [{ "environment": { "userId": "u" } }] } }).to_string(),
+            json!({ "jsonrpc": "2.0", "id": 2, "result": { "result": { "environments": [{ "environment": { "userId": "u" } }], "environment": { "environment": { "userId": "u" } } } } }).to_string(),
+            json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "environment": { "environment": { "userId": "u" } } } }).to_string(),
+        ] {
+            assert_eq!(relay_outbound_frame(&p77_withheld(), untouched.clone()), untouched);
+        }
+    }
+    /// P81 (Astra round 1): a withheld account field is withheld whatever JSON value it holds, and everything beside it
+    /// is written back byte for byte (number spellings, escapes, inner whitespace, nesting deeper than a full parse
+    /// allows).
+    #[test]
+    fn p81_account_fields_are_withheld_for_every_value_kind_and_nothing_else_is_reformatted() {
+        for value in ["null", "7", "true", r#""s""#, r#"{"a":[1]}"#, "[1,2]", r#""\u00e9\"""#] {
+            for key in ACCOUNT_META_KEYS {
+                for place in ["_meta", "meta"] {
+                    assert_eq!(
+                        relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"{place}":{{"a":1,"{key}":{value},"b":2}}}}}}"#)),
+                        format!(r#"{{"id":1,"result":{{"{place}":{{"a":1,"b":2}}}}}}"#),
+                        "{place}.{key} = {value}"
+                    );
+                }
+            }
+            for key in ACCOUNT_INFO_KEYS {
+                assert_eq!(
+                    relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"a":1,"{key}":{value},"b":2}}}}"#)),
+                    r#"{"id":1,"result":{"a":1,"b":2}}"#,
+                    "{key} = {value}"
+                );
+            }
+            for key in ENVIRONMENT_OWNER_KEYS {
+                assert_eq!(
+                    relay_outbound_frame(&p77_withheld(), format!(r#"{{"id":1,"result":{{"environment":{{"environment":{{"a":1,"{key}":{value}}}}}}}}}"#)),
+                    r#"{"id":1,"result":{"environment":{"environment":{"a":1}}}}"#,
+                    "{key} = {value}"
+                );
+            }
+        }
+        let deep = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        let frame = |account: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1.0e0,"result":{{"methodId":"m\u00e9",{account}"teamRole":"a\"b","n":1.50,"w":[ 1 , 2 ],"deep":{deep},"meta":{{"x":2.0,"y":{deep}}},"environment":{{"k":[ 3 ],"environment":{{"z":1e2}}}}}},"z":18446744073709551616}}"#
+            )
+        };
+        let sent = relay_outbound_frame(&p77_withheld(), frame(r#""email":"ada@corp.example","principalId":"p","#));
+        assert!(serde_json::from_str::<serde_json::Value>(&sent).is_err(), "positive control: too deep for a full parse");
+        assert_eq!(sent, frame(""), "only the two account fields are gone");
+    }
+    /// P81 (Astra round 1): the writer keeps writing after a frame it did not send (fail closed is per frame).
+    #[tokio::test]
+    async fn p81_ws_session_keeps_writing_after_a_frame_it_withheld() {
+        let unreadable = r#"[{"result":{"email":"ada@corp.example"}}]"#.to_string();
+        let update = json!({ "jsonrpc": "2.0", "method": "session/update", "params": { "n": 1 } }).to_string();
+        let response = json!({ "jsonrpc": "2.0", "id": 4, "result": { "ok": true, "email": "ada@corp.example" } }).to_string();
+        let frames = [unreadable.clone(), update.clone(), unreadable.clone(), response.clone()];
+        let other = p81_relay_config("wss://relay.example/ws").body_identity();
+        assert_eq!(
+            p81_relay_receives_n(&other, &frames, 2).await,
+            [update.clone(), r#"{"jsonrpc":"2.0","id":4,"result":{"ok":true}}"#.to_string()]
+        );
+        let fluxrouter = p81_relay_config("wss://api.fluxrouter.ai/ws/relay").body_identity();
+        assert_eq!(p81_relay_receives_n(&fluxrouter, &frames, 4).await, frames);
+    }
+    /// P81 (Astra round 1): a machine id that JSON has to escape (a configured `FUIGO_AGENT_ID`) is recognised by its
+    /// value, not by its spelling on the wire.
+    #[test]
+    fn p81_a_machine_id_that_needs_json_escapes_is_still_replaced() {
+        fn escaped_machine_id() -> String {
+            "rack\"one\\é".to_owned()
+        }
+        let identity = RelayBodyIdentity::for_relay("wss://relay.example/ws", escaped_machine_id);
+        let key = fuigo_extra_ca::fluxrouter::destination_pseudonym("wss://relay.example/ws", &escaped_machine_id());
+        for spelling in [r#""rack\"one\\é""#, r#""rack\u0022one\u005c\u00e9""#] {
+            assert_eq!(
+                relay_outbound_frame(&identity, format!(r#"{{"id":0,"result":{{"_meta":{{"agentId":{spelling},"a":1}}}}}}"#)),
+                format!(r#"{{"id":0,"result":{{"_meta":{{"agentId":"{key}","a":1}}}}}}"#),
+                "{spelling}"
+            );
+        }
+        assert_eq!(p81_withheld_initialize_response("wss://relay.example/ws", &escaped_machine_id()), relay_outbound_frame(&identity, p81_initialize_response(&escaped_machine_id())));
+    }
+    /// P81 (Astra round 2): three combinations no other fixture has. An `agentId` that is NOT the machine id stays as
+    /// it is even when the same `_meta` loses another field; the account is withheld from a `_meta` whose machine id
+    /// was replaced; and the values kept in an environment that lost its owner are written back byte for byte.
+    #[test]
+    fn p81_combinations_of_a_machine_id_an_account_and_an_environment_in_one_response() {
+        let relay = "wss://relay.example/ws";
+        let key = fuigo_extra_ca::fluxrouter::destination_pseudonym(relay, P81_MACHINE_ID);
+        // A session-scoped id beside a host name and an account: only those two go.
+        assert_eq!(
+            relay_outbound_frame(&p77_identity(relay), r#"{"id":1,"result":{"_meta":{"agentId":"tui-sess-1","hostname":"h","email":"e","a":1}}}"#.to_string()),
+            r#"{"id":1,"result":{"_meta":{"agentId":"tui-sess-1","a":1}}}"#
+        );
+        assert_eq!(
+            relay_outbound_frame(&p77_identity(relay), r#"{"id":1,"result":{"_meta":{"agentId":"tui-sess-1","a":1},"email":"e"}}"#.to_string()),
+            r#"{"id":1,"result":{"_meta":{"agentId":"tui-sess-1","a":1}}}"#
+        );
+        // The machine id beside an account, without a host name: replaced, and the account goes.
+        assert_eq!(
+            relay_outbound_frame(&p77_identity(relay), format!(r#"{{"id":1,"result":{{"_meta":{{"agentId":"{P81_MACHINE_ID}","email":"e","team_id":"t","team_name":"n","a":1}}}}}}"#)),
+            format!(r#"{{"id":1,"result":{{"_meta":{{"agentId":"{key}","a":1}}}}}}"#)
+        );
+        // An environment that loses its owner keeps every other value as it was written: number spellings, escapes,
+        // inner whitespace and nesting deeper than a full parse allows, in the single environment and in every row.
+        let deep = format!("{}0{}", "[".repeat(200), "]".repeat(200));
+        let environment = |owner: &str| {
+            format!(r#"{{"k":[ 3 ],"environment":{{"n":1.50,{owner}"w":[ 1 , 2 ],"s":"m\u00e9\"x","deep":{deep},"z":1e2}},"userRole":"OWNER"}}"#)
+        };
+        let frame = |owner: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":2,"result":{{"environments":[{},7,{}],"environment":{},"x":2.0}}}}"#,
+                environment(owner),
+                environment(owner),
+                environment(owner)
+            )
+        };
+        let sent = relay_outbound_frame(&p77_identity(relay), frame(r#""userId":"acct-7f3e","teamId":"team-7f3e","#));
+        assert!(serde_json::from_str::<serde_json::Value>(&sent).is_err(), "positive control: too deep for a full parse");
+        assert_eq!(sent, frame(""), "only the owner ids are gone, three times");
+    }
+}
+
+#[cfg(test)]
+mod p70a_relay_proxy_log {
+    /// P70a (Astra r4, r5): the relay's proxy resolution (the function `run_relay_loop` calls, with the proxy lookup
+    /// injected) logs the proxy host, never the password in its userinfo, and returns the URL unchanged for the
+    /// connection.
+    #[test]
+    fn relay_proxy_log_redacts_proxy_credentials() {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        struct Capture(std::sync::Arc<std::sync::Mutex<String>>);
+        struct Render<'a>(&'a mut String);
+        impl tracing::field::Visit for Render<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0.push_str(&format!(" {}={value:?}", field.name()));
+            }
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+                let mut line = String::new();
+                event.record(&mut Render(&mut line));
+                self.0.lock().unwrap().push_str(&line);
+            }
+        }
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let _guard = tracing_subscriber::registry().with(Capture(logs.clone())).set_default();
+        const PROXY: &str = "http://alice:p70px-FAKE-6c7d8e9f@proxy.p70.invalid:3128";
+        let mut asked = None;
+        let used = super::relay_proxy_for("wss://relay.p70.invalid/ws", |host| {
+            asked = Some(host.to_owned());
+            Some(PROXY.to_owned())
+        });
+        assert_eq!(asked.as_deref(), Some("relay.p70.invalid"), "control: the proxy was looked up for the relay host");
+        assert_eq!(used.as_deref(), Some(PROXY), "the connection still uses the configured proxy URL");
+        let logged = logs.lock().unwrap().clone();
+        assert!(logged.contains("proxy.p70.invalid") && logged.contains("CONNECT proxy"), "control: {logged}");
+        assert!(!logged.contains("p70px-FAKE") && !logged.contains("alice"), "the proxy credentials were logged: {logged}");
     }
 }

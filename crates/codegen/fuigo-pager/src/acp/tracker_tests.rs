@@ -2566,6 +2566,7 @@ fn writing_tool_call_delta_clears_retry_activity() {
         max_retries: 5,
         reason: "overloaded".into(),
         error_type: None,
+        verdicts: None,
     };
     let mut tracker = AcpUpdateTracker::new();
     tracker.set_retry_activity(Some(retrying.clone()));
@@ -3391,6 +3392,24 @@ fn tracker_extracts_tools_meta_from_available_commands_update() {
         .expect("tools list should be present");
     assert_eq!(tools, vec!["scheduler_create", "read_file"]);
     assert!(tracker.take_pending_acp_tools().is_none());
+}
+#[test]
+fn tracker_remembers_the_shells_memory_state_and_keeps_it_across_meta_less_updates() {
+    let mut tracker = AcpUpdateTracker::new();
+    let mut sb = ScrollbackState::new();
+    assert_eq!(tracker.memory_enabled(), None, "unknown until the shell says");
+    for (value, expected) in [(false, Some(false)), (true, Some(true))] {
+        let update = acp::SessionUpdate::AvailableCommandsUpdate(
+            acp::AvailableCommandsUpdate::new(vec![]).meta(
+                serde_json::json!({"tools": [], "memoryEnabled": value}).as_object().cloned(),
+            ),
+        );
+        tracker.handle_update(update, &meta(), &mut sb);
+        assert_eq!(tracker.memory_enabled(), expected);
+    }
+    // A later update without the field leaves the last statement in place.
+    tracker.handle_update(available_commands_update(&["loop"]), &meta(), &mut sb);
+    assert_eq!(tracker.memory_enabled(), Some(true));
 }
 #[test]
 fn tracker_tools_meta_absent_when_meta_missing() {
@@ -4785,6 +4804,7 @@ fn retry_status_mirror_chunk_is_not_rendered_and_keeps_retry_activity() {
         max_retries: 2,
         reason: "empty response from model (reasoning_only)".into(),
         error_type: Some("empty_response".into()),
+        verdicts: None,
     };
     tracker.set_retry_activity(Some(retrying.clone()));
     let mut chunk_meta = serde_json::Map::new();
@@ -5174,4 +5194,175 @@ fn bash_mode_block_survives_the_updates_jsonl_round_trip() {
             "{label}: no elision marker in a reloaded bash-mode block: {shown:?}"
         );
     }
+}
+
+// ── P07b: hook batches find their tool call's row by ID ─────────────────────────────────────────────
+
+fn plugin_runs(tag: &str) -> Vec<crate::scrollback::blocks::tool::HookRunEntry> {
+    vec![crate::scrollback::blocks::tool::HookRunEntry {
+        name: format!("plugin/{tag}/hooks:pre_tool_use[0].hooks[0]"),
+        status: crate::scrollback::blocks::tool::HookRunStatus::Success {
+            elapsed: std::time::Duration::from_millis(1),
+        },
+        output: None,
+    }]
+}
+fn hook_count(sb: &ScrollbackState, idx: usize) -> usize {
+    sb.get(idx)
+        .and_then(|e| e.hook_data.as_ref())
+        .map_or(0, |d| d.pre_hooks.len() + d.post_hooks.len())
+}
+
+/// A later Edit merged into an earlier one by coalescing: its post-hook batch, arriving after the merge, lands on the merged row.
+#[test]
+fn a_hook_batch_for_a_coalesced_edit_lands_on_the_merged_row() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    std::thread::spawn(|| {
+        crate::appearance::cache::set_collapsed_edit_blocks(true);
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
+        run_edit(&mut tracker, &mut sb, "e2", "foo.rs", 40);
+        assert_eq!(sb.len(), 1, "fixture: the two edits merged");
+        assert!(tracker.attach_tool_hooks(&mut sb, "e2", HookPhase::Post, plugin_runs("late")));
+        assert!(tracker.attach_tool_hooks(&mut sb, "e1", HookPhase::Post, plugin_runs("early")));
+        assert_eq!(
+            hook_count(&sb, 0),
+            2,
+            "both calls' post batches on the one merged row"
+        );
+    })
+    .join()
+    .unwrap();
+}
+
+/// A batch held for an Edit that has no row yet lands on that Edit's row when it appears, BEFORE coalescing can merge it away;
+/// a row carrying hooks then stays its own row.
+#[test]
+fn a_held_hook_batch_lands_before_its_edit_can_be_coalesced() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    std::thread::spawn(|| {
+        crate::appearance::cache::set_collapsed_edit_blocks(true);
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        run_edit(&mut tracker, &mut sb, "e1", "foo.rs", 5);
+        assert!(!tracker.attach_tool_hooks(&mut sb, "e2", HookPhase::Pre, plugin_runs("held")));
+        tracker.handle_update(edit_tool_precompleted("e2", "foo.rs", 40), &meta(), &mut sb);
+        assert_eq!(sb.len(), 2, "the hooked edit is not merged away");
+        assert_eq!(hook_count(&sb, 0), 0);
+        assert_eq!(hook_count(&sb, 1), 1, "the held batch is on e2's row");
+    })
+    .join()
+    .unwrap();
+}
+
+/// Tool call IDs are turn-scoped: after a user message (a new turn, live or replayed) a batch for a reused ID never lands on the
+/// earlier turn's row; it waits for the new turn's row.
+#[test]
+fn a_reused_call_id_in_a_later_turn_never_lands_on_the_earlier_row() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("x", acp::ToolKind::Other, "first"),
+        &meta(),
+        &mut sb,
+    );
+    let first = sb.len() - 1;
+    tracker.handle_update(
+        acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new("next turn".to_string()),
+        ))),
+        &meta(),
+        &mut sb,
+    );
+    assert!(!tracker.attach_tool_hooks(&mut sb, "x", HookPhase::Pre, plugin_runs("again")));
+    assert_eq!(hook_count(&sb, first), 0, "not on the earlier turn's row");
+    tracker.handle_update(
+        tool_call("x", acp::ToolKind::Other, "second"),
+        &meta(),
+        &mut sb,
+    );
+    let second = sb.len() - 1;
+    assert_ne!(first, second);
+    assert_eq!(hook_count(&sb, second), 1, "on this turn's row");
+}
+
+/// A suppressed tool (a task spawn) that fails gets a visible row; its held hook batch lands on that row.
+#[test]
+fn a_failed_suppressed_tool_row_receives_its_hooks() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(task_call_with_bg("t1", false), &meta(), &mut sb);
+    assert_eq!(
+        sb.len(),
+        0,
+        "fixture: a task spawn has no row while it runs"
+    );
+    assert!(!tracker.attach_tool_hooks(&mut sb, "t1", HookPhase::Pre, plugin_runs("spawn")));
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("t1")),
+            acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Failed)),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 1, "fixture: the failure is shown");
+    assert_eq!(hook_count(&sb, 0), 1);
+}
+
+/// An image-only user message is a turn boundary too: a reused call ID after it never reaches the earlier turn's row.
+#[test]
+fn an_image_only_turn_also_scopes_call_ids() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("x", acp::ToolKind::Other, "first"),
+        &meta(),
+        &mut sb,
+    );
+    let first = sb.len() - 1;
+    tracker.handle_update(
+        acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Image(
+            acp::ImageContent::new("iVBORw0KGgo=", "image/png"),
+        ))),
+        &meta(),
+        &mut sb,
+    );
+    assert!(!tracker.attach_tool_hooks(&mut sb, "x", HookPhase::Pre, plugin_runs("img")));
+    assert_eq!(hook_count(&sb, first), 0);
+}
+
+/// A late `is_background` removes the Execute placeholder row: its hook runs, and a batch arriving before the replacement row,
+/// land on the row registered for the call next (the BgTask row).
+#[test]
+fn hooks_follow_a_removed_background_placeholder_to_its_replacement_row() {
+    use crate::scrollback::blocks::tool::HookPhase;
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    tracker.handle_update(
+        tool_call("bg1", acp::ToolKind::Other, "run_terminal_command"),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 1, "fixture: a placeholder row");
+    assert!(tracker.attach_tool_hooks(&mut sb, "bg1", HookPhase::Pre, plugin_runs("pre")));
+    tracker.handle_update(
+        acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from("bg1")),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::InProgress))
+                .raw_input(Some(serde_json::json!({ "is_background": true }))),
+        )),
+        &meta(),
+        &mut sb,
+    );
+    assert_eq!(sb.len(), 0, "fixture: the placeholder was removed");
+    assert!(!tracker.attach_tool_hooks(&mut sb, "bg1", HookPhase::Post, plugin_runs("post")));
+    let replacement = sb.push_block(RenderBlock::execute("sleep 9999"));
+    tracker.note_tool_row("bg1", replacement, &mut sb);
+    assert_eq!(hook_count(&sb, 0), 2, "both batches on the replacement row");
 }

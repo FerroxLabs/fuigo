@@ -96,7 +96,7 @@ pub struct McpServerEntry {
 /// Distinct from `acp::McpServer` (session/new input) because:
 /// - HTTP: exposes `scope`, `scope_id`, and `scope_name` for connector selection, NOT headers (auth tokens stay private)
 /// - Stdio: same structure but optimized for JSON wire format
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum McpServerConfig {
     #[serde(rename = "http")]
@@ -121,10 +121,48 @@ pub enum McpServerConfig {
     ManagedGateway,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for McpServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http { url, scope, scope_id, scope_name } => f
+                .debug_struct("Http")
+                .field("url", &fuigo_auth::redact_url(url))
+                .field("scope", scope)
+                .field("scope_id", scope_id)
+                .field("scope_name", scope_name)
+                .finish(),
+            Self::Stdio { command, args, env } => f
+                .debug_struct("Stdio")
+                .field("command", command)
+                .field("args", &format_args!("<{} args redacted>", args.len()))
+                .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+                .finish(),
+            Self::ManagedGateway => f.write_str("ManagedGateway"),
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
 pub struct McpEnvVar {
     pub name: String,
     pub value: String,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for McpEnvVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            value,
+        } = self;
+        f.debug_struct("McpEnvVar")
+            .field("name", name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +188,10 @@ pub struct McpServerSessionState {
     /// instead of a generic "unavailable"; old pagers ignore the extra field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked_reason: Option<String>,
+    /// Why a configured server is not connected: its recorded start or handshake failure (P152), so `/mcps` can say
+    /// why instead of a bare "unavailable". Old pagers ignore the extra field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -217,6 +259,27 @@ pub struct McpStatusSnapshot {
     pub configs: Vec<acp::McpServer>,
     pub clients: Vec<McpClientStatus>,
     pub auth_required: std::collections::HashSet<String>,
+    /// The recorded cause of each server's failed start or handshake (P152; `McpState::init_failed`).
+    pub init_failed: HashMap<String, String>,
+}
+
+/// Why `name` is not connected, for the `/mcps` list (P152): its recorded start or handshake failure, unless the server
+/// is ready (a later success supersedes the record) or waiting on auth (the badge already says so).
+fn unavailable_reason(snapshot: &McpStatusSnapshot, name: &str) -> Option<String> {
+    if snapshot.auth_required.contains(name)
+        || snapshot
+            .clients
+            .iter()
+            .any(|c| c.name == name && c.status == McpSessionStatus::Ready)
+    {
+        return None;
+    }
+    snapshot
+        .init_failed
+        .get(name)
+        .map(|reason| reason.trim())
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Clone)]
@@ -459,6 +522,7 @@ pub(crate) fn build_mcp_catalog_with_gateway_tools(
                     auth_required,
                     setup_required: false,
                     blocked_reason: None,
+                    unavailable_reason: None,
                 }),
             });
         }
@@ -554,6 +618,7 @@ fn disabled_server_placeholder_entry(name: &str) -> McpServerEntry {
             auth_required: false,
             setup_required: false,
             blocked_reason: None,
+            unavailable_reason: None,
         }),
     }
 }
@@ -703,6 +768,7 @@ pub(crate) async fn build_mcp_status(
         configs,
         clients: client_statuses,
         auth_required,
+        init_failed: init_failed.into_iter().collect(),
     }
 }
 
@@ -956,6 +1022,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 auth_required: false,
                 setup_required,
                 blocked_reason: None,
+                unavailable_reason: None,
             }),
         });
     }
@@ -1070,6 +1137,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 blocked_reason: (!enabled)
                     .then(|| blocked_reasons.get(&entry.name).cloned())
                     .flatten(),
+                unavailable_reason: unavailable_reason(&snapshot, &entry.name),
             });
         }
 
@@ -1096,6 +1164,7 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                         auth_required: snapshot.auth_required.contains(&client_status.name),
                         setup_required: false,
                         blocked_reason: None,
+                        unavailable_reason: unavailable_reason(&snapshot, &client_status.name),
                     }),
                 });
             }
@@ -1577,14 +1646,18 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             "MCP preferences file is unreadable; fix or remove mcp_preferences.json before saving",
         ));
     }
-    let mut prefs = load.file();
-    let previous_entry = prefs.servers.get(&req.server_name).cloned();
-    prefs
-        .servers
-        .insert(req.server_name.clone(), pending_preferences);
-    crate::util::config::save_mcp_preferences(&prefs)
+    // Read-modify-write under the file's lock: another server's entry saved
+    // meanwhile (another task, another Fuigo) is kept, not overwritten.
+    let previous_entry = {
+        let server_name = req.server_name.clone();
+        crate::util::config::update_mcp_preferences(move |prefs| {
+            prefs
+                .servers
+                .insert(server_name.clone(), pending_preferences.clone())
+        })
         .await
-        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
+        .map_err(|e| crate::acp_error::internal_error(e.to_string()))?
+    };
 
     let rollback_prefs = || async {
         let _ = crate::util::config::restore_mcp_preference_server(
@@ -1658,7 +1731,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     };
 
     let found = crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
-        vec![],
+        Vec::<agent_client_protocol::McpServer>::new(),
         &cwd,
         plugin_reg.as_deref(),
         &compat,
@@ -1956,7 +2029,7 @@ async fn enable_mcp_server_gated(
         // Full config walk: blocking pool, never the session actor's LocalSet.
         tokio::task::spawn_blocking(move || {
             crate::session::managed_mcp::merge_managed_mcp_servers_with_policy(
-                vec![],
+                Vec::<agent_client_protocol::McpServer>::new(),
                 &cwd,
                 merge_reg.as_deref(),
                 &compat,
@@ -2126,6 +2199,12 @@ struct McpUpsertRequest {
     config: crate::util::config::McpServerConfig,
 }
 
+/// The upsert as an untrusted source supplied it (P133): every reference to the saved API key removed.
+fn untrusted_upsert(mut req: McpUpsertRequest) -> Option<McpUpsertRequest> {
+    req.config = req.config.without_saved_key_references(&req.server_name)?;
+    Some(req)
+}
+
 async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpUpsertRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
@@ -2135,6 +2214,18 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| crate::acp_error::invalid_params("session not found"))?;
+
+    // P133: a server an ACP client hands over has no provenance the user vouched for (an editor may apply a repository's
+    // own MCP settings), so it is an untrusted source: it never names the saved API key. The cleaned definition is also
+    // what is persisted, so the reference cannot be laundered into the trusted user config.
+    let notice_scope = fuigo_config::key_naming::NoticeScope::new();
+    let req = notice_scope.run(|| untrusted_upsert(req));
+    // Say so: the upsert succeeds with the reference removed, and nothing else would tell the user. (Collected before
+    // a failure returns, so the scope is always closed.)
+    for notice in notice_scope.notes() {
+        let _ = handle.cmd_tx.send(crate::session::SessionCommand::NotifyConfigNotice { notice });
+    }
+    let req = req.ok_or_else(|| crate::acp_error::invalid_params("server config could not be checked"))?;
 
     // Build the ACP server config before persisting so a refused upsert
     // leaves no state behind.
@@ -2406,6 +2497,7 @@ mod tests {
                             enabled: true,
                         }],
                         blocked_reason: None,
+                        unavailable_reason: None,
                     }),
                 },
             ],
@@ -2436,6 +2528,7 @@ mod tests {
                 auth_required: false,
                 setup_required: false,
                 blocked_reason: None,
+                unavailable_reason: None,
             }),
         })
         .unwrap();
@@ -2501,6 +2594,7 @@ mod tests {
                 auth_required: false,
                 setup_required: false,
                 blocked_reason: None,
+                unavailable_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -2738,6 +2832,7 @@ mod tests {
                 auth_required: false,
                 setup_required: true,
                 blocked_reason: None,
+                unavailable_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -2812,6 +2907,7 @@ mod tests {
                 auth_required: false,
                 setup_required: false,
                 blocked_reason: None,
+                unavailable_reason: None,
             }),
         };
         let json = serde_json::to_value(&entry).unwrap();
@@ -3080,16 +3176,64 @@ mod tests {
             auth_required: false,
             setup_required: false,
             blocked_reason: Some("The server x is blocked by an organization policy (managed_config.toml).".into()),
+            unavailable_reason: None,
         };
         let json = serde_json::to_value(&state).unwrap();
+        assert!(json.get("unavailableReason").is_none());
         assert_eq!(
             json["blockedReason"].as_str(),
             Some("The server x is blocked by an organization policy (managed_config.toml).")
         );
         let clean = McpServerSessionState {
             blocked_reason: None,
+            unavailable_reason: None,
             ..state
         };
         assert!(serde_json::to_value(&clean).unwrap().get("blockedReason").is_none());
     }
+
+    /// P152: the `/mcps` list carries the recorded start/handshake failure of a server that is not connected, and only
+    /// then: a ready server or one waiting on auth has no unavailable reason.
+    #[test]
+    fn p152_unavailable_reason_is_the_recorded_failure_of_a_server_that_is_not_ready() {
+        let mut snapshot = McpStatusSnapshot::default();
+        snapshot
+            .init_failed
+            .insert("dead".into(), "MCP handshake timed out after 2s".into());
+        snapshot.init_failed.insert("blank".into(), "  ".into());
+        snapshot.init_failed.insert("later-ok".into(), "old failure".into());
+        snapshot.init_failed.insert("oauth".into(), "401".into());
+        snapshot.auth_required.insert("oauth".into());
+        snapshot.clients.push(McpClientStatus {
+            name: "later-ok".into(),
+            status: McpSessionStatus::Ready,
+            tools: vec![],
+            icons: Vec::new(),
+        });
+        assert_eq!(
+            unavailable_reason(&snapshot, "dead").as_deref(),
+            Some("MCP handshake timed out after 2s")
+        );
+        assert_eq!(unavailable_reason(&snapshot, "blank"), None);
+        assert_eq!(unavailable_reason(&snapshot, "later-ok"), None);
+        assert_eq!(unavailable_reason(&snapshot, "oauth"), None);
+        assert_eq!(unavailable_reason(&snapshot, "never-seen"), None);
+        let state = McpServerSessionState {
+            enabled: true,
+            status: Some(McpSessionStatus::Unavailable),
+            tools: vec![],
+            auth_required: false,
+            setup_required: false,
+            blocked_reason: None,
+            unavailable_reason: unavailable_reason(&snapshot, "dead"),
+        };
+        assert_eq!(
+            serde_json::to_value(&state).unwrap()["unavailableReason"].as_str(),
+            Some("MCP handshake timed out after 2s")
+        );
+    }
 }
+
+#[cfg(test)]
+#[path = "mcp_p133_tests.rs"]
+mod p133_tests;

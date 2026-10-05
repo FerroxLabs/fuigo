@@ -1,0 +1,57 @@
+# P84 Astra round 3 — final report (range e0145e0f..95c361fb; raw transcript sha256 19d102dd17da78c1a6390de9b14ce5c7f9f9f2c0045c2ce0f664428de5e2f242, copy at hetzner-dsm:/root/fuigo-builds/p84/audits/p84-astra-r3.raw)
+
+**Two HIGH soundness holes remain in claim 7.** The relocation fix and production call paths look correct, but the context check does not fully close r2’s escape issue.
+
+1. **HIGH — A returned `&MvpAgent` can escape the checked context.**
+
+   Locations: [local_ref.rs:54](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:54), [local_ref.rs:269](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:269), [handle.rs:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:45).
+
+   `get()` checks the context when creating the reference, but its returned lifetime follows the `LocalRef` borrow. Safe crate code can leak just the `LocalRef`, obtain a reference during the permitted builder context, and retain that reference after the task completes:
+
+   ```rust
+   let mut held = None;
+   agent.spawn_bound(|r| {
+       let r: &'static LocalRef<MvpAgent> = Box::leak(Box::new(r));
+       held = Some(r.get());
+       async {}
+   }).await.unwrap();
+
+   drop(agent);
+   held.unwrap().announcements_gen.get(); // use-after-free
+   ```
+
+   This is a source-derived counterexample, not an executed test. Alternatively, after the empty task completes, a setter passes `has_pending()` and creates `&mut MvpAgent` while the escaped shared reference remains usable. Thus “no pending future” does not establish exclusive access.
+
+   **Test coverage:** Not caught. The escape test checks subsequent calls to `get()` outside context; it never exports an already-returned reference. The setter test covers a registered pending borrower only.
+
+   This is a remaining part of the pre-existing escape hole. The remedy must enforce the lifetime or ownership of returned references.
+
+2. **HIGH — Address reuse lets a stale `LocalRef` pass another agent’s context check.**
+
+   Locations: [local_ref.rs:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:55), [local_ref.rs:81](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:81).
+
+   Concrete scenario: retain an escaped `LocalRef` from agent A, destroy A, then construct agent B whose allocation reuses A’s address. Move the stale reference into B’s bound future. The address comparison succeeds, and `get()` dereferences A’s invalid pointer. Reallocation at the same address does not restore the original pointer’s validity. [Rust’s provenance documentation](https://doc.rust-lang.org/std/ptr/index.html#provenance)
+
+   **Test coverage:** Not caught. The escape test checks the old reference after destruction with no replacement agent’s context active. It never exercises allocation reuse.
+
+   The check needs allocation identity/liveness that cannot be reused while stale references survive. That still would not independently fix finding 1.
+
+The remaining source checks support these conclusions:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Full-range read-only audit completed; two HIGH findings |
+| Relocation and ownership | ✅ Done | Construction pins before exposure; private handle state, no `DerefMut`, and `!Unpin` prevent safe relocation through the exposed API |
+| Production setters | ✅ Done | Callers configure before bound work starts; the model refresh between construction and some setters does not capture the agent |
+| ACP forwarding | ✅ Done | All 14 implemented methods forward the same arguments to the matching method; no missing/extra override or cfg mismatch. `logout` and `fork_session` retain defaults |
+| Production context coverage | ✅ Done | All 25 `LocalRef::get()` sites traced; no out-of-context production call found |
+| Teardown and context restoration | ✅ Done | No additional defect found in nesting, unwinding, completed-future destruction, cancellation, drain, or closed-spawn destruction |
+| Runtime verification | ⬜ Pending | Excluded by request; no Cargo, tests, Miri, or sanitizer execution |
+
+The production trace covers `acp_agent.rs`, `agent_ops.rs`, `heap_profile.rs`, `mod.rs`, `session_lifecycle.rs`, `session_setup.rs`, and `subagent_spawn.rs`. In `agent/subagent/spawn.rs`, `run`, `validate_type`, and `describe_type` remain inside the coordinator’s polled `FuturesUnordered`; `on_completed` and `running_count_changed` execute synchronously inside that bound coordinator. Worker tasks receive owned snapshots rather than its `LocalRef`.
+
+`InBoundContext` restores the previous mark on normal return and unwind. The TLS value is a const-initialized, drop-free `Cell`; I found no destroyed-key teardown problem for this definition. [Rust TLS documentation](https://doc.rust-lang.org/std/macro.thread_local.html)
+
+The relocation tests use the real constructor and `spawn_bound`; the revised box case frees its original allocation. Their source supports distinguishing the parent, but I did not independently reproduce the reported failures. No files were changed.
+
+DO-NOT-LAND

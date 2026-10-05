@@ -1,0 +1,167 @@
+==================== ROUND 1 ====================
+P56 Astra audit round 1 (gpt-6-astra via codex exec --sandbox read-only < /dev/null), diff d2cdf43a..cbff872a.
+Final report (the tool transcript is omitted; sha256 of the full raw transcript recorded in the receipt).
+
+Found **2 HIGH, 4 MEDIUM, and 1 LOW** findings.
+
+1. **HIGH — Waiting for the flock can roll back a completed token rotation.**  
+   [manager.rs:1023](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:1023) waits, then writes the original credential wholesale at line 1061. The privacy handler passes an earlier credential snapshot ([privacy.rs:84](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/extensions/privacy.rs:84)). Concrete sequence: sibling refresh holds the flock; privacy queues `v1`; sibling commits `v2` and releases; privacy acquires and restores `v1`, including its spent refresh token. Previously, a save during that refresh completed before the refresh’s final write. `update` has the same issue for snapshot callers. Metadata updates must merge into the latest credential under the lock. Add a deterministic same-scope rotation test; the new cross-process tests use different scopes.
+
+2. **HIGH — New tests can overwrite or purge real credentials through inherited `FUIGO_AUTH_PATH`.**  
+   [cross_process_race_tests.rs:359](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:359) constructs managers without neutralizing the path override. The fixture locks its temporary file, but `AuthManager::new` can select another path. Consequently, the purge test at line 392 can delete that other file and replace it with synthetic credentials **before failing its assertion**. Re-executed children also inherit the override at lines 207–217. Explicitly isolate manager paths and child environments; the temporary-directory argument alone does not provide isolation.
+
+3. **MEDIUM — First persistence fails when a custom auth directory does not exist.**  
+   [manager.rs:911](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:911) attempts the lock before creating its parent. For `FUIGO_AUTH_PATH=/new/directory/auth.json`, opening `auth.json.lock` returns `NotFound`; login now fails before reaching the storage writer that previously created the directory. Create the resolved auth-path parent before acquisition, as the API-key writer already does.
+
+4. **MEDIUM — Race tests can pass without exercising a race.**  
+   [cross_process_race_tests.rs:199](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:199) accepts `FUIGO_AUTH_RACE_ROUNDS=0`: both children print completion, final assertions accept the seeds, and a reader iteration satisfies the remaining check. With positive rounds, sending both “go” messages without readiness acknowledgements does not establish overlapping execution. The rollback assertions are meaningful when interleaving occurs, but overlap is unverified. Reject zero rounds and add coordinated contention or a deterministic interleaving.
+
+5. **MEDIUM — Held-lock tests do not establish bounded waiting or successful wakeup.**  
+   [cross_process_race_tests.rs:349](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:349) checks only `TimedOut` and unchanged bytes: an immediate refusal passes, while an indefinitely stuck writer hangs. The release test at line 432 can release before the writer starts. Establish waiter arrival, enforce an outer deadline, and release only after observing contention. Child `wait_with_output` also lacks a deadline.
+
+6. **MEDIUM — Workspace writer still exceeds the specified 10-second budget.**  
+   [hub_auth/mod.rs:206](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:206) retains a separate **15-second** `AUTH_LOCK_TIMEOUT`. This is pre-existing but conflicts with the supplied packet contract. Its write is flock-protected and its production callbacks offload persistence.
+
+7. **LOW — Locking comments remain inconsistent with the implementation.**  
+   [enrichment.rs:170](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs:170) still says some disk writers do not hold the flock. [hub_auth/mod.rs:221](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:221) describes shell stale-lock recovery as unlinking locks, contrary to the current lock implementation.
+
+The whole-`crates/` sweep found no remaining unlocked **production** auth.json content writer. Positive controls detected the unlocked test seed, shell persistence, and workspace persistence. Traced callers revealed no nested-flock acquisition or new `RefCell` borrow across an await. The listener drop probe and event-driven enrichment test are structurally sound; attribution age calculations use the pinned instant.
+
+This was a read-only source audit; no Cargo tests or runtime reproductions were executed.
+
+VERDICT: DO NOT LAND
+
+==================== ROUND 2 ====================
+Diff d2cdf43a..b4ba181b (delta cbff872a..b4ba181b). Final report:
+
+**Two HIGH findings remain at `b4ba181b`.** This was a read-only source audit of both diffs and the writer/caller set; no Cargo tests or runtime reproductions were executed.
+
+1. **HIGH — Privacy can still replace fresh tokens with spent tokens when disk lags memory.**  
+   [manager.rs:951](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:951) unconditionally prefers the stored credential over memory. A successful refresh whose persistence fails deliberately retains `v2` in memory while disk still contains `v1` ([manager.rs:1058](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:1058)). A subsequent privacy request authenticates using `v2`, but its local edit selects disk’s `v1`; `save_without_enrichment_holding_lock` then replaces memory with `v1`, even if that write also fails. The only usable refresh token is lost.
+
+   `update_unless_superseded` similarly treats any token difference as proof that disk is newer at [manager.rs:926](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:926). Existing disk-adoption code explicitly guards against this condition. Preserve both directions of divergence and add a deterministic failed-persistence regression. The new tests cover only disk advancing beyond memory.
+
+2. **HIGH — The test isolation assertion runs after a constructor that can modify real credentials.**  
+   [cross_process_race_tests.rs:476](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:476) calls `AuthManager::new` before checking its path. That constructor honors inherited `FUIGO_AUTH_PATH`, reads the selected file, and invokes stale-scope pruning at [manager.rs:356](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:356). A real store containing an inherited `WebLogin` entry can therefore be rewritten before the assertion fails. Reads also tighten its permissions.
+
+   Child environment removal is correct, but the parent-process held-lock and same-scope tests remain exposed. Reject redirection **before construction**, or use a constructor accepting an explicit isolated path without consulting process overrides.
+
+3. **MEDIUM — Synchronous timeouts leave an unbounded number of parked helper threads.**  
+   [lock.rs:458](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager/lock.rs:458) creates a fresh OS thread for every contended call. `recv_timeout` bounds the caller, but cannot cancel the blocking flock. Repeated calls against a stuck live holder accumulate one thread, stack, and open descriptor per timeout indefinitely.
+
+   The late-send cleanup is correct: once acquisition finishes, a disconnected receiver causes the file to drop, releasing the flock; no late `auth.json` write follows. However, this path bypasses the existing asynchronous waiter’s per-path deduplication. Bound or share outstanding synchronous waits, and test repeated timeouts followed by release.
+
+4. **MEDIUM — The harness still has waits outside its deadline protection.**  
+   The readiness `read_line` at [cross_process_race_tests.rs:353](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:353) can block indefinitely before `wait_with_deadline` starts. The synchronous held-lock tests also call their writers directly at [cross_process_race_tests.rs:556](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:556) and line 564 without an independent watchdog. A regression to an unbounded synchronous acquisition hangs those tests.
+
+   Elapsed-time assertions, asynchronous outer timeouts, and the recorded-wait release handshake are improvements. Complete the bound across readiness, synchronous calls, and child cleanup.
+
+5. **MEDIUM — The cross-process tests can still pass without actual contention.**  
+   The halfway rendezvous at [cross_process_race_tests.rs:178](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:178) establishes interleaved progress, not overlapping acquisition attempts. A valid passing schedule is: A writes its first portion and waits; B completes every write; A completes its remainder. Every read-modify-write can execute serially, including with locking removed.
+
+   `rounds >= 4` fixes the zero-round pass, and READY proves both children started. Require an observed cross-process lock wait or a coordinated hold/attempt before accepting the race evidence. The same-process held-lock tests remain meaningful independently.
+
+6. **LOW — Timeout retries do not establish that the file was unchanged.**  
+   [cross_process_race_tests.rs:225](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:225) compares only the current scope’s access-token round suffix. Changes to its refresh token or metadata pass this assertion. Whole-file equality is inappropriate while the peer legitimately writes, but the complete owned-scope entry can be compared. The separate held-lock tests correctly compare complete file bytes.
+
+The remaining review results:
+
+- **R1 HIGH1:** The original sibling-rotation interleaving is addressed, and the new same-scope tests force that interleaving. Finding 1 identifies an uncovered reverse-divergence case.
+- **R1 HIGH2:** Child isolation is fixed; parent fixture isolation remains incomplete.
+- **R1 MED3:** Fixed in source: `lock_for_write` creates the resolved parent before acquisition.
+- **R1 MED4/MED5:** Partially fixed, with the remaining gaps above.
+- **R1 MED6/LOW7:** The workspace’s 15-second timeout and stale unlink comment remain unchanged at `hub_auth/mod.rs:206` and `:221`; retained as deferred, outside P56 ownership. The shell enrichment comment is corrected.
+- **Writer/deadlock sweep:** No remaining unlocked production `auth.json` content read-modify-write found in `crates/`. Refresh persistence uses the already-held flock; no new nested-flock acquisition or lock-order deadlock found. The nested auth-state acquisition is intentionally reentrant, and the ACP `RefCell` borrow ends before awaiting persistence.
+- **Other tests:** Attribution clock pinning, listener-drop probes, and event-driven enrichment checks remain structurally sound.
+
+VERDICT: DO NOT LAND
+
+==================== ROUND 3 ====================
+Diff d2cdf43a..2c9ad1e6 (delta b4ba181b..2c9ad1e6). Final report:
+
+**Remaining in-scope findings: 2 HIGH and 2 MEDIUM.** Audited the full and round-3 diffs at `2c9ad1e6c21ef49491474cd8d800b1baee9b47eb`. This was read-only source verification; no Cargo tests or runtime reproductions were executed.
+
+1. **HIGH — A stale snapshot can still overwrite a refresh that reached memory but failed persistence.**  
+   [manager.rs:954](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:954) checks the caller against disk only. Concrete ordering: ACP captures `v1`; a concurrent refresh holds the flock, obtains `v2`, fails its disk write, and retains `v2` in memory; the waiting snapshot writer acquires the flock and sees disk’s unchanged `v1`. Because disk matches its snapshot, it calls `update_holding_lock(v1)`, which overwrites memory—even if persistence fails again.
+
+   The new [regression:758](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:758) supplies `v2`, so it misses the stale-caller case. Check current memory as well as disk, keeping the decision and mutation within the same auth-state critical section. Add the failed-persistence interleaving with a caller still holding `v1`.
+
+2. **HIGH — A successful privacy opt-out can leave local collection enabled when persistence fails.**  
+   [manager.rs:988](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager.rs:988) propagates the disk-write error before applying the edit to memory. Lock failure at line 980 likewise skips the memory edit. Meanwhile, [privacy.rs:87](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/extensions/privacy.rs:87) ignores that error and returns the requested successful opt-out.
+
+   Starting with sharing enabled, a successful server PUT followed by either failure leaves the in-memory flag false. Local collection checks read that flag, including [agent_ops.rs:3180](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:3180). The previous persistence helper updated memory despite write failure. Preserve the independent token copies, but apply the acknowledged privacy change to current memory even when disk persistence fails; test both failure paths.
+
+3. **MEDIUM — Cancellation before the blocking closure starts leaves a shared wait without a producer.**  
+   [flock_wait.rs:136](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/manager/lock/flock_wait.rs:136) constructs `DepositOnDrop` **inside** the `spawn_blocking` closure. If runtime shutdown cancels that closure before execution, only its captured `Arc` drops: no error is deposited and no notification occurs. Tickets surviving on another runtime keep `Round::Waiting` alive, and subsequent subscribers can join this producerless round. Existing waiters then depend on deadline salvage rather than waking when the holder releases.
+
+   Tokio permits cancellation of blocking work that has not started; this matches the locked 1.52.3 source inspected locally and the [documented semantics](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html). Construct the deposit guard before scheduling and move it into the closure. Add a cross-runtime queued-cancellation regression. This strands **wait state**, not an acquired file lock.
+
+4. **MEDIUM — Deadline failures still leave test-owned children without cleanup.**  
+   The readiness wrapper at [cross_process_race_tests.rs:361](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:361) panics on timeout before reaching child cleanup. Dropping `Child` does not terminate or reap it. Similarly, a timeout while collecting the first child kills only that child; unwinding drops the other handle without termination. The reader’s stop flag is set only after successful collection.
+
+   Use cleanup guards that terminate/reap both children and stop the reader on every failure path. The waits are now bounded for the parent, but cleanup remains incomplete.
+
+The six round-2 responses resolve as follows:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-3 source audit complete; landing remains blocked. |
+| HIGH1: token preservation | ⬜ Pending | Independent privacy edits preserve tokens; stale snapshot ordering remains in finding 1. |
+| HIGH2: fixture isolation | ✅ Done | `new_at_path` bypasses both auth overrides before reading or pruning. |
+| MED3: parked-thread accumulation | ✅ Done | Sync calls share the per-path waiter; queued cancellation remains separately in finding 3. |
+| MED4: bounded harness waits | ⬜ Pending | Readiness and sync calls have deadlines; cleanup remains in finding 4. |
+| MED5: contention evidence | ✅ Done | Parent requires positive child contention counts; zero-contention runs fail. |
+| LOW6: timeout comparison | ✅ Done | Complete owned entries are compared. |
+
+The writer sweep found no remaining unlocked production `auth.json` content read-modify-write. Refresh persistence uses its existing flock; I found no new nested blocking acquisition or lock-order deadlock.
+
+A **started** parked thread safely outlives `shutdown_background`: its synchronous file operation and owned wait state remain valid. Once it deposits, live tickets can claim the file; with no tickets remaining, dropping the final strong reference releases it. The weak registry does not retain an abandoned acquired lock.
+
+The attribution clock, listener-drop probes, and enrichment handshakes remain structurally sound. Cross-process tests are Unix-only. The previously deferred workspace 15-second timeout and stale unlink comment remain unchanged and outside P56 ownership.
+
+VERDICT: DO NOT LAND
+
+==================== ROUND 4 ====================
+Diff d2cdf43a..e645102c (delta 2c9ad1e6..e645102c). Final report:
+
+Audited `d2cdf43a..e645102c` and the round-4 delta at `e645102cc5bee1fe1ec12dfc887758e72b1c996d`.
+
+**0 BLOCKER, 0 HIGH, 2 MEDIUM findings in scope.** This was a read-only source audit; no Cargo compilation or runtime tests were executed.
+
+1. **MEDIUM — The reaped flag does not prevent signalling a recycled PID.**  
+   At [cross_process_race_tests.rs:296](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:296), the timeout thread can observe `false`, then pause while the waiter reaps the child and sets the flag. If the PID is reused before `kill`, an unrelated process receives `SIGKILL`. There is also a window between `child.wait()` returning at line 287 and publishing `true`. `SeqCst` does not make this sequence atomic. Keep waiting and termination under one owner, with output drained separately, or otherwise serialize reaping against signalling.
+
+2. **MEDIUM — Partial startup still escapes the cleanup guard.**  
+   At [cross_process_race_tests.rs:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:320), children accumulate in a temporary vector; `Harness` receives them only at line 349. If the second spawn fails, unwinding drops the first `Child` without killing or reaping it. Register each successful spawn with the guard immediately. The guard correctly covers readiness failures and the remaining child during collection failures once registration has completed.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-4 source audit and full-packet sweep complete. |
+| HIGH1: stale snapshot versus unpersisted memory mint | ✅ Done | Both copies are checked under one auth-state section through synchronous mutation. The regression supplies the stale caller copy and asserts memory survives. |
+| HIGH2: privacy edit after persistence failure | ✅ Done | Memory is edited before propagating either acquisition or write failure. Both tests start with sharing enabled; assertions are meaningful. |
+| MED3: cancellation before blocking-task execution | ✅ Done | The captured deposit guard exists before scheduling. The shutdown-runtime test exercises cancellation without running the closure, consistent with locally inspected Tokio 1.52.3 source. |
+| MED4: harness cleanup | ⬜ Pending | Original readiness/collection cleanup improved; the two residual issues above remain. |
+
+The writer/caller sweep found no remaining unlocked production `auth.json` content writer or additional token-rollback path in the reviewed changes. Refresh persistence uses its existing flock. Nested `auth_state_lock` acquisition is intentionally reentrant; the synchronous `update_holding_lock` introduces no suspension while that guard is held. Reviewed spawned futures retain no new non-`Send` guard across an await; compilation remains unverified.
+
+Cross-process tests require positive contention, same-scope tests establish waiter arrival, and the attribution, enrichment and listener-drop tests remain structurally meaningful. The workspace’s previously deferred 15-second timeout and stale unlink comment remain outside P56 ownership.
+
+VERDICT: LAND
+
+==================== ROUND 5 ====================
+Diff d2cdf43a..7fce6eb0 (delta e645102c..7fce6eb0). Final report:
+
+Audited `d2cdf43a..7fce6eb0` and the harness-only delta `e645102c..7fce6eb0`.
+
+**Open in-scope findings: 0 BLOCKER, 0 HIGH, 0 MEDIUM, 0 LOW.**
+
+- **Resolved MEDIUM — PID-reuse kill race:** [cross_process_race_tests.rs:285](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:285). The guarded `Child` has one reaping/termination owner. `try_wait` reaps before the slot is cleared; deadline panic leaves cleanup to `Harness::drop`. No competing waiter or raw-PID signal remains.
+- **Resolved MEDIUM — Partial-startup cleanup:** [cross_process_race_tests.rs:349](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:349). Each successful spawn immediately enters the guard, so failure spawning the second child cleans up the first.
+- **No new drain/early-EOF defect found:** [cross_process_race_tests.rs:278](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:278). Separate threads drain stdout and stderr concurrently. Early stdout closure cannot bypass process polling or its deadline. Joins occur after exit; the reviewed child path creates no descendants retaining the write ends.
+- **No readiness-reader ownership leak:** [cross_process_race_tests.rs:390](/Volumes/Mando/WaylandBots/Fuigo/wt-p56/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:390). Readiness transfers the same buffered stdout reader back through the channel, preserving buffered output without retaining another reader. Readiness failure unwinds through the child guard.
+
+The packet-wide source verdict remains unchanged: no additional blocking writer, token-preservation, or lock-order defect found. Earlier privacy, cancellation, isolation, and test-determinism corrections remain intact. Previously deferred workspace findings remain outside P56 ownership.
+
+Read-only source confirmation; no compilation or runtime tests executed. `git diff --check` passed.
+
+VERDICT: LAND

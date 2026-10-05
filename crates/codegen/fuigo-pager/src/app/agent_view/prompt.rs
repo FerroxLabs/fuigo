@@ -1400,14 +1400,13 @@ mod history_browse_panel_tests {
 
     /// Spin-poll the panel's background matcher until `expect` results are visible (the daemon fills the snapshot asynchronously after open).
     fn poll_results(agent: &mut AgentView, expect: usize) {
-        for _ in 0..500 {
-            let _ = agent.prompt.history_search.poll();
-            if agent.prompt.history_search.result_count() == expect {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        panic!("history daemon did not deliver {expect} results");
+        // On the matcher's answer, not on a count of polls: a loaded host has kept that thread off the CPU for over a second (P78).
+        agent
+            .prompt
+            .history_search
+            .poll_until(&format!("{expect} result(s)"), |s| {
+                s.result_count() == expect
+            });
     }
 
     /// Open the browse panel (Up) and wait for the matcher.

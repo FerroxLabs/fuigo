@@ -1145,6 +1145,7 @@ mod tests {
                 tool_timeout_sec: None,
                 tool_timeouts: None,
                 expose_image_base64: None,
+                untrusted_source: false,
             }),
         };
         let plan = ImportPlan {

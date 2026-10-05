@@ -3,16 +3,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-/// The binary version of the currently running leader process.
+/// The release the currently running leader process belongs to.
 ///
 /// Registration compares it against each client's `ClientCapabilities::client_version` to catch mismatches early.
 /// A mismatch produces a structured ACP notification.
-/// In development builds where `VERSION_WITH_COMMIT` is not set, this is `"unknown"`.
-/// Version-mismatch detection is then disabled (no notification sent).
-const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
-    Some(v) => v,
-    None => "unknown",
-};
+/// It is the same value every client sends (`fuigo_version::VERSION`) and the leader registers as its binary version.
+/// P151 (F17): it was `option_env!("VERSION_WITH_COMMIT")`, which only the pager binary's own build script sets, so in
+/// fuigo-shell it was always "unknown" and the notice was never sent.
+const LEADER_VERSION: &str = fuigo_version::VERSION;
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
     InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage,
@@ -52,6 +50,10 @@ enum LeaderServerPoll {
     Accept(std::io::Result<LeaderStream>),
     Event(ServerEvent),
     Response(String),
+    /// P125: the leader's relay refusal changed (`LeaderServerControlState::publish_relay_refusal`).
+    RelayRefusalChanged,
+    /// P142: this process recorded a one-off user notice (`fuigo_file_utils::destination_gate::subscribe_notices`).
+    NoticeRecorded,
 }
 /// A live notification buffered during an in-flight `session/load`: the shared payload plus its `event_seq`.
 /// The `event_seq` is computed at buffer time, when the message is already parsed, so the post-load flush never re-parses.
@@ -105,13 +107,16 @@ struct ClientState {
     /// Until `initialize` is observed, each ACP message is checked so we never miss a late `initialize`.
     /// After it is seen once, we skip the per-message parse as an optimisation.
     initialize_seen: bool,
-    /// Patch the next response's `modelState.currentModelId` to match `default_model`.
-    /// Set on outbound `initialize`, cleared after patching the response.
-    patch_initialize_model: bool,
+    /// The client's own (un-namespaced) JSON-RPC id of its `initialize` request, while the response still needs `modelState.currentModelId` patched to `default_model`.
+    /// Set when the `initialize` is forwarded; cleared only by the response carrying that same id, so an unrelated earlier response cannot consume it.
+    patch_initialize_request_id: Option<serde_json::Value>,
     /// Whether this client has completed IPC registration.
     /// Only registered clients are counted in `client_count`.
     /// Pre-registration connections (which may time out) must not inflate the count and block auto-updates.
     registered: bool,
+    /// P148 (B19): the `startupHints` this client sent on its own `initialize`. The agent keeps only the first
+    /// client's `initialize`, so they are carried onto this client's session requests that name none.
+    init_startup_hints: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone)]
 pub struct LeaderServerMetadata {
@@ -126,6 +131,10 @@ pub struct LeaderServerControlState {
     pub metadata: LeaderServerMetadata,
     pub cpu_profile: Arc<Mutex<CpuProfileManager>>,
     pub workspace: Arc<WorkspaceControl>,
+    /// P125: the `fuigo/relay/refused` notification line for the relay the leader refused (a relay FluxRouter does
+    /// not operate that no opt-in names), or `None` while it has none. The IPC server tells every interactive client
+    /// that registers, and every one already attached when it changes, so a TUI user sees the refusal.
+    relay_refusal: RelayRefusalBoard,
 }
 impl LeaderServerControlState {
     pub fn new(metadata: LeaderServerMetadata) -> Self {
@@ -133,7 +142,12 @@ impl LeaderServerControlState {
             metadata,
             cpu_profile: Arc::new(Mutex::new(CpuProfileManager::new())),
             workspace: Arc::new(WorkspaceControl::new(None)),
+            relay_refusal: RelayRefusalBoard::detached(),
         }
+    }
+    /// P125: a handle that publishes the leader's relay refusal (what the relay start decides with).
+    pub(crate) fn relay_refusal_board(&self) -> RelayRefusalBoard {
+        self.relay_refusal.clone()
     }
     pub(crate) fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
         self.workspace = Arc::new(WorkspaceControl::new(default_hub_url));
@@ -147,7 +161,36 @@ impl LeaderServerControlState {
             profile_formats: manager.profile_formats().to_vec(),
             workspace_exposure: true,
             relaunch_v1: true,
+            downgrade_stop_v1: true,
         }
+    }
+}
+/// P125: where the leader's relay start publishes whether it refused the relay
+/// ([`LeaderServerControlState::publish_relay_refusal`]).
+#[derive(Clone, Debug)]
+pub struct RelayRefusalBoard(Arc<tokio::sync::watch::Sender<Option<Arc<str>>>>);
+impl RelayRefusalBoard {
+    /// A board nobody listens to.
+    pub fn detached() -> Self {
+        Self(Arc::new(tokio::sync::watch::channel(None).0))
+    }
+    /// Publish (or, with `None`, clear) the refusal line; the same line again tells nobody again.
+    pub fn publish(&self, payload: Option<String>) {
+        self.0.send_if_modified(|current| {
+            let next: Option<Arc<str>> = payload.map(Arc::from);
+            if *current == next {
+                return false;
+            }
+            *current = next;
+            true
+        });
+    }
+    /// The refusal line published now, if any.
+    pub fn current(&self) -> Option<Arc<str>> {
+        self.0.borrow().clone()
+    }
+    fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
+        self.0.subscribe()
     }
 }
 pub struct WorkspaceControl {
@@ -159,6 +202,8 @@ pub struct WorkspaceControl {
     lock: tokio::sync::Mutex<()>,
     /// Current exposure, published for lock-free reads so `status` never blocks behind an in-flight drain/reconnect.
     exposure: arc_swap::ArcSwapOption<WorkspaceExposure>,
+    /// P47: the manager behind `auth`, so the hub credential can be classified by value (static API key or session).
+    auth_manager: Mutex<Option<Arc<AuthManager>>>,
 }
 impl WorkspaceControl {
     fn new(default_hub_url: Option<String>) -> Self {
@@ -167,10 +212,12 @@ impl WorkspaceControl {
             auth: tokio::sync::watch::channel(None).0,
             lock: tokio::sync::Mutex::new(()),
             exposure: arc_swap::ArcSwapOption::empty(),
+            auth_manager: Mutex::new(None),
         }
     }
     /// Wire the hub credential to the leader's shared `AuthManager` (sole owner of refresh and persistence).
     pub(crate) fn set_auth_manager(&self, auth_manager: Arc<AuthManager>) {
+        *self.auth_manager.lock() = Some(auth_manager.clone());
         self.auth.send_replace(Some(Arc::new(LeaderAuthProvider {
             auth_manager,
             refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -252,6 +299,54 @@ impl AuthProvider for LeaderAuthProvider {
                 principal_id: a.principal_id,
             },
         })
+    }
+}
+/// P47: the hub credential, decided by value against the hub URL before every socket the hub SDK opens.
+struct HubDestinationGuard {
+    inner: Arc<dyn AuthProvider>,
+    auth_manager: Option<Arc<AuthManager>>,
+    configured_hub: Option<String>,
+}
+impl HubDestinationGuard {
+    fn check(
+        &self,
+        hub_url: &url::Url,
+        credential: &AuthCredential,
+    ) -> Result<(), fuigo_extra_ca::service_trust::RefusedServiceDestination> {
+        let AuthCredential::Bearer { token, .. } = credential else {
+            return Ok(());
+        };
+        if token.is_empty()
+            || self.auth_manager.as_deref().is_some_and(|am| {
+                crate::auth::session_delivery::is_held_static_key(am, token)
+            })
+        {
+            return Ok(());
+        }
+        crate::auth::session_delivery::service_session_url_gate(
+            hub_url.as_str(),
+            self.configured_hub.as_deref(),
+            "leader_workspace_hub",
+        )
+    }
+}
+impl std::fmt::Debug for HubDestinationGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubDestinationGuard").finish_non_exhaustive()
+    }
+}
+impl AuthProvider for HubDestinationGuard {
+    fn current(&self) -> AuthCredential {
+        self.inner.current()
+    }
+    fn principal_key(&self) -> fuigo_computer_hub_sdk::PrincipalKey {
+        self.inner.principal_key()
+    }
+    fn identity(&self) -> Option<AuthIdentity> {
+        self.inner.identity()
+    }
+    fn destination_permits(&self, url: &url::Url, credential: &AuthCredential) -> Result<(), String> {
+        self.check(url, credential).map_err(|refused| refused.to_string())
     }
 }
 struct WorkspaceExposure {
@@ -510,6 +605,46 @@ fn extract_session_id_from_result(json: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
+/// P130: most unsubscribed-session relay notices held at once (oldest dropped first).
+const MAX_PENDING_RELAY_NOTICES: usize = 64;
+
+/// P130: is this a session-scoped `fuigo/relay/refused` or `fuigo/relay/refusal_cleared` extension notification?
+fn is_relay_refusal_notice(json: &serde_json::Value) -> bool {
+    json.get("id").is_none()
+        && json.get("method").and_then(|m| m.as_str()).is_some_and(|m| {
+            let m = m.strip_prefix('_').unwrap_or(m);
+            m == crate::agent::relay_opt_in::RELAY_REFUSED_METHOD
+                || m == crate::agent::relay_opt_in::RELAY_REFUSAL_CLEARED_METHOD
+        })
+}
+
+/// P130: hold a relay refusal notice for a session nobody is subscribed to yet. The agent emits it while handling
+/// `session/new`, before the response that tells the leader which client owns the session; it is delivered to that
+/// client when it subscribes (see [`take_pending_relay_notices`]).
+fn hold_relay_notice(pending: &mut Vec<(String, Arc<str>)>, session_id: &str, payload: Arc<str>) {
+    pending.push((session_id.to_string(), payload));
+    if pending.len() > MAX_PENDING_RELAY_NOTICES {
+        pending.remove(0);
+    }
+}
+
+/// P130: take (in arrival order) the relay notices held for `session_id`.
+fn take_pending_relay_notices(
+    pending: &mut Vec<(String, Arc<str>)>,
+    session_id: &str,
+) -> Vec<Arc<str>> {
+    let mut taken = Vec::new();
+    pending.retain(|(sid, payload)| {
+        if sid == session_id {
+            taken.push(payload.clone());
+            false
+        } else {
+            true
+        }
+    });
+    taken
+}
+
 #[derive(Debug)]
 enum ChildSessionEvent {
     Spawned(String),
@@ -711,6 +846,47 @@ fn inject_session_request_context(
     }
     mutated
 }
+/// The `_meta.startupHints` object of an `initialize` request, if `json` is one that carries it.
+fn initialize_startup_hints(json: &serde_json::Value) -> Option<serde_json::Value> {
+    if json.get("method").and_then(|m| m.as_str()) != Some(AGENT_METHOD_NAMES.initialize) {
+        return None;
+    }
+    json.pointer("/params/_meta/startupHints")
+        .filter(|hints| hints.is_object())
+        .cloned()
+}
+/// P148 (B19): carry the requesting client's own `initialize` `startupHints` onto its `session/new`, `session/load` or
+/// `session/resume` that names none. The agent keeps only the first `initialize` it saw, so on a shared leader a later
+/// client's initialize-only hints (an app that embeds Fuigo non-interactively) would otherwise be replaced by the first
+/// client's: its sessions would run interactive policy (a 30-minute `ask_user_question` wait, progressive MCP init).
+/// Hints the request carries itself are kept. Returns `true` when `json` was mutated.
+fn inject_client_startup_hints(json: &mut serde_json::Value, hints: Option<&serde_json::Value>) -> bool {
+    let Some(hints) = hints else {
+        return false;
+    };
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if method != AGENT_METHOD_NAMES.session_new
+        && method != AGENT_METHOD_NAMES.session_load
+        && method != AGENT_METHOD_NAMES.session_resume
+    {
+        return false;
+    }
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let Some(meta) = params
+        .entry("_meta")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    else {
+        return false;
+    };
+    if meta.contains_key("startupHints") {
+        return false;
+    }
+    meta.insert("startupHints".to_string(), hints.clone());
+    true
+}
 /// Inject client identity into an `initialize` request.
 ///
 /// In leader mode, multiple clients (TUI, IDE extension, web) share one agent process.
@@ -850,7 +1026,7 @@ fn select_outbound_payload(
         _ => payload,
     }
 }
-/// Patch the `initialize` response so `meta.modelState.currentModelId` reflects the client's `default_model`.
+/// Patch the `initialize` response so `_meta.modelState.currentModelId` reflects the client's `default_model`.
 /// It would otherwise reflect the agent's global `current_model_id`.
 ///
 /// Without this the TUI briefly shows the agent's startup default.
@@ -864,14 +1040,37 @@ fn patch_initialize_response_model(
     let Some(model) = default_model.as_ref().filter(|m| !m.is_empty()) else {
         return false;
     };
-    let needs_patch = json
-        .pointer("/result/meta/modelState/currentModelId")
-        .and_then(|v| v.as_str())
-        .is_some_and(|current| current != model.as_str());
+    // Only switch to a model the agent actually advertises. An unavailable preference would leave the client with a current id absent from its catalog (session/new falls back to the agent default in that case).
+    let available = json
+        .pointer("/result/_meta/modelState/availableModels")
+        .and_then(|v| v.as_array())
+        .is_some_and(|models| {
+            models
+                .iter()
+                .any(|m| m.get("modelId").and_then(|v| v.as_str()) == Some(model.as_str()))
+        });
+    let needs_patch = available
+        && json
+            .pointer("/result/_meta/modelState/currentModelId")
+            .and_then(|v| v.as_str())
+            .is_some_and(|current| current != model.as_str());
     if needs_patch {
-        json["result"]["meta"]["modelState"]["currentModelId"] =
+        json["result"]["_meta"]["modelState"]["currentModelId"] =
             serde_json::Value::String(model.clone());
         debug!(patched_model = %model, "Patched initialize response currentModelId");
+        return true;
+    }
+    false
+}
+/// Disarm the pending `initialize` patch when `response` answers that exact request.
+/// `response["id"]` must already be restored to the client's original id (see `parse_response_id`).
+/// Returns `true` once, for the matching response; any other response leaves the patch armed.
+fn take_initialize_patch_if_matches(
+    pending: &mut Option<serde_json::Value>,
+    response: &serde_json::Value,
+) -> bool {
+    if pending.as_ref().is_some_and(|id| response.get("id") == Some(id)) {
+        *pending = None;
         return true;
     }
     false
@@ -977,10 +1176,10 @@ async fn wait_for_leader_auth(
         )),
     }
 }
-fn workspace_server_id() -> String {
-    let raw = gethostname::gethostname()
-        .to_string_lossy()
-        .to_ascii_lowercase();
+/// The host-derived server id: the sanitised, lower-cased host name. Never sent as is to a hub that is not
+/// FluxRouter-operated; see [`hub_registration_identity`].
+fn host_derived_server_id(hostname: &str) -> String {
+    let raw = hostname.to_ascii_lowercase();
     let sanitized: String = raw
         .chars()
         .map(|c| {
@@ -996,6 +1195,40 @@ fn workspace_server_id() -> String {
         "fuigo-workspace".to_string()
     } else {
         name.to_string()
+    }
+}
+/// P77: the `server_id` and registration `metadata` sent to the hub at `hub_url` (the exact URL connected to).
+///
+/// A FluxRouter-operated hub (`IdentityDisclosure::for_websocket_destination`: `wss` to the FluxRouter API host, the
+/// P43 rule for a WebSocket handshake; `for_destination` is `https`-only and would never admit a `wss` hub) gets the
+/// host-derived id and the `hostname` unchanged. Any other hub, and any hub URL that cannot be classified, gets NO
+/// `hostname` and the P54 per-destination pseudonym of the host-derived id: stable per machine at that one origin
+/// (reconnects and dedupe keep working), different at every other origin (a keyless hash: a guessed host name can be
+/// checked offline), and UUID-shaped so the hub's id parser accepts it.
+fn hub_registration_identity(
+    hub_url: &str,
+    cwd: &Path,
+    hostname: &str,
+) -> (String, serde_json::Value) {
+    let host_id = host_derived_server_id(hostname);
+    // `cwd` is the workspace root the user asked to expose to this hub, so it is sent as is; a path that embeds a user
+    // or host name is out of this rule's scope (proposal in R082). The object is built in the pre-P77 key order, so a
+    // FluxRouter hub receives the registration byte for byte as before.
+    let mut metadata = serde_json::json!({
+        "source": "fuigo-workspace",
+        "hostname": hostname,
+        "cwd": cwd.display().to_string(),
+    });
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(hub_url).is_permitted() {
+        (host_id, metadata)
+    } else {
+        if let Some(fields) = metadata.as_object_mut() {
+            fields.shift_remove("hostname");
+        }
+        (
+            fuigo_extra_ca::fluxrouter::destination_pseudonym(hub_url, &host_id),
+            metadata,
+        )
     }
 }
 async fn drain_and_disconnect(handle: &WorkspaceHandle) {
@@ -1085,6 +1318,11 @@ async fn handle_workspace_start(
         })?;
     let url = url::Url::parse(&url_str)
         .map_err(|e| workspace_err(format!("invalid hub url {url_str}: {e}")))?;
+    // P47: the configured hub (`[hub].url`, else the compiled default) is the hub's service base.
+    let configured_hub = ws.default_hub_url.clone().or_else(|| {
+        let fallback = PROD_COMPUTER_HUB_URL.trim();
+        (!fallback.is_empty()).then(|| fallback.to_string())
+    });
     let cwd_path = PathBuf::from(&cwd);
     let _serialize = ws.lock.lock().await;
     if let Some(existing) = ws.exposure.load_full()
@@ -1097,17 +1335,30 @@ async fn handle_workspace_start(
             Some(existing.as_ref()),
         ));
     }
-    let allow_insecure_ws =
-        url.scheme() == "ws" && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let allow_insecure_ws = hub_url_allows_insecure_ws(&url);
     let status_config = fuigo_workspace::StatusConfig::from_env();
     let alpha_test_key = None;
     let auth = wait_for_leader_auth(ws, &cancel).await?;
-    let server_id = workspace_server_id();
-    let metadata = serde_json::json!({
-        "source": "fuigo-workspace",
-        "hostname": gethostname::gethostname().to_string_lossy(),
-        "cwd": cwd_path.display().to_string(),
-    });
+    // P47: the hub is handed the leader's credential on every connect and reconnect, re-resolved each time, so its
+    // kind can change between connects. `HubDestinationGuard` decides on the exact value before EVERY socket (the
+    // hub SDK asks `AuthProvider::destination_permits`): a session token goes only to a hub the service-endpoint
+    // trust class admits (`wss`, not loopback, on the configured hub's origin); a static `AuthMode::ApiKey`
+    // credential, matched by value, keeps its own rules. A refusal opens no socket and is terminal. The first
+    // connect is checked here too, so the command fails with the remedy instead of a connect error.
+    let guard = HubDestinationGuard {
+        inner: auth,
+        auth_manager: ws.auth_manager.lock().clone(),
+        configured_hub,
+    };
+    guard
+        .check(&url, &guard.inner.current())
+        .map_err(|refused| workspace_err(refused.to_string()))?;
+    let auth: Arc<dyn AuthProvider> = Arc::new(guard);
+    let (server_id, metadata) = hub_registration_identity(
+        &url_str,
+        &cwd_path,
+        &gethostname::gethostname().to_string_lossy(),
+    );
     let upload_queue_enabled =
         std::env::var("FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED").as_deref() != Ok("false");
     crate::agent::folder_trust::resolve_and_record(&cwd_path, None, false);
@@ -1254,8 +1505,8 @@ fn handle_control_command(
         | ControlCommand::WorkspaceStatus => {
             unreachable!("workspace control commands are handled asynchronously")
         }
-        ControlCommand::RelaunchForUpdate { .. } => {
-            unreachable!("RelaunchForUpdate must be handled asynchronously")
+        ControlCommand::RelaunchForUpdate { .. } | ControlCommand::StopForDowngrade { .. } => {
+            unreachable!("RelaunchForUpdate and StopForDowngrade must be handled asynchronously")
         }
     }
 }
@@ -1386,6 +1637,42 @@ fn decide_relaunch_for_update(
         grace_ms: RELAUNCH_TOTAL_GRACE.as_millis() as u64,
     })
 }
+/// Decide whether a [`ControlCommand::StopForDowngrade`] is accepted (P124).
+/// The mirror of [`decide_relaunch_for_update`]: accepted only when the leader is strictly NEWER than `to_version` (both parseable)
+/// and no relaunch is in progress. Same ack and drain, so connected clients reconnect exactly as for an update.
+fn decide_stop_for_downgrade(
+    control_state: &LeaderServerControlState,
+    to_version: String,
+    relaunching: &AtomicBool,
+) -> Result<ControlPayload, ControlError> {
+    let leader_version = control_state.metadata.leader_binary_version.clone();
+    if !super::leader_is_newer_than(&leader_version, &to_version) {
+        debug!(
+            from_version = %leader_version,
+            to_version = %to_version,
+            "StopForDowngrade declined: target is not strictly older (or unparseable)"
+        );
+        return Ok(ControlPayload::RelaunchDeclined {
+            reason: format!("leader version {leader_version} is not newer than {to_version}"),
+        });
+    }
+    if relaunching.swap(true, Ordering::SeqCst) {
+        return Ok(ControlPayload::RelaunchDeclined {
+            reason: "a relaunch is already in progress".to_string(),
+        });
+    }
+    info!(
+        from_version = %leader_version,
+        to_version = %to_version,
+        grace_ms = RELAUNCH_TOTAL_GRACE.as_millis() as u64,
+        "StopForDowngrade accepted; draining before the leader stops for an explicit downgrade"
+    );
+    Ok(ControlPayload::Relaunching {
+        from_version: leader_version,
+        to_version,
+        grace_ms: RELAUNCH_TOTAL_GRACE.as_millis() as u64,
+    })
+}
 /// Start the bounded-grace drain for an accepted relaunch.
 /// Wait up to [`RELAUNCH_GRACE`] for the agent to go idle.
 /// Idle checks both `agent_busy` (IPC traffic) and [`AgentActivity::is_busy`] (relay-driven turns, subagents).
@@ -1426,6 +1713,25 @@ pub enum ServerError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
+/// Wire method of the leader's version-mismatch notice.
+/// ACP only decodes a custom notification that carries the extension `_` prefix (the decoder strips it, so the pager handlers see `fuigo/leader/version_mismatch`);
+/// a bare `fuigo/...` method is rejected as method-not-found and the notice never reaches the handler.
+/// Leaders before this fix sent the bare name; the pager still normalizes it (`leader_bridge`).
+pub(crate) const VERSION_MISMATCH_WIRE_METHOD: &str = "_fuigo/leader/version_mismatch";
+/// Whether two version strings name the same release.
+/// A version may carry a commit stamp (`"1.0.21 (abcdef123456)"`, the pager's `VERSION_WITH_COMMIT`) or semver build
+/// metadata; neither makes a different release, so only the semantic version is compared. Strings that are not semver
+/// compare as text.
+fn same_release(a: &str, b: &str) -> bool {
+    fn core(v: &str) -> &str {
+        v.split_whitespace().next().unwrap_or("")
+    }
+    let (a, b) = (core(a), core(b));
+    match (semver::Version::parse(a), semver::Version::parse(b)) {
+        (Ok(a), Ok(b)) => a.cmp_precedence(&b).is_eq(),
+        _ => a == b,
+    }
+}
 /// Build the ACP notification payload for a leader/client version mismatch, or return `None` when versions match or detection is disabled.
 ///
 /// Extracted as a standalone function so the notification shape can be unit-tested without running a full server.
@@ -1433,13 +1739,13 @@ fn make_version_mismatch_notification(
     client_version: &str,
     leader_version: &str,
 ) -> Option<String> {
-    if client_version == leader_version || leader_version == "unknown" {
+    if leader_version == "unknown" || same_release(client_version, leader_version) {
         return None;
     }
     Some(
         serde_json::json!({
             "jsonrpc": "2.0",
-            "method": "fuigo/leader/version_mismatch",
+            "method": VERSION_MISMATCH_WIRE_METHOD,
             "params": {
                 "clientVersion": client_version,
                 "leaderVersion": leader_version,
@@ -1451,6 +1757,29 @@ fn make_version_mismatch_notification(
         })
         .to_string(),
     )
+}
+/// P142: send the one-off user notices this process recorded since `*forwarded`
+/// (`fuigo_file_utils::destination_gate::announce_notice`, the withheld-upload notices) to every registered client
+/// that shows them ([`ClientCapabilities::leader_notices`]). The leader runs the agent and its stderr is
+/// `~/.fuigo/leader.log`, so without this the user never sees them. Each notice is sent once overall: to the clients
+/// attached when it is recorded, or, when none of them shows notices, to the first such client that registers.
+fn forward_process_notices(clients: &HashMap<ClientId, ClientState>, forwarded: &mut usize) {
+    let pending = fuigo_file_utils::destination_gate::notices_from(*forwarded);
+    // Oldest first, one notice at a time: a notice no client accepted stays (with every later one) for the next client
+    // that registers, and a notice a client accepted is never offered again.
+    for message in pending {
+        let payload: Arc<str> = Arc::from(super::protocol::leader_notice_payload(&message));
+        let mut accepted = false;
+        for client in clients.values() {
+            if client.registered && client.capabilities.leader_notices {
+                accepted |= matches!(client.tx.try_send(ClientOutbound::Acp(payload.clone())), Ok(true));
+            }
+        }
+        if !accepted {
+            return;
+        }
+        *forwarded += 1;
+    }
 }
 /// Run the leader IPC server.
 ///
@@ -1486,7 +1815,8 @@ fn make_version_mismatch_notification(
 /// * `agent_activity` - Agent-derived activity view (running turns, parked interactions, live subagents).
 ///   The `RelaunchForUpdate` drain consults it alongside `agent_busy`, plus the pre-shutdown session flush.
 /// * `ready_rx` - Watch receiver; ACP forwarding is gated until this is `true`
-/// * `relay_demand_tx` - Watch sender flipped to `true` when the first [`ClientMode::Headless`] client registers.
+/// * `relay_demand_tx` - Watch sender flipped to `true` when the first [`ClientMode::Headless`] client registers, and
+///   notified again (still `true`) on every later headless registration (P93).
 ///   `run_leader` defers starting the grok.com WebSocket relay until this fires.
 ///   A leader serving only interactive clients (TUI dashboard, IDE) thus never duplicates its ACP stream onto the relay.
 ///   Headless registration is the devbox-flow marker: those clients are driven remotely *through* the relay.
@@ -1496,7 +1826,7 @@ fn make_version_mismatch_notification(
 ///   Clients then see the real reason; senders must write before cancelling.
 /// * `leader_version_override` - If `Some`, overrides [`LEADER_VERSION`] for version mismatch detection.
 ///   Pass `None` in production.
-///   A test version string bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
+///   Tests use it to pin a leader version independent of the crate's own.
 /// * `control_state` - Leader-local control metadata and CPU profiling state
 pub async fn run_leader_server(
     socket_path: std::path::PathBuf,
@@ -1515,6 +1845,10 @@ pub async fn run_leader_server(
 ) -> Result<(), ServerError> {
     let _ = std::fs::remove_file(&socket_path);
     let shutdown_reason_rx = shutdown_tx.subscribe();
+    let mut relay_refusal_rx = control_state.relay_refusal.subscribe();
+    let mut notice_rx = fuigo_file_utils::destination_gate::subscribe_notices();
+    // P142: how many of this process's notices a client has been sent (each one is sent once overall).
+    let mut notices_forwarded: usize = 0;
     let listener = LeaderListener::bind(&socket_path)?;
     info!("Leader server listening");
     let (event_tx, event_rx) = kanal::unbounded_async::<ServerEvent>();
@@ -1528,6 +1862,7 @@ pub async fn run_leader_server(
     let mut orphan_replay_warned: HashSet<ClientId> = HashSet::new();
     let mut load_replay_max_seq: HashMap<(ClientId, String), u64> = HashMap::new();
     let mut interaction_requests: HashMap<String, HashMap<String, Arc<str>>> = HashMap::new();
+    let mut pending_relay_notices: Vec<(String, Arc<str>)> = Vec::new();
     let mut last_active_client: Option<ClientId> = None;
     let mut had_clients = false;
     let mut pending_requests: usize = 0;
@@ -1541,6 +1876,8 @@ pub async fn run_leader_server(
             }
             Ok(event) = event_rx.recv() => LeaderServerPoll::Event(event),
             Some(payload) = response_rx.recv() => LeaderServerPoll::Response(payload),
+            Ok(()) = relay_refusal_rx.changed() => LeaderServerPoll::RelayRefusalChanged,
+            Ok(()) = notice_rx.changed() => LeaderServerPoll::NoticeRecorded,
         };
         match poll {
             LeaderServerPoll::Cancelled => {
@@ -1552,6 +1889,24 @@ pub async fn run_leader_server(
                 }
                 broadcast_shutdown(&clients, reason).await;
                 break;
+            }
+            LeaderServerPoll::RelayRefusalChanged => {
+                // P125: the leader refused a relay: every interactive client attached now is told (headless clients
+                // refuse the relay themselves, before they reach the leader).
+                let payload = relay_refusal_rx.borrow_and_update().clone();
+                // Cleared (the user opted in): tell them so, so no client keeps showing a refusal that is over.
+                let payload = payload.unwrap_or_else(|| {
+                    Arc::from(crate::agent::relay_opt_in::refusal_cleared_payload())
+                });
+                for client in clients.values() {
+                    if client.registered && client.mode != ClientMode::Headless {
+                        let _ = client.tx.try_send(ClientOutbound::Acp(payload.clone()));
+                    }
+                }
+            }
+            LeaderServerPoll::NoticeRecorded => {
+                // `changed()` already marked the count seen; the list itself is read from this server's cursor.
+                forward_process_notices(&clients, &mut notices_forwarded);
             }
             LeaderServerPoll::Accept(accept_result) => match accept_result {
                 Ok(stream) => {
@@ -1566,8 +1921,9 @@ pub async fn run_leader_server(
                             capabilities: ClientCapabilities::default(),
                             client_type: String::new(),
                             initialize_seen: false,
-                            patch_initialize_model: false,
+                            patch_initialize_request_id: None,
                             registered: false,
+                            init_startup_hints: None,
                         },
                     );
                     spawn_client_handler(
@@ -1600,11 +1956,11 @@ pub async fn run_leader_server(
                             })),
                         );
                         if mode == ClientMode::Headless {
-                            let newly_demanded = relay_demand_tx.send_if_modified(|demanded| {
-                                let changed = !*demanded;
-                                *demanded = true;
-                                changed
-                            });
+                            // P93: EVERY headless registration notifies (the value stays `true`), so a leader that
+                            // refused a relay nobody had opted in to decides again when the next headless client
+                            // attaches (`agent::app::spawn_leader_relay`).
+                            let newly_demanded = !*relay_demand_tx.borrow();
+                            relay_demand_tx.send_replace(true);
                             if newly_demanded {
                                 info!(
                                     client_id = id.0,
@@ -1628,7 +1984,25 @@ pub async fn run_leader_server(
                             );
                             let _ = client.tx.try_send(ClientOutbound::Acp(payload.into()));
                         }
+                        // P125: a client that registers after the leader refused a relay is told at once.
+                        if mode != ClientMode::Headless {
+                            let refusal = relay_refusal_rx.borrow().clone();
+                            let payload = match refusal {
+                                Some(payload) => Some(payload),
+                                // A client that asked for the state is told "cleared" too, so a reconnect reconciles
+                                // a refusal it cached.
+                                None if client.capabilities.relay_refusal_state => Some(Arc::from(
+                                    crate::agent::relay_opt_in::refusal_cleared_payload(),
+                                )),
+                                None => None,
+                            };
+                            if let Some(payload) = payload {
+                                let _ = client.tx.try_send(ClientOutbound::Acp(payload));
+                            }
+                        }
                     }
+                    // P142: a notice recorded while no client that shows them was attached goes to this one.
+                    forward_process_notices(&clients, &mut notices_forwarded);
                 }
                 ServerEvent::Disconnected(id) => {
                     let was_registered = clients.get(&id).is_some_and(|c| c.registered);
@@ -1745,6 +2119,13 @@ pub async fn run_leader_server(
                                         &relaunching,
                                     )
                                 }
+                                ControlCommand::StopForDowngrade { to_version } => {
+                                    decide_stop_for_downgrade(
+                                        &control_state,
+                                        to_version,
+                                        &relaunching,
+                                    )
+                                }
                                 other => handle_control_command(&control_state, other),
                             };
                             let arm_relaunch =
@@ -1808,6 +2189,17 @@ pub async fn run_leader_server(
                             &mut session_subscribers,
                             &mut session_driver,
                         );
+                        // A `session/load` re-checks the relay's trust and the agent re-emits a fresh notice if it is
+                        // still refused, so a notice held from an earlier (abandoned) `session/new` is stale: drop it.
+                        let held = take_pending_relay_notices(&mut pending_relay_notices, &session_id);
+                        let is_attach = json.as_ref().is_some_and(is_session_attach_request);
+                        if let Some(client) = clients.get(&id)
+                            && !is_attach
+                        {
+                            for notice in held {
+                                let _ = client.tx.try_send(ClientOutbound::Acp(notice));
+                            }
+                        }
                     }
                     if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
                         if let Some(yolo_mode) = extract_yolo_mode_change(json) {
@@ -1842,9 +2234,13 @@ pub async fn run_leader_server(
                                     .as_ref()
                                     .is_some_and(|m| !m.is_empty())
                                 {
-                                    client.patch_initialize_model = true;
+                                    // A missing id leaves it unarmed; an explicit `null` id is a valid JSON-RPC id that `rewrite_request_id`/`parse_response_id` round-trip, so it arms as `Some(Null)`.
+                                    client.patch_initialize_request_id = json.get("id").cloned();
                                 }
                             }
+                        }
+                        if let Some(hints) = initialize_startup_hints(json) {
+                            client.init_startup_hints = Some(hints);
                         }
                         payload_mutated |= inject_session_request_context(
                             json,
@@ -1852,6 +2248,8 @@ pub async fn run_leader_server(
                             &client.client_type,
                             id,
                         );
+                        payload_mutated |=
+                            inject_client_startup_hints(json, client.init_startup_hints.as_ref());
                         payload_mutated |= inject_client_identity_into_yolo_notification(
                             json,
                             &client.client_type,
@@ -1924,8 +2322,7 @@ pub async fn run_leader_server(
                             session_id, "Subscribed client to session from response"
                         );
                     }
-                    if client.patch_initialize_model {
-                        client.patch_initialize_model = false;
+                    if take_initialize_patch_if_matches(&mut client.patch_initialize_request_id, json) {
                         patch_initialize_response_model(json, &client.capabilities.default_model);
                     }
                     let restored_payload: Arc<str> = json.to_string().into();
@@ -1957,6 +2354,12 @@ pub async fn run_leader_server(
                                     "reason": "channel_closed",
                                 })),
                             );
+                        }
+                    }
+                    // P130: relay refusals the agent emitted while handling this request come after the response.
+                    if let Some(session_id) = extract_session_id_from_result(json) {
+                        for notice in take_pending_relay_notices(&mut pending_relay_notices, &session_id) {
+                            let _ = client.tx.try_send(ClientOutbound::Acp(notice));
                         }
                     }
                     if let Some((buf_client, buf_sid)) = pending_load_by_req.remove(raw_response_id)
@@ -2248,6 +2651,13 @@ pub async fn run_leader_server(
                         .is_some_and(|s| !session_subscribers.contains_key(s.as_str()));
                 if !is_notification {
                     trace!("Dropping non-routable response (likely relay-originated)");
+                } else if is_relay_session_notification
+                    && let Some(ref sid) = session_id
+                    && json.as_ref().is_some_and(is_relay_refusal_notice)
+                {
+                    // P130: not relay-owned: the notice for a session whose `session/new` is still in flight.
+                    trace!(session_id = sid.as_str(), "Holding relay refusal notice until the session's client subscribes");
+                    hold_relay_notice(&mut pending_relay_notices, sid, payload);
                 } else if is_relay_session_notification {
                     if let Some(ChildSessionEvent::Finished(child_sid)) =
                         json.as_ref().and_then(extract_child_session_event)
@@ -2623,6 +3033,14 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
         control_state,
     })
 }
+/// Plaintext `ws://` is allowed only to a canonical loopback hub (`localhost`, `127.0.0.1`, `::1`).
+/// The parsed host is compared: `host_str()` brackets IPv6 (`[::1]`), so matching it against `"::1"` never fired.
+fn hub_url_allows_insecure_ws(url: &url::Url) -> bool {
+    url.scheme() == "ws" && crate::util::is_canonical_loopback_host(url)
+}
 #[cfg(test)]
 #[path = "server_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "server_p148_tests.rs"]
+mod p148_tests;

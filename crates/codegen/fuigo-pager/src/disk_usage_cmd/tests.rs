@@ -989,6 +989,9 @@ fn symlinked_worktrees_dir_is_surfaced_not_silently_dropped() {
 // Serial keys are independent locks, so a test setting both must hold both
 #[serial_test::serial(HOME)]
 fn symlinked_default_home_keeps_home_label() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let tmp = tempfile::TempDir::new().unwrap();
     let fake_home = tmp.path().join("home");
     let real_fuigo = tmp.path().join("fuigo-on-disk");

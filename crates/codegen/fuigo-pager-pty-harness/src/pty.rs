@@ -7,8 +7,8 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use fuigo_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 const PTY_REAP_POLL: Duration = Duration::from_millis(10);
@@ -1012,8 +1012,7 @@ mod tests {
 
         assert_eq!(cmd.get_env("FUIGO_API_KEY"), None);
         assert_eq!(
-            cmd.get_env("FUIGO_API_BASE_URL")
-                .and_then(|v| v.to_str()),
+            cmd.get_env("FUIGO_API_BASE_URL").and_then(|v| v.to_str()),
             Some("http://127.0.0.1:43123/v1")
         );
     }

@@ -4,6 +4,8 @@ mod auth_provider;
 pub(crate) mod backend;
 mod config;
 pub mod credential_provider;
+#[cfg(all(test, unix))]
+mod cross_process_race_tests;
 #[path = "devbox_login_stub.rs"]
 pub(crate) mod devbox_login;
 pub(crate) mod device_code;
@@ -17,6 +19,9 @@ pub mod oidc;
 mod pre_tui;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
+pub(crate) mod session_delivery;
+#[cfg(test)]
+pub(crate) mod p47_service_wire_tests;
 pub(crate) mod single_flight;
 mod storage;
 mod token_output;
@@ -61,6 +66,7 @@ pub use model::{AuthMode, FuigoAuth, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
 pub use storage::{clear_api_key, read_api_key, read_auth_json, store_api_key};
+pub(crate) use storage::{clear_api_key_async, store_api_key_async};
 
 /// Provider-scoped subscription auth, separate from first-party authority.
 pub mod subscription;

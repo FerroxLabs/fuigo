@@ -9,7 +9,7 @@ pub(super) async fn code(provider: SubscriptionProvider) -> Result<String> {
     #[cfg(unix)]
     {
         if let Ok(file) = open_terminal() {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "If xAI shows a code instead of redirecting, paste it here and press Enter (input hidden)."
             );
             return read_from(file).await;

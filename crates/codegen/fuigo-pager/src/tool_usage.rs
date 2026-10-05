@@ -108,7 +108,8 @@ impl ToolCategory {
             ToolCallBlock::IntegrationSearch(_) | ToolCallBlock::UseTool(_) => Self::Other,
             ToolCallBlock::MemorySearch(_)
             | ToolCallBlock::SentMessage(_)
-            | ToolCallBlock::Other(_) => Self::Other,
+            | ToolCallBlock::Other(_)
+            | ToolCallBlock::Lifecycle(_) => Self::Other,
         }
     }
 }
@@ -285,6 +286,8 @@ impl ToolUsageStats {
             };
 
             match &entry.block {
+                // A plugin hook's lifecycle row is not a tool call: it never counts as an operation
+                crate::scrollback::block::RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)) => {}
                 crate::scrollback::block::RenderBlock::ToolCall(tc) => {
                     let category = ToolCategory::from_tool_block(tc);
                     let status = if entry.is_running {
@@ -376,6 +379,7 @@ impl ToolUsageStats {
             ToolCallBlock::SentMessage(b) => b.is_failure(),
             ToolCallBlock::Skill(b) => !b.is_success(),
             ToolCallBlock::Other(b) => !b.is_success(),
+            ToolCallBlock::Lifecycle(_) => false,
         }
     }
 
@@ -394,6 +398,7 @@ impl ToolUsageStats {
             ToolCallBlock::SentMessage(b) => b.elapsed_ms(),
             ToolCallBlock::Skill(b) => b.elapsed_ms(),
             ToolCallBlock::Other(b) => b.elapsed_ms(),
+            ToolCallBlock::Lifecycle(_) => None,
         }
     }
 

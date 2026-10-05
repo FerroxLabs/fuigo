@@ -102,6 +102,10 @@ pub enum AgentsModalOutcome {
     Close,
     Changed,
     Unchanged,
+    /// Persist a `config.toml` change. The write takes `config.toml.lock`, so it
+    /// runs as an effect off the input thread (P49); the modal shows "Saving…"
+    /// and refuses another write until [`finish_config_write`] reports back.
+    Persist(AgentsConfigWrite),
     /// User pressed Enter or o: open the agent's full definition in the line viewer.
     /// Contains the source path (if file-based) or in-memory markdown content.
     ViewAgent {
@@ -226,6 +230,114 @@ impl PersonaCreateInput {
 pub enum PersonaConfirmAction {
     Delete { name: String, path: PathBuf },
 }
+/// What an agents-modal `config.toml` edit does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentsConfigOp {
+    /// `s`: set (`Some`) or clear (`None`) `[agent] name`. `was_default` picks
+    /// the message shown when it lands.
+    SetDefault {
+        name: Option<String>,
+        was_default: bool,
+    },
+    /// `t`: enable or disable one agent.
+    Toggle { name: String, enabled: bool },
+}
+
+/// A `config.toml` edit requested from the agents modal, run off the input
+/// thread by `Effect::AgentsModalConfigWrite`. `ticket` names this request:
+/// only the modal still waiting for that ticket applies its result, so a
+/// write started from a modal that was closed and reopened cannot complete
+/// (or unlock) a newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentsConfigWrite {
+    pub ticket: u64,
+    pub op: AgentsConfigOp,
+    /// The user `config.toml`, made absolute when the key was pressed: a
+    /// relative `FUIGO_HOME` must not follow a `/cd` made while it waited.
+    pub config_path: PathBuf,
+}
+
+impl AgentsConfigWrite {
+    fn new(op: AgentsConfigOp) -> Self {
+        static NEXT_TICKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+        Self {
+            ticket: NEXT_TICKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            op,
+            config_path: std::path::absolute(&path).unwrap_or(path),
+        }
+    }
+
+    /// Perform the write. Blocking: it waits for `config.toml.lock`, so it must
+    /// never run on the input thread.
+    pub fn run(&self) -> Result<(), String> {
+        match &self.op {
+            AgentsConfigOp::SetDefault { name, .. } => {
+                edit_config_at(&self.config_path, |doc| set_default_agent_in(doc, name.as_deref()))
+            }
+            AgentsConfigOp::Toggle { name, enabled } => {
+                edit_config_at(&self.config_path, |doc| toggle_agent_in(doc, name, *enabled))
+            }
+        }
+    }
+}
+
+/// Whether `write`'s result belongs on `state`: the modal waiting for it, or
+/// an idle one (reopened while it ran, so it shows the list as it was before
+/// the write and must be refreshed). Not a modal waiting for a DIFFERENT write:
+/// that one refreshes when its own write lands, and must stay locked till then.
+#[must_use]
+pub fn awaits_config_write(state: &AgentsModalState, write: &AgentsConfigWrite) -> bool {
+    state.write_pending.is_none() || state.write_pending == Some(write.ticket)
+}
+
+/// Apply a finished [`AgentsConfigWrite`] to the modal waiting for it: refresh
+/// what changed on disk and say what happened. A modal that is not waiting for
+/// this write (see [`awaits_config_write`]) is left alone; returns whether it
+/// was applied.
+pub fn finish_config_write(
+    state: &mut AgentsModalState,
+    write: &AgentsConfigWrite,
+    result: Result<(), String>,
+) -> bool {
+    if !awaits_config_write(state, write) {
+        return false;
+    }
+    state.write_pending = None;
+    // Whatever this write did or failed to do, re-read BOTH halves from disk:
+    // earlier writes (from a modal since closed, whose results were not ours to
+    // apply) may have changed the other one.
+    refresh_default_agent(state);
+    state.rebuild_agents();
+    if let Err(e) = result {
+        state.message = Some(AgentsModalMessage::error(e));
+        return true;
+    }
+    match &write.op {
+        AgentsConfigOp::SetDefault { was_default, .. } => {
+            state.message = Some(if *was_default {
+                AgentsModalMessage::info(format!(
+                    "Cleared: new sessions use '{}'",
+                    state.default_agent
+                ))
+            } else {
+                AgentsModalMessage::info(format!(
+                    "New sessions will start with '{}'",
+                    state.default_agent
+                ))
+            });
+        }
+        AgentsConfigOp::Toggle { name, enabled } => {
+            state.message = Some(AgentsModalMessage::info(format!(
+                "{} '{}' \u{2014} applies to new sessions",
+                if *enabled { "Enabled" } else { "Disabled" },
+                name
+            )));
+        }
+    }
+    true
+}
+
 /// Modal state for the agents listing.
 pub struct AgentsModalState {
     pub window: ModalWindowState,
@@ -265,6 +377,10 @@ pub struct AgentsModalState {
     pub persona_scroll: usize,
     /// Indices of expanded personas (showing description + capability tags).
     pub persona_expanded: std::collections::HashSet<usize>,
+    /// The ticket of the [`AgentsConfigWrite`] in flight. Another `s`/`t`
+    /// would be computed from the not-yet-refreshed list, so it is refused
+    /// until this clears.
+    pub(crate) write_pending: Option<u64>,
 }
 /// Built-in agent names that should be shown to the user.
 /// Skips the internal variants:
@@ -315,6 +431,7 @@ impl AgentsModalState {
             persona_selected: 0,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
+            write_pending: None,
         }
     }
     /// Rebuild agent list from disk after a mutation.
@@ -756,34 +873,47 @@ fn refresh_default_agent(state: &mut AgentsModalState) {
 /// inode); a config created here is `0600`, because `config.toml` supports
 /// `[model.<key>].api_key`.
 fn edit_user_config(
-    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+    edit: impl FnMut(&mut toml_edit::DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
     let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     edit_config_at(&config_path, edit)
 }
 
 /// Core of [`edit_user_config`]; takes the path so tests can use a temp dir.
+///
+/// `edit` may run more than once: `edit_locked` re-reads and re-applies it when
+/// another writer replaced the file in between, so it must only edit `doc`.
 fn edit_config_at(
     config_path: &std::path::Path,
-    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+    mut edit: impl FnMut(&mut toml_edit::DocumentMut) -> Result<(), String>,
 ) -> Result<(), String> {
+    use fuigo_config::fs_atomic::{Edit, EditError};
     if let Some(parent) = config_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    fuigo_config::fs_atomic::locked_read_modify_write(config_path, || {
-        let Some(mut doc) = crate::config_toml_edit::read_config_document_for_edit(config_path)
-        else {
-            return Err("Could not read or parse config.toml".to_string());
-        };
-        edit(&mut doc)?;
-        fuigo_config::fs_atomic::write_atomically(
-            config_path,
-            &doc.to_string(),
-            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
-        )
-        .map_err(|e| format!("Failed to write config.toml: {e}"))
+    fuigo_config::fs_atomic::edit_locked(
+        config_path,
+        |bytes| {
+            fuigo_config::fs_atomic::stage_atomically_from_existing(config_path, bytes, 0o600)
+        },
+        |current| {
+            let Some(mut doc) =
+                crate::config_toml_edit::config_document_for_edit(config_path, current)
+            else {
+                return Err("Could not read or parse config.toml".to_string());
+            };
+            edit(&mut doc)?;
+            Ok(Edit::Replace {
+                contents: doc.to_string().into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(|e| match e {
+        EditError::Edit(e) => e,
+        EditError::Lock(e) => format!("Could not lock config.toml: {e}"),
+        EditError::Write(e) => format!("Failed to write config.toml: {e}"),
     })
-    .map_err(|e| format!("Could not lock config.toml: {e}"))?
 }
 
 /// Set or clear the default agent via `[agent] name` in config.toml.
@@ -2243,65 +2373,70 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         }
         KeyCode::Char('q') => AgentsModalOutcome::Close,
         KeyCode::Char('s') => {
-            if let Some(entry) = state.agents.get(state.selected) {
-                if entry.definition.plugin_name.is_some() {
-                    state.message = Some(AgentsModalMessage::info(
-                        "Plugin agents can't be the session default \u{2014} \
-                         they are spawned as subagents via the Task tool.",
-                    ));
-                    return AgentsModalOutcome::Changed;
-                }
-                let name = entry.name.clone();
-                let is_already_default = load_config_agent_name().as_deref() == Some(name.as_str());
-                let new_default = if is_already_default {
-                    None
-                } else {
-                    Some(name.as_str())
-                };
-                match set_default_agent(new_default) {
-                    Ok(()) => {
-                        refresh_default_agent(state);
-                        state.message = Some(if is_already_default {
-                            AgentsModalMessage::info(format!(
-                                "Cleared: new sessions use '{}'",
-                                state.default_agent
-                            ))
-                        } else {
-                            AgentsModalMessage::info(format!(
-                                "New sessions will start with '{}'",
-                                state.default_agent
-                            ))
-                        });
-                    }
-                    Err(e) => {
-                        state.message = Some(AgentsModalMessage::error(e));
-                    }
-                }
+            let Some((is_plugin, name)) = state
+                .agents
+                .get(state.selected)
+                .map(|e| (e.definition.plugin_name.is_some(), e.name.clone()))
+            else {
+                return AgentsModalOutcome::Changed;
+            };
+            if is_plugin {
+                state.message = Some(AgentsModalMessage::info(
+                    "Plugin agents can't be the session default \u{2014} \
+                     they are spawned as subagents via the Task tool.",
+                ));
+                return AgentsModalOutcome::Changed;
             }
-            AgentsModalOutcome::Changed
+            if let Some(busy) = refuse_while_saving(state) {
+                return busy;
+            }
+            let is_already_default = load_config_agent_name().as_deref() == Some(name.as_str());
+            persist(
+                state,
+                AgentsConfigOp::SetDefault {
+                    name: (!is_already_default).then_some(name),
+                    was_default: is_already_default,
+                },
+            )
         }
         KeyCode::Char('t') => {
-            if let Some(entry) = state.agents.get(state.selected) {
-                let new_enabled = !entry.enabled;
-                let name = entry.name.clone();
-                match toggle_agent(&name, new_enabled) {
-                    Ok(()) => {
-                        state.rebuild_agents();
-                        state.message = Some(AgentsModalMessage::info(format!(
-                            "{} '{}' \u{2014} applies to new sessions",
-                            if new_enabled { "Enabled" } else { "Disabled" },
-                            name
-                        )));
-                    }
-                    Err(e) => {
-                        state.message = Some(AgentsModalMessage::error(e));
-                    }
-                }
+            let Some((name, enabled)) = state
+                .agents
+                .get(state.selected)
+                .map(|e| (e.name.clone(), e.enabled))
+            else {
+                return AgentsModalOutcome::Changed;
+            };
+            if let Some(busy) = refuse_while_saving(state) {
+                return busy;
             }
-            AgentsModalOutcome::Changed
+            persist(
+                state,
+                AgentsConfigOp::Toggle {
+                    name,
+                    enabled: !enabled,
+                },
+            )
         }
         _ => AgentsModalOutcome::Unchanged,
     }
+}
+/// Mark the modal as saving and hand the write to an effect.
+fn persist(state: &mut AgentsModalState, op: AgentsConfigOp) -> AgentsModalOutcome {
+    let write = AgentsConfigWrite::new(op);
+    state.write_pending = Some(write.ticket);
+    state.message = Some(AgentsModalMessage::info("Saving\u{2026}"));
+    AgentsModalOutcome::Persist(write)
+}
+/// While a config write is in flight, a second one is refused (it would be
+/// computed from the list as it was before the first landed).
+fn refuse_while_saving(state: &mut AgentsModalState) -> Option<AgentsModalOutcome> {
+    state.write_pending.is_some().then(|| {
+        state.message = Some(AgentsModalMessage::info(
+            "Still saving the last change\u{2026}",
+        ));
+        AgentsModalOutcome::Changed
+    })
 }
 /// Handle key input specific to the Personas tab.
 fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
@@ -2631,7 +2766,7 @@ mod tests {
     /// original and the last rename would keep one change.
     #[test]
     fn concurrent_config_edits_do_not_lose_each_other() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::test_util::memory_backed_tempdir();
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         std::fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
         let names: Vec<String> = (0..8).map(|n| format!("agent-{n}")).collect();
@@ -2931,6 +3066,7 @@ mod tests {
                 persona_selected: 0,
                 persona_scroll: 0,
                 persona_expanded: std::collections::HashSet::new(),
+                write_pending: None,
             };
             state.set_search_query(query);
             state
@@ -2973,6 +3109,7 @@ mod tests {
             persona_selected: selected,
             persona_scroll: 0,
             persona_expanded: std::collections::HashSet::new(),
+            write_pending: None,
         };
         state.set_search_query(query);
         state
@@ -3429,6 +3566,7 @@ mod tests {
     }
     #[test]
     fn search_and_create_renderers_keep_unicode_cursor_visible() {
+        let _theme = crate::theme::cache::pin_theme();
         let grapheme = "👩🏽\u{200d}💻";
         let text = format!("12345678901234567890中e\u{301}{grapheme}z");
         let theme = Theme::current();
@@ -3552,5 +3690,218 @@ mod tests {
             .find(|e| e.name == "my-plugin:reviewer")
             .expect("disabled plugin agent stays visible in the list");
         assert!(!entry.enabled);
+    }
+
+    // ---- P49: config writes leave the input thread ----
+
+    fn agents_tab_state(cwd: &Path) -> AgentsModalState {
+        let mut state = make_persona_state(vec![], "", 0);
+        state.active_tab = AgentsTab::Agents;
+        state.cwd = cwd.to_path_buf();
+        state.agents = build_agent_list(cwd, &HashMap::new(), None);
+        state
+    }
+
+    fn press(state: &mut AgentsModalState, c: char) -> AgentsModalOutcome {
+        handle_agents_tab_key(state, &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
+    }
+
+    /// `t` no longer writes inline: it marks the modal as saving and returns
+    /// the write for an effect to run.
+    #[test]
+    fn toggling_an_agent_returns_the_write_instead_of_doing_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut state = agents_tab_state(cwd.path());
+        let name = state.agents[0].name.clone();
+        let enabled = state.agents[0].enabled;
+        let outcome = press(&mut state, 't');
+        let AgentsModalOutcome::Persist(write) = outcome else {
+            panic!("expected a Persist outcome");
+        };
+        assert_eq!(
+            write.op,
+            AgentsConfigOp::Toggle {
+                name,
+                enabled: !enabled
+            }
+        );
+        assert_eq!(state.write_pending, Some(write.ticket));
+        assert_eq!(state.message.as_ref().map(|m| m.text.as_str()), Some("Saving\u{2026}"));
+    }
+
+    /// While a write is in flight another `s`/`t` is refused: it would be
+    /// computed from the list as it was before the first write landed.
+    #[test]
+    fn a_second_write_while_saving_is_refused() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut state = agents_tab_state(cwd.path());
+        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Persist(_)));
+        for c in ['t', 's'] {
+            assert!(
+                matches!(press(&mut state, c), AgentsModalOutcome::Changed),
+                "{c} must not start a second write"
+            );
+            assert!(
+                state
+                    .message
+                    .as_ref()
+                    .is_some_and(|m| m.text.starts_with("Still saving")),
+                "{c}"
+            );
+        }
+    }
+
+    /// `s` returns the set-default write; nothing is written yet.
+    #[test]
+    fn setting_the_default_returns_the_write_instead_of_doing_it() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut state = agents_tab_state(cwd.path());
+        let outcome = press(&mut state, 's');
+        assert!(
+            matches!(
+                &outcome,
+                AgentsModalOutcome::Persist(AgentsConfigWrite {
+                    op: AgentsConfigOp::SetDefault { .. },
+                    ..
+                })
+            ),
+            "expected a SetDefault write"
+        );
+        assert!(state.write_pending.is_some());
+    }
+
+    /// The finished write clears the saving state and reports the result.
+    #[test]
+    fn a_finished_write_clears_saving_and_reports() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut state = agents_tab_state(cwd.path());
+        let write = AgentsConfigWrite::new(AgentsConfigOp::Toggle {
+            name: "x".into(),
+            enabled: false,
+        });
+        state.write_pending = Some(write.ticket);
+        assert!(finish_config_write(
+            &mut state,
+            &write,
+            Err("Could not lock config.toml: busy".into())
+        ));
+        assert_eq!(state.write_pending, None);
+        let msg = state.message.as_ref().unwrap();
+        assert_eq!(msg.kind, AgentsModalMessageKind::Error);
+        assert!(msg.text.contains("busy"));
+
+        state.write_pending = Some(write.ticket);
+        assert!(finish_config_write(&mut state, &write, Ok(())));
+        assert_eq!(state.write_pending, None);
+        assert_eq!(
+            state.message.as_ref().map(|m| m.text.as_str()),
+            Some("Disabled 'x' \u{2014} applies to new sessions")
+        );
+        // And a new write can start again.
+        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Persist(_)));
+    }
+
+    /// A write from an earlier modal (closed and reopened since) cannot finish
+    /// or unlock the write the current modal is waiting for.
+    #[test]
+    fn a_stale_write_does_not_finish_the_current_one() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut old_modal = agents_tab_state(cwd.path());
+        let AgentsModalOutcome::Persist(old_write) = press(&mut old_modal, 't') else {
+            panic!("expected a write");
+        };
+        // Closed and reopened: a fresh modal starts its own write.
+        let mut state = agents_tab_state(cwd.path());
+        let AgentsModalOutcome::Persist(new_write) = press(&mut state, 't') else {
+            panic!("expected a write");
+        };
+        assert_ne!(old_write.ticket, new_write.ticket);
+        assert!(!finish_config_write(&mut state, &old_write, Ok(())));
+        assert_eq!(state.write_pending, Some(new_write.ticket), "still saving");
+        assert!(matches!(press(&mut state, 't'), AgentsModalOutcome::Changed));
+        assert!(finish_config_write(&mut state, &new_write, Ok(())));
+        assert_eq!(state.write_pending, None);
+    }
+
+    /// A finished write re-reads both the agent list and the default from
+    /// disk, whichever it changed and whether or not it succeeded, so a change
+    /// made by an earlier write (from a closed modal) is never left stale.
+    #[test]
+    fn a_finished_write_refreshes_the_list_and_the_default() {
+        let cwd = tempfile::tempdir().unwrap();
+        for result in [Ok(()), Err("busy".to_string())] {
+            for op in [
+                AgentsConfigOp::SetDefault {
+                    name: None,
+                    was_default: true,
+                },
+                AgentsConfigOp::Toggle {
+                    name: "x".into(),
+                    enabled: true,
+                },
+            ] {
+                let mut state = agents_tab_state(cwd.path());
+                let fresh_enabled = state.agents[0].enabled;
+                let fresh_default = state.default_agent.clone();
+                // Stale in-memory state, as left by a write it never saw.
+                state.agents[0].enabled = !fresh_enabled;
+                state.default_agent = "stale-default".into();
+                let write = AgentsConfigWrite::new(op.clone());
+                state.write_pending = Some(write.ticket);
+                assert!(finish_config_write(&mut state, &write, result.clone()));
+                assert_eq!(state.agents[0].enabled, fresh_enabled, "{op:?} {result:?}");
+                assert_eq!(state.default_agent, fresh_default, "{op:?} {result:?}");
+            }
+        }
+    }
+
+    /// A modal reopened while a write ran (idle, showing the old list) takes
+    /// that write's result: it is refreshed and told, not left stale.
+    #[test]
+    fn an_idle_reopened_modal_takes_the_finished_write() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mut old_modal = agents_tab_state(cwd.path());
+        let AgentsModalOutcome::Persist(write) = press(&mut old_modal, 't') else {
+            panic!("expected a write");
+        };
+        let mut reopened = agents_tab_state(cwd.path());
+        assert_eq!(reopened.write_pending, None);
+        assert!(finish_config_write(&mut reopened, &write, Ok(())));
+        assert!(
+            reopened
+                .message
+                .as_ref()
+                .is_some_and(|m| m.text.contains("applies to new sessions")),
+            "the reopened modal is told"
+        );
+    }
+
+    /// The write itself, run against a temp file, lands; it is the same
+    /// `edit_config_at` path the effect drives.
+    #[cfg(not(windows))] // the injected rename needs an optimistic pass (none on Windows)
+    #[test]
+    fn edit_config_at_survives_a_concurrent_rename_between_read_and_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonical: the optimistic pass needs a link-free path.
+        let path = dunce::canonicalize(dir.path()).unwrap().join("config.toml");
+        std::fs::write(&path, "[ui]\ncompact_mode = true\n").unwrap();
+        let mut first = true;
+        edit_config_at(&path, |doc| {
+            if first {
+                first = false;
+                // Another writer replaces the file while this edit is reading.
+                fuigo_config::fs_atomic::write_atomically(
+                    &path,
+                    "[ui]\ncompact_mode = true\n[hints]\nother = 1\n",
+                    None,
+                )
+                .unwrap();
+            }
+            set_default_agent_in(doc, Some("chosen"))
+        })
+        .unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("other = 1"), "concurrent write lost: {text}");
+        assert!(text.contains("chosen"), "{text}");
     }
 }

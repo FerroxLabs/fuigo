@@ -1,3 +1,4 @@
+mod atomic_write;
 pub mod reloader;
 pub mod watcher;
 use crate::bundle;
@@ -504,6 +505,9 @@ pub(crate) struct ModelOverrideConfig {
     /// Unlike the other overrides this does NOT fill a compiled default; see [`PromptSuggestModelPin`].
     #[serde(skip)]
     pub prompt_suggestion: PromptSuggestModelPin,
+    /// Which helper models the user chose; see [`ExplicitHelperModels`].
+    #[serde(skip)]
+    pub explicit: ExplicitHelperModels,
 }
 impl Default for ModelOverrideConfig {
     fn default() -> Self {
@@ -512,7 +516,30 @@ impl Default for ModelOverrideConfig {
             session_summary: None,
             image_description: None,
             prompt_suggestion: PromptSuggestModelPin::Unpinned,
+            explicit: ExplicitHelperModels::default(),
         }
+    }
+}
+/// The helper models a user (or their administrator) chose explicitly: a `[models]` key in a
+/// config file, its environment variable, or its CLI flag. A value from remote settings or the
+/// compiled default is not a choice, so it is `None` here.
+///
+/// P90 F6: during a subscription session a DEFAULT helper is routed to the subscription (a
+/// default must not turn the subscription into a paid API call), but an EXPLICIT helper keeps
+/// its own route (a user who picked, say, a local model for privacy must not see it replaced).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExplicitHelperModels {
+    pub session_summary: Option<String>,
+    pub image_description: Option<String>,
+}
+impl ExplicitHelperModels {
+    /// How the session-summary helper `slug` was chosen.
+    pub(crate) fn session_summary_choice(&self, slug: &str) -> crate::agent::config::HelperModelChoice {
+        crate::agent::config::HelperModelChoice::of(self.session_summary.as_deref(), slug)
+    }
+    /// How the image-description helper `slug` was chosen.
+    pub(crate) fn image_description_choice(&self, slug: &str) -> crate::agent::config::HelperModelChoice {
+        crate::agent::config::HelperModelChoice::of(self.image_description.as_deref(), slug)
     }
 }
 /// Resolved model pin for the next-prompt suggestion call (tab-autocomplete ghost text).
@@ -555,6 +582,26 @@ impl ModelOverrideConfig {
         config: &toml::Value,
         remote: Option<&crate::util::config::RemoteSettings>,
     ) -> Self {
+        Self::resolve_with_user_config(
+            cli_web_search_model,
+            cli_session_summary_model,
+            config,
+            Some(config),
+            remote,
+        )
+    }
+    /// [`Self::resolve`], with `user_config` (the config files WITHOUT campaign patches, from
+    /// the same read as `config`; see [`load_effective_config_with_campaign_free`]) deciding which config-file helper values are the
+    /// user's own choice. A campaign can patch `[models]` in `config`; a value it put there is
+    /// not the user's, so it is not explicit. `None` (the files could not be read): no
+    /// config-file value counts as explicit, which routes helpers as defaults.
+    pub(crate) fn resolve_with_user_config(
+        cli_web_search_model: Option<&str>,
+        cli_session_summary_model: Option<&str>,
+        config: &toml::Value,
+        user_config: Option<&toml::Value>,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> Self {
         let models_table = config.get("models");
         let parsed_models: crate::agent::config::ModelsConfig = models_table
             .and_then(|v| v.clone().try_into().ok())
@@ -568,6 +615,28 @@ impl ModelOverrideConfig {
             prompt_suggestion: non_empty_model_override(parsed_models.prompt_suggestion.as_deref())
                 .map(PromptSuggestModelPin::Pinned)
                 .unwrap_or_default(),
+            explicit: ExplicitHelperModels::default(),
+        };
+        // Config-file values the user's own files hold are explicit; campaign patches, remote
+        // values (applied below only when no file sets the key) and compiled defaults are not.
+        let user_models: crate::agent::config::ModelsConfig = user_config
+            .and_then(|c| c.get("models"))
+            .and_then(|v| v.clone().try_into().ok())
+            .unwrap_or_default();
+        let users_own = |value: &Option<String>, user: Option<&str>| {
+            value
+                .clone()
+                .filter(|v| non_empty_model_override(user).as_deref() == Some(v.as_str()))
+        };
+        result.explicit = ExplicitHelperModels {
+            session_summary: users_own(
+                &result.session_summary,
+                user_models.session_summary.as_deref(),
+            ),
+            image_description: users_own(
+                &result.image_description,
+                user_models.image_description.as_deref(),
+            ),
         };
         let has_local_ws = models_table.and_then(|m| m.get("web_search")).is_some();
         let has_local_ss = models_table
@@ -602,9 +671,11 @@ impl ModelOverrideConfig {
         }
         if let Ok(v) = std::env::var("FUIGO_SESSION_SUMMARY_MODEL") {
             result.session_summary = non_empty_model_override(Some(v.as_str()));
+            result.explicit.session_summary = result.session_summary.clone();
         }
         if let Ok(v) = std::env::var("FUIGO_IMAGE_DESCRIPTION_MODEL") {
             result.image_description = non_empty_model_override(Some(v.as_str()));
+            result.explicit.image_description = result.image_description.clone();
         }
         if let Ok(v) = std::env::var("FUIGO_PROMPT_SUGGESTIONS_MODEL")
             && let Some(v) = non_empty_model_override(Some(v.as_str()))
@@ -616,6 +687,7 @@ impl ModelOverrideConfig {
         }
         if let Some(v) = cli_session_summary_model {
             result.session_summary = non_empty_model_override(Some(v));
+            result.explicit.session_summary = result.session_summary.clone();
         }
         if result.session_summary.is_none() {
             result.session_summary =
@@ -951,6 +1023,7 @@ fn walk_toml(
 pub(crate) use crate::config::reloader::parse_skills_config;
 /// Effective config: the layers plus the campaign overlay (remote cache and `FUIGO_CAMPAIGNS_OVERRIDE`).
 pub use crate::util::config::load_effective_config;
+pub use crate::util::config::load_effective_config_with_campaign_free;
 /// Effective config with disk campaigns only, for one-shot entrypoints that never fetch remote settings.
 /// This avoids resolving against a never-seeded cache.
 pub use crate::util::config::load_effective_config_disk_only;
@@ -1433,7 +1506,7 @@ pub fn apply_sandbox(
     let resolved = config.resolve_profile(cli_profile, profile_req);
     fuigo_sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash(auto_allow_req).value);
     let sandbox_profile: fuigo_sandbox::ProfileName = resolved.value.parse().unwrap_or_else(|e| {
-        eprintln!("warning: {e}, defaulting to no sandbox");
+        fuigo_tty_utils::cli_eprintln!("warning: {e}, defaulting to no sandbox");
         fuigo_sandbox::ProfileName::Off
     });
     fuigo_sandbox::set_configured_profile(&resolved.value);
@@ -1454,7 +1527,7 @@ pub fn apply_sandbox(
     #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |cause: &str| {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "error: this sandbox could not enforce its deny list on Linux: \
                  {cause} Refusing to start with denied paths unprotected."
             );
@@ -1473,7 +1546,7 @@ pub fn apply_sandbox(
             BwrapStartup::ReexecOptional(mut cmd) => {
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "WARNING: bwrap exec failed: {err}. \
                      Falling back to Landlock sandbox. \
                      Install bubblewrap: apt install -y bubblewrap"
@@ -1483,7 +1556,7 @@ pub fn apply_sandbox(
                 if requires_hook_write_deny
                     && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced()
                 {
-                    eprintln!(
+                    fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required hook write-deny \
                          mounts are missing or writable ({e}); refusing to start \
                          (possible __FUIGO_INSIDE_BWRAP spoof)"
@@ -1494,7 +1567,7 @@ pub fn apply_sandbox(
                     && let Err(e) =
                         fuigo_sandbox::verify_read_deny_enforced(&sandbox_profile, &workspace)
                 {
-                    eprintln!(
+                    fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required read-deny mounts \
                          are not in effect ({e}); refusing to start \
                          (possible __FUIGO_INSIDE_BWRAP spoof)"
@@ -1505,7 +1578,7 @@ pub fn apply_sandbox(
                     && let Err(e) =
                         fuigo_sandbox::verify_data_write_deny_enforced(&sandbox_profile, &workspace)
                 {
-                    eprintln!(
+                    fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but the required /data write-deny \
                          mount is not in effect ({e}); refusing to start \
                          (possible __FUIGO_INSIDE_BWRAP spoof)"
@@ -1532,13 +1605,13 @@ pub fn apply_sandbox(
         };
         let mut sandbox = fuigo_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
-            eprintln!("warning: sandbox could not be applied: {e}");
+            fuigo_tty_utils::cli_eprintln!("warning: sandbox could not be applied: {e}");
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             let unappliable = requires_protection && !sandbox.is_applied();
             if unappliable {
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "error: could not apply the '{}' sandbox profile; see the \
                      warning above for the cause. Refusing to start with its \
                      protections missing.",
@@ -1551,7 +1624,7 @@ pub fn apply_sandbox(
                 && fuigo_sandbox::is_inside_bwrap()
                 && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced()
             {
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "error: required hook write-deny mounts not verified after apply ({e}); \
                      refusing to start"
                 );
@@ -1597,137 +1670,208 @@ pub(crate) fn resolve_effective_plugins_config(
     plugins_cfg
 }
 pub use fuigo_config::{deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml};
+/// Run one of the blocking config edits below (plugin lists, `hooks-paths`)
+/// on the blocking pool, never on the async reactor.
+///
+/// They wait up to `fuigo_config::fs_atomic::CONFIG_LOCK_MAX_WAIT` for the
+/// `config.toml` lock with a sleeping poll. On the session's current-thread
+/// runtime that wait would also freeze the very task holding the lock across
+/// an `.await` (an MCP or settings save), so it could not finish and release
+/// it: the edit would time out after the full wait instead of queueing behind
+/// it. The error is flattened to a `String` because the edits' boxed error is
+/// not `Send`.
+pub(crate) async fn off_reactor<T: Send + 'static>(
+    edit: impl FnOnce() -> Result<T, Box<dyn std::error::Error>> + Send + 'static,
+) -> Result<T, String> {
+    tokio::task::spawn_blocking(move || edit().map_err(|e| e.to_string()))
+        .await
+        .map_err(|e| format!("config edit task failed: {e}"))?
+}
+/// `~/.fuigo/config.toml`, the file the plugin-list writers below edit.
+fn user_config_toml_path() -> std::path::PathBuf {
+    crate::util::fuigo_home::fuigo_home().join("config.toml")
+}
+/// Whether [`edit_config_string_list`] adds or removes its value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListEdit {
+    /// Append if absent, creating the section and the array as needed.
+    Add,
+    /// Drop every occurrence. A missing file is left missing.
+    Remove,
+}
+/// Add `value` to, or remove it from, the string array `[section].key` in `config_path`.
+///
+/// The read-modify-write goes through `fuigo_config::fs_atomic::edit_locked`, under
+/// `lock_config_for_write`, the lock every other `config.toml` writer takes, so it cannot
+/// lose a concurrent writer's change; the temp is filled and synced outside the lock and
+/// only renamed inside it. The file is replaced ([`atomic_write::stage_file_atomically`]),
+/// never rewritten in place, so a concurrent reader (the config watcher, another Fuigo)
+/// sees the whole old file or the whole new one -- never the empty or truncated file
+/// that loads as "no settings" and resets the trust set (R013 §1.5).
+///
+/// Only a missing file counts as empty. Any other read error (permissions, invalid
+/// UTF-8) is returned: treating it as empty would replace a file this process could
+/// not read with one holding nothing but this list.
+fn edit_config_string_list(
+    config_path: &std::path::Path,
+    section: &str,
+    key: &str,
+    value: &str,
+    edit: ListEdit,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Nothing to remove from a missing file; don't create a directory or a lock
+    // file for it. (Re-checked under the lock below.)
+    if edit == ListEdit::Remove
+        && matches!(std::fs::metadata(config_path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return Ok(());
+    }
+    use fuigo_config::fs_atomic::Edit;
+    fuigo_config::fs_atomic::edit_locked(
+        config_path,
+        |bytes| atomic_write::stage_file_atomically(config_path, bytes),
+        |current| -> Result<Edit<()>, Box<dyn std::error::Error>> {
+            let content = match current_text(current)? {
+                Some(c) => c,
+                None => {
+                    if edit == ListEdit::Remove {
+                        return Ok(Edit::Keep(()));
+                    }
+                    String::new()
+                }
+            };
+            let mut config: toml::Value = if content.is_empty() {
+                toml::Value::Table(toml::map::Map::new())
+            } else {
+                toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
+            };
+            match edit {
+                ListEdit::Add => {
+                    let table = config
+                        .as_table_mut()
+                        .ok_or("config.toml root is not a table")?;
+                    let section_table = table
+                        .entry(section.to_string())
+                        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                        .as_table_mut()
+                        .ok_or_else(|| format!("[{section}] is not a table"))?;
+                    let list = section_table
+                        .entry(key.to_string())
+                        .or_insert_with(|| toml::Value::Array(Vec::new()))
+                        .as_array_mut()
+                        .ok_or_else(|| format!("[{section}].{key} is not an array"))?;
+                    if !list.iter().any(|v| v.as_str() == Some(value)) {
+                        list.push(toml::Value::String(value.to_string()));
+                    }
+                }
+                ListEdit::Remove => {
+                    if let Some(list) = config
+                        .as_table_mut()
+                        .and_then(|t| t.get_mut(section))
+                        .and_then(|v| v.as_table_mut())
+                        .and_then(|t| t.get_mut(key))
+                        .and_then(|v| v.as_array_mut())
+                    {
+                        list.retain(|v| v.as_str() != Some(value));
+                    }
+                }
+            }
+            Ok(Edit::Replace {
+                contents: toml::to_string_pretty(&config)?.into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(edit_error_into_box)
+}
+/// The text `edit_locked` handed an edit: `None` for a missing file. A read
+/// error, or bytes that are not UTF-8, come back as the `std::io::Error` that
+/// `read_to_string` gave before, so callers see the same error.
+fn current_text(
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match current {
+        Ok(None) => Ok(None),
+        Ok(Some(bytes)) => String::from_utf8(bytes.to_vec()).map(Some).map_err(|_| {
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "stream did not contain valid UTF-8",
+            )) as Box<dyn std::error::Error>
+        }),
+        Err(e) => Err(Box::new(std::io::Error::new(e.kind(), e.to_string()))),
+    }
+}
+/// Flatten an [`fuigo_config::fs_atomic::EditError`] into the writers' boxed
+/// error. Lock and write failures stay `std::io::Error`s (callers check
+/// `TimedOut` by downcasting).
+fn edit_error_into_box(
+    e: fuigo_config::fs_atomic::EditError<Box<dyn std::error::Error>>,
+) -> Box<dyn std::error::Error> {
+    use fuigo_config::fs_atomic::EditError;
+    match e {
+        EditError::Edit(e) => e,
+        EditError::Lock(e) | EditError::Write(e) => Box::new(e),
+    }
+}
 /// Add a plugin path to `[plugins].paths` in `~/.fuigo/config.toml`.
 ///
 /// Creates the `[plugins]` section and `paths` array if they don't exist.
 /// Deduplicates: if the path is already present, this is a no-op.
 pub(crate) fn add_plugin_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("paths") {
-        plugins.insert("paths".to_string(), toml::Value::Array(vec![]));
-    }
-    let paths = plugins
-        .get_mut("paths")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].paths is not an array")?;
-    let already_present = paths.iter().any(|v| v.as_str().is_some_and(|s| s == path));
-    if !already_present {
-        paths.push(toml::Value::String(path.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    add_plugin_path_in(path, &user_config_toml_path())
+}
+/// [`add_plugin_path`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn add_plugin_path_in(
+    path: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(config_path, "plugins", "paths", path, ListEdit::Add)
 }
 /// Remove a plugin path from `[plugins].paths` in `~/.fuigo/config.toml`.
 ///
 /// If the path is not found, this is a no-op (returns Ok).
 pub(crate) fn remove_plugin_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(paths) = plugins.get_mut("paths").and_then(|v| v.as_array_mut())
-    {
-        paths.retain(|v| v.as_str().is_none_or(|s| s != path));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    remove_plugin_path_in(path, &user_config_toml_path())
+}
+/// [`remove_plugin_path`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn remove_plugin_path_in(
+    path: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(config_path, "plugins", "paths", path, ListEdit::Remove)
 }
 /// Add a plugin to `[plugins].disabled` in `~/.fuigo/config.toml`.
 ///
 /// Creates the `[plugins]` section and `disabled` array if they don't exist.
 /// Deduplicates: if already present, this is a no-op.
 pub fn add_disabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("disabled") {
-        plugins.insert("disabled".to_string(), toml::Value::Array(vec![]));
-    }
-    let disabled = plugins
-        .get_mut("disabled")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].disabled is not an array")?;
-    let already = disabled
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        disabled.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    add_disabled_plugin_in(plugin_id, &user_config_toml_path())
+}
+/// [`add_disabled_plugin`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn add_disabled_plugin_in(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(config_path, "plugins", "disabled", plugin_id, ListEdit::Add)
 }
 /// Remove a plugin from `[plugins].disabled` in `~/.fuigo/config.toml`.
 ///
 /// If the plugin is not in the disabled list, this is a no-op.
 pub fn remove_disabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(disabled) = plugins.get_mut("disabled").and_then(|v| v.as_array_mut())
-    {
-        disabled.retain(|v| v.as_str().is_none_or(|s| s != plugin_id));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    remove_disabled_plugin_in(plugin_id, &user_config_toml_path())
+}
+/// [`remove_disabled_plugin`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn remove_disabled_plugin_in(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(
+        config_path,
+        "plugins",
+        "disabled",
+        plugin_id,
+        ListEdit::Remove,
+    )
 }
 /// Add a plugin to `[plugin_cta].dismissed` in `~/.fuigo/config.toml`.
 ///
@@ -1743,43 +1887,13 @@ pub fn add_dismissed_plugin_cta_to_file(
     plugin_id: &str,
     config_path: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugin_cta") {
-        table.insert(
-            "plugin_cta".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugin_cta = table
-        .get_mut("plugin_cta")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugin_cta] is not a table")?;
-    if !plugin_cta.contains_key("dismissed") {
-        plugin_cta.insert("dismissed".to_string(), toml::Value::Array(vec![]));
-    }
-    let dismissed = plugin_cta
-        .get_mut("dismissed")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugin_cta].dismissed is not an array")?;
-    let already = dismissed
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        dismissed.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    edit_config_string_list(
+        config_path,
+        "plugin_cta",
+        "dismissed",
+        plugin_id,
+        ListEdit::Add,
+    )
 }
 /// All plugin ids listed in `[plugin_cta].dismissed` in `~/.fuigo/config.toml`.
 ///
@@ -1853,6 +1967,14 @@ pub(crate) fn validate_hooks_path(path: &str) -> Result<(), Box<dyn std::error::
     }
     Ok(())
 }
+/// [`post_install_plugin`] on the blocking pool, for async callers: its
+/// auto-enable edits wait on the `config.toml` lock (see [`off_reactor`]).
+pub(crate) async fn post_install_plugin_off_reactor(repo_key: &str) -> (Vec<String>, Vec<String>) {
+    let repo_key = repo_key.to_string();
+    tokio::task::spawn_blocking(move || post_install_plugin(&repo_key))
+        .await
+        .unwrap_or_else(|e| (vec![], vec![format!("post-install task failed: {e}")]))
+}
 /// Post-install steps for a newly installed plugin repo.
 ///
 /// Auto-enables all plugins in the repo so they are active after the next reload.
@@ -1879,65 +2001,31 @@ pub(crate) fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) 
 /// Used for project-scope plugins that are disabled by default.
 /// Deduplicates: if already present, this is a no-op.
 pub fn add_enabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut config: toml::Value = if content.is_empty() {
-        toml::Value::Table(toml::map::Map::new())
-    } else {
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?
-    };
-    let table = config
-        .as_table_mut()
-        .ok_or("config.toml root is not a table")?;
-    if !table.contains_key("plugins") {
-        table.insert(
-            "plugins".to_string(),
-            toml::Value::Table(toml::map::Map::new()),
-        );
-    }
-    let plugins = table
-        .get_mut("plugins")
-        .and_then(|v| v.as_table_mut())
-        .ok_or("[plugins] is not a table")?;
-    if !plugins.contains_key("enabled") {
-        plugins.insert("enabled".to_string(), toml::Value::Array(Vec::new()));
-    }
-    let enabled = plugins
-        .get_mut("enabled")
-        .and_then(|v| v.as_array_mut())
-        .ok_or("[plugins].enabled is not an array")?;
-    let already = enabled
-        .iter()
-        .any(|v| v.as_str().is_some_and(|s| s == plugin_id));
-    if !already {
-        enabled.push(toml::Value::String(plugin_id.to_string()));
-    }
-    if let Some(parent) = config_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    add_enabled_plugin_in(plugin_id, &user_config_toml_path())
+}
+/// [`add_enabled_plugin`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn add_enabled_plugin_in(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(config_path, "plugins", "enabled", plugin_id, ListEdit::Add)
 }
 /// Remove a plugin from `[plugins].enabled` in `~/.fuigo/config.toml`.
 pub fn remove_enabled_plugin(plugin_id: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config_path = crate::util::fuigo_home::fuigo_home().join("config.toml");
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
-    };
-    let mut config: toml::Value =
-        toml::from_str(&content).map_err(|e| format!("failed to parse config.toml: {e}"))?;
-    if let Some(plugins) = config
-        .as_table_mut()
-        .and_then(|t| t.get_mut("plugins"))
-        .and_then(|v| v.as_table_mut())
-        && let Some(enabled) = plugins.get_mut("enabled").and_then(|v| v.as_array_mut())
-    {
-        enabled.retain(|v| v.as_str().is_none_or(|s| s != plugin_id));
-    }
-    std::fs::write(&config_path, toml::to_string_pretty(&config)?)?;
-    Ok(())
+    remove_enabled_plugin_in(plugin_id, &user_config_toml_path())
+}
+/// [`remove_enabled_plugin`] against an explicit `config.toml` (path-parameterized for tests).
+pub(crate) fn remove_enabled_plugin_in(
+    plugin_id: &str,
+    config_path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    edit_config_string_list(
+        config_path,
+        "plugins",
+        "enabled",
+        plugin_id,
+        ListEdit::Remove,
+    )
 }
 /// Add a hook path to `~/.fuigo/hooks-paths` (one path per line).
 ///
@@ -1955,20 +2043,35 @@ pub(crate) fn add_hooks_path_to_file(
     path: &str,
     paths_file: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(parent) = paths_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let existing = std::fs::read_to_string(paths_file).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == path) {
-        return Ok(());
-    }
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(paths_file)?;
-    writeln!(file, "{}", path)?;
-    Ok(())
+    // The same read-modify-write as `remove_hooks_path_from_file`: the line is
+    // added by replacing the file (a reader never sees a partial line), under the
+    // same lock, renamed only over the version read. A file that cannot be read
+    // is an error now: it was read as empty and appended to before, and a
+    // replacement built from "empty" would erase every line in it. A new file
+    // gets the mode the old append created it with (`0o666 & !umask`).
+    use fuigo_config::fs_atomic::Edit;
+    use fuigo_config::write_through::{NewFileMode, stage_file_atomically_with};
+    fuigo_config::fs_atomic::edit_locked(
+        paths_file,
+        |bytes| stage_file_atomically_with(paths_file, bytes, NewFileMode::Default),
+        |current| -> Result<Edit<()>, Box<dyn std::error::Error>> {
+            let existing = current_text(current)?.unwrap_or_default();
+            if existing.lines().any(|l| l.trim() == path) {
+                return Ok(Edit::Keep(()));
+            }
+            let mut updated = existing;
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(path);
+            updated.push('\n');
+            Ok(Edit::Replace {
+                contents: updated.into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(edit_error_into_box)
 }
 /// The user-registered hook directories (`~/.fuigo/hooks-paths` lines) —
 /// exactly what `remove_hooks_path` can remove (same exact-string match).
@@ -1999,34 +2102,45 @@ pub(crate) fn remove_hooks_path_from_file(
     path: &str,
     paths_file: &std::path::Path,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let content = match std::fs::read_to_string(paths_file) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e.into()),
-    };
-    let mut found = false;
-    let new_lines: Vec<&str> = content
-        .lines()
-        .filter(|l| {
-            if l.trim() == path {
-                found = true;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-    if !found {
+    // Nothing to remove from a missing file; don't create a lock file for it.
+    if matches!(std::fs::metadata(paths_file), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
         return Ok(false);
     }
-    if let Some(parent) = paths_file.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
+    // The read and the replace go through the same lock `add_hooks_path_to_file`
+    // takes; only the rename happens while holding it.
+    use fuigo_config::fs_atomic::Edit;
+    fuigo_config::fs_atomic::edit_locked(
         paths_file,
-        new_lines.join("\n") + (if new_lines.is_empty() { "" } else { "\n" }),
-    )?;
-    Ok(true)
+        |bytes| atomic_write::stage_file_atomically(paths_file, bytes),
+        |current| -> Result<Edit<bool>, Box<dyn std::error::Error>> {
+            let Some(content) = current_text(current)? else {
+                return Ok(Edit::Keep(false));
+            };
+            let mut found = false;
+            let new_lines: Vec<&str> = content
+                .lines()
+                .filter(|l| {
+                    if l.trim() == path {
+                        found = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if !found {
+                return Ok(Edit::Keep(false));
+            }
+            // Replaced, never rewritten in place: a hook loader reading mid-write must not
+            // see a truncated list.
+            Ok(Edit::Replace {
+                contents: (new_lines.join("\n") + (if new_lines.is_empty() { "" } else { "\n" }))
+                    .into_bytes(),
+                value: true,
+            })
+        },
+    )
+    .map_err(edit_error_into_box)
 }
 #[cfg(test)]
 mod tests;

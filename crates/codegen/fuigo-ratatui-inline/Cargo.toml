@@ -33,3 +33,6 @@ harness = false
 scrolling-regions = [
     "ratatui/scrolling-regions",
 ] # required for terminal fork only
+
+[lints]
+workspace = true

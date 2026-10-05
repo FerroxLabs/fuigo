@@ -84,6 +84,11 @@ pub enum RefreshTokenFailedReason {
     /// Escalation from repeated transient failures (OIDC).
     /// Never a raw IdP code: an unrecognized terminal code is classified transient, not `Other` (see `classify_terminal`).
     Other,
+    /// P149 (S7/B11): local policy refused the identity provider's token endpoint (it is not on the issuer's https
+    /// origin, or it answered with a redirect Fuigo does not follow). Nothing about the credential is known, so the
+    /// stored sign-in is kept; but asking again cannot succeed until the provider's configuration changes, so the
+    /// refusal is a verdict: no retry and no resend of the refresh token while it stands.
+    TokenEndpointRefused,
 }
 
 impl RefreshTokenFailedReason {
@@ -92,7 +97,10 @@ impl RefreshTokenFailedReason {
     pub(crate) fn is_sticky(self) -> bool {
         match self {
             Self::RefreshTokenRejected => true,
-            Self::ClientRejected | Self::ProviderInteractiveRequired | Self::Other => false,
+            Self::ClientRejected
+            | Self::ProviderInteractiveRequired
+            | Self::Other
+            | Self::TokenEndpointRefused => false,
         }
     }
 
@@ -101,7 +109,7 @@ impl RefreshTokenFailedReason {
     pub(crate) fn blocks_unattended_retry(self) -> bool {
         match self {
             Self::RefreshTokenRejected | Self::ProviderInteractiveRequired => true,
-            Self::ClientRejected | Self::Other => false,
+            Self::ClientRejected | Self::Other | Self::TokenEndpointRefused => false,
         }
     }
 
@@ -118,6 +126,14 @@ impl RefreshTokenFailedReason {
             Self::ProviderInteractiveRequired => provider_login_message(None),
             Self::Other => {
                 "Authentication could not be refreshed. Run `fuigo login` to sign in again.".into()
+            }
+            Self::TokenEndpointRefused => {
+                "Fuigo refused to refresh your sign-in: your identity provider's token endpoint is not on the \
+                 issuer's https origin, or it answered with a redirect that Fuigo does not follow. The refresh \
+                 token was not sent anywhere else, and Fuigo does not retry a refused refresh (it tries again after \
+                 5 minutes); your stored sign-in is kept. Ask your administrator to fix the identity provider's \
+                 configuration."
+                    .into()
             }
         }
     }

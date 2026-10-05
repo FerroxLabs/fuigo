@@ -552,7 +552,9 @@ fn permission_interrupts_open_plan_viewer() {
 fn a_card_under_any_open_line_viewer_does_not_take_the_bar() {
     let mut agent = make_agent();
     open_question(&mut agent);
-    let path = std::env::temp_dir().join("key_owner_line_viewer.txt");
+    // A directory of this test's own: a fixed name under the shared temp dir is rewritten by every other suite running on the host (P78).
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("key_owner_line_viewer.txt");
     std::fs::write(&path, "one\ntwo\n").expect("write fixture");
     agent.open_line_viewer(&path, None);
 

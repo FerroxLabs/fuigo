@@ -806,6 +806,8 @@ impl AgentView {
                                             && now.duration_since(t).as_millis()
                                                 < MULTI_CLICK_TIMEOUT_MS
                                     });
+                                // P152 (Astra r2 #4): a click is deliberate selection; it ends a typing burst.
+                                self.permission_typed_at = None;
                                 if let Some(perm) = self.permission_queue.front_mut() {
                                     perm.active_idx = idx;
                                     perm.focus =
@@ -2583,6 +2585,9 @@ mod scrollback_paste_focus_forward_tests {
     /// scrollback it takes the same focus-forward round trip as a text paste.
     #[test]
     fn dragging_image_while_scrollback_focused_attaches_to_composer() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let (mut agent, reg) = scrollback_agent();
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("drag.png");

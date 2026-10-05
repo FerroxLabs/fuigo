@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agent_client_protocol as acp;
 
@@ -26,6 +26,26 @@ use crate::session::storage::{
 #[cfg(test)]
 #[path = "copy_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs once on the copying thread right after the source's chat history was read, before the witness
+    /// recovery and the transcript staging, so a test can interleave a source write there (P111, Astra r7 #2, r8 #1).
+    static AFTER_SOURCE_CHAT_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test seam: runs on the copying thread right after the snapshot released its locks, before it reads the chat history.
+    static AFTER_SNAPSHOT_LOCKS_RELEASED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn after_source_chat_read() {
+    if let Some(hook) = AFTER_SOURCE_CHAT_READ.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+}
 
 fn is_orchestration_projection_update(update: &SessionUpdate) -> bool {
     matches!(
@@ -160,7 +180,7 @@ impl<'a> UpdateLineWriter<'a> {
         target_session_id: &'a acp::SessionId,
     ) -> io::Result<Self> {
         Ok(Self {
-            writer: BufWriter::new(std::fs::File::create(target)?),
+            writer: BufWriter::new(super::super::owner_only::create(target)?),
             source,
             target_session_id,
             copied: CopiedUpdates::default(),
@@ -229,13 +249,16 @@ impl<'a> UpdateLineWriter<'a> {
 /// With a `target_prompt_index`, pass one computes the surviving line set and pass two writes exactly those lines.
 /// Without one, every line streams through, preserving rewind markers and dead branches.
 /// Both passes read one pinned, rewound file handle, so their line indexes cannot skew under a concurrent rename.
-/// `updates.jsonl` is append-only by contract, so lines appended after pass one land past every survivor index.
+/// Only the first `limit` bytes are read when a limit is given: the length the copy's snapshot took (see
+/// [`JsonlStorageAdapter::snapshot_source`]), so lines appended after the snapshot are in neither pass (P123, K17).
 fn copy_updates_streaming(
     source: &Path,
     target: &Path,
     target_session_id: &acp::SessionId,
     target_prompt_index: Option<usize>,
+    limit: Option<u64>,
 ) -> io::Result<CopiedUpdates> {
+    let limit = limit.unwrap_or(u64::MAX);
     let mut writer = UpdateLineWriter::try_new(target, source, target_session_id)?;
     let mut file = match std::fs::File::open(source) {
         Ok(file) => file,
@@ -245,16 +268,16 @@ fn copy_updates_streaming(
     };
     match target_prompt_index {
         None => {
-            for_each_jsonl_line(BufReader::new(file), |_, line| {
+            for_each_jsonl_line(BufReader::new(file.take(limit)), |_, line| {
                 writer.copy_line(line)?;
                 Ok(ControlFlow::Continue(()))
             })?;
         }
         Some(target_idx) => {
-            let survivors = surviving_line_indexes(BufReader::new(&mut file), target_idx)?;
+            let survivors = surviving_line_indexes(BufReader::new((&mut file).take(limit)), target_idx)?;
             file.seek(io::SeekFrom::Start(0))?;
             let mut survivors = survivors.into_iter().peekable();
-            for_each_jsonl_line(BufReader::new(file), |index, line| {
+            for_each_jsonl_line(BufReader::new(file.take(limit)), |index, line| {
                 if survivors.next_if_eq(&index).is_some() {
                     writer.copy_line(line)?;
                 }
@@ -277,20 +300,144 @@ impl JsonlStorageAdapter {
         target_info: &Info,
         options: CopySessionOptions,
     ) -> io::Result<CopySessionResult> {
-        // Canonical creator: the fork target chain is born owner-only.
-        let target_dir = self.create_session_dir_owner_only(target_info)?;
-
         let source_summary = self.read_summary_sync(source_info)?;
         let chat_format_version = source_summary.chat_format_version;
 
-        let mut chat_to_copy: Vec<ConversationItem> =
-            self.read_chat_history_sync(self.chat_file(source_info), chat_format_version)?;
-
-        if let Some(target_idx) = options.target_prompt_index {
-            // +1: the cut keeps the target prompt inclusive.
-            let keep = conversation_truncate_for_prompt(&chat_to_copy, target_idx + 1);
-            chat_to_copy.truncate(keep);
+        // The source may be live, so the copy takes ONE snapshot of it: the chat history's bytes and the transcript's length
+        // are read together with the source's append locks held (both files, so no append lands between the two reads).
+        // The transcript is then copied only up to that length, so a turn added while the fork is being made is in the
+        // child's transcript and model history, or in neither (P123, K17; before, the transcript was read after the chat
+        // history, and a turn appended between the two was in the transcript only).
+        // Appends are not the only thing that happens to a live source. A rewrite of the chat history (a rewind, a
+        // compaction) replaces the file without those locks, so the chat history is fingerprinted and checked again once the
+        // transcript is staged, before the target exists: a history replaced in between refuses the copy instead of
+        // pairing one generation's history with another's transcript (P111, Astra r6).
+        // The same holds for a compaction that commits after the snapshot: its marker lands in the transcript before its
+        // separate rewrite of the chat history runs. A marker in what was appended after the snapshot refuses the copy too,
+        // since the compaction witness (read next) may already describe it (P111, Astra r7 #2). A fork_filter copy keeps no
+        // transcript and skips the scan (Astra r8 #4).
+        let snapshot = self.snapshot_source(source_info, !options.fork_filter)?;
+        let source_chat_path = self.chat_file(source_info);
+        // The bytes fingerprinted are also the ones the compaction witness is judged against below, so a compaction
+        // rewrite that lands in between (and keeps those bytes as its prefix) cannot make them look current (Astra r8 #1).
+        let chat_bytes_seen = snapshot.chat_bytes;
+        let chat_seen = chat_bytes_seen.as_deref().map(chat_fingerprint_of);
+        let (mut chat_to_copy, mut skipped_chat_lines): (Vec<ConversationItem>, usize) = match chat_bytes_seen.as_deref() {
+            Some(bytes) => self.read_chat_history_counting_from_bytes(&source_chat_path, bytes, chat_format_version)?,
+            None => (Vec::new(), 0),
+        };
+        #[cfg(test)]
+        after_source_chat_read();
+        // A source whose latest compaction committed without its chat_history.jsonl rewrite landing is copied with the
+        // history it resumes with: the projection and the items written after it (P111, DI-03). Unreadable lines among
+        // those are repaired out structurally, as the source's own load would (the child carries no evidence of them).
+        if let Some(recovered) = super::compaction_witness::recover_unapplied_compaction_in(
+            &self.session_dir(source_info),
+            chat_bytes_seen.as_deref(),
+        ) {
+            chat_to_copy = recovered.history;
+            skipped_chat_lines = recovered.skipped_lines;
         }
+        // A damaged source (a torn line, or one an earlier load already scrubbed and kept as `.corrupt`) is copied with the
+        // history repaired the way its own load repairs it (P96): a tool result whose call was lost would make the provider
+        // reject every request of the fork. The source's file is not touched (it stays the evidence), so the child needs no
+        // `.pre-repair` backup of its own (P123, K14).
+        if skipped_chat_lines > 0 || super::load_repair::quarantine_of_earlier_load(&source_chat_path).is_some() {
+            let report = fuigo_chat_state::compaction_utils::repair_history(&mut chat_to_copy);
+            if report.changed() {
+                tracing::warn!(
+                    session_id = %source_info.id.0,
+                    skipped_chat_lines,
+                    duplicates_removed = report.duplicates_removed,
+                    stripped_tool_result_ids = ?report.stripped_tool_result_ids,
+                    synthetic_results_inserted = report.synthetic_results_inserted,
+                    "fork: the source's saved history was damaged; the copy's history was repaired"
+                );
+            }
+        }
+
+        // A point-in-time copy decides the child's history from the cut (and rewind-filtered) transcript, and that
+        // decision can refuse the copy (P111, DI-04). The cut is therefore staged in a private directory under the
+        // sessions root (P114: never the system temp dir) and decided BEFORE the target session exists, so a refusal
+        // creates nothing and never has to delete anything.
+        // A fork_filter copy (subagent context bootstrap) starts the child with an empty transcript and only truncates.
+        let staged_cut = match options.target_prompt_index {
+            Some(target_idx) if !options.fork_filter => {
+                let staging = self.fork_staging_dir(target_info)?;
+                let staged_updates = staging.dir.path().join(crate::session::storage::UPDATES_FILE);
+                let copied = copy_updates_streaming(
+                    &self.updates_file(source_info),
+                    &staged_updates,
+                    &target_info.id,
+                    Some(target_idx),
+                    Some(snapshot.updates_len),
+                )?;
+                match self.chat_for_compacted_cut(
+                    source_info,
+                    &staged_updates,
+                    target_idx,
+                    &chat_to_copy,
+                    snapshot.updates_len,
+                )? {
+                    Some(rebuilt) => chat_to_copy = rebuilt,
+                    None => {
+                        // +1: the cut keeps the target prompt inclusive.
+                        let keep = conversation_truncate_for_prompt(&chat_to_copy, target_idx + 1);
+                        chat_to_copy.truncate(keep);
+                    }
+                }
+                Some((staging, staged_updates, copied))
+            }
+            Some(target_idx) => {
+                let keep = conversation_truncate_for_prompt(&chat_to_copy, target_idx + 1);
+                chat_to_copy.truncate(keep);
+                None
+            }
+            // A whole copy stages the transcript too, so the coherence check below runs before the target exists.
+            None if !options.fork_filter => {
+                let staging = self.fork_staging_dir(target_info)?;
+                let staged_updates = staging.dir.path().join(crate::session::storage::UPDATES_FILE);
+                let copied = copy_updates_streaming(
+                    &self.updates_file(source_info),
+                    &staged_updates,
+                    &target_info.id,
+                    None,
+                    Some(snapshot.updates_len),
+                )?;
+                Some((staging, staged_updates, copied))
+            }
+            None => None,
+        };
+        let compaction_crossed = staged_cut.is_some()
+            && !compaction_checkpoint_files(&self.updates_file(source_info), (snapshot.updates_len, None))?.is_empty();
+        if compaction_crossed || !chat_file_still_starts_with(&source_chat_path, chat_seen.as_ref())? {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                format!(
+                    "Cannot copy session {}: its conversation history was replaced while it was being copied (a \
+                     rewind or compaction finished). Nothing was created; try again.",
+                    source_info.id.0
+                ),
+            ));
+        }
+
+        // Canonical creator: the fork target chain is born owner-only.
+        let target_dir = self.create_session_dir_owner_only(target_info)?;
+        // The target id may be the caller's (`newSessionId`). A session already stored under it is never overwritten:
+        // the copy claims the target by creating its summary exclusively, so of two copies to one id only one proceeds,
+        // and a refused copy has written nothing (P111, Astra r4).
+        self.claim_copy_target(target_info)?;
+
+        let copied_updates = if options.fork_filter {
+            super::super::owner_only::write(&self.updates_file(target_info), b"")?;
+            CopiedUpdates::default()
+        } else if let Some((staging, staged_updates, copied)) = staged_cut {
+            move_staged_file(&staged_updates, &self.updates_file(target_info))?;
+            drop(staging);
+            copied
+        } else {
+            unreachable!("every copy that keeps a transcript staged it")
+        };
 
         if options.fork_filter {
             fork_filter_chat(&mut chat_to_copy);
@@ -334,9 +481,8 @@ impl JsonlStorageAdapter {
             .max()
             .unwrap_or(0);
 
-        // Release chat history before the (typically much larger) updates copy.
         {
-            let mut writer = BufWriter::new(std::fs::File::create(self.chat_file(target_info))?);
+            let mut writer = BufWriter::new(super::super::owner_only::create(&self.chat_file(target_info))?);
             for item in &chat_to_copy {
                 serde_json::to_writer(&mut writer, item).map_err(invalid_data)?;
                 writer.write_all(b"\n")?;
@@ -344,19 +490,6 @@ impl JsonlStorageAdapter {
             writer.flush()?;
         }
         drop(chat_to_copy);
-
-        // A fork_filter copy (subagent context bootstrap) starts the child with an empty replay transcript, so the source updates are never read
-        let copied_updates = if options.fork_filter {
-            std::fs::write(self.updates_file(target_info), b"")?;
-            CopiedUpdates::default()
-        } else {
-            copy_updates_streaming(
-                &self.updates_file(source_info),
-                &self.updates_file(target_info),
-                &target_info.id,
-                options.target_prompt_index,
-            )?
-        };
         let checkpoint_files = copied_updates.checkpoint_files;
         let num_messages = copied_updates.count;
 
@@ -372,7 +505,7 @@ impl JsonlStorageAdapter {
             },
         );
         let summary_bytes = serde_json::to_vec_pretty(&target_summary).map_err(invalid_data)?;
-        std::fs::write(self.summary_file(target_info), summary_bytes)?;
+        super::super::owner_only::write(&self.summary_file(target_info), summary_bytes)?;
 
         let plan_copied = copy_sidecar_file(
             options.copy_plan_state,
@@ -469,7 +602,7 @@ impl JsonlStorageAdapter {
                 for entry in std::fs::read_dir(&src_dir)? {
                     let entry = entry?;
                     if entry.file_type()?.is_file() {
-                        std::fs::copy(entry.path(), dst_dir.join(entry.file_name()))?;
+                        super::super::owner_only::copy(&entry.path(), &dst_dir.join(entry.file_name()))?;
                         copied += 1;
                     }
                 }
@@ -497,6 +630,546 @@ impl JsonlStorageAdapter {
             compaction_segments_copied,
             compaction_checkpoints_copied,
         })
+    }
+}
+
+/// How long a copy waits for the source's append locks before giving up for now (an append is a few milliseconds; this is
+/// for a writer that is stuck).
+const SNAPSHOT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What a copy took from its source at one moment: the chat history's bytes (`None` when it has no file) and the length
+/// of the transcript.
+struct SourceSnapshot {
+    chat_bytes: Option<Vec<u8>>,
+    updates_len: u64,
+}
+
+impl JsonlStorageAdapter {
+    /// One coherent snapshot of the source's chat history and transcript (P123, K17).
+    ///
+    /// Both files' append locks (`<file>.lock`, taken exclusively by every append) are held while the chat history is
+    /// read and the transcript's length is taken, in a fixed order, so no append to either file lands between the two.
+    /// The snapshot is the source as it was between two appends: the transcript is later copied only up to the length
+    /// taken here, and the chat history is the bytes read here. An append in progress finishes first; one that comes
+    /// later waits for the few milliseconds the snapshot takes. A lock that cannot be opened (a source directory that is
+    /// not writable) is skipped and the snapshot is then taken without it, as copies were before this; a lock held
+    /// longer than [`SNAPSHOT_LOCK_WAIT`] refuses the copy as retryable.
+    /// A copy that keeps no transcript (`fork_filter`, a subagent's context) takes the chat history's lock only: it neither
+    /// reads nor depends on the transcript, so a stuck transcript writer must not fail it.
+    fn snapshot_source(&self, source_info: &Info, with_transcript: bool) -> io::Result<SourceSnapshot> {
+        let chat_path = self.chat_file(source_info);
+        let updates_path = self.updates_file(source_info);
+        let mut held = Vec::new();
+        if with_transcript {
+            // The turn-start lock first: no prompt is between its transcript echo and its chat item while it is held.
+            let pair = crate::session::storage::snapshot_lock::lock_path(&self.session_dir(source_info));
+            if let Some(lock) = crate::session::storage::snapshot_lock::acquire_blocking(&pair, &updates_path)? {
+                held.push(lock);
+            }
+        }
+        let locked: &[&std::path::PathBuf] = if with_transcript { &[&chat_path, &updates_path] } else { &[&chat_path] };
+        for path in locked {
+            if let Some(lock) = lock_append_for_snapshot(path)? {
+                held.push(lock);
+            }
+        }
+        // Under the locks only the two lengths are taken (a stat each), so a copy that is suspended holds the source's
+        // writers for no longer than that. Both files are append-only, so the chat history's first `chat_len` bytes read
+        // after the locks are released are the bytes that were there; a rewrite that replaced the file meanwhile is caught
+        // by the fingerprint check before the target exists (Astra P123 r3 N3).
+        let len_of = |path: &Path| match std::fs::metadata(path) {
+            Ok(meta) => Ok(Some(meta.len())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        };
+        let chat_len = len_of(&chat_path)?;
+        let updates_len = if with_transcript { len_of(&updates_path)?.unwrap_or(0) } else { 0 };
+        drop(held);
+        #[cfg(test)]
+        if let Some(hook) = AFTER_SNAPSHOT_LOCKS_RELEASED.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
+        let chat_bytes = match chat_len {
+            None => None,
+            Some(len) => {
+                use std::io::Read as _;
+                match std::fs::File::open(&chat_path) {
+                    Ok(file) => {
+                        let mut bytes = Vec::new();
+                        file.take(len).read_to_end(&mut bytes)?;
+                        Some(bytes)
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error),
+                }
+            }
+        };
+        Ok(SourceSnapshot { chat_bytes, updates_len })
+    }
+}
+
+/// Take `path`'s append lock exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`]. `Ok(None)` when the lock file cannot be
+/// opened at all.
+fn lock_append_for_snapshot(path: &Path) -> io::Result<Option<std::fs::File>> {
+    let lock_path = path.with_extension("jsonl.lock");
+    let lock = match crate::session::storage::owner_only::open(
+        std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
+        &lock_path,
+    ) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::debug!(%error, path = %lock_path.display(), "fork snapshot taken without the append lock");
+            return Ok(None);
+        }
+    };
+    let deadline = std::time::Instant::now() + SNAPSHOT_LOCK_WAIT;
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(Some(lock)),
+            Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
+                #[cfg(test)]
+                crate::session::storage::snapshot_lock::CONTENDED.lock().insert(lock_path.clone());
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        format!(
+                            "Cannot copy the session: {} is being written. Nothing was created; try again.",
+                            path.display()
+                        ),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err(error) => {
+                tracing::debug!(%error, path = %lock_path.display(), "fork snapshot taken without the append lock");
+                return Ok(None);
+            }
+        }
+    }
+}
+
+impl JsonlStorageAdapter {
+    /// Refuse a copy whose target already holds a session, and claim the target for this copy otherwise.
+    ///
+    /// The claim is the exclusive creation of the target's (still empty) `summary.json`; the copy writes the summary
+    /// itself last. Any of the files a session is made of already being there means the id is taken.
+    fn claim_copy_target(&self, target_info: &Info) -> io::Result<()> {
+        let taken = |path: &Path| {
+            io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!(
+                    "Cannot create session {}: a session with that id already exists ({} is present). Nothing was \
+                     written; use another id.",
+                    target_info.id.0,
+                    path.display()
+                ),
+            )
+        };
+        for existing in [self.updates_file(target_info), self.chat_file(target_info)] {
+            if std::fs::symlink_metadata(&existing).is_ok() {
+                return Err(taken(&existing));
+            }
+        }
+        let summary = self.summary_file(target_info);
+        match crate::session::storage::owner_only::open(
+            std::fs::OpenOptions::new().write(true).create_new(true),
+            &summary,
+        ) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(taken(&summary)),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Chat history for a point-in-time copy cut at the target, or `None` when truncating the source's chat history is
+    /// right. `cut_updates` is the copied transcript: cut at the target, rewound branches filtered out.
+    ///
+    /// When the cut ends with an active compaction, the child's model view is that checkpoint's projection plus the
+    /// turns after it up to the cut. The source's chat history may instead start from a LATER compaction, whose summary
+    /// covers turns after the cut, and no truncation removes those. The cut is replayed instead, as a rewind across a
+    /// compaction does (text only: tool calls between that checkpoint and the cut are not carried, the limit a rewind
+    /// has). This is the rule 1.0.10-1.0.19 applied at the child's first load; P88 moved it here.
+    ///
+    /// Otherwise truncating the source's chat history is exact only when that history starts from the same compaction
+    /// as the cut (or neither has one). The source's history starts from the latest compaction on its live timeline:
+    /// its transcript with every rewound branch filtered out, as the copy filters the cut. When the two differ, the
+    /// source's history is a summary made after the cut, and the copy is refused with an error (P111, DI-04): a child
+    /// that silently inherits a summary of turns after its fork point would act on work it never did. The same rule
+    /// decides when a missing or damaged checkpoint makes the cut unreplayable (1.0.20 failed such a child at its first
+    /// load). Only markers are compared, so a damaged checkpoint on an abandoned branch decides nothing.
+    fn chat_for_compacted_cut(
+        &self,
+        source_info: &Info,
+        cut_updates: &Path,
+        target_prompt_index: usize,
+        source_chat: &[ConversationItem],
+        source_updates_len: u64,
+    ) -> io::Result<Option<Vec<ConversationItem>>> {
+        // Checkpoint files are named relative to the session directory; the copy brings them over later, under the
+        // same names, so they are read from the source.
+        let replay_error = match crate::session::helpers::replay::replay_if_latest_compaction_active(
+            cut_updates,
+            &self.session_dir(source_info),
+        ) {
+            Ok(Some(rebuilt)) => return Ok(Some(rebuilt)),
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+        // The cut holds no rewind markers (the copy drops rewound branches), so its latest marker is its live one.
+        let cut_latest = crate::session::helpers::replay::find_latest_compaction_checkpoint(cut_updates)
+            .map(|latest| latest.map(|info| info.checkpoint_id));
+        let source_latest = latest_live_compaction_id(&self.updates_file(source_info), source_updates_len);
+        let same_compaction = matches!((&cut_latest, &source_latest), (Ok(cut), Ok(source)) if cut == source);
+        // Truncating a history that starts from a compaction finds its cut by prompt markers, and turns written before
+        // prompt markers existed (unmarked) cannot be placed on the transcript's prompt axis. So the truncation is
+        // accepted only when the point it cuts at is proven to be the transcript's cut (see `marked_cut_is_exact`).
+        let boundary_provable =
+            !matches!(&cut_latest, Ok(Some(_))) || marked_cut_is_exact(source_chat, target_prompt_index);
+        let exact = same_compaction && boundary_provable;
+        if exact {
+            if let Some(error) = &replay_error {
+                // A damaged checkpoint: like a resume (L-1), the copy degrades instead of failing.
+                tracing::warn!(session_id = %source_info.id.0, %error,
+                    "fork: cannot rebuild the history at the cut (checkpoint unreadable); truncating the source chat \
+                     history, which starts from the same compaction");
+            }
+            return Ok(None);
+        }
+        // What the message says depends on why (P114). When the cut and the session's history share their compaction,
+        // the summary covers turns BEFORE the cut and the fork is already after the latest compaction: the turns after
+        // the summary carry no prompt markers to cut by, and what always works is a whole-session fork.
+        const SUMMARY_AFTER_CUT: &str = ", and the session's current history is a compaction summary that covers \
+                                         turns after that prompt. Nothing was created. Fork at a prompt after the \
+                                         latest compaction, or fork the whole session, instead.";
+        let (why, advice) = match (&replay_error, &cut_latest, &source_latest) {
+            _ if same_compaction => (
+                format!(
+                    "{}the saved history has no prompt markers to cut it by",
+                    replay_error
+                        .as_ref()
+                        .map(|error| format!("its compaction checkpoint cannot be replayed ({error}) and "))
+                        .unwrap_or_default()
+                ),
+                ". Nothing was created. Fork the whole session instead.",
+            ),
+            (Some(error), _, _) => (
+                format!("a compaction checkpoint before it is missing or damaged ({error})"),
+                SUMMARY_AFTER_CUT,
+            ),
+            (None, Err(error), _) | (None, _, Err(error)) => (
+                format!("the transcript could not be read ({error})"),
+                SUMMARY_AFTER_CUT,
+            ),
+            (None, Ok(_), Ok(_)) => (
+                "it lies before the compaction the session's current history starts from".to_string(),
+                SUMMARY_AFTER_CUT,
+            ),
+        };
+        tracing::warn!(session_id = %source_info.id.0, target_prompt_index, %why,
+            "fork refused: the history at the cut cannot be rebuilt exactly");
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "Cannot fork at prompt #{target_prompt_index}: the conversation at that point cannot be rebuilt \
+                 exactly, because {why}{advice}"
+            ),
+        ))
+    }
+}
+
+/// The checkpoint files every compaction marker in `updates` (a transcript) names, as the copy records them; empty
+/// when it does not exist. Streams the file; only lines that mention a compaction checkpoint are parsed. Only the
+/// bytes in `range` (from, to) are read: the copy's snapshot is the first `to` bytes, and what was appended after
+/// it is the tail the coherence check looks at (P123).
+fn compaction_checkpoint_files(updates: &Path, range: (u64, Option<u64>)) -> io::Result<BTreeSet<String>> {
+    let mut files = BTreeSet::new();
+    let mut file = match std::fs::File::open(updates) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error),
+    };
+    let (from, to) = range;
+    file.seek(io::SeekFrom::Start(from))?;
+    let len = to.map_or(u64::MAX, |to| to.saturating_sub(from));
+    for_each_jsonl_line(BufReader::new(file.take(len)), |_, line| {
+        if let Ok(text) = std::str::from_utf8(line)
+            && text.contains("compaction_checkpoint")
+            && let Ok(SessionUpdate::Fuigo(notification)) = SessionUpdateEnvelope::from_str(text)
+            && let crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) = notification.update
+        {
+            files.insert(info.checkpoint_file);
+        }
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(files)
+}
+
+/// The contents of `path`, or `None` when it does not exist.
+fn read_optional(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Length and SHA-256 of `bytes`.
+fn chat_fingerprint_of(bytes: &[u8]) -> (u64, String) {
+    use sha2::Digest;
+    (bytes.len() as u64, format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+/// Length and SHA-256 of `path`, or `None` when it does not exist.
+#[cfg(test)]
+fn chat_file_fingerprint(path: &Path) -> io::Result<Option<(u64, String)>> {
+    Ok(read_optional(path)?.as_deref().map(chat_fingerprint_of))
+}
+
+/// Whether `path` still starts with the bytes `seen` fingerprinted (only appended to since), or `seen` is `None`.
+fn chat_file_still_starts_with(path: &Path, seen: Option<&(u64, String)>) -> io::Result<bool> {
+    use sha2::Digest;
+    let Some((len, sha)) = seen else {
+        return Ok(true);
+    };
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(bytes.len() as u64 >= *len && format!("{:x}", sha2::Sha256::digest(&bytes[..*len as usize])) == *sha)
+}
+
+/// Whether truncating `chat` (a history that starts from a compaction) for a fork at `target_prompt_index` keeps
+/// exactly the turns up to and including that prompt, which is where the transcript copy cuts (P111, DI-04).
+///
+/// The truncation keeps everything before the first user turn it decides belongs after the target. That point is the
+/// transcript's cut, provably, in two cases only:
+/// - the item it cuts at is the marked user turn of prompt `target_prompt_index + 1`: the history is chronological, so
+///   every turn before it, marked or not, is at or before the target;
+/// - the target's own user turn is marked and no unmarked turn follows it before the cut: everything kept after the
+///   target's turn is part of that turn.
+///
+/// Anything else is refused by the caller. In particular a history with unmarked turns after its summary (written
+/// before prompt markers) followed by marked ones: the truncation cuts at the first marker past the target, keeping
+/// the unmarked turns between the target and that marker (Astra r4).
+fn marked_cut_is_exact(chat: &[ConversationItem], target_prompt_index: usize) -> bool {
+    let keep = conversation_truncate_for_prompt(chat, target_prompt_index + 1);
+    if let Some(ConversationItem::User(user)) = chat.get(keep)
+        && user.prompt_index == Some(target_prompt_index + 1)
+    {
+        return true;
+    }
+    let Some(target_turn) = chat[..keep].iter().position(
+        |item| matches!(item, ConversationItem::User(user) if user.prompt_index == Some(target_prompt_index)),
+    ) else {
+        return false;
+    };
+    // An unmarked user item that opens a turn by the pre-marker rules (a typed prompt, or a synthetic that starts a
+    // turn) after the target's marked turn is a later prompt the truncation would keep.
+    !chat[target_turn + 1..keep].iter().any(|item| {
+        matches!(item, ConversationItem::User(user) if user.prompt_index.is_none()
+            && user.synthetic_reason.as_ref().is_none_or(|reason| reason.starts_prompt_turn()))
+    })
+}
+
+/// Id of the latest compaction marker on the live timeline of `updates` (rewound branches filtered out the way a
+/// point-in-time copy filters them), or `None` when it has none. Only the first `limit` bytes are read: the copy's
+/// snapshot of the transcript.
+fn latest_live_compaction_id(updates: &Path, limit: u64) -> io::Result<Option<String>> {
+    struct LineRecord {
+        step: RewindStep,
+        checkpoint_id: Option<String>,
+    }
+    let file = match std::fs::File::open(updates) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut records = Vec::new();
+    for_each_jsonl_line(BufReader::new(file.take(limit)), |_, line| {
+        let text = std::str::from_utf8(line).ok();
+        let step = text.map_or(RewindStep::Other, rewind_step_for_line);
+        let checkpoint_id = text
+            .filter(|text| text.contains("compaction_checkpoint"))
+            .and_then(|text| SessionUpdateEnvelope::from_str(text).ok())
+            .and_then(|update| match update {
+                SessionUpdate::Fuigo(notification) => match notification.update {
+                    crate::extensions::notification::SessionUpdate::CompactionCheckpoint(info) => {
+                        Some(info.checkpoint_id)
+                    }
+                    _ => None,
+                },
+                SessionUpdate::Acp(_) => None,
+            });
+        records.push(LineRecord { step, checkpoint_id });
+        Ok(ControlFlow::Continue(()))
+    })?;
+    Ok(filter_rewind_by(records, |record| record.step)
+        .into_iter()
+        .rev()
+        .find_map(|record| record.checkpoint_id))
+}
+
+/// Name prefix of the staging directories copies make next to the target session. The leading dot keeps them out of
+/// the session listings and the relocation scan, which skip dot entries at that level.
+const FORK_STAGING_PREFIX: &str = ".fuigo-fork-staging-";
+
+/// The lock file inside a staging directory, held exclusively while its copy runs.
+const FORK_STAGING_LOCK: &str = ".lock";
+
+/// The name the lock file has until its lock is held.
+const FORK_STAGING_LOCK_INIT: &str = ".lock.init";
+
+/// A staging directory older than this whose lock is free was left by a copy whose process died.
+const STALE_FORK_STAGING_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// A copy's staging directory. The lock is released (and closed) before the directory is removed.
+struct ForkStaging {
+    _lock: std::fs::File,
+    dir: tempfile::TempDir,
+    /// Declared last, so it runs after the staging directory is gone.
+    _created_cwd_dir: CreatedCwdDir,
+}
+
+/// The target's `<encoded-cwd>` directory, when THIS fork created it ([`claim_cwd_dir`] makes the claim with an
+/// exclusive `create_dir`, so "created" is exact). A refused fork must not leave it behind empty (P132); it is removed
+/// on drop with `remove_dir`, which only succeeds on an EMPTY directory, so a session (or anything else) that arrived
+/// in the meantime keeps it. A successful fork has put the session in it. Nothing inside is ever deleted: a hash-encoded
+/// cwd's `.cwd` marker keeps its directory (a few bytes), because taking the marker away could race with another
+/// session that has already checked for it.
+struct CreatedCwdDir(Option<PathBuf>);
+
+impl Drop for CreatedCwdDir {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+}
+
+/// Create `dir` and say whether THIS call made `dir`: parents first (owner-only ones for the sessions tree, plain ones
+/// for a caller-owned explicit directory, whose ancestors keep their permissions), then one exclusive `create_dir`, so
+/// a directory another process makes first is never claimed.
+fn claim_cwd_dir(dir: &Path, owner_only_parents: bool) -> io::Result<bool> {
+    if let Some(parent) = dir.parent() {
+        if owner_only_parents {
+            crate::util::fuigo_home::create_dir_all_owner_only(parent)?;
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    match std::fs::create_dir(dir) {
+        Ok(()) => {
+            crate::util::fuigo_home::set_dir_owner_only(dir);
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+impl JsonlStorageAdapter {
+    /// The private directory a copy stages its transcript in (P114): next to the target's session directory, so the
+    /// move into the target is a rename on one filesystem and the transcript is written once, with no dependence on the
+    /// system temp dir (missing, full, unwritable or RAM-backed). The target's CWD directory is made the way the target
+    /// itself is (owner-only, with the sessions root repaired), before anything is staged. The directory is removed
+    /// when the returned guard drops, on every path; one left by a process that died is removed by a later copy.
+    fn fork_staging_dir(&self, target_info: &Info) -> io::Result<ForkStaging> {
+        let (parent, created) = match &self.dir_mode {
+            super::SessionDirMode::FromRoot(root) => {
+                let cwd_dir = crate::util::fuigo_home::sessions_cwd_dir_in(root, &target_info.cwd);
+                let claimed = claim_cwd_dir(&cwd_dir, true)?;
+                let created = CreatedCwdDir(claimed.then_some(cwd_dir));
+                let parent = crate::util::fuigo_home::ensure_sessions_cwd_dir_in(root, &target_info.cwd)?;
+                (parent, created)
+            }
+            super::SessionDirMode::Explicit(dir) => {
+                let parent = dir.parent().map_or_else(|| dir.clone(), Path::to_path_buf);
+                let claimed = claim_cwd_dir(&parent, false)?;
+                (parent.clone(), CreatedCwdDir(claimed.then(|| parent.clone())))
+            }
+        };
+        remove_stale_fork_staging(&parent);
+        match private_staging_dir(&parent) {
+            Ok(mut staging) => {
+                staging._created_cwd_dir = created;
+                Ok(staging)
+            }
+            // `created` drops here, removing a directory this call made.
+            Err(error) => Err(io::Error::new(
+                error.kind(),
+                format!("cannot create the fork's staging directory in {}: {error}", parent.display()),
+            )),
+        }
+    }
+}
+
+/// Best effort: remove staging directories in `parent` left by copies whose process died. A directory is removed only
+/// when it is old AND its lock file opens AND its lock is free: a live copy holds its lock for as long as it runs,
+/// however long that is (a suspended process included). One without a lock file is kept (its copy may not have made
+/// it yet).
+fn remove_stale_fork_staging(parent: &Path) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry.file_name().to_string_lossy().starts_with(FORK_STAGING_PREFIX)
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age > STALE_FORK_STAGING_AGE));
+        if !old {
+            continue;
+        }
+        // Only positive evidence that its copy is gone counts: the lock file opens (read-only, so its permissions do not
+        // matter) and its lock is free. A directory whose lock cannot be opened or taken is kept (P114 r2 #4).
+        let Ok(lock) = std::fs::OpenOptions::new().read(true).open(entry.path().join(FORK_STAGING_LOCK)) else {
+            continue;
+        };
+        if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
+            continue;
+        }
+        drop(lock);
+        if let Err(error) = std::fs::remove_dir_all(entry.path()) {
+            tracing::warn!(path = %entry.path().display(), %error, "could not remove a stale fork staging directory");
+        }
+    }
+}
+
+/// A private directory in `parent` for a staged cut, locked for as long as the returned guard lives: the transcript is
+/// session content, so other local users must not be able to read it while it is staged (owner-only on Unix).
+fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(FORK_STAGING_PREFIX);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let dir = builder.tempdir_in(parent)?;
+    // The lock is taken under another name and only then renamed to `.lock` (the lock stays with the open file), so a
+    // `.lock` a sweep can open is always one its copy has locked at some point: a copy suspended before it holds its
+    // lock has no `.lock` yet, and the sweep keeps its directory (P114 r3 #2).
+    let initializing = dir.path().join(FORK_STAGING_LOCK_INIT);
+    let lock = fuigo_config::owner_only_file_options(
+        std::fs::OpenOptions::new().read(true).write(true).create_new(true),
+    )
+    .open(&initializing)?;
+    fs2::FileExt::lock_exclusive(&lock)?;
+    std::fs::rename(&initializing, dir.path().join(FORK_STAGING_LOCK))?;
+    Ok(ForkStaging { _lock: lock, dir, _created_cwd_dir: CreatedCwdDir(None) })
+}
+
+/// Move the staged cut into the new session: a rename (the staging directory is on the target's filesystem), with a
+/// copy as the fallback should the rename still fail.
+fn move_staged_file(staged: &Path, target: &Path) -> io::Result<()> {
+    match std::fs::rename(staged, target) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            super::super::owner_only::copy(staged, target)?;
+            Ok(())
+        }
     }
 }
 
@@ -708,7 +1381,7 @@ fn copy_sidecar_file(enabled: bool, src: &Path, dst: &Path) -> io::Result<bool> 
         }
         return Ok(false);
     }
-    std::fs::copy(src, dst)?;
+    super::super::owner_only::copy(src, dst)?;
     Ok(true)
 }
 
@@ -785,11 +1458,22 @@ fn copy_referenced_checkpoints(
             }
             Err(error) => return Err(error),
         }
+        // Read through the checkpoint reader, which never follows a symlink even one swapped in after the check
+        // above (P146); a file it refuses is skipped like a missing one.
+        let bytes = match crate::extensions::notification::read_contained_checkpoint(source_session_dir, checkpoint_file) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                tracing::warn!(path = %src.display(), session_id = %source_id, %error,
+                    "compaction checkpoint refused or missing; skipping copy");
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let dst = target_dir.join(relative);
         if let Some(parent) = dst.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(&src, &dst)?;
+        super::super::owner_only::write(&dst, &bytes)?;
         copied += 1;
     }
     Ok(copied)

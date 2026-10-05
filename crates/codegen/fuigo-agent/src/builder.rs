@@ -949,6 +949,9 @@ impl AgentBuilder {
                 }
             }
         }
+        // P01. Allowlist entries that matched no known tool, carried onto the built Agent
+        // so a caller can tell the user which names did nothing.
+        let mut unresolved_allowlist_entries: Vec<String> = Vec::new();
         if !definition.tools.is_empty() {
             let has_agent_entry = definition
                 .tools
@@ -993,21 +996,37 @@ impl AgentBuilder {
                     "tools allowlist named recognized tools that aren't enabled; ignoring them"
                 );
             }
+            // P01. The allowlist is applied whether or not every entry resolved.
+            //
+            // This branch used to discard the entire allowlist and keep the full toolset
+            // when ANY entry was unmappable, so a single typo -- or a tool renamed by an
+            // upgrade -- silently inverted a restriction into a grant of the whole
+            // toolset, `run_terminal_command` included. The only signal was a `warn!`.
+            //
+            // Unmappable entries need no special handling here: `tool_id_matches` simply
+            // never matches them, so they contribute nothing and the entries that DID
+            // resolve still bind. That is the same shape as the
+            // `recognized_but_unavailable` branch just above, which already ignores
+            // unusable entries while keeping the allowlist in force.
+            tool_config.tools.retain(|tc| {
+                tool_id_matches(&definition.tools, &tc.id)
+                    || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
+                    || (has_agent_entry && task_deps.contains(&short_tool_name(&tc.id)))
+                    || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+            });
             if unresolved.is_empty() {
-                tool_config.tools.retain(|tc| {
-                    tool_id_matches(&definition.tools, &tc.id)
-                        || tc.kind.is_some_and(|k| allow_kinds.contains(&k))
-                        || (has_agent_entry && task_deps.contains(&short_tool_name(&tc.id)))
-                        || matches!(tc.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
-                });
                 tracing::debug!(agent = %definition.name, allowed = ?definition.tools, "tools allowlist applied");
             } else {
-                tracing::warn!(
+                // `error!`, not `warn!`: the user's configuration names tools that do not
+                // exist, and those names are restricting nothing.
+                tracing::error!(
                     agent = %definition.name,
                     unresolved = ?unresolved,
                     allowed = ?definition.tools,
-                    "tools allowlist had unmappable entries; keeping full fuigo toolset"
+                    "tools allowlist names unknown tools; they match nothing and restrict nothing -- check for a typo or a renamed tool. The rest of the allowlist is still applied"
                 );
+                unresolved_allowlist_entries =
+                    unresolved.iter().map(|t| (*t).to_string()).collect();
             }
         }
         tool_config
@@ -1278,7 +1297,8 @@ impl AgentBuilder {
             self.compaction_policy,
             hosted_tools,
             use_backend_search,
-        ))
+        )
+        .with_unresolved_tool_allowlist_entries(unresolved_allowlist_entries))
     }
 }
 /// CLI naming for the shared [`fuigo_tool_types::build_task_description`] builder.
@@ -2281,9 +2301,13 @@ mod tests {
             "must not inherit-all: {names:?}"
         );
     }
-    /// An unresolved own-allowlist entry makes step 4 fall back to the full toolset; the session clamp (step 4b) must still bind afterward.
+    /// P01. Renamed: step 4 no longer falls back to the full toolset, so the old name
+    /// described behaviour that no longer exists. The property this test exists to pin is
+    /// unchanged and still load-bearing -- the session clamp (step 4b) binds whatever the
+    /// allowlist layer above it decides. P01 strengthens that layer and must not weaken
+    /// the clamp, which is the last line of defence.
     #[tokio::test]
-    async fn session_clamp_binds_when_own_allowlist_falls_back() {
+    async fn session_clamp_binds_whatever_the_own_allowlist_resolves() {
         let names = session_clamp_tool_names(
             vec!["read_file".into(), "bogus_unresolved_xyz".into()],
             vec!["read_file".into()],
@@ -2292,7 +2316,7 @@ mod tests {
         assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
         assert!(
             !names.iter().any(|n| n == "run_terminal_cmd"),
-            "session clamp must bind despite the step-4 full-toolset fallback: {names:?}"
+            "session clamp must bind: {names:?}"
         );
     }
     #[test]
@@ -2477,9 +2501,57 @@ mod tests {
             assert!(!names.contains(&dropped.to_string()), "got: {names:?}");
         }
     }
-    /// Entries we can't match or map (a typo, a renamed/absent tool) fall back to the full toolset rather than crippling the agent.
+    /// P01. **This test's assertions were deliberately inverted.** It previously asserted
+    /// that an allowlist containing unmappable entries fell back to the FULL toolset --
+    /// the documented behaviour, on the reasoning that a typo should not cripple the
+    /// agent. That made the failure of the restriction a grant of everything: one typo,
+    /// or one tool renamed by an upgrade, and the agent received `run_terminal_command`.
+    ///
+    /// The allowlist now always applies. Entries that resolve bind; entries that do not
+    /// match nothing and are reported. The agent is not crippled -- it keeps the tools
+    /// the user actually named -- so the original concern is preserved without the
+    /// inversion. The flip is the point of the packet, not incidental churn.
     #[tokio::test]
-    async fn unmappable_allowlist_falls_back_to_full_toolset() {
+    async fn unmappable_allowlist_still_restricts() {
+        let tools = vec!["read_file".into(), "Frobnicate".into()];
+        let agent = build_with_tools(tools, vec![]).await;
+        let names: Vec<String> = agent
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| d.function.name.clone())
+            .collect();
+        assert!(
+            names.contains(&"read_file".to_string()),
+            "the entry that resolved must still bind: {names:?}"
+        );
+        assert!(
+            !names.contains(&"run_terminal_command".to_string()),
+            "an unmappable entry must not grant the full toolset: {names:?}"
+        );
+    }
+
+    /// P01 §5.3. The unresolved names reach the caller, not only `tracing`.
+    #[tokio::test]
+    async fn unresolved_allowlist_entries_are_reported_to_the_caller() {
+        let tools = vec!["read_file".into(), "Frobnicate".into(), "Wibble".into()];
+        let agent = build_with_tools(tools, vec![]).await;
+        let reported = agent.unresolved_tool_allowlist_entries();
+        assert!(
+            reported.iter().any(|e| e == "Frobnicate"),
+            "got: {reported:?}"
+        );
+        assert!(reported.iter().any(|e| e == "Wibble"), "got: {reported:?}");
+        assert!(
+            !reported.iter().any(|e| e == "read_file"),
+            "a resolved entry must not be reported as unresolved: {reported:?}"
+        );
+    }
+
+    /// P01 §5.4. The edge that most tempts a fallback: NOTHING resolves. The agent must
+    /// end up with only the always-allowed tools, never the full toolset.
+    #[tokio::test]
+    async fn allowlist_where_nothing_resolves_grants_no_ordinary_tools() {
         let tools = vec!["Frobnicate".into(), "Wibble".into()];
         let agent = build_with_tools(tools, vec![]).await;
         let names: Vec<String> = agent
@@ -2488,14 +2560,16 @@ mod tests {
             .iter()
             .map(|d| d.function.name.clone())
             .collect();
-        assert!(names.contains(&"read_file".to_string()), "got: {names:?}");
-        assert!(
-            names.contains(&"search_replace".to_string()),
-            "got: {names:?}"
-        );
-        assert!(
-            names.contains(&"run_terminal_command".to_string()),
-            "got: {names:?}"
+        for denied in ["read_file", "search_replace", "run_terminal_command"] {
+            assert!(
+                !names.contains(&denied.to_string()),
+                "nothing resolved, so {denied} must not be granted: {names:?}"
+            );
+        }
+        assert_eq!(
+            agent.unresolved_tool_allowlist_entries().len(),
+            2,
+            "both unmappable entries must be reported"
         );
     }
     /// An on-disk plugin agent parsed via `from_file_frontmatter_only` with a compat-style `tools:` allowlist gets the mapped toolset, not 0 tools.

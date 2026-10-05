@@ -10,8 +10,16 @@ pub struct DreamLock {
     marker: PathBuf,
 }
 pub struct DreamGuard {
-    _file: fs::File,
+    file: fs::File,
     marker: PathBuf,
+}
+impl Drop for DreamGuard {
+    /// Unlocks explicitly. A `flock` belongs to the open file description, and a child that another thread forks
+    /// inherits a copy of it until it execs (descriptors are close-on-exec), so closing ours alone can leave the lock
+    /// held for a moment. Errors cannot be reported from a destructor; closing the descriptor releases the lock anyway.
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 impl DreamLock {
     pub fn new(workspace_dir: &Path) -> Self {
@@ -40,12 +48,19 @@ impl DreamLock {
         let file = opts.open(&self.path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(DreamGuard {
-                _file: file,
+                file,
                 marker: self.marker.clone(),
             })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
             Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
+    }
+}
+#[cfg(test)]
+impl DreamGuard {
+    /// The held descriptor, so a test can make an inherited copy of it (what a forked child holds before it execs).
+    fn file(&self) -> &fs::File {
+        &self.file
     }
 }
 impl DreamGuard {
@@ -129,6 +144,7 @@ mod tests {
     use filetime::FileTime;
     use std::time::Duration;
     use tempfile::TempDir;
+
     #[test]
     fn exclusion_and_cancellation_preserve_success() {
         let dir = tempfile::tempdir().unwrap();
@@ -143,6 +159,34 @@ mod tests {
         drop(lock.acquire(0).unwrap().unwrap());
         assert_eq!(lock.last_consolidated_at().unwrap(), success);
         assert!(lock.acquire(0).unwrap().is_some());
+    }
+    /// P122 (P75 P-8): a forked child that has not exec'd yet holds a copy of the lock's open file description, and a
+    /// `flock` belongs to that description, so closing the parent's descriptor alone does not release it. The guard
+    /// must unlock explicitly. `try_clone` makes exactly that inherited copy, so the test needs no fork and no timing.
+    /// Mutant discriminated: a guard that only closes its descriptor on drop.
+    #[test]
+    fn a_dropped_guard_releases_the_lock_even_while_a_copy_of_its_descriptor_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DreamLock::new(dir.path());
+        let guard = lock.acquire(0).unwrap().unwrap();
+        let inherited = guard.file().try_clone().unwrap();
+        drop(guard);
+        assert!(
+            lock.acquire(0).unwrap().is_some(),
+            "the lock is free the moment the guard is dropped"
+        );
+        drop(inherited);
+    }
+    /// The same for a guard consumed by `commit`.
+    #[test]
+    fn a_committed_guard_releases_the_lock_even_while_a_copy_of_its_descriptor_lives() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = DreamLock::new(dir.path());
+        let guard = lock.acquire(0).unwrap().unwrap();
+        let inherited = guard.file().try_clone().unwrap();
+        assert!(guard.commit());
+        assert!(lock.acquire(0).unwrap().is_some());
+        drop(inherited);
     }
     #[test]
     fn marker_failure_keeps_retry_open() {

@@ -1,0 +1,1196 @@
+# Astra (gpt-6-astra, read-only, < /dev/null) audit of P17-F3: final answer of each of 20 rounds (tool traces omitted).
+# Rounds 1-18: HIGH-FOUND (each fixed, see R049). Round 19 (c846a607): NO-HIGH, 3 MEDIUM. Round 20 (1357b030): NO-HIGH, 2 MEDIUM + 1 LOW (listed as limits in R049).
+
+################ ROUND 1
+Found **4 HIGH and 4 MEDIUM defects**. Shell syntax checks passed; focused shell/Python harnesses reproduced the state, exit-status, signal-inheritance and resolver bugs. Linux/systemd cleanup was not exercised on this read-only macOS host.
+
+1. **HIGH — Scope identity is lost before abort cleanup.** [rp.sh:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:30), [iso.sh:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:49)  
+   `bg scoped …` executes `scoped` in a subshell. Its assignments to `CURU` and `SEQ` never reach the parent. The harness confirmed that the parent retains `CURU=""`, `SEQ=0`, and consecutive commands use the same `…-1` scope. Consequently, abort skips `systemctl kill`. A test descendant that calls `setsid()` survives both session sweeps while the script deletes its worktree and reports cleanup complete. A surviving scope also prevents subsequent commands from creating that same unit.
+
+2. **HIGH — The advertised gate abort can kill unrelated processes.** [final-gate.sh:71](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:71)  
+   The gate records its inherited session without first becoming a session leader. Started normally from an interactive shell, its advertised `pkill -s <GSID>` targets the terminal’s session, including the caller and unrelated jobs. Unlike `rp.sh`/`iso.sh`, this script never re-execs under `setsid`. The self-test always supplies `setsid` externally, masking this defect.
+
+3. **HIGH — Build containment inspection fails open.** [final-gate.sh:141](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:141)  
+   Neither `gate_cg_resolve` nor `gate_cg_kill` status is retained. Resolution failure leaves `BORPH=0`; a failed inspection/kill can likewise print zero, which is treated as clean. Both cases reproduced in the harness. For example, a failed `cgroup-build.path` write does not prevent the wrapper from executing cargo. An environment-cleared build descendant then escapes the later run-scope inspection, allowing an otherwise green gate to PASS without establishing build cleanup.
+
+4. **HIGH — Re-executed runners ignore direct SIGINT aborts.** [rp.sh:15](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:15), [iso.sh:18](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:18)  
+   Launching the replacement shell with `&` gives it an ignored SIGINT disposition. Bash cannot install an effective INT trap for a signal ignored on entry, and [`setsid` preserves that disposition](https://raw.githubusercontent.com/util-linux/util-linux/master/sys-utils/setsid.c). Thus `kill -INT` of the recorded runner PID—or `pkill -INT -s` of its session—does not invoke cleanup. The harness caught INT in the foreground case but ignored it after background re-exec.
+
+5. **MEDIUM — The supervisor can return success for a failed runner.** [rp.sh:17](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:17), [iso.sh:20](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:20)  
+   If the replacement exits before the first `kill -0`, the loop never calls `wait`; `SUPRC` remains unset and the wrapper exits zero. A quick lane-lock refusal or argument error can therefore become CLI success. Reproduced with an already-completed child whose actual exit status was 3.
+
+6. **MEDIUM — A rejected isolation invocation destroys the active lane’s output.** [iso.sh:42](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:42)  
+   `$OUT` is truncated before acquiring `.lane.lock`. Starting a second isolation run on an occupied lane erases the first run’s header and accumulated results, then exits 3. Acquire the lock before touching the shared output.
+
+7. **MEDIUM — Resolver guesses target names incorrectly for existing packages.** [iso-resolve.py:36](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:36)  
+   Cargo target names need not equal package names or source filenames. Existing manifests demonstrate this: `ptyctl-cli` maps `src/main.rs` to binary `ptyctl`, but the resolver emits `--bin ptyctl-cli`; `fuigo-pager-bin` similarly needs `--bin fuigo-pager`. Explicitly named binaries such as `pty-scenario` are also misresolved from underscore filenames. These isolation attempts fail without executing the requested test.
+
+8. **MEDIUM — Advertised doctest isolation cannot handle real doctest names.** [iso-resolve.py:64](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:64), [iso.sh:65](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:65)  
+   The resolver’s `\S+` matching excludes names containing spaces, while `for NM in $NAME` splits them into separate requests. The repository’s real fixture contains `src/lib.rs - double (line 10)`: direct resolution found nothing, and print-only isolation emitted five UNRESOLVED fragments. The synthetic `test docced ... ok` self-test does not exercise actual rustdoc naming.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 2
+Audited `b6c7b4ce..63464641`: **2 HIGH, 3 MEDIUM**. Linux/systemd behaviour was reviewed from code, not executed here.
+
+1. **HIGH — Earlier scopes escape abort cleanup.** [abort-lib.sh:46](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:46) overwrites `ABORT_CURU` for every command; line 53 kills only the latest scope. Scenario: an isolation run leaves a `setsid` descendant, returns, and the next repetition starts. Aborting now kills the second scope and original session, leaving the first descendant alive while deleting its scratch directories. A scope remains alive while any member exists. [systemd scope documentation](https://raw.githubusercontent.com/systemd/systemd/v255/man/systemd.scope.xml). The `quick-first` test uses `true`, so it cannot detect this leak. Retain all run-owned units or reap each before advancing.
+
+2. **HIGH — The background supervisor still ignores SIGINT.** [abort-lib.sh:29](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:29). From a noninteractive shell, `bash rp.sh … &` starts the non-leader supervisor with SIGINT ignored. Only its runner passes through Python; the supervisor cannot install an effective INT trap. Consequently, `kill -INT $!` leaves the run executing. Bash explicitly preserves signals ignored on entry. [Bash manual](https://www.gnu.org/s/bash/manual/bash.html). A local Bash probe confirmed this disposition behaviour. The new tests signal the recorded **runner** PID, never the supervisor PID.
+
+3. **MEDIUM — Abort during worktree creation skips cleanup.** [rp.sh:33](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:33). If TERM arrives during foreground `git worktree add`, Bash defers the trap until Git finishes, then executes it before `MADE_WT=1`. Cleanup sees zero and leaves the newly created worktree registered and present, yet reports `ABORTED: cleaned up`. A local shell probe confirmed this ordering.
+
+4. **MEDIUM — Doctest resolution ignores package identity.** [iso-resolve.py:53](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:53) returns `--doc` before checking metadata or the header’s crate name. A workspace log containing a requested name only beneath `Doc-tests other` therefore resolves successfully for package `wanted`. Isolation runs the wrong package’s doctests, potentially matching zero tests. A direct Python probe reproduced this. Validate the header against the selected package’s library target name.
+
+5. **MEDIUM — Distinct isolation names overwrite their evidence.** [iso.sh:76](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:76) keeps only `${NM##*:}` in log filenames. Isolating `a::same b::same` at one SHA writes both tests’ repetitions to the same three files; the second test truncates the first’s logs. The target suffix does not help when each name resolves to one target. A local filename probe reproduced the collision.
+
+All six shell files passed individual syntax checks. The supplied 229/0 Linux result was not rerun.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 3
+Audited `b6c7b4ce..70c288e7`: **2 HIGH, 2 MEDIUM**. Linux/systemd behavior was reviewed from code; local syntax checks and bounded Python/helper probes were executed.
+
+1. **HIGH — Supervisor startup can lose an abort and orphan the runner.** [abort-lib.sh:25](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:25) launches the child before installing forwarding handlers at line 27. TERM/INT/HUP arriving after the child starts but before its handler is installed terminates the supervisor without signaling the runner. The runner continues in its separate session; the gate watchdog watches that runner, so it does not help. A probe pausing the actual supervisor immediately after `Popen` reproduced supervisor exit `-15` with its child still alive. Install abort handling before spawning and preserve signals received during startup. The current self-tests signal only after fixture processes are running. [Python signal semantics](https://docs.python.org/3/library/signal.html).
+
+2. **HIGH — Scope containment and cleanup fail open.** [abort-lib.sh:48](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:48) executes commands directly when `systemd-run` is missing. A test descendant that calls `setsid()` then escapes both scope cleanup and the session sweep, while `rp.sh`/`iso.sh` report cleanup complete and remove scratch directories. With systemd present, lines 57 and 63 also discard every scope-kill failure without checking for survivors. A helper probe confirmed `bg` returns zero when its command succeeds but `systemctl kill` fails. Require containment before execution and verify cleanup before advancing or claiming success.
+
+3. **MEDIUM — Distinct names still overwrite isolation logs.** [iso.sh:35](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:35). For `a::same b::same a__same`, the first two names receive full sanitized stems, producing `a__same` and `b__same`; the third retains `a__same`. Line 82 consequently assigns the first and third tests identical filenames, and the later run truncates earlier evidence. Uniqueness must be checked across the final stems, including target suffixes.
+
+4. **MEDIUM — Metadata resolution still accepts another package’s relative header.** [iso-resolve.py:66](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:66) suffix-matches `src/lib.rs` against the requested package without checking the executable identity in the header. A workspace log containing `Running unittests src/lib.rs (.../other-abcd)` therefore resolves an `other` test to `--lib` for `wanted`. A direct resolver probe reproduced this with both packages present in metadata. Isolation can run zero tests—or an unrelated same-named test. Preserve and validate package/target identity, or reject ambiguous headers.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 4
+Audited `012aa51a96f7` against `b6c7b4ce`. Four findings remain:
+
+1. **HIGH — Scope inspection errors are treated as successful cleanup.** [abort-lib.sh:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:55) accepts anything except literal `active` as “gone,” including empty output from a failed `systemctl` call and `deactivating`. Scenario: a command leaves a detached child; both the kill and subsequent bus query fail. `bg` returns the command’s original success, and `abort_kill_all` reports no survivors. Mocked failure probes reproduced both zero returns. Systemd also permits stopping—and eventually failed—scopes with surviving processes. [Systemd scope implementation](https://raw.githubusercontent.com/systemd/systemd/v255/src/core/scope.c). Cleanup needs evidence of emptiness, with inspection failures propagated.
+
+2. **HIGH — Final-gate abort discards cgroup cleanup failures.** [gate-lib.sh:164](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:164) ignores `gate_cg_kill` failures; the function returns only the final marker sweep’s status. Scenario: an environment-cleared, detached child survives cgroup killing. The marker sweep finds nothing, so cleanup returns zero. [final-gate.sh:89](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:89) then announces the run was killed and its EXIT trap disables the watchdog. The watchdog likewise logs success unconditionally. A mocked surviving cgroup reproduced `gate_abort_run` returning zero.
+
+3. **HIGH — `rp.sh` silently discards containment failure during derivation.** [rp.sh:44](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:44) neither captures nor checks `bg`’s status and suppresses its diagnostic. Scenario: `cargo test --no-run` produces valid JSON, but a build-script descendant survives cleanup, causing `bg` to return 98. Derivation still succeeds; subsequent tests/clippy can report zero and the script writes `DONE`, removes scratch, and leaves that earlier scope alive. A probe of these statements reproduced `derived=5` and status zero after injected status 98. Containment failure must stop the run independently of valid derivation output.
+
+4. **MEDIUM — Heuristic executable validation covers libraries only.** [iso-resolve.py:53](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:53) through line 60 return bin/test selectors without checking `exe`. Reproduced: `Running unittests src/main.rs (.../other-abcd)` resolves to `--bin wanted` for package `wanted`; `tests/smoke.rs (.../custom_smoke-abcd)` resolves to `--test smoke`. When metadata is unavailable, isolation can execute the wrong target and report `exit=0` with no matching test. Apply executable validation to these branches too.
+
+Shell syntax checks passed. Findings were checked through source review and read-only, mocked/Python probes; Linux/systemd execution was not repeated. Exact historical output parity remains unverified because `rp.sh` and `iso.sh` are new files relative to the supplied baseline.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 5
+Audited `b6c7b4ce..8773eed1`. Two findings remain:
+
+1. **HIGH — SIGKILL of the launcher bypasses the watchdog.** [abort-lib.sh:29](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:29), [final-gate.sh:97](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:97). With `bash final-gate.sh … &`, `$!` becomes the Python supervisor; the runner has a different PID and session. Killing `$!` with SIGKILL leaves the runner executing. The watchdog monitors only the runner’s `$$`, so it never initiates cleanup while that runner remains alive. Cargo/tests can continue after the launcher reports termination. A local probe using the **current supervisor code** confirmed the surviving runner. The SIGKILL self-test targets the recorded runner PID, missing this path. Monitor supervisor death as well.
+
+2. **MEDIUM — Matching executable stems still misattributes targets across packages.** [iso-resolve.py:79](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:79), also heuristic mode at line 62. Both `fuigo-sampler` and `fuigo-extra-ca` contain `tests/proxy_dispatch.rs`. Given the latter’s relative Cargo header and its test `raw_control_proves_dns_guard_does_not_stop_proxy_connect`, resolving for `fuigo-sampler` returns `--test proxy_dispatch` in both modes. The executable stem matches, while the distinguishing hash is discarded. Isolation consequently runs the wrong package’s target three times, selecting zero tests and reporting `exit=0`. An in-memory fixture reproduced this mapping. Ambiguous package-relative headers need stronger package identity or an unresolved result.
+
+Shell syntax checks passed. Linux/systemd execution was not rerun; the supplied 278/0 result remains your reported evidence.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 6
+Reviewed `b6c7b4ce..e9f88f73`. Two findings:
+
+1. **HIGH — Parent-death SIGTERM can be swallowed before exec.** [abort-lib.sh:35](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:35)  
+   If the supervisor is SIGKILLed during `die_with_supervisor()`, the child still inherits `fwd` as its SIGTERM handler. Both the kernel-delivered signal and line 37’s self-signal append to the child’s private `st["early"]`; neither terminates it. The child then execs Bash, discarding that queue, and runs unattended. Signal handlers persist across fork until exec; `restore_signals` does not reset this custom handler. [Linux signal semantics](https://man7.org/linux/man-pages/man7/signal.7.html), [Python subprocess documentation](https://docs.python.org/3/library/subprocess.html).
+
+   **Evidence:** A bounded local probe using the actual callback, a stubbed Linux `prctl`, and a forced parent mismatch printed `RUNNER_EXECUTED_AFTER_PARENT_MISMATCH`, exit 0. The existing test delays **after** spawning, missing this window. Restore SIGTERM’s default disposition before arming parent-death notification and terminate immediately on parent mismatch.
+
+2. **MEDIUM — Doctest resolution bypasses cross-package ambiguity checks.** [iso-resolve.py:71](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso-resolve.py:71)  
+   If packages `wanted` and `other` both declare library target `shared`, a workspace log’s `Doc-tests shared` cannot identify its package. This branch examines only `wanted` and returns `--doc`, even when the failure belongs to `other`. Isolation can therefore test different code and produce misleading green evidence.
+
+   **Evidence:** Direct invocation with both packages returned `--doc`; the equivalent ambiguous unit-test header correctly returned unsupported. Apply workspace-wide library-name uniqueness checking to doctest headers too.
+
+Shell syntax checks passed. Linux/systemd tests were not rerun. Both wrappers are absent from the baseline commit, so that baseline cannot independently establish exact compatibility with the deployed originals.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 7
+Audited `b6c7b4ce..a63555fc`: **1 HIGH, 1 MEDIUM**. Shell syntax checks passed. Linux/systemd behaviour was assessed from code; the supplied 289/0 result was not rerun.
+
+1. **HIGH — A scope created during abort can escape cleanup.** [abort-lib.sh:106](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:106)  
+   The scope-kill pass happens **before** stopping the session’s launchers. Concrete ordering: TERM arrives while `systemd-run` is starting; `systemctl kill` finds no unit yet; the launcher subsequently creates its scope and starts a test that forks a `setsid()` descendant before the session sweep. Both session sweeps miss that descendant. Line 111 only checks the surviving scope—it never kills it again. `rp.sh`/`iso.sh` then remove scratch and exit, leaving the descendant alive despite reporting incomplete cleanup. This ordering is consistent with systemd’s separate scope-registration and command-execution steps. [systemd implementation](https://raw.githubusercontent.com/systemd/systemd/v255/src/run/run.c).  
+   **Correction:** stop launchers first, then kill and verify every recorded scope. Add a regression that synchronizes abort with scope creation; current mini-runner tests wait until the workloads are already running.
+
+2. **MEDIUM — Watchdog shutdown can signal a reused PID.** [gate-lib.sh:201](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:201)  
+   `gate_wd_stop` unconditionally sends TERM to the numeric PID saved at watchdog startup. If the watchdog dies early—for example under memory pressure—and its PID is reused during a long gate, normal gate exit kills the unrelated replacement process. Nothing checks process identity or whether the watchdog already exited.  
+   **Correction:** use the existing stop-file protocol and track/reap the watchdog safely, rather than signalling an unvalidated saved PID.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 8
+Audited `b6c7b4ce..cac7ef3b`: **1 HIGH, 1 MEDIUM**.
+
+1. **HIGH — Gate cleanup misses unscoped, unmarked children.** [gate-lib.sh:169](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:169) checks scopes and environment markers, but never the gate’s own session. [final-gate.sh:122](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:122) runs `cargo metadata` outside both mechanisms. SIGKILL during this pipeline leaves its children alive while the watchdog reports “killed.” A concrete prolonged case is Cargo’s rustup proxy installing missing toolchain components. [Rustup implementation](https://github.com/rust-lang/rustup/blob/master/src/config.rs). These children also inherit lane-lock fd 9.
+
+   The same gap affects a delayed, pre-exec `--list` launcher at [final-gate.sh:162](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:162): it has no separate session, so `pkill -s "$SID"` uses a PID that is not its SID. Before scope registration/environment installation, cleanup can miss it and it can subsequently launch candidate binaries. Contain startup work and stop launchers before sweeping scopes.
+
+2. **MEDIUM — The late-scope regression test does not establish the second-pass race.** [gate-selftest.sh:617](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:617) starts the scope, sleeps 0.3 seconds, then executes the **first** real kill. When registration completes during that sleep, the first pass kills it; deleting the second pass still satisfies the assertion. Failed fixture startup can also satisfy it because existence is never asserted. Force the first kill to miss, then establish a populated scope before the second pass.
+
+Six shell syntax checks, Python syntax, and five resolver probes passed. A local Bash fixture confirmed the orphaned-pipeline behavior; Linux/systemd tests were not rerun. Supplied CLI shapes remain intact; exact original-output equivalence is unverified because both scripts are new files relative to the base.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 9
+Audited `b6c7b4ce..94bb2501`, excluding `docs/strike/audits`, and compared against `/private/tmp/rp.sh` and `/private/tmp/iso.sh`. Three findings:
+
+1. **HIGH — Late scope registration can still escape gate cleanup.** [gate-lib.sh:179](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:179)  
+   Build/run launchers use `setsid`, so the gate-session sweep does not stop them. Concrete ordering: the unit-kill pass finds no scope; the record-file pass finds no record; the detached launcher then registers its scope and starts a child that clears its environment and calls `setsid`. The marker sweep kills tagged processes but misses that child. The final cgroup check only reports incomplete cleanup—it never kills again. The trap then disables the watchdog through its EXIT handler; the watchdog path likewise ends without another attempt. The child survives. Round 8’s late-registration fixture tests `abort_kill_all`, not this single-pass helper.
+
+2. **MEDIUM — Foreground Git commands still defer abort handling indefinitely.** [final-gate.sh:98](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:98)  
+   `git clone` and `git fetch` remain foreground commands without a timeout. If either stalls, `kill -TERM <gate-pid>` queues the Bash trap until Git finishes. Consequently, the new session sweep never starts, and the watchdog sees a living gate and does nothing. The same applies when the supervisor forwards TERM. Session-wide `pkill` can interrupt Git, but the documented PID-only abort cannot reliably do so. A local Bash probe confirmed the trap deferral.
+
+3. **MEDIUM — Legacy mixed-whitespace name lists silently lose isolation coverage.** [iso.sh:32](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:32)  
+   The original splits names on all whitespace. Now, any newline switches the entire argument to newline-only splitting, including explicit legacy mode. For example, `$'unit::a unit::b\nunit::c'` previously ran three names; now it runs `"unit::a unit::b"` as one exact filter, then `unit::c`. The combined filter ordinarily executes zero tests with exit 0; line 104 removes the zero-test summary, leaving an apparently successful `runN exit=0` line. Supporting spaced doctest names should not silently change legacy parsing.
+
+Shell syntax checks passed. Linux/systemd conclusions are from code review; the reported 296/0 suite was not rerun here.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 10b
+Audited `b6c7b4ce..50f611e6` in `wt-p17f3`, excluding `docs/strike/audits`.
+
+1. **HIGH — Observed build/list survivors can still produce PASS.** [gate-lib.sh:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:275) records the first scan’s PIDs, but returns only the later kill scan’s count. If a survivor exits while its details are collected, `gate_reap_scope` returns `0`, status `0`. [final-gate.sh:215](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:215) consequently omits `GATE_ORPHANS`; `survivors.txt` does not independently invalidate the verdict. An otherwise green run can PASS despite recording a survivor. A bounded mock reproduced `report observed pid=4242` followed by `count=0 status=0`. Preserve the first observation in the verdict count.
+
+2. **MEDIUM — Later-discovered survivors are killed without being recorded.** [gate-lib.sh:278](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:278), [final-gate.sh:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:214). Reporting covers the initial snapshot, while both kill helpers enumerate again; marker cleanup also repeats its scans. A survivor that forks during reporting can leave a child discovered by a subsequent kill scan and killed without any report block. The verdict can correctly reject the run while the new “every process found alive, before killing” requirement fails. Reporting must also cover discoveries inside cleanup.
+
+3. **MEDIUM — Build/list failure skips the promised survivor summary.** [final-gate.sh:158](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:158), [final-gate.sh:179](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:179). A failing build script that leaves a detached child gets that child recorded and reaped, then exits before creating `verdict.txt`. A failed `--list` phase follows the same path. These runs remain inadmissible, but their survivor summaries are missing from the required verdict artifact.
+
+4. **LOW — A valid run marker can be reported as absent.** [gate-lib.sh:255](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:255). With a sufficiently large environment and an early marker, `grep -m1` closes the pipe before `tr` finishes. Under `pipefail`, status `141` triggers `marker=""`, discarding the successfully captured marker. Reproduced with synthetic environment data. Consume the complete stream before selecting the marker.
+
+Shell syntax checks passed. Linux/systemd tests were not rerun. Exact legacy output compatibility remains unverified: the original `rp.sh`/`iso.sh` are absent from the base commit and local copies searched.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 11
+Audited `42c0e294` against `b6c7b4ce`, excluding `docs/strike/audits`. Found **2 HIGH and 1 MEDIUM** defects.
+
+1. **HIGH — Failed build/list exits can leak marked descendants.**  
+   [final-gate.sh:165](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:165), also line 186.  
+   A build script starts a detached helper using `systemd-run --scope`, retaining `FUIGO_GATE_RUN`, then fails. The helper occupies another scope; reaping the build scope misses it. These exits never reach `gate_reap_marker` at line 216, and the EXIT trap at line 103 disables the watchdog. The helper survives indefinitely. The same applies to a failing `--list` binary. Scope execution inherits the caller’s environment. [systemd documentation](https://man7.org/linux/man-pages/man1/systemd-run.1.html)  
+   **Fix:** perform marker cleanup on build/list failure before disabling the watchdog.
+
+2. **HIGH — Marker cleanup can SIGKILL an innocent process after PID reuse.**  
+   [gate-lib.sh:301](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:301)–303.  
+   The function saves numeric PIDs, reports every survivor, then signals the original list. If an observed survivor exits during reporting and its PID is recycled, `kill -9` targets the replacement without checking ownership. Reporting enlarges this race window. A harmless control-flow probe confirmed that the saved PID is still signalled after simulated ownership replacement.  
+   **Fix:** retain a stable process handle while establishing marker ownership and signal through that handle. Linux explicitly documents this wrong-process race and pidfd protection. [Linux documentation](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)
+
+3. **MEDIUM — Equal-count process replacement escapes survivor reporting.**  
+   [gate-lib.sh:283](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:283).  
+   The report scan observes A; A forks B and exits; the kill scan observes B. Both counts equal one, so no placeholder is written. B is killed, the next round finds nothing, and `survivors.txt` names only A. A mocked control-flow probe reproduced this omission. The verdict remains inadmissible, but the promised survivor evidence is incomplete.  
+   **Fix:** compare process identities between scans, not just counts.
+
+Shell/Python syntax checks and three resolver smoke cases passed. Compared the CLI/output code with `/tmp/rp.sh` and `/tmp/iso.sh`; no additional format regression found. Linux/systemd tests were not rerun.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 12
+Audited `wt-p17f3` at `0cc63dda4e7a63ad1b41ebbea274ad07eb28e68b`, excluding `docs/strike/audits`.
+
+1. **HIGH — Abort cleanup still signals recycled PIDs.** [gate-lib.sh:194](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:194) calls `gate_kill_marker`, which executes raw `kill -9 $pids` at line 69. A marked helper can exit during the remaining `/proc` scan; if its PID is reused, an unrelated process receives SIGKILL. The new pidfd protection applies only to `gate_reap_marker`. The session sweeps also have this enumeration-to-signal race at [gate-lib.sh:165](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:165) and [abort-lib.sh:108](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:108). A stubbed abort-path probe confirmed raw signals with **zero calls** to `gate_kill_if_marked`.
+
+2. **HIGH — The EXIT sweep cannot invalidate PASS and disarms the watchdog after failure.** [final-gate.sh:105](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:105) discards both the sweep’s survivor count and status, then unconditionally calls `gate_wd_stop`. Concrete race: an escaped marked helper forks and exits during the preceding marker scan; the parent disappears before inspection and the child was absent from the scan’s initial glob. That scan reports zero. The EXIT sweep subsequently discovers the child, but the gate has already published its verdict and still exits 0. An inspection/cleanup failure there likewise disables watchdog recovery. Stubbed checks confirmed **exit 0 plus watchdog disarm** for both a newly observed survivor and reaper status 2.
+
+3. **HIGH — Watchdog liveness tracks a PID, not the original gate’s identity.** [gate-lib.sh:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:214) repeatedly calls `gate_pid_alive`, which checks only existence and non-zombie state. If the gate is SIGKILLed, reaped, and its PID reused before the next poll, an unrelated long-lived process is treated as the gate. Cleanup can then be postponed indefinitely while the original build/test scopes remain running. No captured start time or persistent pidfd distinguishes the replacement.
+
+4. **MEDIUM — Session inspection errors are reported as successful cleanup.** [gate-lib.sh:165](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:165) and line 168 discard `pgrep` status. If enumeration fails—for example under resource exhaustion—empty output skips both signalling and survivor verification, and the function returns 0. Unscoped startup children can survive while abort/watchdog reporting says cleanup completed. Injecting `pgrep` status 2 reproduced this false success.
+
+Shell syntax checks and representative resolver checks passed. Linux/systemd execution was not repeated. Exact original-wrapper parity remains unverified: `rp.sh` and `iso.sh` are additions absent from `b6c7b4ce`.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 13
+Audited `b6c7b4ce..199ac2bf`, excluding `docs/strike/audits`. Two findings:
+
+1. **HIGH — A recycled session ID can still cause innocent processes to be killed.** [gate-lib.sh:223](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:223), [gate-lib.sh:185](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:185), [safe-kill.py:37](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/safe-kill.py:37).
+   
+   Scenario: the gate and its original session disappear while the watchdog is delayed. That PID is recycled into an unrelated session leader. The watchdog correctly detects the changed start time, then calls cleanup with the **old numeric SID**. Session verification accepts the unrelated processes because their SID matches; the pidfd safely signals those wrong processes. A pidfd identifies the selected process, not the original session’s ownership. [Linux documentation](https://man7.org/linux/man-pages/man2/pidfd_open.2.html).
+   
+   A mocked boundary probe confirmed acceptance of the replacement leader. The regression at `gate-selftest.sh:937` supplies an empty gate SID, bypassing this dangerous path. Session cleanup needs identity protection across enumeration and both signal passes.
+
+2. **MEDIUM — Runner aborts remain deferred behind foreground Git commands.** [rp.sh:38](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:38), [rp.sh:40](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:40), [iso.sh:85](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:85).
+   
+   Scenario: fetch stalls, or worktree creation waits on a hanging checkout hook. TERM sent to the runner—or forwarded by its supervisor—does not execute `on_abort` until that foreground command finishes. The process, scratch directory and lane lock remain indefinitely. These commands bypass `bg`; the supervisor forwards only to the runner. This follows [Bash’s documented trap behavior](https://www.gnu.org/s/bash/manual/bash.html#Signals), also confirmed with a bounded local probe. Run these operations asynchronously with an interruptible `wait` and appropriate cleanup tracking.
+
+The positional CLIs and normal `.out` summary formats match the original `/tmp` snapshots. Shell syntax checks passed. Linux/systemd tests were not rerun; the reported 347 passes remain supplied evidence.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 14
+Audited `b6c7b4ce..d83abecb` in `wt-p17f3`, excluding `docs/strike/audits`.
+
+1. **HIGH — Recycled sessions are accepted when their replacement leader has exited.** [safe-kill.py:40](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/safe-kill.py:40)  
+   Scenario: the original gate session disappears completely; its SID is reused by an unrelated session; that session’s leader exits, leaving children. A delayed watchdog sweep accepts those children because a zombie leader bypasses the start-time comparison and a missing leader is accepted outright. The SID is now pinned by **new** members, which does not establish continuity with the original session. The pidfd consequently targets an innocent process. A source-level fixture confirmed both branches return `0` and invoke the signal operation; this was mocked evidence, not Linux runtime proof. [Linux session semantics](https://www.man7.org/linux/man-pages/man7/credentials.7.html).
+
+2. **HIGH — The launcher-session sweep still omits identity verification.** [gate-lib.sh:191](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:191)  
+   The marker is checked once, then `gate_kill_session "$lsid"` runs without a leader start time. Scenario: its TERM pass empties the original launcher session; during the one-second pause, that SID is recycled. The KILL pass enumerates the replacement session and signals its members—even with its unrelated leader still alive—because `safe-kill.py` receives no expected start time. The round-13 protection therefore does not cover this caller.
+
+3. **MEDIUM — Detached Git-hook children escape `bgs` cleanup.** [abort-lib.sh:91](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:91)  
+   Scenario: a `post-checkout` hook starts `setsid sleep 600` and waits; TERM arrives during `rp.sh` checkout or `iso.sh` worktree creation. `bgs` creates neither a scope nor a run marker. The session sweep kills Git and the hook, but misses the detached child; no recorded scope contains it. Cleanup can consequently report `ABORTED: cleaned up` while that process survives. Git invokes this hook for both checkout and worktree creation. [Git hook documentation](https://git-scm.com/docs/githooks#_post_checkout).
+
+Shell/Python syntax checks passed. Linux/systemd tests were not rerun. Both positional CLI shapes remain present; complete original-output parity is unverified because the deployed originals are absent from the base commit and inspected local files.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 15
+Audited `b6c7b4ce..fabbf9cb`, excluding `docs/strike/audits`. Found three defects:
+
+1. **HIGH — A delayed launcher can start work after abort reports success.** [abort-lib.sh:98](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:98), [abort-lib.sh:113](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:113)  
+   `bg` records a unit name but never terminates or reaps the pending launcher during abort. If that child stalls before registering its scope, both kill passes find nothing and the absent cgroup is accepted as “gone.” The child can subsequently resume and launch the command. Final-gate’s auxiliary launchers also lack `FUIGO_GATE_RUN` and `launcher.id`, so its marker sweep cannot catch them. [Systemd registers the scope during client execution](https://github.com/systemd/systemd/blob/main/src/run/run.c); the one-second delay is no registration guarantee. A shell mock reproduced `cleanup returned 0`, followed by `LATE: command started after cleanup`. The existing late-registration fixture waits for registration before allowing the first kill call to return, excluding this scenario.
+
+2. **HIGH — Auxiliary containment failures can be discarded, allowing a passing gate with surviving work.** [final-gate.sh:130](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:130), [final-gate.sh:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:110)  
+   If fetch returns `98` because its scope remains populated or cannot be verified empty, execution continues. That failure never reaches the orphan verdict. Auxiliary commands carry no run marker, and `final_sweep` checks only marked processes before disarming the watchdog. Consequently, subsequent successful phases can produce PASS while the fetch scope remains alive. Clone/checkout containment failures also exit without cleaning auxiliary scopes. Related unchecked setup statuses exist at `rp.sh:37,47` and `iso.sh:82,85`.
+
+3. **MEDIUM — Failure to record an auxiliary scope does not prevent execution.** [abort-lib.sh:97](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:97)  
+   An append failure to `aux.units`—for example, disk exhaustion—falls straight through to command launch. If the gate then receives SIGKILL, its in-memory list disappears; the watchdog has neither the missing unit entry nor a marker identifying that auxiliary command. A shell mock confirmed that an unsuccessful journal append still executes the command and returns `0`. Recording must succeed before launch.
+
+Shell and Python syntax checks passed. The reproductions were shell mocks; Linux/systemd runtime verification remains the supplied 359-test result.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 16
+Audited `b6c7b4ce..6d2193d4` in `wt-p17f3`, excluding `docs/strike/audits`.
+
+- **HIGH — Abort can miss the launcher before PID assignment.** [abort-lib.sh:104](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:104). Launching the background command and assigning `ABORT_CHILD=$!` are separate shell operations. TERM between them enters cleanup with `ABORT_CHILD` empty. In `rp.sh`/`iso.sh`, a launcher delayed beyond both scope-kill passes can subsequently register its scope and execute after “ABORTED: cleaned up.” A shell-only signal-injection check reproduced the empty variable at trap entry. The delayed-launch test signals after assignment and misses this window.
+
+- **HIGH — The launcher kill can target a recycled PID.** [abort-lib.sh:122](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:122). Bash can reap background children before explicit `wait`; additionally, line 108 leaves `ABORT_CHILD` populated briefly after `wait` returns. If the runner is descheduled or stopped in either window, the PID can be reused before an abort resumes execution. The unconditional numeric `kill -KILL` then kills the unrelated replacement. The “not yet reaped” justification is false; a local shell check confirmed a child was already absent while `wait` still returned its cached status successfully.
+
+- **MEDIUM — Self-test cleanup kills unrelated host processes.** [gate-selftest.sh:958](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:958). `pkill -f 'sleep 7023'` has no run identity or scope restriction and matches substrings. An unrelated `sleep 70230`, or another concurrent self-test’s fixture, is terminated. Cleanup must target the fixture’s recorded scope or verified process identity.
+
+Linux/systemd tests were not rerun. The deployed originals of `rp.sh`/`iso.sh` are absent from the base commit, so exact original-output compatibility remains unverified.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 17
+- **HIGH — Reusing a lane re-enables an aborted launcher.** [rp.sh:22](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:22), [iso.sh:69](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:69). Abort leaves an unregistered launcher alive and relies on `<lane>.abort` remaining present. Once cleanup releases the lock, the next invocation deletes that same flag. A delayed old launcher can then register its scope, pass the check, and execute after “ABORTED: cleaned up.” For example, an old `rp.sh` bundle fetch can overwrite the new run’s `rb-<lane>` refs. Use a unique, persistent abort flag per invocation. The delayed-launch self-test never restarts the lane before releasing the launcher, so it misses this race.
+
+- **MEDIUM — Self-test cleanup still signals a reaped PID.** [gate-selftest.sh:588](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:588). `mini_case` waits for the runner’s exit receipt and cleanup assertions, then unconditionally sends SIGKILL to the saved PID. If that PID is recycled during the intervening checks or waits, an unrelated process is killed. Remove the redundant kill after confirmed exit; failure cleanup needs verified process identity.
+
+Reviewed `371a0ddb`; shell/Python syntax and diff checks passed. Linux/systemd tests were not rerun. Exact deployed-original CLI/output parity remains unverified because those originals are absent from the baseline.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 18
+Audited `81f910d1` against `b6c7b4ce`, excluding `docs/strike/audits`. Four findings:
+
+1. **HIGH — Pruning can reactivate an aborted launcher.** [rp.sh:24](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/rp.sh:24), [iso.sh:71](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/iso.sh:71). A launcher stopped before scope registration survives the scope-only abort. If it remains stopped beyond the pruning threshold, another invocation deletes its abort flag. When resumed, it registers its scope, passes the absent-flag check at `abort-lib.sh:109`, and executes the aborted command without its owner. No launcher lifetime bound makes age-based deletion safe. Retain flags until launcher termination is established. The assertion at `gate-selftest.sh:975` checks for `rm -f`, so it misses the existing `find … -delete`.
+
+2. **MEDIUM — Failed cgroup cleanup still disarms the watchdog.** [final-gate.sh:118](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:118). Suppose an environment-cleared survivor remains after `gate_reap_scope` fails to write `cgroup.kill`. The gate correctly rejects the evidence, but its exit sweep finds no marker and unconditionally calls `gate_wd_stop`, preventing the watchdog’s separate `systemctl kill` fallback. This also applies after an incomplete abort. A control-flow probe confirmed watchdog disarm with failed cleanup statuses and an empty marker sweep. Disarm only after scope cleanup is verified.
+
+3. **MEDIUM — Survivor reporting can identify an innocent replacement process.** [gate-lib.sh:319](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:319). Marker reaping captures PID/start-time pairs, but passes only PIDs to `gate_survivor_report`. If a survivor exits and its PID is reused before reporting, the report reads the replacement’s command, executable and working directory and labels it a survivor. The subsequent identity-checked kill correctly avoids signalling it, but `survivors.txt` and the coordinator summary falsely identify it as a process that was killed. Pass and validate the captured identity when reporting.
+
+4. **MEDIUM — The self-test still signals a potentially recycled session.** [gate-selftest.sh:1075](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1075). The planted-survivor gate can finish before the test reads its persisted SID and executes `pkill -s "$GP3"`. If that number has been reused as another session’s ID, the test terminates unrelated processes. Removing the saved-PID SIGKILL elsewhere does not close this path. Abort this fixture through its recorded scopes or an identity-verified live runner.
+
+Linux/systemd tests were not rerun here.
+
+VERDICT: HIGH-FOUND
+
+################ ROUND 19
+Audited `b6c7b4ce..c846a607` in `wt-p17f3`, excluding `docs/strike/audits`. Three MEDIUM findings; no HIGH found.
+
+1. **MEDIUM — Survivor identity can still be captured after PID reuse.** [gate-lib.sh:323](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:323)  
+   `gate_marker_pids` returns bare PIDs; start times are read afterward. If a marked survivor exits and its PID is reused between those operations, the replacement’s start time becomes the supposedly trusted token. The report then describes that innocent process. There is another unchecked window between the report’s initial `stat` read and its subsequent command-line/environment reads at lines 247–253. The marker check protects the replacement from being killed, but `survivors.txt` can still falsely identify it.
+
+2. **MEDIUM — The exit scope check treats unavailable tracking state as “all gone.”** [gate-lib.sh:338](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:338)  
+   An unreadable `aux.units` is silently omitted, and absent scope paths are accepted without first validating the cgroup mount. Consequently, losing access to the mount—or the auxiliary-unit record while an env-cleared auxiliary descendant remains—can make `final_sweep` disarm the watchdog. A read-only helper check with an unavailable mount returned **1**, meaning “all scopes gone.” Missing tracking infrastructure must remain distinguishable from an absent individual scope.
+
+3. **MEDIUM — The planted-survivor integration test never asserts completion or rejection.** [gate-selftest.sh:1089](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1089)  
+   After polling `gs.rc`, the test only checks that `sleep 6040` disappeared. It never reads the exit code or asserts INADMISSIBLE. A regression that records/kills the survivor but incorrectly passes the gate satisfies every assertion. If the gate remains running after 300 seconds, the test also deletes its lane without failing the completion check.
+
+Shell/Python syntax checks passed. Linux/systemd execution was not repeated; 359/0 remains supplied evidence. Exact comparison against the original deployed `rp.sh`/`iso.sh` copies remains unverified because those originals are absent from the baseline.
+
+VERDICT: NO-HIGH
+
+################ ROUND 20
+Audited `b6c7b4ce..1357b030` in `wt-p17f3`, excluding `docs/strike/audits`. No HIGH found. Three findings remain:
+
+- **MEDIUM — `aux.units` read failures still fail open.** [gate-lib.sh:340](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:340), also [gate-lib.sh:177](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-lib.sh:177). If `-r` succeeds but `cat` subsequently fails—for example, an I/O error—the auxiliary units disappear from the inspected set. An auxiliary descendant with its environment cleared can survive abort while the exit check reports everything empty and disarms the watchdog. In-memory fault injection against the actual function returned **0 (populated)** with a successful read and **1 (all empty)** with the same auxiliary scope present but its inventory read failing. Check the read’s exit status.
+
+- **MEDIUM — Survivor summaries claim successful kills despite cleanup failure.** [final-gate.sh:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/final-gate.sh:275), also line 85. When a recorded survivor remains alive after SIGKILL, the reap helpers return failure, but the summary still says the processes “were killed.” The gate remains inadmissible, so this does **not** create a false PASS; it gives the coordinator incorrect cleanup evidence. Report survivors as observed and distinguish confirmed termination from incomplete cleanup.
+
+- **LOW — The report-failure assertion checks an inactive condition.** [gate-selftest.sh:1001](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1001). It greps for the `SREP` condition, but `SREP` is permanently initialized to zero. Removing report-error propagation from the reap helpers would leave this assertion passing. Inject a report-write failure through a reap helper and assert the resulting unknown/inadmissible outcome.
+
+Shell/Python syntax and diff checks passed. Linux/systemd execution was not rerun; 359/0 remains supplied evidence. The requested positional CLI contracts are retained, but the pre-packet deployed originals are absent from the base revision, limiting independent output-parity confirmation. The accepted survivor PID-description limitation is not re-raised.
+
+VERDICT: NO-HIGH
+
+
+################ ROUNDS 21-28 (TRANSCRIPTS LOST)
+The final answers of rounds 21-28 were kept only in the codex session logs under the home directory, which was wiped on
+2026-10-02 16:18Z (`rm -rf ~` by another session). They cannot be reproduced here. What survives is second-hand: the
+receipt R049 as committed in ca9b48a1, the fix commits, and the round-29 prompt. Nothing below is a quotation of Astra.
+
+| Round | Audited | Verdict (as recorded by the author at the time) | Fix |
+|---|---|---|---|
+| 21 | d00c44af (feature-gated targets) | HIGH-FOUND: gated-target discovery failure was silent | 2715a326 |
+| 22 | 2715a326 | NO-HIGH (mediums/low: metadata exit status, [+features] failset identity, safe-kill signal names) | 488795df |
+| 23 | 45fdd3de (disk guard) | NO-HIGH (disk-guard failure must be fatal; self-test counts) | dc0886f8 |
+| 24 | 0f9049e9 + cd86ddb8 (fresh pager binary per side) | HIGH-FOUND: FUIGO_BINARY inherited from the environment; FEAT broke the pager build | d66a6320 |
+| 25 | d66a6320 | HIGH-FOUND: a failed checkout re-proved the wrong revision | 0cd9cefc |
+| 26 | 0cd9cefc | NO-HIGH, 1 MEDIUM (gated-targets.py ignores dependency-enabled features; over-reports) | none (known limit) |
+| 27 | 89e593ed (test-only commits after R26) | HIGH-FOUND: the self-test signalled fixtures that were not identity-checked; zombie handshake | fa06f9c5 |
+| 28 | fa06f9c5 | HIGH-FOUND: the self-test could kill unmarked processes selected by name; MEDIUM: pre-exec SIGKILL test could pass vacuously | b73b10cb |
+
+Rounds 27 and 28: the audited commit is inferred from the commit order (R27 fix is the first commit after dc8ace15); the
+finding text for round 28 is taken from the round-29 prompt, for round 27 from the fix commit subject.
+
+
+################ ROUND 29 (diff fa06f9c5..b73b10cb; full transcript: p17f3-astra-r29.raw.txt, sha256 1b5da3f1ed40a6c1cca6569495b628a6c47c1e7c368eca01a441477d7e4493bd)
+
+Audited `fa06f9c5..b73b10cb`. **Both fixes remain incomplete: 2 HIGH, 1 MEDIUM.**
+
+1. **HIGH — Ownership filtering still leaves unsafe PID/session signalling.** [gate-selftest.sh:44](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:44) verifies the marker during selection, then returns an unpinned numeric PID. Cleanup later uses plain `kill "$LSB"` (679), `kill "$SVP"` (885), and `kill "$KP2"` (926). If the fixture exits and its PID is reused between those operations, the replacement is signalled without verification. The revised supervisor path (624–625) verifies the child’s marker but only checks the parent’s command line before signalling it—also without pinning.
+
+   Unchanged bypasses remain: group/session signals at 562–564, 598 and 1141, plus saved-PID signals elsewhere. For example, `gate_abort_case` can observe that its gate exited while waiting for readiness, yet still execute `pkill -s "$GP"` or `kill -9 "$GP"`. Failed `chk` assertions do not normally stop execution.
+
+   These are residual safety defects. Open a pidfd, verify the target’s run identity, then signal through that descriptor; an earlier environment check cannot protect a later numeric kill. [Linux documents this PID-reuse race](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html).
+
+2. **HIGH — Scope cleanup still kills other runs’ name-matched fixtures.** [gate-selftest.sh:1177](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1177) selects **every** systemd scope matching `/gatedemo5-helper/` and sends SIGKILL to all its processes. There is no current-run marker or ownership check. Another concurrent self-test’s helper scope is directly eligible, without requiring PID reuse. This unchanged signalling path bypasses the new filter entirely. Record and clean up this invocation’s exact scope identity.
+
+3. **MEDIUM — The “handshake” still permits a false pass after exec.** [gate-selftest.sh:704](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:704) checks only that the supervisor has a child. If scheduling delays observation or signalling beyond the three-second hook, that child can already be executing `sleep 6021`. Killing the supervisor then terminates that sleep through `PR_SET_PDEATHSIG`, which [survives ordinary exec](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html). Five seconds later, the assertion still reads `child/0/0`, falsely claiming the runner never executed.
+
+   The pidfd kill correctly protects this particular signal from PID reuse, but does not establish timing. Require an acknowledgement from inside the pre-exec hook, hold the child there until the supervisor is killed, and record a persistent sentinel if the runner executes.
+
+`bash -n` and `git diff --check` passed. Linux/systemd execution was not performed. No files changed.
+
+MEDIUM count: 1  
+VERDICT: HIGH-FOUND
+
+
+################ ROUND 30 (diff b73b10cb..e5c1fca7; full transcript: p17f3-astra-r30.raw.txt, sha256 ea1f231908ed041de0f711630c350042ba002a6fc26d8d2d72158f56e3563079)
+
+**Round 30: both round 29 HIGH findings remain open; the MEDIUM pre-exec finding is only partially fixed.** Audited `b73b10cb..e5c1fca7`; HEAD matches `e5c1fca734cd338345a550631085617244ef06af`. No files changed.
+
+1. **HIGH — Unverified PID/group/session signals remain.** The new `skill()` correctly uses marker verification through a pidfd, and fixes the supervisor-parent signal at line 627. However, these destructive paths still bypass it in [gate-selftest.sh](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:564):
+
+   | Lines | Remaining signal |
+   |---|---|
+   | 564 | Numeric process-group `kill`, following a separate `ps` lookup |
+   | 566 | `pkill -s "$GB"` |
+   | 600 | All `mini_case` branches: numeric runner PID, session ID, and supervisor PPID signals |
+   | 965, 975 | TERM to saved fixture PIDs |
+   | 1143 | `gate_abort_case` TERM still uses `pkill -s "$GP"` |
+
+   Earlier discovery or assertions do not pin the recipient. Process exit/reuse between lookup and signaling can redirect the signal; the supervisor lookup can also observe a changed parent. Failed `chk` assertions normally continue, so they are not safety guards. **Round 29 finding 1 is not closed.** Use verified pidfd recipients; tests requiring actual group/session signaling need isolation that makes collateral signaling impossible.
+
+2. **HIGH — Cross-run scope cleanup is unchanged.** [Line 1179](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1179) still enumerates every scope matching `/gatedemo5-helper/` and sends SIGKILL without checking run ownership. Another concurrent self-test’s helper is eligible. The fixture’s unit name contains its build-process PID, but cleanup does not restrict itself even to that name. **Round 29 finding 2 is not closed.** Record the exact successfully created unit under a unique run identifier and restrict cleanup to owned units.
+
+   The other direct `systemctl kill` sites are **649, 667, 719, 897, 903, and 979**. Lines 897/903 use a generated PID-plus-random unit; 649/667/719 use PID-derived names; 979 selects a PID-derived prefix. These are narrower than 1179, but do not independently verify ownership before signaling. PID-only names can collide with scopes retained from an earlier invocation after PID reuse. The generated wrappers at 644/662 also forward calls to real `systemctl`.
+
+3. **MEDIUM — Pre-exec timing is still unproven.** [Lines 701–708](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:701) add the persistent `t2.ran` sentinel, which improves detection. However, readiness remains “a child exists,” followed by a timed three-second hook. There is no acknowledgement from inside the hook and no hold/release protocol. Scheduling can let the child leave the hook before the signal; even successful exec followed by death before Bash writes the sentinel can escape detection. **Round 29 finding 3 is only partially closed.** Add hook acknowledgement, hold the child until supervisor death is confirmed, and retain the sentinel.
+
+4. **MEDIUM — Host-global process counts contaminate assertions and readiness.** These checks use unscoped command-line matches:
+
+   | Fixture | Assertion lines |
+   |---|---|
+   | Nine abort-scope sleeps | 509, 517 |
+   | Group/session demonstration, `6161` | 565, 567 |
+   | Mini-runner sleeps, `7011–7016` | 598, 599, 603 |
+   | Supervisor spawn window, `6020` | 629 |
+   | Late scopes, `7019` / `7020` | 648, 666 |
+   | Launcher identity, `6033` / `6034` | 676, 678, 680 |
+   | Auxiliary scope, `6032` | 693, 695, 697 |
+   | Pre-exec child, `6021` | 708 |
+   | Marker reaping, `6050` / `6051` | 910 |
+   | Verified signaling, `6060` / `6061` | 924, 926 |
+   | Stalled/delayed helpers, `7022` / `7023` | 964, 967, 978 |
+   | Gate build readiness and cleanup, `6001` | 1140, 1146 |
+   | External-scope helper, `6044` | 1178 |
+   | Planted survivor, `6040` | 1193, 1207 |
+
+   Related global polling occurs at **595, 602, 625, 640–641, 658–659, 692, 696, 963, 1139, and 1145**. Foreign processes can cause false failures, supply missing positive counts, or trigger readiness before this run reaches the intended phase. A foreign process disappearing later can also permit a misleading pass. Use run-owned identities or recorded cgroups; environment-cleared fixtures require cgroup-based checks.
+
+5. **MEDIUM — `skill()` hides signaling and cleanup failures.** [Line 46](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:46) discards stderr and always returns zero, including when `safe-kill.py` reports an operational error. Cleanup calls such as lines 681 and 928 have no subsequent disappearance assertion. The suite can therefore leave fixtures running without reporting the cleanup failure. Preserve error status and verify cleanup completion.
+
+6. **LOW — Synthetic PID fixtures inspect real host processes.** [Lines 937–942](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:937) stub enumeration with PIDs 4001/4002 but leave `gate_survivor_report` reading real `/proc`. Foreign process details can enter the report; matching text such as `additional process` can alter its assertions, and process-exit races can produce stderr. Supply an isolated fake proc tree.
+
+7. **LOW — Numeric liveness probes can accept replacement processes.** `kill -0` assertions at **684, 958, and 1141** check PID existence without confirming identity. At 1141, `${GP:-0}` additionally turns a missing PID into a probe of the caller’s process group. These probes are non-destructive, but can report false success. Require a nonempty PID and matching recorded identity.
+
+Shell syntax, Python AST parsing, and diff whitespace checks passed. Linux/systemd behavior was not executed or verified.
+
+**MEDIUM count: 3.** Total findings: 2 HIGH, 3 MEDIUM, 2 LOW.
+
+VERDICT: HIGH-FOUND
+
+
+################ ROUND 31 (diff e5c1fca7..004635e2; full transcript: p17f3-astra-r31.raw.txt, sha256 e8ef6062dee69ce440f56a03d35bf613ead2666ecb351c13262d1de31757bd7c)
+
+Audited `e5c1fca7..004635e2dda442dcabda307a8224dbbe4679c435`, read-only. **1 HIGH, 3 MEDIUM, 2 LOW remain.** Bash syntax passes. The reported **394/0** Linux/systemd result was supplied separately, not reproduced here.
+
+1. **HIGH — Two scope-signalling paths still trust PID-derived names.**  
+   [Line 665](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:665) and [line 683](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:683) call `systemctl kill` directly, bypassing `ukill`. A previous run’s surviving scope can have the same name after PID reuse. The fake wrappers also forward subsequent kill requests to real `systemctl` without ownership verification. Failed fixture creation does not prevent these signals. Use an invocation-unique name consistently through fixture creation, abort inputs, and cleanup; protecting only the final cleanup calls is insufficient.
+
+2. **MEDIUM — `ukill` silently accepts signalling failures.**  
+   [Lines 58–62](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:58) suppress `systemctl kill` errors and unconditionally return success. Timestamp-query failures also become silent skips. At [line 925](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:925), the preceding test deliberately stubs out killing, so failed cleanup can leave fixtures running without failing the suite. An extracted-function stub returning **42** from `systemctl kill` produced **`ukill_rc=0 failn=0`**. Report cleanup errors and verify the scope empties.
+
+3. **MEDIUM — Process assertions are narrower, but not fully run-isolated.**  
+   Every sleep-count assertion now includes the tag, but [the tag is only `$$`](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:46): surviving fixtures from an earlier invocation can collide after PID reuse. Additionally, [build-readiness and disappearance polls](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1161) use `sleep 6001.$SELFTEST_TAG` with an **unescaped regex dot**. For tag `1234`, that matches unrelated `sleep 600191234`. Use an invocation-unique suffix and escape the separator consistently.
+
+4. **MEDIUM — Pre-exec death evidence still conflates missing evidence with death.**  
+   [Lines 725–728](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:725) classify an empty initial `T2CST` as `dead`; capturing the child’s identity is never required to succeed. A stub confirmed **empty start time → `T2DEAD=dead`**. Conversely, an unreaped zombie retains its start time and is classified as alive. Require a valid initial identity and distinguish live, zombie/dead, and inspection failure. The Python-image acknowledgement, eight-second hold, and sentinel assertion are present.
+
+5. **LOW — Synthetic PID inspection remains**, as explicitly accepted: [4001/4002](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:961) still reach real `/proc` inspection.
+
+6. **LOW — Numeric liveness probes remain identity-blind.**  
+   The empty-PID guards are present, but `kill -0` at [700](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:700), 980, and 1163 still cannot distinguish PID reuse or zombies from the intended live process. These probes deliver no signal.
+
+The marker-plus-pidfd replacements for PID/group/session signalling are complete in the audited paths. `skill()` now records unexpected safe-kill failures. Demo5’s helper naming and prefix selection remove the former all-runs cleanup selector; its cleanup inherits the `ukill` limitation above.
+
+**MEDIUM count: 3**
+
+VERDICT: HIGH-FOUND
+
+
+################ ROUND 32 (diff 004635e2..83c91a94; full transcript: p17f3-astra-r32.raw.txt, sha256 f7eae9e22d661854aade1ef7d83a628bb69c2e47c934ded2a8ab8aeeeb6054c8)
+
+Audited `004635e2..83c91a94` read-only. **1 HIGH, 2 MEDIUM, 2 carried-forward LOW findings.**
+
+1. **HIGH — PID-only unit names remain on indirect signal paths.**  
+   The `rec2`, `flg`, and `flg2` fixtures still pass fixed lane names to `bg` ([1012](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1012), [1017](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1017), [1019](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1019)). This produces names such as `fuigo-t-rec2-<pid>-1.scope`. `bg` unconditionally signals that name after waiting—even when creation failed ([abort-lib.sh:118](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:118)). A stale scope following PID reuse can therefore be killed without current-run ownership verification. An inert stub confirmed the kill call follows failed creation. Extend the run tag to these fixtures too.
+
+2. **MEDIUM — `ukill` still does not establish scope emptiness.**  
+   At [63–68](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:63), a failed timestamp query becomes an empty value and returns success; subsequent inspection accepts anything except literal `active`. Stubs returning `deactivating`, `failed`, or a query error all produced `failn=0`. Use verified cgroup emptiness, such as `abort_scope_gone`, and distinguish inspection failure from confirmed absence. The existing [1088–1090 regression](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1088) already demonstrates why systemd state alone is insufficient.
+
+3. **MEDIUM — The scope-inventory assertion can pass after enumeration fails.**  
+   At [1178](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1178), failed `systemctl list-units` yields `grep -c` output `0`; the next assertion ignores the pipeline status and reports no scopes remaining. Confirmed with an inert stub. Check enumeration success before counting. This is a remaining pre-existing assertion defect.
+
+The requested fixes otherwise check out:
+
+- **Late/late3 direct kills:** replaced with `ukill`; all five specified fixture groups carry the new tag.
+- **Explicit cleanup failures:** kill errors, invalid/old timestamps, and persistent `active` state now report `FAIL`, subject to finding 2.
+- **Tag/regex changes:** randomized numeric tag implemented; both `pgrep -fx` patterns and `mine_fx` correctly escape dots.
+- **Pre-exec identity:** missing identity yields `noid`; start-time matching distinguishes alive, zombie, and dead. Stub checks passed.
+- **LOW:** synthetic PIDs `4001/4002` remain accepted; identity-blind `kill -0` probes remain unchanged.
+
+`bash -n` passed. Linux/systemd execution was unavailable; **394/0 is your supplied result**, not independently reproduced here.
+
+**MEDIUM count: 2**
+
+VERDICT: HIGH-FOUND
+
+
+################ ROUND 33 (diff 83c91a94..e97f95f8; full transcript: p17f3-astra-r33.raw.txt, sha256 fafc76b3ceeab42d3ce53f813b2ef5e70995363761a55d963452df40cafe07ce)
+
+Audited `83c91a94..e97f95f8` read-only. Only `scripts/strike/gate-selftest.sh` changed.
+
+The named `abort_init` lanes now contain `SELFTEST_UID`, including rec2/flg/flg2, nosd, flg3, mini, mini-bgs and ax. The inventory assertion correctly turns enumeration failure into `enumeration-failed`, which fails comparison with `0`. The `ukill` fix remains incomplete.
+
+- **HIGH — PID-only unit names still reach unconditional signalling.** [Lines 699–703](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:699) pass `fuigo-gate-ln-$$`; [line 1023](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1023) passes `fuigo-gate-flag-$$`. `gate_abort_run` unconditionally SIGKILLs each base and its `-build`/`-list` units, without creation or ownership evidence. Stubbing the marker sweep does not disable these signals. The watchdog control at line 987 also retains `fuigo-gate-none-$$`, reachable if its watched process disappears before disarming. Add `SELFTEST_UID` to these names and corresponding markers.
+
+- **MEDIUM — Empty activation timestamp bypasses emptiness verification.** [Line 64](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:64) returns success before `abort_scope_gone`. Query errors now fail, and post-kill verification uses the cgroup correctly, but this successful-query/empty-value branch still provides no cgroup evidence. A no-I/O stub check produced `failn=0 scope_check=no` with the scope checker configured to reject emptiness. Require cgroup verification before accepting this branch.
+
+- **MEDIUM — Shared lock-fixture path remains PID-only.** [Lines 891–895](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:891) use `selftest-isolock-$$`, overwrite its `.out` before acquiring the lock, and unconditionally remove its directory afterward. PID reuse can therefore overwrite/delete retained state from an earlier invocation; lock-acquisition failure does not prevent cleanup. Include `SELFTEST_UID` in `ISOL`.
+
+- **LOW — Missing-unit assertion is not run-unique.** [Line 753](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:753) assumes `fuigo-no-such-unit-$$` is absent in the real cgroup hierarchy. Add `SELFTEST_UID` to avoid host-state collisions. Previously accepted synthetic-PID and `kill -0` limitations remain unchanged.
+
+`bash -n` and diff whitespace checks passed. Linux/systemd execution was unavailable; **394/0 is separately supplied evidence**, not reproduced here.
+
+**MEDIUM count: 2.**
+
+VERDICT: HIGH-FOUND
+
+
+################ ROUND 34 (diff e97f95f8..e6b0cb39; full transcript: p17f3-astra-r34.raw.txt, sha256 eee1de280ce413476901e9307ef1d00220b487049929dc2cdd879010e76f5263)
+
+Audited `e97f95f8..e6b0cb397282a8999c48903f051ba806e4063a88`. **No HIGH/BLOCKER found. MEDIUM count: 2.** Both MEDIUM findings are unchanged residual issues.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Read-only diff and signal/fixture audit completed |
+| R33 HIGH: ln/flag/none units | ✅ Done | All now include `SELFTEST_UID`, including arguments reaching `gate_abort_run` |
+| R33 MEDIUM: empty activation timestamp | ✅ Done | `ukill` requires `abort_scope_gone`; failed evidence increments `failn` |
+| R33 MEDIUM: isolock directory | ✅ Done | Creation, assertions and cleanup use `selftest-isolock-$SELFTEST_UID` |
+| R33 LOW: nonexistent unit | ✅ Done | Uses `fuigo-no-such-unit-$SELFTEST_UID` |
+
+Remaining findings:
+
+- **MEDIUM — stale-binary lane missed the migration.** [gate-selftest.sh:1135](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1135) still constructs `selftest-stale-$1-$$-$RANDOM`. It has randomness, so it is **not PID-only**, but lacks the stronger run namespace. Line 1139 subsequently deletes `"/root/fuigo-builds/$ln"*`; after PID reuse, this can also match another retained lane whose random suffix extends this one. Embed `SELFTEST_UID` and delimit cleanup targets.
+
+- **MEDIUM — negative write fixtures depend on host-global absence.** [Line 916](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:916) writes to `/nonexistent-dir/s.txt`; [line 1011](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1011) appends to `/nonexistent-dir/aux.units`. If that directory exists and is writable, these tests modify unrelated files and exercise successful writes instead of the intended failures. Use a deliberately invalid destination beneath `$W`.
+
+- **LOW — fixed scope name remains in a live process scan.** [Line 939](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:939) passes `nounit.scope` to `gate_reap_marker`. An unrelated unreadable process in that scope can cause a false scan failure. Signalling remains protected by the run-unique marker and pidfd checks. Namespace the placeholder; line 1094 also retains it, although that case stubs enumeration.
+
+Confirmed **46 `$$` → `$SELFTEST_UID` replacements**. The blanket migration claim needs the stale-lane exception above. Other fixed cgroup names examined are isolated under `$W` or fake roots. Accepted LOW synthetic PIDs 4001/4002 and `kill -0` probes remain unchanged.
+
+`bash -n` and `git diff --check` passed. Linux/systemd execution was unavailable; **394/0 is user-supplied separate evidence**, not a run performed here. No files changed.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 35 (diff e6b0cb39..6744e5bb; full transcript: p17f3-astra-r35.raw.txt, sha256 a5ffad937d92dc55e2bd9a58e3d4f4ebc6d09afc9a69c75505600806998688c3)
+
+Audited `e6b0cb39..6744e5bb3194878683e979657d70793df4485e86`: only the six stated lines changed. **No HIGH/BLOCKER findings. MEDIUM count: 1.**
+
+Remaining findings:
+
+- **MEDIUM — Host-global `/nonexistent` still controls negative fixtures.** [gate-selftest.sh:292](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:292), also lines 294, 296, 355, 358, 517, 752 and 1040. Concrete scenario: another task creates `/nonexistent` as a readable regular file. The fake `environ` symlinks become readable, so the scanner returns success instead of exercising its unreadable-environment failure path. Other fixtures likewise assume this global path is absent or unusable. Use a guaranteed-invalid path beneath the private fixture directory. This is pre-existing, not introduced by HEAD.
+
+- **LOW — `KEEP` bypasses automatic directory uniqueness.** [gate-selftest.sh:34](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:34). Two invocations using the same `KEEP` directory overwrite common fixtures and evidence; sequential reuse can retain sentinels such as `rec.ran` and produce false failures. Default `mktemp` execution is isolated; retained runs require distinct directories.
+
+All three round-34 fixes are correct under the stated private-directory precondition:
+
+- **Stale lane and cleanup, lines 1135–1139:** the lane includes `SELFTEST_UID`. Exact, dotted and hyphenated patterns cover the lane directory and all stated per-lane filenames. Another generated lane with a longer numeric suffix cannot match: the next character must be `.` or `-`. Different UIDs and labels are excluded. Bash pattern checks confirmed these cases. This guarantee concerns the script’s generated lane grammar; arbitrary manually named `<lane>-something` directories would still match.
+- **Negative writes, lines 916 and 1011:** the regular-file parent forces `ENOTDIR`, including for root. `gate_survivor_report` reaches its append failure and returns `1`; `bg` fails recording the unit and returns `97` before launching the command. Status capture remains correct, and the second assertion still checks that `rec.ran` was never created.
+- **Placeholder units, lines 939 and 1094:** both use `nounit-$SELFTEST_UID.scope`. Marker matching and identity-checked signalling remain intact.
+
+No additional unscoped destructive signal or live-unit target was found. Fixed names confined to private fake roots are isolated. The accepted synthetic-PID and `kill -0` LOW limitations remain unchanged.
+
+`bash -n` passed. Linux/systemd execution was unavailable; **394/0 belongs to e6b0cb39, and HEAD’s runtime result remains unknown**.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 36 (gate-selftest.sh, diff 6744e5bb..023b8213; full transcript: p17f3-astra-r36.raw.txt, sha256 95b73812e82a4222167ed9635830c618061da3502b0e5fc9451f75c7a27b4fa8)
+
+No HIGH/BLOCKER found. **MEDIUM count: 8.** Round 36 therefore does **not** meet the “NO open MEDIUM” bar.
+
+1. **MEDIUM — Nonce length is unbounded.** [gate-selftest.sh:48](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:48) accepts 240 digits; a local evaluation produced a 290-character scope name. Systemd’s [limit](https://raw.githubusercontent.com/systemd/systemd/main/src/basic/unit-name.h) and [validator](https://raw.githubusercontent.com/systemd/systemd/main/src/basic/unit-name.c) reject names of 256 characters or more. Even shorter values break line 919: a representative 180-digit nonce produces a 206-character command, while `gate_survivor_summary` truncates commands to 200 characters. Bound the nonce against both consumers.
+
+2. **MEDIUM — Relative KEEP breaks downstream paths.** [gate-selftest.sh:35](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:35) preserves a relative template result. With `KEEP=keep`, line 1139 executes after `cd "$SB"` and resolves `"$W/stalebin.bundle"` beneath `$SB`, rather than the original working directory. Bundle creation fails. The new symlink/gitdir targets also resolve relative to their containing directories, rather than naming the intended `$W/nonexistent`. Canonicalize W before using it.
+
+3. **MEDIUM — KEEP metacharacters break supervisor identification.** [gate-selftest.sh:658](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:658), also line 738, interpolates W directly into regular expressions. With `KEEP=/tmp/fuigo[1]`, neither expression matches its own literal fixture path; both failures were reproduced with filesystem-free checks. The intended supervisor signal is consequently skipped or lacks a target. Use literal matching or proper regex escaping.
+
+4. **MEDIUM — “Not a repository” depends on the enclosing filesystem.** [gate-selftest.sh:326](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:326) assumes W cannot belong to a repository. An absolute KEEP directory inside a checkout lets Git discover that checkout; `gate_tree_check "$W"` returns dirty/clean rather than the expected inspection error. Isolate Git discovery for this negative fixture.
+
+5. **MEDIUM — ISO assertions inherit contradictory caller settings.** [gate-selftest.sh:523](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:523) never unsets `ISO_FROM_LOG`. With an inherited readable log, the actual resolver branch returns `!UNRESOLVED`, not the expected “unset or unreadable” diagnostic; this was reproduced using the extracted function. Similarly, inherited `ISO_PRINT_LOGS`, `ISO_META`, or `ISO_NAMES_NEWLINE` changes other fixtures’ behavior. Explicitly establish each fixture’s environment.
+
+6. **MEDIUM — Inherited abort bookkeeping can write outside the private fixture directory.** [gate-selftest.sh:612](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:612) initializes the mini runner without clearing `ABORT_UNITS_FILE` or `ABORT_LAUNCHER_FILE`; `abort_init` does not clear them either. If the caller exports another run’s launcher-file path, `bg` overwrites and subsequently truncates that file. Reset inherited abort bookkeeping before fixture execution.
+
+7. **MEDIUM — Git fixtures depend on host Git configuration.** [gate-selftest.sh:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:320), with equivalent setup elsewhere, overrides author identity but retains global signing, hooks, templates and excludes. For example, global `commit.gpgSign=true` with an unavailable signing key prevents fixture commits and invalidates subsequent assertions. Establish isolated Git configuration for fixture repositories.
+
+8. **MEDIUM — The historical comparison executable is mutable host-global state.** [gate-selftest.sh:1148](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1148) checks only that `/root/fuigo-builds/rp.sh.bak` is executable. Replacing that backup with the corrected runner changes the expected historical `0/101` result to `0/0`, without any candidate change. Pin and verify the historical fixture’s identity.
+
+Additional LOW findings:
+
+- **LOW — Failed mktemp does not reliably produce external exit 2.** Lines 35–36 exit 2 internally, but normal mktemp stderr causes the outer wrapper at lines 25–28 to replace it with exit 1. The extracted failure branch confirmed this interaction.
+- **LOW — Synthetic proc entries can equal the self-test PID.** Lines 299/303 use 4242/4444; `gate_marker_pids` skips `$$`, so those specific shell PIDs bypass the intended unreadable-process cases.
+- **LOW — Cwd assertion assumes `/tmp` is its physical path.** Lines 906/914 fail on a Linux host where `/tmp` is a symlink, because `/proc/PID/cwd` reports the resolved directory.
+
+The nine NOPATH replacements are complete; nothing in the script creates `$W/nonexistent`. With an absolute W, they preserve the intended missing-path failures. Both refused-hook replacements remain correctly quoted and still test hook presence. KEEP now creates a fresh private directory, retains it, and prints its path on normal completion. Unset nonce preserves the previous identity construction; supplied digits retain the existing random components and introduce no regex operators.
+
+No additional unsafe signal target was substantiated. Fixed unit names used solely beneath private fake roots do not collide with real units. The previously accepted synthetic-PID and `kill -0` LOWs remain accepted.
+
+`bash -n` and the scoped diff check passed. Linux/systemd execution was unavailable; HEAD’s full self-test result remains unknown.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 37 (gate-selftest.sh, diff 023b8213..a7a1df21; full transcript: p17f3-astra-r37.raw.txt, sha256 21aadb9548fc94ebda44df6a058f29fb6ea426dcd7313eaea7a4bee51fa7e266)
+
+**No HIGH/BLOCKER found. MEDIUM count: 6.** HEAD `a7a1df21` does **not** meet the “no open MEDIUM” bar.
+
+All locations below refer to `scripts/strike/gate-selftest.sh`.
+
+1. **MEDIUM — Git configuration isolation remains incomplete: [line 28](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:28).**  
+   `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_*`/`GIT_CONFIG_VALUE_*` and `GIT_CONFIG_PARAMETERS` survive. Concrete condition: a build shell supplies `commit.gpgsign=true` through environment configuration, but has no usable signing key. Fixture commits fail despite both configuration files being `/dev/null`, producing false self-test failures. I executed the exact sanitation block with that override; `git config --get commit.gpgsign` still returned `true`. Git documents this independent configuration channel. [Git configuration](https://git-scm.com/docs/git-config#Documentation/git-config.txt-GIT_CONFIG_COUNT)
+
+2. **MEDIUM — Inherited `NODOC` changes the default-count fixture: [line 1084](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1084).**  
+   Concrete condition: the root build shell retains exported `NODOC=1` from feature-only derivation work. The first invocation does not clear it, so the assertion obtains `1/1` instead of `2/1`. Running the exact JSON fixture through `derive.py`, after the new sanitation block, confirmed default count **2** without the variable and **1** with it. This is a wrong self-test verdict with unchanged code.
+
+3. **MEDIUM — Cargo target configuration remains inherited: [line 1143](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1143).**  
+   Concrete condition: `CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu` on an x86-64 build host, or equivalent `[build] target` in its Cargo configuration. Cargo places the pager beneath `target/<triple>/debug`, while the fixture and current runner expect `target/debug/fuigo-pager`. The fixture’s fallback build still writes to the target-specific location; executing the expected path fails. This needs no missing cross-compilation toolchain—even explicitly selecting the native triple triggers the layout difference. [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildtarget), [output layout](https://doc.rust-lang.org/cargo/reference/build-cache.html)
+
+4. **MEDIUM — Stale-binary fixtures mutate a shared repository: [line 1157](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1157).**  
+   The invocation of current `rp.sh` uses `/root/fuigo-builds/integration/src-p15r`, not an isolated fixture repository. Its fetch loop updates shared `refs/remotes/rbi/...` from every `int-*.bundle`; subsequent operations also write shared `FETCH_HEAD`, objects, references and worktree metadata. Concrete condition: the normal build host has that integration repository and an updated integration bundle. Running this self-test updates repository state belonging to other work. The cleanup at line 1160 only removes lane paths. The shared repository’s local Git configuration/hooks also remain effective despite `/dev/null` global/system configuration.
+
+5. **MEDIUM — The “some process escaped” assertion depends on PID ordering: [line 310](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:310).**  
+   It examines only `tail -1` of the scan, whose order follows the `/proc/[0-9]*` glob. Concrete condition: the ordinary, same-session sleep receives PID `99999`, and the `setsid` descendants receive `100000` onward. Lexicographic ordering puts `99999` last, so the assertion fails although the escaped processes exist and were found. Inspect all returned SIDs rather than treating the last PID as representative. The scope launcher itself does not establish a new session in the relevant systemd implementation. [systemd scope implementation](https://github.com/systemd/systemd/blob/v255/src/run/run.c#L1412)
+
+6. **MEDIUM — Exported `CDPATH` corrupts `HERE`: [line 22](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:22).**  
+   Concrete condition: the root shell has the ordinary navigation setting `CDPATH=.` and runs the specified relative command. `cd scripts/strike` prints its destination; `pwd` prints it again. `HERE` therefore contains two lines, breaking library sourcing and script paths. I reproduced the duplicate-path value read-only. Sanitation currently happens after this assignment and never clears `CDPATH`.
+
+Two LOWs remain:
+
+- **LOW — Outer `mktemp` failure still exits 1: [line 31](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:31).** An unavailable `TMPDIR` makes `ERRF=$(mktemp)` fail unchecked; redirecting the child’s stderr to the empty filename then fails. A stubbed failure reproduction returned **1**, not **2**. The new suppression fixes inner fixture-directory failures, not this outer allocation.
+- **LOW — Accepted identity-blind liveness probes:** lines **729, 1009 and 1194** still use `kill -0`. These probes do not send destructive signals.
+
+The other stated fixes are sound within static verification:
+
+- **Nonce:** the 32-digit bound keeps the generated names and asserted sleep command lines within the stated limits.
+- **`KEEP`/`W`:** physical absolute resolution fixes relative paths. The whitelist removes the problematic regex syntax except `.`. Dots still broaden regex matches, but the remaining uses retain run-marker or already-selected-process constraints; I found no concrete MEDIUM from them.
+- **Not-a-repository fixture:** the exported ceiling reaches Git, and the subshell preserves the helper’s status. A read-only check against an existing non-repository subdirectory returned **2**.
+- **`ISO_*`/`ABORT_*`:** sanitation precedes both passes and library sourcing. Explicit fixture assignments still work: a focused Bash check confirmed `VAR=x function` reaches its child and restores the prior unset state afterward.
+- **Historical runner:** the SHA check correctly makes an absent, non-executable or mismatched `rp.sh.bak` fail the fixture. Its deployed bytes were unavailable here.
+- **Synthetic PIDs:** directory names and zombie stat PID agree. The replacement fixture still distinguishes `9004001` and `9004002`; vanished-process report headers retain the spaces its assertions match. These IDs cannot select real Linux processes.
+- **Cwd:** `/` removes the physical `/tmp` assumption.
+- **Git export propagation:** the checked `rp.sh`, `final-gate.sh`, guard and scope-launch paths preserve the exports. `/root/fuigo-builds/slot-run.sh` is not present in this checkout, so propagation **through that deployed script remains unverified**.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Scoped read-only audit completed; 6 MEDIUM, 2 LOW, no HIGH/BLOCKER. |
+| Local verification | ✅ Done | Bash syntax passed; focused read-only checks support the findings above. |
+| HEAD Linux/systemd execution | ⬜ Pending | External rerun result unknown. The baseline’s 394/0 is not HEAD evidence. |
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 38 (gate-selftest.sh, diff a7a1df21..ac733058; full transcript: p17f3-astra-r38.raw.txt, sha256 8032436fa8e1f7d99890e046403730de4900581bead330b67ded2f8768b39aa7)
+
+Round 38 at `ac733058`: **0 HIGH/BLOCKER, 2 open MEDIUM**. The requested acceptance bar is not met.
+
+1. **MEDIUM — ref-cleanup failure does not affect the verdict.** [gate-selftest.sh:1176](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1176)
+
+   Both Git commands suppress diagnostics, and the callers at lines 1181–1184 check only the printed parent/tip pair. A failed deletion therefore leaves fixture refs in the shared repository while the assertion passes.
+
+   **Realistic condition:** concurrent Git maintenance holds `packed-refs.lock` beyond Git’s default one-second acquisition timeout. Ref deletion acquires that lock, including for loose refs; this is ordinary contention in a shared integration repository, requiring no hostile switch or configuration change. [Git implementation](https://raw.githubusercontent.com/git/git/v2.43.0/refs/files-backend.c), [lock timeout documentation](https://git-scm.com/docs/git-config/2.48.0#Documentation/git-config.txt-corepackedRefsTimeout).
+
+   **Evidence:** an isolated probe using the actual `stale_run` and `chk` functions, with Git deletion returning 128, produced:
+   ```text
+   stale_run output=0/101 status=128
+   PASS  expected-stale-pair
+   assertion counters=1/0
+   ```
+   Check enumeration/deletion status and verify the namespace is empty; propagate failure to the parent assertion. Merely incrementing `failn` inside this command substitution would not propagate.
+
+2. **MEDIUM — shared-slot contention becomes a false failure, followed by deletion of an active lane.** [gate-selftest.sh:1274](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1274)
+
+   The planted-survivor case waits 300 seconds for completion, asserts `3/1`, then unconditionally removes its lane at line 1277. The real gate continues through its test phase after recording the build survivor, and that phase waits in the host’s `slot-run.sh`.
+
+   **Realistic condition:** production jobs occupy all shared slots for more than five minutes. The production runners permit hour-long tests, so this requires neither toolchain changes nor deliberately hostile switches. A functioning gate can still be queued when the self-test reports failure and removes its files.
+
+   Track the live invocation through timeout handling; distinguish unfinished infrastructure work from a fixture mismatch, and abort/await verified cleanup before deleting the lane. This is pre-existing, but remains within the requested host-state review.
+
+The round-37 fixes otherwise check out:
+
+| Fix/check | Audit result |
+|---|---|
+| Git environment overrides, `NODOC`, `CARGO_BUILD_TARGET` | Removed by the ordinary dirty-environment re-exec. Explicit fixture-local assignments remain effective. |
+| Arguments and forwarding | Canonical `--reexec --inner [LOGDIR]` ordering and shifts are correct. Normal invocation, default log directory, spaces, empty arguments, and extra arguments survived isolated probes. Reversed internal flags are not supported or generated. |
+| Re-exec guard | Dirty environment with leading `--reexec` exits 2; the clean second pass proceeds. |
+| Bash exports | `compgen -e` is valid in Bash 5; `PWD`, `OLDPWD`, `SHLVL`, and `_` are allowed. See the qualification below about exported functions. [GNU Bash documentation](https://www.gnu.org/software/bash/manual/html_node/Programmable-Completion-Builtins.html). |
+| `LC_ALL=C` | No conflicting fixture expectation found. ASCII matching and shared `sort`/`comm` ordering remain consistent throughout the examined callers. |
+| `HOME`, `PATH`, `TMPDIR`, `KEEP` | Preserved with quoting; optional values preserve unset versus empty. Root tool discovery remains available. Existing fixture-directory validation still applies. |
+| `CDPATH` | Unset before calculating `HERE`. |
+| Inner stderr capture | Environment selection is removed; normal invocation always enters the outer capture pass. |
+| Outer `mktemp` failure | Isolated failure probe confirmed diagnostic and exit 2. |
+| Session assertion | Checks every returned PID and excludes empty `ps` results. |
+| Ref-selection scope | The trailing-slash namespace is restricted to this run’s lane; the deletion-status problem is finding 1. |
+
+Remaining **LOW** qualifications:
+
+- **[gate-selftest.sh:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:30):** `compgen -e` enumerates exported variables, not exported functions. An otherwise already-clean environment can retain imported functions and bypass re-exec. An isolated probe confirmed this. That requires an unusually pre-sanitized caller environment; ordinary additional host variables trigger `env -i`.
+- **[gate-selftest.sh:1156](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1156):** a host Cargo `[build] target` still conflicts with `debug/fuigo-pager`. LOW under the supplied toolchain-configuration calibration.
+- **[gate-selftest.sh:1170](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1170):** **I no longer rate finding (4), the required shared-repository execution itself, MEDIUM.** The shared fetch/object/`FETCH_HEAD` effects are an accepted integration dependency under the byte-identical `rp.sh` constraint. The unchecked cleanup above is a separate, fixable MEDIUM.
+- **[gate-selftest.sh:1210](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1210):** bare `kill -0` observations retain the previously accepted LOW identity limitation.
+
+No additional unintended signal target or unrelated deletion namespace was identified. Real signals use verified markers/pidfds or run-specific scopes; synthetic fixed names stay under private fixture roots.
+
+Validation was read-only: syntax check and isolated Bash probes passed. Local Bash is **3.2**, so these are not Bash-5 execution receipts. Linux/systemd, the deployed slot runner, and HEAD’s full-suite result remain unverified. The earlier 394/0 result was not attributed to HEAD.
+
+**MEDIUM count: 2.**
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 39 (gate-selftest.sh, diff ac733058..bb21edad; full transcript: p17f3-astra-r39.raw.txt, sha256 e28d0f102b8db70bf379ad074a7441aefcbca56d4b2489c10355be6f40c570e2)
+
+Audited `ac733058..bb21edad` read-only. **HIGH/BLOCKER: 0. MEDIUM: 1.** The requested acceptance bar is not yet met.
+
+**MEDIUM — retained live gate still loses its source and wrapper files.** [gate-selftest.sh:54](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:54), interacting with lines 1272 and 1291.
+
+When the gate remains running after TERM and the additional 180 seconds, the new branch correctly preserves its lane. However, the unconditional EXIT trap still removes `$W`, including `$DEMO3`, which is that gate’s `--src` checkout, and `gs.out`/`gs.rc`. If the gate remains alive through the subsequent abort cases, suite exit deletes its live source; its wrapper also cannot subsequently create `gs.rc`.
+
+The conditions are occupied host slots exceeding 30 minutes, followed by stalled I/O or cleanup that outlasts the grace period and remaining cases. Concurrent long builds and host resource stalls make this a realistic failure condition on the shared build host; it requires no hostile switch or toolchain change. This falls under your exception for overload that **deletes something live**, rather than merely producing a failing assertion.
+
+**Remedy:** when retaining a still-running gate, also retain `$W` and print both retained paths. Do not run the unconditional fixture cleanup while that gate remains unresolved.
+
+The two fixes otherwise check out:
+
+- **Stale refs, lines 1168–1189:** `res` is captured before deletion and printed after verification. The locals remain available throughout the command substitution; the outer `chk` updates the real counters. `for r in $refs` is safe for these Git refnames: valid refs cannot contain whitespace or shell glob characters. Each deletion argument is quoted and scoped to the run-unique namespace. Leftover refs or failed final enumeration append a suffix that fails **all three** exact comparisons.
+- **Planted survivor, lines 1273–1291:** the earlier 300-second wait can fail evidence assertions but still proceeds to the completion wait. Empty `GP3` causes no signal. A populated SID selects candidates whose identity is checked through `skill`. Entering the timeout branch always records a failure—even if the gate subsequently returns `3/INADMISSIBLE`. Missing completion status produces further failures and preserves the lane.
+
+The remaining isolation review found no additional MEDIUM/HIGH. Previously calibrated LOWs remain:
+
+- **LOW:** exported-function whitelist gap — line 30.
+- **LOW:** inherited host Cargo configuration, including `[build] target` — lines 1156 and 1165.
+- **LOW:** shared integration repository and deployed-runner dependencies under the stated byte-identical constraint — lines 1170 and 1185.
+- **LOW:** accepted `kill -0` liveness probes — lines 741, 1022 and 1215.
+
+`bash -n` passed. Read-only Bash probes confirmed the three ref-result comparisons, six completion/abort branches, and the unconditional EXIT-cleanup interaction. These are syntax/control-flow checks; Linux/systemd execution remains unavailable. HEAD’s full-suite result is unknown.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 40 (gate-selftest.sh, diff bb21edad..d43b3098; full transcript: p17f3-astra-r40.raw.txt, sha256 09fca4b758232a07f0a50f4f81b87b11efbd6d61cbd7aa04d599bd490bff4b26)
+
+**1 MEDIUM remains; no HIGH/BLOCKER. The fix is incomplete for fail-fast execution.**
+
+- **MEDIUM — [gate-selftest.sh:1287](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1287): retention is armed after an earlier failing assertion.** If the gate remains alive after TERM and the 180-second grace period, `chk` at line 1287 exits immediately with `GATE_SELFTEST_FAILFAST=1`. Execution never reaches `RETAIN_W=1` at line 1292, so the EXIT trap deletes `$W`, including the live gate’s source checkout and wrapper output paths. Earlier assertions at lines 1276–1279 can likewise exit while the asynchronous gate is running. This uses the documented fail-fast value, not a hostile switch value; the impact is deletion of live resources, not merely a timeout verdict. Arm retention before launching the asynchronous gate and release it only after confirmed completion, preserving any existing retention requirement.
+
+Confirmed correct:
+
+- The single-quoted trap evaluates variables **at exit**; `${RETAIN_W:-}` is safe under `set -u`.
+- The outer pass owns only `$ERRF`. The inner Bash process creates `$W`, installs its trap, and executes the retention branch directly. Only the gate wrapper runs in a background subshell.
+- Once `RETAIN_W=1` is reached, even a fail-fast exit inside the following `chk` preserves `$W`.
+- `KEEP=<dir>` still installs no cleanup trap.
+
+`bash -n` passed. A read-only Bash probe using the extracted trap, `chk`, and timeout branch—with deletion stubbed—confirmed both successful retention and the earlier fail-fast bypass. The remaining script review found no additional qualifying signal, unit-name, filesystem, environment, or host-global-state findings under your calibration.
+
+Linux/systemd execution was unavailable. HEAD’s full-suite result remains unknown; the earlier 394/0 result is not HEAD evidence.
+
+**Open MEDIUM count: 1.**
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 41 (gate-selftest.sh, diff d43b3098..d08fa0eb; full transcript: p17f3-astra-r41.raw.txt, sha256 2671314c8feb44e3d76693301f2a2f93bbf0a5e22dd63c1e640314575f7b9f2d)
+
+Audited `d43b3098..d08fa0eb`, scoped to `gate-selftest.sh`. **HIGH/BLOCKER: 0. Open MEDIUM: 1.** The acceptance bar is not yet met.
+
+- **MEDIUM — Consecutive abort cases reuse live wrapper files.** [gate-selftest.sh:1210](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1210). If the TERM case reaches the new “still-running” branch, execution continues into the KILL case, which unlinks the first gate’s still-open `ga.out` and reuses `ga.rc`. A late completion from the first wrapper can then satisfy the second case’s completion predicate at [line 1235](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1235), without proving that second gate exited. This compromises the explicitly supported incomplete-abort path; it is more than a timeout-induced test failure. Give each invocation separate output/completion files, or prevent the second invocation while the first remains unconfirmed.
+
+The remaining R40 changes check out statically:
+
+- `chk` sets retention before its fail-fast exit.
+- Both asynchronous launches arm retention before starting; intervening assertions execute in the parent shell, not command substitutions or subshells.
+- `local rw` correctly saves the incoming value; restoration preserves retention inherited from an earlier unfinished gate.
+- The planted-survivor completion file is not reused.
+- Both synchronous end-to-end calls return before their assertions and cleanup, so they need no asynchronous retention.
+
+The final signal, unit-name, filesystem, environment and global-state review found no additional qualifying findings beyond the accepted LOWs. `bash -n` passed. Linux/systemd behavior remains unverified here; HEAD’s pending rerun is not assumed to pass.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 42 (gate-selftest.sh, diff d08fa0eb..d47782c3; full transcript: p17f3-astra-r42.raw.txt, sha256 9f7e996efe815fde28b3d95459dddba5e530e1ff3af45e6c7cef7ae6445b2057)
+
+Round 42 audited `d08fa0eb..d47782c3` for `scripts/strike/gate-selftest.sh`. **No HIGH/BLOCKER findings; MEDIUM count: 0.** The R41 MEDIUM is closed.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Scoped source audit complete; no open MEDIUM. |
+| Completion-file isolation | ✅ Done | TERM and KILL use separate files throughout. |
+| Retention and exit paths | ✅ Done | No premature retention release found. |
+| Run isolation | ✅ Done | No additional qualifying signal, path, unit, environment, or global-state finding. |
+
+Specific conclusions:
+
+- [gate-selftest.sh:1212](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1212): An earlier unconfirmed gate causes a failing assertion before any launch or file removal. The ordinary return preserves that failure and `RETAIN_W`; FAILFAST exits with retention armed.
+- [gate-selftest.sh:1215](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1215): `local rw` saves the prior value without shadowing `RETAIN_W`. Retention is armed before launch and restored only after this case’s completion file exists. Timeout, assertion failure, and still-running paths preserve it. No stale `ga.out`/`ga.rc` references remain.
+- [gate-selftest.sh:1279](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1279): The planted-survivor path retains the same protection. Relevant `chk` calls execute in the parent shell; command substitutions compute arguments, so failure counts and FAILFAST retention are not lost in subshells.
+- [gate-selftest.sh:1255](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1255) and [1270](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1270): Both synchronous end-to-end calls finish before their assertions and cleanup; they need no asynchronous retention.
+
+`bash -n` passed. No files changed. Linux/systemd execution was unavailable; HEAD’s runtime result remains unknown. The supplied 394/0 result belongs to `d43b3098`.
+
+VERDICT: NO-HIGH
+
+
+################ MUTANT-HARNESS KILL-SAFETY REVIEW 1 (scripts/strike/gate-mutants.py at 023b8213; full transcript: p17f3-astra-mutants-review1.raw.txt, sha256 68a15a200a097712b1730d3ed02b02f587da467f4c0b6ebce58f67e758289532)
+
+**Do not run this harness on the shared host.** At `023b8213d9cae6fd60a6e5c2c10d89abfa6d45cd`, it cannot establish the required ownership guarantee.
+
+I read the complete harness and the relevant self-test, abort, gate, and safe-kill paths. The reviewed files match HEAD. Read-only `--check` reports **75 entries, zero missing patterns**. No Linux execution or destructive operation was performed.
+
+**Findings: 1 BLOCKER, 7 HIGH, 3 MEDIUM.**
+
+1. **BLOCKER — Mutated kill code executes as unrestricted host root.**  
+   [gate-mutants.py:86–91](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:86), [gate-mutants.py:300](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:300)
+
+   The outer systemd scope supplies cleanup grouping, not isolation from host PIDs, systemd, cgroups, or files. Mutants can damage foreign jobs before harness cleanup runs.
+
+   | Mutant | Concrete effect and possible victim | Shared-host assessment |
+   |---|---|---|
+   | **M45** | Removes environment-marker verification from `safe-kill.py`. The self-test’s `skill()` calls that same mutated file **without a start time** (`gate-selftest.sh:57–58`). If a selected fixture exits and its PID is reused before `pidfd_open`, the helper can signal an unrelated cargo, rustc, sleep, SSH, or container process. `gate_kill_marker()` also calls without a start time. | **Unacceptable.** A pidfd pins whichever process exists at open time; the removed check was what rejected a foreign replacement. |
+   | **M46** | Replaces the checked pidfd operation with `kill -9 $pids`. A PID discovered during the marker scan can be reused while start times and survivor reports are collected. The subsequent numeric kill can hit any host process occupying it. | **Unacceptable.** Neither the marker nor start time is checked at signalling time. |
+   | **M44** | Removes start-time verification but retains marker verification and pidfd signalling. A replacement carrying the same marker can be killed despite a stale recorded identity. | Does **not** independently permit killing an ordinary unmarked SSH/cargo process. Its negative fixture is run-owned, but the strict creation-ownership guarantee remains unproved. |
+   | **M49** | Removes the recorded launcher start time from the launcher kill; marker verification and pidfd remain. A different process carrying the same run marker can be mistaken for the recorded launcher. | Same qualification as M44; not equivalent to M45/M46. |
+
+   The deliberate “foreign marker” and “wrong start time” victims at `gate-selftest.sh:700–711`, `955–965`, and `1099–1103` are actually created by this self-test. Killing those fixtures is not itself collateral damage. The problem is executing the weakened helpers against the real host process table.
+
+   **M83** changes the marker variable being checked rather than removing verification. **M43** removes a reporting rescan, not a cgroup ownership guard. The other containment/abort mutants can create leaks or weaken verification; they do not add the unchecked PID-kill primitive introduced by M46. Mutants are applied individually—this assessment does not assume combinations such as M22 plus M45.
+
+2. **HIGH — Nonce-containing scope names authorize unconditional recursive killing.**  
+   [gate-mutants.py:188–222](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:188)
+
+   `named_units()` accepts **any** immediate `system.slice` entry starting `fuigo-` or `gatedemo5-helper-`, ending `.scope`, and containing the nonce anywhere. `cleanup()` kills it without checking membership or a creation receipt.
+
+   Another packet’s `fuigo-rp-<lane>-<pid>-<n>` scope qualifies if its lane contains those digits—for example, a diagnostic lane named after the mutant being investigated. A collision or deliberately copied nonce has the same effect.
+
+   The timeout path at lines 307–308 similarly assumes that `fuigo-mut-<nonce>.scope` belongs to this invocation without confirming successful creation. If systemd refuses an existing-name collision, later cleanup still selects that existing scope.
+
+   `--cleanup` compounds this: lines 332–336 accept any syntactically valid 20-digit nonce, without requiring evidence that this harness created its resources.
+
+3. **HIGH — Poisoned `runs/` contents can select foreign gates; membership verification misses descendants and races.**  
+   [gate-mutants.py:194–229](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:194)
+
+   A nonce-named lane can contain—or symlink to—a `runs/` directory containing another packet’s run ID. `gate_units()` derives that packet’s actual `fuigo-gate-<runid>{,-build,-list}.scope` names.
+
+   The supposed protection reads only the scope’s immediate `cgroup.procs`. If that file is empty but a nested cgroup contains foreign processes, `notmine=[]`, and cleanup writes `cgroup.kill`. That operation kills descendants too. This follows the [kernel’s documented cgroup semantics](https://docs.kernel.org/admin-guide/cgroup-v2.html#core-interface-files).
+
+   I exercised this selection path with an in-memory mock: an empty direct process list and populated descendant caused five calls to the mocked foreign-scope kill operation.
+
+   Even a recursive scan would not establish creation ownership: membership can change between inspection and the path-based kill, and the directory is not pinned against replacement.
+
+4. **HIGH — Recursive deletion selects names, not resources created by the run.**  
+   [gate-mutants.py:170–173](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:170), [gate-mutants.py:242–248](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:242)
+
+   Any `/root/fuigo-builds/selftest-*` entry containing the nonce is deleted after the process scan reports clean. A foreign backup, directory, file, or symlink with that name qualifies. Contents are unrestricted: a nonce-named directory containing another team’s files is recursively removed.
+
+   The additional `rmtree(d)` calls at **290 and 326** use the calculated work-directory path. `os.makedirs(d/tmp)` does not prove `d` was newly created: a pre-existing `d` lacking `tmp` is accepted. Directory replacement or an ancestor symlink can also redirect later path resolution.
+
+   On Linux/Python 3.12, ordinary descendant-symlink traversal is mitigated by the fd-based `rmtree` implementation; a top-level lane symlink takes the `unlink` branch and deletes the link itself. Those protections **do not establish ownership of the selected directory or link**, nor pin the original ancestors. See [Python’s `rmtree` documentation](https://docs.python.org/3.12/library/shutil.html#shutil.rmtree).
+
+5. **HIGH — Process markers and sleep names are transferable labels, not creation evidence.**  
+   [gate-mutants.py:134–165](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:134)
+
+   `is_mine()` accepts any host process with either matching environment marker, or exactly `sleep <digits>.<digits ending in nonce>`. It does not require a recorded process identity or verified origin.
+
+   An unrelated diagnostic/CI process launched with a copied environment, or an independently created matching sleep, is killed. For `--cleanup N`, a calling shell launched with `GATE_SELFTEST_NONCE=N` also qualifies. Only the Python cleanup process itself is excluded by `my_pids()`; ancestors and SSH-related processes are not.
+
+   **The pidfd ordering itself is sound against ordinary PID reuse:** reuse before opening leads to inspection of the replacement; reuse afterwards does not retarget the already-open pidfd. The defect is the ownership predicate applied to that process, not an additional pidfd race. [Linux pidfd documentation](https://man7.org/linux/man-pages/man2/pidfd_send_signal.2.html)
+
+   The self-exclusion also does not protect a harness situated inside a nonce-selected scope: `cgroup.kill` can kill it along with that scope.
+
+6. **HIGH — The documented interrupt command can signal the parent SSH session.**  
+   [gate-mutants.py:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:30), [gate-mutants.py:360](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:360)
+
+   The harness writes `os.getsid(0)` but never creates or requires its own session. Started normally from an SSH shell, its `.sid` can name the shell’s session. Following the documented `pkill -s <sid>` then signals unrelated session members, potentially including the shell and other jobs.
+
+   The session protection in `abort_guard()` applies to the scripts it guards, not this Python harness.
+
+7. **HIGH — Inspection failures can be reported as successful cleanup.**  
+   [gate-mutants.py:128–131](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:128), [gate-mutants.py:170–206](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:170)
+
+   Several paths collapse “cannot inspect” into “absent”:
+
+   - Failed cgroup enumeration becomes `[]`.
+   - Failed `cgroup.events` reads become `False`.
+   - Failed `cgroup.procs` reads skip verification.
+   - Unreadable process identity becomes “not mine.”
+   - Filesystem deletion errors are ignored without subsequent verification.
+
+   For example, an env-cleared fixture surviving in a scope whose cgroup inventory becomes inaccessible can disappear from both inventories. Cleanup can return zero, delete its evidence, and allow another mutant to start.
+
+8. **HIGH — Timeout and exception handling do not guarantee cleanup or bounded termination.**  
+   [gate-mutants.py:299–309](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:299)
+
+   After timeout or STOP, `kill_unit()` swallows failure and the code calls **unbounded** `p.wait()`. If the launcher is stalled before registering its scope, or the kill fails, execution never reaches `cleanup()`.
+
+   There is no enclosing `try/finally` guaranteeing cleanup after process launch. Unexpected worker exceptions also do not set STOP; already-submitted executor work can continue while the failed run remains unreaped.
+
+   A cleanly handled timeout is labelled `TIMEOUT`, but does not itself set STOP; subsequent mutants run and `main()` can exit zero.
+
+9. **MEDIUM — Environmental failures are counted as successful mutant kills; the control is not a gate.**  
+   [gate-mutants.py:311–325](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:311)
+
+   Any confirmed run with nonzero exit and a `FAIL` line becomes `KILLED`, regardless of causality. For example, missing `/root/fuigo-builds/rp.sh.bak` produces a fixture-availability failure at `gate-selftest.sh:1154`; unrelated mutants reaching it are then reported killed.
+
+   M01 receives the same classification, and its failure does not stop or invalidate later measurements. With `--jobs N`, other mutants run before the control’s result is available. The harness therefore cannot distinguish mutation detection from a broken baseline.
+
+10. **MEDIUM — Inherited self-test controls can produce misleading SURVIVED/full-mode results.**  
+    [gate-mutants.py:293–295](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:293)
+
+    `--full` does not clear an inherited `GATE_SELFTEST_SKIP_E2E=1`; the run is labelled full while `gate-selftest.sh:1158` skips E2E cases.
+
+    An inherited `GATE_SELFTEST_INNER=1` bypasses the outer stderr-failure wrapper at self-test lines 23–30. Harness classification records stderr size but does not reject it. A run can therefore be reported SURVIVED despite violating the self-test’s stderr contract.
+
+11. **MEDIUM — STOP is not synchronized with actual launches.**  
+    [gate-mutants.py:277–301](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:277)
+
+    A worker checks STOP only before copying its tree. Another worker can subsequently discover a leak or unconfirmed nonce and set STOP, yet the first worker still executes `Popen()`. Thus “starts no further mutant” is not guaranteed.
+
+    A STOP-driven termination is also not separately classified as cancellation; an existing `FAIL` line can turn the interrupted run into `KILLED`.
+
+The remaining requested boundaries resolve as follows:
+
+- **Nonce propagation:** self-test lines 49–54 correctly put the nonce into `FUIGO_SELFTEST_ID`, `SELFTEST_TAG`, `SELFTEST_UID`, and the NOTE. Tagged fixture/lane names propagate into `abort_init`/`bg` unit names. Real final-gate phase units instead derive from the UTC/PID run ID, explaining the separate—and unsafe—`gate_units()` discovery path.
+- **Unconfirmed nonce or detected leak:** the normal path eventually sets STOP and returns exit 3. However, destructive cleanup happens **before** confirmation is checked. Lane evidence may already be deleted; retaining the copied tree does not undo that.
+- **Path traversal:** a run ID from `listdir()` cannot contain `/`, and conversion replaces nonalphanumeric characters with `-`. `unit_ok()` also rejects `/`. Direct `../` traversal through those names is not the demonstrated exploit; symlink-followed directories and forged selection inputs are.
+- **Cgroup symlinks:** ordinary userspace symlink creation is not available inside genuine cgroupfs; I am not claiming a simple `ln -s` attack there. The harness nevertheless performs no mount/object validation and follows whatever path hierarchy it is given. [Kernel directory operations](https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/kernfs/dir.c)
+- **Parallel cleanup:** distinct nonces are not sufficient because matching is by substring. For example, nonce A `12345678901234567890` occurs inside tag `11` + nonce B `23456789012345678901`. A can select B’s scope and lane even though their nonces differ. More practically, a copied nonce-bearing lane or poisoned `runs/` directory crosses the boundary directly.
+- **Docker:** the ordinary `docker-<hex>.scope` name is excluded by the harness’s unit prefix checks. Its processes remain exposed to M45/M46’s host-PID signalling.
+
+Meeting this bar requires isolation that prevents mutated code from reaching foreign resources, plus cleanup based on retained creation identities—not global discovery by nonce-bearing names.
+
+VERDICT: DO-NOT-RUN
+
+
+################ MUTANT-HARNESS KILL-SAFETY REVIEW 2 (scripts/strike/gate-mutants.py at a7a1df21; full transcript: p17f3-astra-mutants-review2.raw.txt, sha256 68e71018cfc93833cbd27584700d7c3ec18fb5670b3d81cc8a0e7a24db4b769c)
+
+The rewrite fixes several round-1 problems, but I would not run this revision on the shared host. **In-model findings: 1 BLOCKER, 2 HIGH, 4 MEDIUM.** Two additional LOW findings concern selection and inaccurate safety documentation.
+
+Reviewed clean HEAD `a7a1df21362211aa9f5c26b669382f99f39b81b1`. All 75 entries were inspected; every replacement applies, and the resulting Python sources parse. Control-flow checks used mocked I/O, processes and deletion—not Linux execution. No files were changed.
+
+I accept the stated non-adversarial model and the existing root self-test as the baseline. I have not counted deliberate nonce copying, forged receipts, planted directories or hostile cgroup migration. **Accidental collisions and inherited signal dispositions remain in-model.**
+
+**Findings**
+
+1. **BLOCKER — `p.kill()` assumes zombie retention without establishing it.**  
+   [gate-mutants.py:372](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:372), also lines 375, 377 and 433.
+
+   The “still our unreaped child” argument requires the harness’s children not to be automatically reaped. The harness neither resets nor rejects inherited `SIGCHLD=SIG_IGN`.
+
+   Concrete scenario:
+
+   - An ordinary job launcher ignores `SIGCHLD` to avoid zombies, then execs the harness.
+   - A timeout or interrupted launch reaches `p.kill()`.
+   - Its internal poll observes the child alive.
+   - The child exits and is automatically reaped. The harness is descheduled, and the PID is reused by another team’s process.
+   - `Popen.kill()` resumes and sends SIGKILL to that numeric PID, without a nonce check.
+
+   Ignored dispositions survive exec, Linux automatically reaps children when `SIGCHLD` is explicitly ignored, and Python 3.12’s POSIX `Popen.kill()` ultimately uses `os.kill(self.pid, sig)`. The ordinary single-threaded, unreaped-child protection therefore has an unchecked prerequisite. [Linux signal semantics](https://man7.org/linux/man-pages/man7/signal.7.html), [Linux wait semantics](https://man7.org/linux/man-pages/man2/wait.2.html), [Python 3.12 implementation](https://raw.githubusercontent.com/python/cpython/v3.12.0/Lib/subprocess.py).
+
+   **Required correction:** establish normal child-reaping semantics before launch and retain a verified child pidfd for these fallback signals. Session leadership does not establish either condition.
+
+2. **HIGH — failed creation of an already-existing scope still authorizes killing it.**  
+   [gate-mutants.py:279](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:279), related lines 154–162, 218–243, 348 and 381.
+
+   `scoped` guards only the immediate timeout kill. The unconditional `finally: cleanup(nonce)` enumerates and kills **every** matching named scope, including `fuigo-mut-<nonce>.scope`, without checking `in_own_scope`.
+
+   Concrete scenario: an earlier interrupted invocation retains that scope, and a new invocation accidentally generates the same nonce while using a different work directory. `systemd-run` refuses the existing unit; the self-test never starts. Cleanup nevertheless writes `1` to the earlier run’s `cgroup.kill`. Matching earlier lane files and processes are also eligible for deletion/signalling.
+
+   This collision is extremely improbable—approximately `10^-20` for a particular pair of generated nonces—but your model explicitly includes accidental collisions. The exclusive work-directory `mkdir` does not reserve a nonce globally. A receipt written **before attempted launch** proves nonce selection, not ownership of an existing scope.
+
+   The mocked cleanup reproduced selection of the pre-existing outer scope with no child or launch confirmation. Systemd 255 requests transient scopes using mode `fail` and returns on creation failure. [Systemd 255 source](https://raw.githubusercontent.com/systemd/systemd/v255/src/run/run.c).
+
+   **Required correction:** reject pre-existing identities without cleaning them, and preserve actual creation/ownership evidence for cleanup. The digit-boundary fix addresses substring collisions, not equal nonces.
+
+3. **HIGH — infrastructure errors can be credited as `KILLED`, followed by further mutants.**  
+   [gate-mutants.py:390](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:390); [gate-selftest.sh:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:30).
+
+   The self-test captures its inner stderr and converts any content into:
+
+   `FAIL  the self-test wrote to stderr ...`
+
+   The harness then treats any nonzero exit plus any `FAIL` line as `KILLED`. It requires neither an attributable assertion failure nor an infrastructure-error distinction.
+
+   Concrete scenario: M01 passes; during M31, temporary disk exhaustion or a transient command failure occurs after nonce confirmation. The wrapper prints its generic stderr failure and exits 1. Cleanup succeeds. The harness records `KILLED`, removes the mutant directory and continues—even though the mutation was not demonstrated to cause the failure.
+
+   Mocked `run_one()` reproduced `KILLED` with no STOP for precisely that wrapper output.
+
+   **Required correction:** give unexpected execution/fixture/inspection errors a distinct invalid-run outcome. A passing initial control cannot establish that later environmental failures are mutation effects.
+
+4. **MEDIUM — scope confirmation is not an acceptance condition.**  
+   [gate-mutants.py:364](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:364), related lines 365–367 and 387–390.
+
+   A completed child breaks out before scope inspection, and verdict classification never checks `scoped`.
+
+   Concrete scenario: the harness is descheduled while a mutant confirms its nonce and fails early. Its first successful wait reaps the child without ever observing its scope. The result is accepted as `KILLED`, contrary to the documented “scope cannot be confirmed → stop” rule. The same missing condition applies to SURVIVED classification.
+
+   Mocked `run_one()` accepted a result without any scope observation.
+
+5. **MEDIUM — some inspection failures become absence instead of `Unknown`.**  
+   [gate-mutants.py:250](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:250), related lines 265, 269 and 297.
+
+   `real_dir()` catches **every** `OSError` and returns false. Thus an EIO while inspecting a lane’s `runs` directory silently removes its final-gate scopes from leak inspection. `os.path.lexists()` likewise does not provide an error-reporting deletion verification.
+
+   Concrete scenario: a transient filesystem I/O error affects `lstat(<lane>/runs)`. `gate_scopes()` skips the directory instead of reporting unknown ownership/liveness. Later filesystem operations can succeed, allowing cleanup to report zero without completing the required inspection.
+
+   An injected EIO reproduced `real_dir() == False`.
+
+   **Required correction:** distinguish confirmed absence from inspection failure; propagate the latter.
+
+6. **MEDIUM — private work-directory removal is neither checked nor included in the leak result.**  
+   [gate-mutants.py:397](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:397), also line 347.
+
+   `shutil.rmtree(d, ignore_errors=True)` runs after the result and leak count have been logged. There is no subsequent existence check.
+
+   Concrete scenario: a filesystem error prevents removing the copied tree. The harness still returns SURVIVED/KILLED and continues, with `leaked_after_cleanup=0`. Mocked removal that left the directory untouched reproduced this behavior. Python explicitly documents that `ignore_errors=True` suppresses removal errors. [Python shutil documentation](https://docs.python.org/3.12/library/shutil.html#shutil.rmtree).
+
+7. **MEDIUM — an acknowledged stop during preparation still launches the mutant.**  
+   [gate-mutants.py:342](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:342), related lines 357, 369 and 439.
+
+   STOP is checked before entering `run_one()`, but not after copying/applying the mutant and before `Popen()`.
+
+   Concrete scenario: TERM arrives during `copytree()`. The handler records STOP, but the harness finishes preparation and starts another root self-test. Only the subsequent wait loop notices the stop. If the child exits first, the result can also be recorded as KILLED/SURVIVED and its directory removed.
+
+   The mocked preparation-time signal reproduced a launch with STOP already set.
+
+8. **LOW — unknown mutant selectors silently disappear.**  
+   [gate-mutants.py:434](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:434).
+
+   Requesting `M53`, or a mistyped identifier, runs only the control and can finish successfully. Reject unmatched selectors rather than reporting DONE for a silently reduced request.
+
+9. **LOW — the docstring overstates the verified identity invariants.**  
+   [gate-mutants.py:39](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:39).
+
+   - M83 also changes a signal identity check.
+   - Real final-gate `FUIGO_GATE_RUN` values come from timestamp/PID run-directory names and **do not contain the nonce**.
+   - Scripts under test retain cgroup/systemctl kills, so “every kill … through a pidfd” is not literally true.
+   - The env-cleared `/bin/sleep 300` fixtures at self-test lines 363–364 have no nonce in their command line; their nonce-bearing scopes provide containment.
+
+   These distinctions matter when maintaining the safety argument.
+
+**Mutation reach: identity checks and destructive paths**
+
+No entry changes an `rm -rf` target expression or broadens the cgroup path/name passed to a kill. The following entries require individual qualification:
+
+| Mutant | Changed reach compared with unmutated code |
+|---|---|
+| **M44**, line 115 | Removes start-time validation. Can signal a process carrying the expected marker despite a mismatching recorded start time. The current negative fixture is owned by this self-test. The marker itself is not universally nonce-bearing in real final-gate calls. |
+| **M45**, line 116 | Replaces the requested marker/variable check with this invocation’s nonce. Can signal another fixture from the same mutant invocation that lacks the requested gate/self-test marker. Retains supplied start-time validation and pidfd signalling. |
+| **M46**, line 117 | Removes gate-marker and start-time rechecks. NKILL can kill a selected PID carrying this invocation’s nonce regardless of its gate marker/start time. It still opens the pidfd before reading the real `/proc/<pid>/environ`. |
+| **M49**, line 120 | Removes the launcher’s start-time requirement. Can kill an otherwise marker-matching launcher rejected by the original start-time check. Current negative fixture remains self-test-owned. |
+| **M83**, line 146 | Replaces the configurable identity-variable name with `FUIGO_GATE_RUN`. With `SAFE_KILL_VAR=FUIGO_SELFTEST_ID`, it could accept `FUIGO_GATE_RUN=<requested self-test ID>` instead. That key includes this invocation’s nonce; existing fixtures primarily expose missed cleanup signals. |
+| **M06**, line 73 | Removes the watchdog’s stop-file veto. It can kill the same run’s recorded scopes/processes after a normal stop that previously suppressed cleanup. Changes when killing happens, not the target namespace. |
+| **M43**, line 114 | Removes an identity rescan used for survivor reporting. It does **not** select kill targets: `gate_cg_kill()` still operates on the same scope and performs its own enumeration. |
+| **M79**, line 142 | Changes signal-name parsing; names such as INT become invalid. Does not weaken target identity or enlarge the target set. |
+
+For complete accounting, the other **67 entries** were reviewed as follows:
+
+| Entries | Effect relevant to this review |
+|---|---|
+| M01 | Unmutated control. |
+| M02–M05, M07 | Remove cleanup/watchdog operations or alter liveness/counting; no broader destructive target. |
+| M08–M16 | Resolution, names, output stems and pre-lock truncation. M13 damages the self-test’s deliberately locked output fixture; no expanded deletion/signal target. |
+| M17–M29 | Scope tracking, supervisors, containment checks, recording and abort behavior; removed/narrowed cleanup or changed execution timing, with unchanged destructive target expressions. |
+| M30–M42 | Verification, resolver ownership, parent-death behavior, scope-status checks and accounting; no broader destructive target. |
+| M47–M48, M50–M52 | Reporting and omitted launcher/auxiliary cleanup; no broader target. |
+| M57–M59, M64–M70 | Unscoped helper execution, omitted launcher tracking, abort-flag handling and fewer kill passes. Can leave or start additional **own-run** work; do not enlarge kill/delete selectors. |
+| M71–M78, M80–M82 | Feature discovery, result reporting, builds, binary pinning and checkout validation. Fixture paths remain owned; no expanded kill/delete selector. |
+
+Together with the eight individually discussed entries, this accounts for all **75**.
+
+**M45 and M46 remain meaningful mutants**
+
+- **M45:** self-test lines 720–721 supply a launcher PID without the requested gate marker. It still inherits `GATE_SELFTEST_NONCE`, so mutated safe-kill can kill it; the “left alone” assertion should fail. Lines 970–974 provide another wrong-marker test.
+- **M46:** lines 1113–1116 create a fixture with a different gate marker, then stub discovery to return that PID. Unmutated reaping rejects it. NKILL accepts its inherited nonce and kills it, so the alive assertion should fail.
+
+These are supported expected outcomes, not claimed Linux results.
+
+**Round-1 remediation check**
+
+| Claim | Assessment |
+|---|---|
+| **B1** bounded mutants | M45/M46 nonce checks and pidfd ordering are implemented. No additional foreign-target path was found in their current fixtures. The harness’s own fallback signalling still has finding 1. M44/M49’s universal nonce-marker claim is inaccurate. |
+| **H2** names, own-scope proof, receipts, serial execution | Digit-suffix matching is corrected for distinct nonces. Receipt writing precedes launch. Execution is serial. Own-scope proof is bypassed by cleanup and omitted from acceptance: findings 2 and 4. |
+| **H3** final-gate scopes read-only | Confirmed for the harness: `gate_scopes()` feeds populated checks, never `kill_unit()`. Scripts under test still perform their existing gate cleanup. |
+| **H4** deletion ownership | Exclusive mutant-directory creation and symlink-free `--work` check are present. Lane symlinks are retained and reported. Inspection/deletion verification remains incomplete: findings 5–6. |
+| **H5** labels/protected PIDs | Exact environment checks and anchored sleep matching are present. `protected_pids()` protects individual harness cleanup signals; it is not consulted by cgroup kills or `p.kill()`. Ancestor traversal is capped at 64. |
+| **H6** own session | Confirmed for execution mode. Does not establish safe SIGCHLD disposition. |
+| **H7** inspection failures/deletion verification | Partially implemented; finding 5 and unchecked private-tree removal remain. |
+| **H8** bounded waits/finally/stop | Launch cleanup is in `finally`; waits and cleanup iterations are bounded. Findings 3–4 and 7 violate the promised stop behavior. Timeout accounting also uses wall time rather than monotonic time. |
+| **M9** control first | Confirmed. A non-SURVIVED control or nonzero cleanup leak sets STOP before another mutant. |
+| **M10** minimal environment/empty stderr | Confirmed at harness launch. The self-test preserves nonce/NKILL variables through its scrub and re-exec. Empty stderr is required for SURVIVED, but captured inner stderr can incorrectly produce KILLED. |
+| **M11** no parallelism | Confirmed within one harness invocation. |
+
+The nonce wiring itself is consistent: `FUIGO_SELFTEST_ID` ends in `-<nonce>`, `SELFTEST_TAG` ends in the 20-digit nonce, and `SELFTEST_UID` incorporates that tag. Named env-cleared fixtures match the harness’s anchored sleep rule; the unnamed `/bin/sleep 300` fixtures rely on their nonce-bearing scopes.
+
+The pidfd paths at harness lines 63 and 213, and `safe-kill.py:42`, have the correct open-before-inspection ordering. The remaining direct `p.kill()` calls are the exception. Ordinary systemd launch failure without a collision produces an invalid result and stops; the dangerous case is cleanup treating a pre-existing matching identity as newly owned.
+
+**In-model counts: BLOCKER 1 · HIGH 2 · MEDIUM 4.**
+
+VERDICT: DO-NOT-RUN
+
+
+################ MUTANT-HARNESS KILL-SAFETY REVIEW 3 (scripts/strike/gate-mutants.py at ac733058; full transcript: p17f3-astra-mutants-review3.raw.txt, sha256 e75a03eed74fd0329b862c809af693cd51cf47abdcbed47b5a24cb58d88eb2c6)
+
+Round 3 at `ac733058`: **0 BLOCKER, 0 HIGH, 1 MEDIUM, 1 LOW**. I found no remaining cross-tenant kill path under the stated model. One required fail-closed cleanup condition remains incomplete.
+
+1. **MEDIUM — Work-directory removal can falsely report success after an inspection failure.**  
+   [gate-mutants.py:505](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:505)
+
+   `rmtree(d, ignore_errors=True)` suppresses removal errors; the following `os.path.lexists(d)` also suppresses inspection errors. In Python 3.12, `lexists()` returns `False` for **any `OSError`**, including EIO—not just absence. [CPython implementation](https://github.com/python/cpython/blob/3.12/Lib/posixpath.py#L178)
+
+   **Concrete scenario:** a filesystem error prevents removal of the mutant directory and makes its subsequent `lstat` fail with EIO. The harness reports `leaked_after_cleanup=0`, accepts the result—including a control—and starts the next run. No adversary or nonce collision is needed.
+
+   I reproduced the error suppression with an in-memory fault injection. This leaves **M6 partially unresolved**. Use explicit `lstat`, accepting only `FileNotFoundError` as removal success; other errors must record a leak and stop.
+
+2. **LOW — Closing control overwrites opening-control evidence.**  
+   [gate-mutants.py:456](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:456)
+
+   Both control labels differ from `name`, so both select `tag = 'M01z'`. Opening the files with `'w'` at line 464 means the closing control truncates the opening control’s stdout and stderr.
+
+   **Concrete scenario:** an ordinary completed run retains both summary results but only the closing control’s raw logs. Give opening and closing controls distinct filenames.
+
+The round-2 corrections otherwise check out:
+
+- **B1:** SIGCHLD is reset before child creation. The direct child’s pidfd opens before any wait; every fallback signal uses that descriptor. It remains open through the wait loop and final fallback, then closes before nonce cleanup. This satisfies the documented unreaped-child prerequisites; CPython’s signal reset also clears `SA_NOCLDWAIT`. [Linux pidfd documentation](https://man7.org/linux/man-pages/man2/pidfd_open.2.html), [CPython signal implementation](https://github.com/python/cpython/blob/3.12/Python/pylifecycle.c#L2975)
+- **H2:** Preflight precedes directory creation, receipt writing and launch. Under the accepted nonce assumptions, cleanup’s process checks, scope names and lane names identify this run. Real final-gate scopes without the nonce are inspected, not cgroup-killed by the harness.
+- **H3:** `KILLED` requires the expected first assertion; other assertions become `KILLED-OTHER`. Missing summaries and stderr-wrapper-first failures cannot receive kill credit. Opening and closing controls must both survive with successful cleanup, subject to finding 1.
+- **M4:** Scope observation is mandatory. Polling is 50 ms until observation, then one second. A fast exit before observation conservatively becomes `NOSCOPE`.
+- **M5:** `real_dir()` propagates inspection failures; lane deletion verification uses explicit `lstat`. The remaining gap concerns the separate work-directory check.
+- **M7 / L8 / L9:** The preparation-time STOP recheck, selector rejection, corrected documentation and monotonic elapsed timing are present.
+
+Additional requested checks:
+
+- **`systemd-run` failure:** failure before scope observation becomes `NOSCOPE`; failure after observation but before self-test identity confirmation becomes `INVALID`. Neither earns kill credit. Timeout, STOP and `+CHILD-NOT-REAPED` paths remain non-results and stop further runs; none falls back to signalling a recycled numeric PID.
+- **EXPECT:** **No stale prefix found.** All 70 entries match current assertion labels, including seven assembled dynamically in shell. M20, M31, M32 and M83 have no EXPECT entry; failures therefore become `KILLED-OTHER`.
+- **Environment re-exec:** Both `GATE_SELFTEST_NONCE` and `GATE_MUT_NKILL` appear in the allowlist and preservation loop at [gate-selftest.sh:27](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:27). Neither is lost through `env -i`.
+- **Verification:** Python parsing, shell syntax and all 74 mutation-pattern checks passed. Linux execution was unavailable. No files were changed. Nonce forgery and planted cleanup targets are **OUT-OF-MODEL**, not counted.
+
+The remaining MEDIUM violates the explicitly required removal-verification/stop condition, so that correction is needed before approval.
+
+VERDICT: DO-NOT-RUN
+
+
+################ MUTANT-HARNESS KILL-SAFETY REVIEW 4 (scripts/strike/gate-mutants.py at bb21edad; full transcript: p17f3-astra-mutants-review4.raw.txt, sha256 0cf141db99e8e0fecf871931716ca696bb241d6ab26ccdc357fb5ff569ca1d36)
+
+Reviewed the full file at **bb21edadd6dbb482e28c169f02dade9de4bad2de** and its diff from `ac733058`.
+
+**In-model findings: 0 BLOCKER, 0 HIGH, 0 MEDIUM, 0 LOW.** Both round-3 findings are resolved:
+
+- **MEDIUM resolved — [gate-mutants.py:508](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:508):** Only `FileNotFoundError` establishes removal. Permission, I/O, and other inspection errors now record a leak and stop execution. The corresponding preexisting-scope check at line 364 raises `Unknown`, causing a PREEXISTING stop before launch or cleanup.
+- **LOW resolved — [gate-mutants.py:458](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-mutants.py:458):** Opening and closing controls produce separate `mut-M01-opening.{out,err}` and `mut-M01-closing.{out,err}` files.
+
+**I confirm the round-3 statement: no remaining cross-tenant kill path found under the stated model.** Process signalling retains pidfd-based targeting and post-open ownership checks; cgroup kills require nonce-bearing scope names; deletion remains confined to nonce-owned lanes and exclusively created run directories. The five identity-changing mutants retain run-specific marker restrictions.
+
+I found no additional in-model path to an incorrectly accepted KILLED/SURVIVED result. Scope confirmation, nonce confirmation, assertion classification, cleanup failures, and control failures retain their stopping behavior.
+
+Verification: `--check` passed for all **75 entries—74 mutants plus the control—with no missing patterns**. **29 in-memory branch checks passed**, covering inspection errors, control filenames, scope-name boundaries, and verdict classification. No files were changed. Linux process/cgroup behavior was reviewed statically, not executed.
+
+Deliberate nonce forgery or hostile path replacement is **OUT-OF-MODEL**, excluded from the counts.
+
+VERDICT: SAFE-TO-RUN
+
+
+################ ROUND 43 (gate-selftest.sh, diff d47782c3..cb2958b8; full transcript: p17f3-astra-r43.raw.txt, sha256 e97f79543e233ab6218e4f64cb98be875d727f2c0361bd90693434cf322a77f9)
+
+Audited `d47782c3..cb2958b8` for `scripts/strike/gate-selftest.sh`. **No HIGH/BLOCKER findings; MEDIUM count: 0.** The change fixes the stated precondition gap. I found no additional launch-context weakness within the requested cases and documented launch methods.
+
+The signal analysis is correct, with one qualification:
+
+- At [gate-selftest.sh:656](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:656) and line 657, `trap '' INT HUP QUIT` explicitly makes those dispositions ignored by subsequently executed commands. They survive both `setsid` and `exec`; `env -i` does not reset them. This establishes the precondition independently of the suite’s launch method. Bash distinguishes these explicit ignores from its handling of an asynchronous subshell. [GNU Bash manual](https://www.gnu.org/s/bash/manual/bash.html)
+- The initial non-interactive runner cannot undo inherited ignored INT/HUP with its own `trap on_abort`. The leader’s Python shim resets the dispositions before executing a fresh Bash, making those traps effective. With M19, that reset is absent: INT/HUP remain ignored, fixture sleeps survive, and the cleanup/status assertions fail. This is a source-level conclusion, not a claimed HEAD mutation result. [Bash trap rules](https://www.gnu.org/s/bash/manual/html_node/Bourne-Shell-Builtins.html)
+- On the non-leader path, [abort-lib.sh:27](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/abort-lib.sh:27) resets the signals and installs forwarding handlers; line 38 resets the child before `exec`. **The explicit pre-exec reset is not the only reason the eventual Bash can trap them:** `exec` also resets caught handlers to defaults. Its essential additional purpose is protecting the *pre-exec window*, when parent-death TERM would otherwise enter the inherited forwarding handler. [Linux exec semantics](https://man7.org/linux/man-pages/man2/execve.2.html)
+
+Every `mini_case` invocation retains its intended behavior:
+
+| Case / location | Assessment |
+|---|---|
+| Leader TERM, INT, HUP — [gate-selftest.sh:672](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:672) | TERM remains usable; INT/HUP now reliably require recovery from inherited ignore. Readiness requires three live fixture sleeps before signaling. |
+| Leader/non-leader `pkills` — [gate-selftest.sh:675](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:675) | Still sends TERM to verified members of the runner’s session. The launching wrapper is outside that session. Escaped fixture sessions still require scope cleanup. |
+| Non-leader runner TERM — [gate-selftest.sh:677](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:677) | Still targets the actual runner, with cleanup and propagated status checked. |
+| `quick-first` — [gate-selftest.sh:678](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:678) | Still aborts the second command after the first completes, exercising parent-shell scope bookkeeping. |
+| `leak-first` — [gate-selftest.sh:679](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:679) | Still checks that the earlier command’s escaped child was reaped **before** the next command, then checks abort cleanup. It does not demonstrate an earlier populated scope surviving until abort; that was already its evidence boundary. |
+| `supINT`, `supTERM`, `supHUP` — [gate-selftest.sh:680](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:680) | Still target the runner’s Python parent. Python can replace inherited ignored dispositions and forward the signals. Cleanup plus exit 143 prevents supervisor-only termination from passing. |
+| `supKILL` — [gate-selftest.sh:683](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:683) | Still kills the supervisor, expecting wrapper status 137 and subsequent runner cleanup through parent-death TERM. The separate cleanup wait correctly accommodates that ordering. [Parent-death signal semantics](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html) |
+
+The wrapper’s `echo $?` remains valid. The trailing command keeps the wrapper alive to record the child’s status. In the documented launches, the suite’s non-interactive shells have job control disabled, so the launched `setsid` command is not a process-group leader and does not take the extra-fork path that could prematurely return success. The explicit ignores are confined to the wrapper subshells. [util-linux `setsid` implementation](https://github.com/util-linux/util-linux/blob/master/sys-utils/setsid.c)
+
+The guarded runner establishes its dispositions before invoking `bg`. Fixture cleanup uses scope SIGKILL, so any INT/QUIT ignores subsequently introduced by asynchronous launches cannot defeat cleanup. No new signal target, deletion path, or ownership boundary is introduced.
+
+For the other requested cases:
+
+| Case / location | Launch-context assessment |
+|---|---|
+| `bgs-only` — [gate-selftest.sh:1031](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1031) | Uses TERM, not INT/HUP. Terminal, detached-nohup, and the described mutant-harness launches do not remove its required precondition. Checks running fixture, cleanup, 143, and disappearance. |
+| `late-launch` — [gate-selftest.sh:1042](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1042) | Also uses TERM. Its delayed launcher and abort-flag behavior do not depend on inherited INT/HUP/QUIT or a controlling terminal. |
+| `tiny.sh` — [gate-selftest.sh:687](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:687) | Python installs its TERM handler explicitly; the child receives default TERM. No corresponding inherited-disposition weakness. This remains a timed-window test, not an acknowledged-window test. |
+| `tiny2.sh` — [gate-selftest.sh:766](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:766) | SIGKILL cannot be ignored. The test checks the pre-exec child, successful signaling, child identity/death, and absence of execution. Caller INT/HUP dispositions do not substitute for that evidence. |
+| `gate_abort_case` — [gate-selftest.sh:1221](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:1221) | Explicit session isolation; TERM and KILL cases. Neither requires inherited INT/HUP ignore. Build readiness, abort records or watchdog log, survivors, scopes, and lock release remain checked. |
+| Watchdog death/stop cases — [gate-selftest.sh:594](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:594), auxiliary case at 749, identity cases at 1017 | Death triggers use KILL or explicit identity mismatch; stopping uses a file. Detached-session behavior is explicitly checked at line 600. No documented caller context supplies a missing signal precondition. |
+| Session-versus-group case — [gate-selftest.sh:619](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:619) | Establishes its own session and checks both group separation and shared session before signaling. Caller session/group identity does not supply those conditions. |
+
+An additional custom launcher that explicitly ignores **TERM** could break TERM-dependent fixtures; none of the three specified launch methods does that. This is not evidence of a defect under the agreed launch contract.
+
+Local `bash -n` and scoped `git diff --check` passed. Local Bash is 3.2, so these are syntax/whitespace checks only. Linux/systemd execution and HEAD’s full-suite/mutation results remain unverified; the supplied **394/0 applies only to d47782c3**.
+
+VERDICT: NO-HIGH
+
+
+################ ROUND 44 (gate-selftest.sh, diff cb2958b8..8ee19ba7; full transcript: p17f3-astra-r44.raw.txt, sha256 a3f1377fbd60692f778920c1255ad8138353ef8e4f163c4bbf8657d8dbb597fe)
+
+Audited `cb2958b8..8ee19ba7`, limited to `scripts/strike/gate-selftest.sh`. **HIGH/BLOCKER: 0. Open MEDIUM: 0. LOW: 1.** No changes made.
+
+1. **Environment order is correct for the stated GNU/Linux stack — line 985.** Coreutils `env -i` clears `environ`, then processes assignments sequentially; glibc appends these distinct names in that order. `setsid` directly executes `sleep`, without an intervening shell rebuilding the environment. Neither program reorders it. The new assertion also checks the actual sleeping process’s first entry. Sources: [GNU env](https://raw.githubusercontent.com/coreutils/coreutils/v9.5/src/env.c), [glibc](https://raw.githubusercontent.com/bminor/glibc/release/2.39/master/stdlib/setenv.c), [setsid](https://raw.githubusercontent.com/util-linux/util-linux/v2.40/sys-utils/setsid.c), [sleep](https://raw.githubusercontent.com/coreutils/coreutils/master/src/sleep.c).
+
+2. **M48 should now fail on the intended 64-KiB-pipe setup — lines 984–988.** The marker precedes approximately 400 kB of padding. GNU grep’s initial read buffer is approximately 96 KiB; read-ahead plus a 64-KiB pipe cannot absorb the remainder before `grep -m1` exits. `tr` consequently encounters SIGPIPE/EPIPE, `pipefail` makes the assignment unsuccessful, and `|| marker=""` discards even the marker already captured. Bash’s command substitution drains **grep’s output**, not the `tr → grep` pipe, so it cannot rescue the writer. The unmutated implementation consumes the entire transformed stream before its here-string loop selects the marker. Sources: [GNU grep source](https://fossies.org/linux/grep/src/grep.c), [grep behavior](https://www.gnu.org/s/grep/manual/grep.html).
+
+3. **Ownership and cleanup remain intact — line 985.** Explicit `FUIGO_SELFTEST_ID` preserves `mine_fx` and `skill` identification; `FUIGO_GATE_RUN` preserves `gate_kill_if_marked`. The tagged sleep argument remains unchanged, preserving the harness identification routes specified in your request. PATH is retained and quoted for executable lookup. Removed variables are unnecessary for these native utilities; the tag is expanded before execution. Each padding argument contains only `x`, so its unquoted expansion introduces no splitting/globbing problem.
+
+4. **The new assertion is sound — line 986.** Empty PID results short-circuit both reads and cannot equal the expected value. `/proc` paths and captured values are quoted. The marker fits within the 200-byte prefix. Any nonzero pipeline status inside the first substitution does not erase captured stdout or prevent `chk` from comparing it: this script enables `-u` and `pipefail`, not `-e`. The size branch emits `big` only after a successful numeric comparison. Unlike M48, this substitution has no failure handler clearing its output.
+
+**LOW — [gate-selftest.sh:981](/Volumes/Mando/WaylandBots/Fuigo/wt-p17f3/scripts/strike/gate-selftest.sh:981): the 64-KiB capacity statement is platform-specific.** Linux normally allocates 16 pages per pipe; with 64-KiB pages, a pipe can hold this entire fixture, allowing M48 to survive depending on scheduling. The assertion establishes order and size, not pipe capacity. This limits portability of the mutation guarantee; it does not establish an intended-host acceptance failure. [Linux pipe documentation](https://man7.org/linux/man-pages/man7/pipe.7.html)
+
+Verification: `bash -n` passed, plus four focused local Bash semantic checks. **Linux fixture execution, HEAD’s full self-test, and an observed M48 kill remain unverified here.**
+
+VERDICT: NO-HIGH

@@ -1,5 +1,6 @@
 use super::*;
 use fuigo_extra_ca::subscription::{Recipient, SubscriptionClient};
+use std::ffi::OsString;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -11,6 +12,10 @@ pub(super) struct TokenClient {
     client: SubscriptionClient,
     #[cfg(test)]
     endpoint: Option<String>,
+    /// Test-only stand-in for the process-wide CA bundle selection, which is read once per
+    /// process and may be set by any other test in the binary.
+    #[cfg(test)]
+    ca_bundle: Option<Option<(&'static str, OsString)>>,
 }
 impl TokenClient {
     pub(super) fn new(provider: SubscriptionProvider) -> Result<Self> {
@@ -20,10 +25,24 @@ impl TokenClient {
         };
         Ok(Self {
             provider,
-            client: SubscriptionClient::new(recipient).map_err(|_| SubscriptionError::Network)?,
+            client: subscription_client(recipient)?,
             #[cfg(test)]
             endpoint: None,
+            #[cfg(test)]
+            ca_bundle: None,
         })
+    }
+    #[cfg(test)]
+    pub(super) fn with_ca_bundle(mut self, bundle: Option<(&'static str, OsString)>) -> Self {
+        self.ca_bundle = Some(bundle);
+        self
+    }
+    fn ca_bundle(&self) -> Option<(&'static str, OsString)> {
+        #[cfg(test)]
+        if let Some(bundle) = &self.ca_bundle {
+            return bundle.clone();
+        }
+        configured_ca_bundle()
     }
     #[cfg(test)]
     pub(super) fn local(provider: SubscriptionProvider, endpoint: String) -> Self {
@@ -38,16 +57,18 @@ impl TokenClient {
             #[cfg(test)]
             if let Some(endpoint) = &self.endpoint {
                 use fuigo_extra_ca::dispatch::AsyncRequestBuilderExt;
-                let client = fuigo_extra_ca::build_reqwest_client(|b| {
-                    b.redirect(reqwest::redirect::Policy::none())
-                })
-                .map_err(|_| SubscriptionError::Network)?;
+                let client = or_local_tls(
+                    fuigo_extra_ca::build_reqwest_client(|b| {
+                        b.redirect(reqwest::redirect::Policy::none())
+                    }),
+                    self.ca_bundle(),
+                )?;
                 let response = client
                     .post(endpoint)
                     .form(form)
                     .send_checked()
                     .await
-                    .map_err(|_| SubscriptionError::Network)?;
+                    .map_err(|error| exchange_send_error(&error, self.ca_bundle()))?;
                 return read_response(response).await;
             }
             let request = self
@@ -61,11 +82,13 @@ impl TokenClient {
                 .client
                 .execute(request)
                 .await
-                .map_err(|_| SubscriptionError::Network)?;
+                .map_err(|error| exchange_send_error(&error, self.ca_bundle()))?;
             read_response(response).await
         })
         .await
-        .map_err(|_| SubscriptionError::Network)?
+        // The deadline can elapse after the provider received the request, so this is
+        // ambiguous, not a send failure.
+        .map_err(|_| SubscriptionError::AmbiguousExchange)?
     }
     async fn exchange(&self, code: &str, verifier: &str, redirect: &str) -> Result<Credential> {
         let body = self
@@ -91,8 +114,108 @@ impl TokenClient {
         parse_credential(self.provider, self.post(&form).await?)
     }
 }
+/// The subscription HTTPS client. Building it touches nothing but local TLS state (crypto
+/// provider, OS roots, the opt-in extra CA bundle), so its failure is a local configuration
+/// fault: reporting it as a network error would invite endless retries of something only
+/// the user can fix.
+pub(super) fn subscription_client(recipient: Recipient) -> Result<SubscriptionClient> {
+    or_local_tls(SubscriptionClient::new(recipient), configured_ca_bundle())
+}
+/// A send failure. A TLS handshake that rejected the provider's certificate while an extra
+/// CA bundle is configured is the usual face of a broken bundle: the loader skips an
+/// unreadable or certificate-free file (logging it), so the client builds and the failure
+/// only shows up here. That is a local configuration fault, reported as such with the file
+/// named. With no bundle configured a rejected certificate stays `Network`: telling the
+/// user to trust a different CA could be advice to trust an interceptor. Either way the
+/// handshake failed before any request bytes were sent.
+pub(super) fn transport_error(
+    error: &(dyn std::error::Error + 'static),
+    bundle: Option<(&str, OsString)>,
+) -> SubscriptionError {
+    match bundle {
+        Some(bundle) if certificate_rejected(error) => local_tls(
+            Some(bundle),
+            "the provider's TLS certificate did not verify",
+        ),
+        _ => SubscriptionError::Network,
+    }
+}
+/// A token-exchange send failure. Only a failure before the request left this host (egress
+/// denial, DNS, TCP connect, TLS handshake) proves the provider issued nothing. Any other
+/// transport failure (the connection dropped after the request was written, before the
+/// response headers arrived) may follow a rotation the provider already performed, so it is
+/// ambiguous and the refresh latch must hold.
+pub(super) fn exchange_send_error(
+    error: &fuigo_extra_ca::dispatch::DispatchError,
+    bundle: Option<(&str, OsString)>,
+) -> SubscriptionError {
+    use fuigo_extra_ca::dispatch::DispatchError;
+    let never_sent = error.is_connect() || matches!(error, DispatchError::Denied(_));
+    match transport_error(error, bundle) {
+        SubscriptionError::Network if !never_sent => SubscriptionError::AmbiguousExchange,
+        other => other,
+    }
+}
+/// Whether a rustls certificate-verification failure is anywhere in the error chain.
+/// `io::Error::source` skips the error it wraps, so wrapped errors are opened explicitly.
+fn certificate_rejected(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut pending = vec![error];
+    let mut seen = 0;
+    while let Some(error) = pending.pop() {
+        seen += 1;
+        if seen > 64 {
+            return false;
+        }
+        if let Some(rustls::Error::InvalidCertificate(_)) = error.downcast_ref::<rustls::Error>() {
+            return true;
+        }
+        if let Some(inner) = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|io| io.get_ref())
+        {
+            pending.push(inner);
+        }
+        if let Some(source) = error.source() {
+            pending.push(source);
+        }
+    }
+    false
+}
+/// The CA bundle variable fuigo-extra-ca selected, and the path it names.
+pub(super) fn configured_ca_bundle() -> Option<(&'static str, OsString)> {
+    let variable = fuigo_extra_ca::configured_bundle_env()?;
+    Some((variable, std::env::var_os(variable).unwrap_or_default()))
+}
+/// Maps a client-construction failure to [`SubscriptionError::LocalTls`], naming the file.
+pub(super) fn or_local_tls<T, E>(
+    built: std::result::Result<T, E>,
+    bundle: Option<(&str, OsString)>,
+) -> Result<T> {
+    built.map_err(|_| local_tls(bundle, "the HTTPS client could not be built"))
+}
+fn local_tls(bundle: Option<(&str, OsString)>, what: &str) -> SubscriptionError {
+    // `{:?}` quotes and escapes the path so it cannot inject terminal controls.
+    let detail = match bundle {
+        Some((variable, path)) => format!(
+            "{what}; check the CA bundle file {:?} set by {variable}",
+            Path::new(&path)
+        ),
+        None => format!("{what}; no extra CA bundle is configured; check the system trust store"),
+    };
+    tracing::warn!(%detail, "subscription local TLS/CA configuration error");
+    SubscriptionError::LocalTls(detail)
+}
+/// Token-exchange responses only. The success status is already in hand here, so the one
+/// `Network` this can produce is a body read that failed *after* the provider answered:
+/// a rotated single-use refresh token is then gone along with the reply we lost. Report
+/// that as ambiguous so the refresh path latches instead of treating it as a send failure.
 pub(super) async fn read_response(response: reqwest::Response) -> Result<serde_json::Value> {
-    read_json_response(response, 65536).await
+    read_json_response(response, 65536)
+        .await
+        .map_err(|error| match error {
+            SubscriptionError::Network => SubscriptionError::AmbiguousExchange,
+            other => other,
+        })
 }
 pub(super) async fn read_json_response(
     mut response: reqwest::Response,
@@ -188,11 +311,199 @@ fn parse_credential(provider: SubscriptionProvider, body: serde_json::Value) -> 
     Ok(record)
 }
 
+/// The loopback callback listener. Under test it reports its own drop, so a test can prove
+/// the socket was released without re-binding the port, which races every other test on
+/// the host for ephemeral ports.
+struct CallbackListener {
+    inner: TcpListener,
+    ipv6: Option<TcpListener>,
+    #[cfg(test)]
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Callback connections read at once. Each is bounded by [`CALLBACK_READ_TIMEOUT`], so a
+/// connection that never sends a request line holds one slot for at most that long and
+/// never blocks the real callback; past this many, new connections wait in the kernel
+/// backlog until a slot frees. Ignored requests are never counted: only the attempt's
+/// overall deadline ends a login that is never completed.
+const MAX_PENDING_CALLBACKS: usize = 32;
+const CALLBACK_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `EAFNOSUPPORT`: the host has no IPv6 at all (kernel booted without it, some containers).
+#[cfg(unix)]
+pub(super) const EAFNOSUPPORT: i32 = libc::EAFNOSUPPORT;
+#[cfg(windows)]
+pub(super) const EAFNOSUPPORT: i32 = 10047; // WSAEAFNOSUPPORT
+#[cfg(not(any(unix, windows)))]
+pub(super) const EAFNOSUPPORT: i32 = i32::MIN;
+
+/// Whether an IPv6 loopback bind failed because the host has no IPv6 loopback, as opposed
+/// to someone else holding the address. Only these let ChatGPT sign-in continue on IPv4
+/// alone: with no `[::1]` on the host, nothing can listen there and receive the redirect.
+pub(super) fn ipv6_loopback_unavailable(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::AddrNotAvailable
+        || error.raw_os_error() == Some(EAFNOSUPPORT)
+}
+
+fn listener_error(address: std::net::SocketAddr, error: &std::io::Error) -> SubscriptionError {
+    fuigo_tty_utils::cli_eprintln!(
+        "Cannot bind subscription callback listener at {address}: {error}. Release this address before signing in."
+    );
+    SubscriptionError::Listener
+}
+
+/// Binds the callback listeners: `127.0.0.1:port`, and for ChatGPT (whose registered
+/// redirect host is `localhost`, which a browser may resolve to `::1` first) `[::1]` on the
+/// same port, so no other local process can take the IPv6 side of the redirect. A host
+/// without IPv6 loopback continues on IPv4 alone; any other IPv6 failure (the address is
+/// held by someone else, or an unknown error) aborts, as does any IPv4 failure.
+/// `bind` is the socket seam: production passes `TcpListener::bind`.
+async fn bind_callback_listeners<F, Fut>(
+    provider: SubscriptionProvider,
+    port: u16,
+    bind: F,
+) -> Result<(TcpListener, Option<TcpListener>)>
+where
+    F: Fn(std::net::SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<TcpListener>>,
+{
+    let ipv4_address: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, port).into();
+    let ipv4 = bind(ipv4_address)
+        .await
+        .map_err(|error| listener_error(ipv4_address, &error))?;
+    if provider != SubscriptionProvider::Chatgpt {
+        return Ok((ipv4, None));
+    }
+    let port = ipv4
+        .local_addr()
+        .map_err(|_| SubscriptionError::Listener)?
+        .port();
+    let ipv6_address: std::net::SocketAddr = (std::net::Ipv6Addr::LOCALHOST, port).into();
+    match bind(ipv6_address).await {
+        Ok(ipv6) => Ok((ipv4, Some(ipv6))),
+        Err(error) if ipv6_loopback_unavailable(&error) => {
+            tracing::info!(%error, "no IPv6 loopback on this host; subscription callback listens on IPv4 only");
+            Ok((ipv4, None))
+        }
+        Err(error) => Err(listener_error(ipv6_address, &error)),
+    }
+}
+
+/// What one callback connection amounted to.
+enum CallbackRequest {
+    /// Not this attempt's callback (wrong, missing or duplicate state, another path, a
+    /// malformed or unfinished request): answered, if possible, and ignored.
+    Ignored,
+    /// This attempt's state with the authorization code.
+    Code(String),
+    /// This attempt's state without a usable code (for example the user declined): final.
+    Rejected,
+}
+
+/// The target of a well-formed `GET <origin-form target> HTTP/1.x` request head (CRLF line
+/// endings, every header line `name: value`). `None` for anything else, so a malformed request
+/// is ignored even when it carries this attempt's state.
+fn parse_request_target(head: &str) -> Option<&str> {
+    let head = head.strip_suffix("\r\n\r\n")?;
+    let mut lines = head.split("\r\n");
+    let mut parts = lines.next()?.split(' ');
+    let (method, target, version) = (parts.next()?, parts.next()?, parts.next()?);
+    let well_formed = parts.next().is_none()
+        && method == "GET"
+        && (version == "HTTP/1.1" || version == "HTTP/1.0")
+        && target.starts_with('/')
+        && !target.starts_with("//")
+        // RFC 9112 3.2.1 origin-form is path and optional query only, so no fragment ('#').
+        // Rejects exactly what a browser always percent-encodes in a path or query (WHATWG URL:
+        // controls, space, non-ASCII, '"', '#', '<', '>'), so a real callback is never refused
+        // for a character a browser legitimately leaves raw (such as '|' or '{').
+        && target
+            .bytes()
+            .all(|b| b.is_ascii_graphic() && !b"\"#<>".contains(&b));
+    // RFC 9110 5.1 / 5.5: a field name is a token; a field value has no control character
+    // other than horizontal tab.
+    let token = |b: u8| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b);
+    let headers_ok = lines.all(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            !name.is_empty()
+                && name.bytes().all(token)
+                && value.bytes().all(|b| b == b'\t' || !(b.is_ascii_control()))
+        })
+    });
+    (well_formed && headers_ok).then_some(target)
+}
+
+/// Reads and answers one callback connection. Never fails: anything that is not this
+/// attempt's callback is [`CallbackRequest::Ignored`], so no other page or local process
+/// can end the login by sending junk to the port.
+async fn read_callback(
+    mut stream: tokio::net::TcpStream,
+    expected_path: &str,
+    state: &str,
+) -> CallbackRequest {
+    const NOT_FOUND: &[u8] =
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    const BAD_REQUEST: &[u8] = b"HTTP/1.1 400 Bad Request\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nFuigo rejected this callback.";
+    const RECEIVED: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nFuigo received authorization. Return to your terminal for the result.";
+    let mut bytes = Vec::new();
+    let read = tokio::time::timeout(CALLBACK_READ_TIMEOUT, async {
+        loop {
+            bytes.push(stream.read_u8().await.ok()?);
+            if bytes.ends_with(b"\r\n\r\n") {
+                return Some(());
+            }
+            if bytes.len() >= 8192 {
+                return None;
+            }
+        }
+    })
+    .await;
+    if !matches!(read, Ok(Some(()))) {
+        // Unfinished (closed early, too long, or too slow): answered, best effort, and ignored.
+        let _ = stream.write_all(BAD_REQUEST).await;
+        return CallbackRequest::Ignored;
+    }
+    let target = std::str::from_utf8(&bytes)
+        .ok()
+        .and_then(parse_request_target)
+        .and_then(|target| url::Url::parse(&format!("http://localhost{target}")).ok());
+    let Some(url) = target else {
+        let _ = stream.write_all(BAD_REQUEST).await;
+        return CallbackRequest::Ignored;
+    };
+    if url.path() != expected_path {
+        let _ = stream.write_all(NOT_FOUND).await;
+        return CallbackRequest::Ignored;
+    }
+    let fields: Vec<_> = url.query_pairs().collect();
+    let states: Vec<_> = fields.iter().filter(|(k, _)| k == "state").collect();
+    let codes: Vec<_> = fields.iter().filter(|(k, _)| k == "code").collect();
+    if !(states.len() == 1 && states[0].1 == state) {
+        let _ = stream.write_all(BAD_REQUEST).await;
+        return CallbackRequest::Ignored;
+    }
+    if codes.len() == 1 && !codes[0].1.is_empty() && !fields.iter().any(|(k, _)| k == "error") {
+        let _ = stream.write_all(RECEIVED).await;
+        CallbackRequest::Code(codes[0].1.to_string())
+    } else {
+        let _ = stream.write_all(BAD_REQUEST).await;
+        CallbackRequest::Rejected
+    }
+}
+#[cfg(test)]
+impl Drop for CallbackListener {
+    fn drop(&mut self) {
+        // `inner` is closed by the drop glue immediately after this, in the same call.
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Owns the listener and one attempt's PKCE material. Dropping cancels the listener.
 /// No spawned callback task, external session imports, or secret Debug output.
 pub struct LoginAttempt {
     provider: SubscriptionProvider,
-    listener: TcpListener,
+    listener: CallbackListener,
     redirect: String,
     state: String,
     verifier: String,
@@ -209,9 +520,18 @@ impl LoginAttempt {
         Self::bind(provider, port).await
     }
     pub(super) async fn bind(provider: SubscriptionProvider, port: u16) -> Result<Self> {
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
-            .await
-            .map_err(|_| SubscriptionError::Listener)?;
+        Self::bind_with(provider, port, TcpListener::bind).await
+    }
+    pub(super) async fn bind_with<F, Fut>(
+        provider: SubscriptionProvider,
+        port: u16,
+        bind: F,
+    ) -> Result<Self>
+    where
+        F: Fn(std::net::SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<TcpListener>>,
+    {
+        let (listener, ipv6) = bind_callback_listeners(provider, port, bind).await?;
         let port = listener
             .local_addr()
             .map_err(|_| SubscriptionError::Listener)?
@@ -243,13 +563,28 @@ impl LoginAttempt {
         }
         Ok(Self {
             provider,
-            listener,
+            listener: CallbackListener {
+                inner: listener,
+                ipv6,
+                #[cfg(test)]
+                dropped: Default::default(),
+            },
             redirect,
             state,
             verifier: pkce.code_verifier,
             authorize: authorize.into(),
             client: TokenClient::new(provider)?,
         })
+    }
+    /// Whether this attempt also listens on `[::1]`.
+    #[cfg(test)]
+    pub(super) fn listens_on_ipv6(&self) -> bool {
+        self.listener.ipv6.is_some()
+    }
+    /// Becomes `true` once this attempt's callback listener has been dropped.
+    #[cfg(test)]
+    pub(super) fn listener_drop_probe(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.listener.dropped.clone()
     }
     #[cfg(test)]
     pub(super) fn with_endpoint(mut self, endpoint: String) -> Self {
@@ -303,76 +638,44 @@ impl LoginAttempt {
         .await
         .map_err(|_| SubscriptionError::Network)?
     }
+    /// Serves the callback port until this attempt's own callback arrives. Connections are
+    /// read concurrently (see [`MAX_PENDING_CALLBACKS`]), so an idle or slow connection
+    /// cannot hold up the real one; requests that are not this attempt's callback are
+    /// answered and ignored, never fatal. The caller's deadline bounds the whole wait.
     async fn callback(&self) -> Result<String> {
+        use futures::StreamExt;
+        let expected = url::Url::parse(&self.redirect).map_err(|_| SubscriptionError::Callback)?;
+        let expected_path = expected.path();
+        let mut pending = futures::stream::FuturesUnordered::new();
         loop {
-            let (mut stream, _) = self
-                .listener
-                .accept()
-                .await
-                .map_err(|_| SubscriptionError::Listener)?;
-            let mut bytes = Vec::new();
-            let read = tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    let byte = stream
-                        .read_u8()
-                        .await
-                        .map_err(|_| SubscriptionError::Callback)?;
-                    bytes.push(byte);
-                    if bytes.ends_with(b"\r\n\r\n") {
-                        return Ok(());
-                    }
-                    if bytes.len() >= 8192 {
-                        return Err(SubscriptionError::Callback);
-                    }
+            let accept = async {
+                match &self.listener.ipv6 {
+                    Some(ipv6) => tokio::select! {
+                        accepted = self.listener.inner.accept() => accepted,
+                        accepted = ipv6.accept() => accepted,
+                    },
+                    None => self.listener.inner.accept().await,
                 }
-            })
-            .await;
-            if !matches!(read, Ok(Ok(()))) {
-                continue;
-            }
-            let line = std::str::from_utf8(&bytes)
-                .map_err(|_| SubscriptionError::Callback)?
-                .lines()
-                .next()
-                .ok_or(SubscriptionError::Callback)?;
-            let mut parts = line.split_whitespace();
-            if parts.next() != Some("GET") {
-                continue;
-            }
-            let target = parts.next().ok_or(SubscriptionError::Callback)?;
-            if !target.starts_with('/') || target.starts_with("//") {
-                return Err(SubscriptionError::Callback);
-            }
-            let url = url::Url::parse(&format!("http://localhost{target}"))
-                .map_err(|_| SubscriptionError::Callback)?;
-            let expected =
-                url::Url::parse(&self.redirect).map_err(|_| SubscriptionError::Callback)?;
-            if url.path() != expected.path() {
-                let _ = stream
-                    .write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    )
-                    .await;
-                continue;
-            }
-            let fields: Vec<_> = url.query_pairs().collect();
-            let states: Vec<_> = fields.iter().filter(|(k, _)| k == "state").collect();
-            let codes: Vec<_> = fields.iter().filter(|(k, _)| k == "code").collect();
-            let valid = states.len() == 1
-                && states[0].1 == self.state
-                && codes.len() == 1
-                && !codes[0].1.is_empty()
-                && !fields.iter().any(|(k, _)| k == "error");
-            let reply: &[u8] = if valid {
-                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nFuigo received authorization. Return to your terminal for the result."
-            } else {
-                b"HTTP/1.1 400 Bad Request\r\nCache-Control: no-store\r\nConnection: close\r\n\r\nFuigo rejected this callback."
             };
-            let _ = stream.write_all(reply).await;
-            if !valid {
-                return Err(SubscriptionError::Callback);
+            tokio::select! {
+                accepted = accept, if pending.len() < MAX_PENDING_CALLBACKS => match accepted {
+                    Ok((stream, _)) => pending.push(read_callback(stream, expected_path, &self.state)),
+                    // A peer that connected and reset before the accept is its own failure,
+                    // not the listener's; any peer could otherwise end the login this way.
+                    Err(error) if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                    Err(_) => return Err(SubscriptionError::Listener),
+                },
+                Some(request) = pending.next() => match request {
+                    CallbackRequest::Ignored => {}
+                    CallbackRequest::Code(code) => return Ok(code),
+                    CallbackRequest::Rejected => return Err(SubscriptionError::Callback),
+                },
             }
-            return Ok(codes[0].1.to_string());
         }
     }
 }
@@ -380,13 +683,13 @@ impl LoginAttempt {
 pub async fn cli_login(provider: SubscriptionProvider) -> Result<()> {
     let store = default_store()?;
     let attempt = LoginAttempt::start(provider).await?;
-    eprintln!(
+    fuigo_tty_utils::cli_eprintln!(
         "Sign in to {} for Fuigo. Credentials will be stored only by Fuigo.\n{}",
         provider.name(),
         attempt.authorization_url()
     );
     if webbrowser::open(attempt.authorization_url()).is_err() {
-        eprintln!("Open the URL above in your browser.");
+        fuigo_tty_utils::cli_eprintln!("Open the URL above in your browser.");
     }
     let cancel = CancellationToken::new();
     let finish = attempt.finish_with_code_input(
@@ -400,6 +703,6 @@ pub async fn cli_login(provider: SubscriptionProvider) -> Result<()> {
         result = &mut finish => result?,
         _ = tokio::signal::ctrl_c() => { cancel.cancel(); finish.await?; },
     }
-    eprintln!("{} subscription login saved by Fuigo.", provider.name());
+    fuigo_tty_utils::cli_eprintln!("{} subscription login saved by Fuigo.", provider.name());
     Ok(())
 }

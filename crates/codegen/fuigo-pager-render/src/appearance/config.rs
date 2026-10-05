@@ -1794,10 +1794,17 @@ fn comment_out_values(toml: &str) -> String {
     out
 }
 
-/// Serializes the pager.toml read-modify-write so two rapid settings toggles can't interleave and clobber each other.
-/// It mirrors the shell's `save_config` `SAVE_LOCK`.
-static PAGER_TOML_SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// Set `[scrollback.scroll] respect_manual_folds` in `pager.toml`.
+///
+/// A read-modify-write through the shared helper
+/// (`fuigo_config::fs_atomic::edit_state_file`, P72): serialized against every
+/// other writer of the file in this process AND in other pagers (it used to
+/// take only an in-process mutex, so two pagers toggling settings at once lost
+/// one's change), with the replacement staged and synced outside the lock and
+/// renamed only if the file is still the version the edit read. The file keeps
+/// its mode, owner and ACLs, and a symlinked `pager.toml` is written through
+/// (`fuigo_config::write_through`); a new one is created as `std::fs::write`
+/// would. A file that cannot be read, or is not valid TOML, is refused.
 pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
 
@@ -1808,45 +1815,41 @@ pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
              that startup would never read",
         ));
     }
-    let _guard = PAGER_TOML_SAVE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    persist_respect_manual_folds_at(&crate::util::pager_toml_path(), enabled)
+}
 
-    let path = crate::util::pager_toml_path();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(e),
-    };
-    let updated = upsert_respect_manual_folds(&content, enabled)
-        .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
-        use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode()
-    });
-
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    std::fs::write(&tmp, updated)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(mode) = prior_mode {
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-        }
-    }
-    std::fs::rename(&tmp, &path)
+/// [`persist_respect_manual_folds`] on an explicit `pager.toml`.
+fn persist_respect_manual_folds_at(path: &std::path::Path, enabled: bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    fuigo_config::fs_atomic::edit_state_file(
+        path,
+        |bytes| {
+            fuigo_config::write_through::stage_file_atomically_with(
+                path,
+                bytes,
+                fuigo_config::write_through::NewFileMode::Default,
+            )
+        },
+        |current| {
+            let content = match current {
+                Ok(None) => "",
+                Ok(Some(bytes)) => std::str::from_utf8(bytes)
+                    .map_err(|e| Error::new(ErrorKind::InvalidData, e))?,
+                Err(e) => return Err(Error::new(e.kind(), e.to_string())),
+            };
+            let updated = upsert_respect_manual_folds(content, enabled)
+                .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
+            Ok(if updated == content {
+                fuigo_config::fs_atomic::Edit::Keep(())
+            } else {
+                fuigo_config::fs_atomic::Edit::Replace {
+                    contents: updated.into_bytes(),
+                    value: (),
+                }
+            })
+        },
+    )
+    .map_err(Error::from)
 }
 
 fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, String> {
@@ -2010,6 +2013,83 @@ gutter_bg = true
             toml::from_str("[scrollback.scroll]\nrespect_manual_folds = true").unwrap();
         let cfg: AppearanceConfig = raw.into();
         assert!(cfg.scrollback.scroll.respect_manual_folds);
+    }
+
+    /// Another writer of `pager.toml` (a second pager, through the same
+    /// state-file lock) appending keys while this pager toggles the setting:
+    /// nothing either writes is lost, and no temp is left.
+    #[test]
+    #[serial_test::serial] // the state lock lives under the (env-derived) fuigo home
+    fn toggling_alongside_another_writer_loses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pager.toml");
+        std::fs::write(&path, "[scrollback.scroll]\nrespect_manual_folds = false\n").unwrap();
+        let other = {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for i in 0..25 {
+                    fuigo_config::fs_atomic::edit_state_file(
+                        &path,
+                        |bytes| fuigo_config::fs_atomic::stage_atomically(&path, bytes, None),
+                        |current| {
+                            let mut s = String::from_utf8(current.unwrap().unwrap().to_vec()).unwrap();
+                            s.push_str(&format!("\n[other{i}]\nset = true\n"));
+                            Ok::<_, std::io::Error>(fuigo_config::fs_atomic::Edit::Replace {
+                                contents: s.into_bytes(),
+                                value: (),
+                            })
+                        },
+                    )
+                    .unwrap();
+                }
+            })
+        };
+        for i in 0..25 {
+            persist_respect_manual_folds_at(&path, i % 2 == 0).unwrap();
+        }
+        other.join().unwrap();
+        persist_respect_manual_folds_at(&path, true).unwrap();
+        let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(), Some(true));
+        for i in 0..25 {
+            assert_eq!(v[format!("other{i}")]["set"].as_bool(), Some(true), "other{i}");
+        }
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["pager.toml"]);
+    }
+
+    /// The write is staged and synced while another writer holds the lock,
+    /// and a change that writer makes meanwhile is kept (the toggle is
+    /// applied again to the newer file).
+    #[cfg(not(any(target_os = "macos", windows)))]
+    #[test]
+    #[serial_test::serial] // the state lock lives under the (env-derived) fuigo home
+    fn a_change_made_under_the_lock_while_staged_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pager.toml");
+        std::fs::write(&path, "[ui]\nkeep = 1\n").unwrap();
+        let held = fuigo_config::fs_atomic::lock_state_file(&path).unwrap();
+        let writer = {
+            let path = path.clone();
+            std::thread::spawn(move || persist_respect_manual_folds_at(&path, true))
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !std::fs::read_dir(dir.path())
+            .unwrap()
+            .any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+        {
+            assert!(std::time::Instant::now() < deadline, "nothing staged");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::write(&path, "[ui]\nkeep = 1\nadded = 2\n").unwrap();
+        drop(held);
+        writer.join().unwrap().unwrap();
+        let v: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["ui"]["added"].as_integer(), Some(2));
+        assert_eq!(v["scrollback"]["scroll"]["respect_manual_folds"].as_bool(), Some(true));
     }
 
     #[test]

@@ -1,9 +1,5 @@
 //! Session bring-up for `acp_session`: `spawn_session_actor` and the per-session OS thread (`SessionThread` / `spawn_session_on_thread`).
 //! Also holds the MCP auto-restart wiring (`SessionRestartActions`).
-//!
-//! The chat+local `own` supervisor (`gateway_bridge::local_workspace_supervisor`) is started in `session/new`, before the handshake stamp.
-//! It lives on `MvpAgent`, not `SessionActor`.
-//! Crash-restart issues `BridgeCommand::UpdateComputerSessions` through the bridge slot seeded here.
 #![allow(clippy::items_after_test_module)]
 use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
@@ -249,6 +245,21 @@ mod subagent_rate_limit_threshold_tests {
         );
     }
 }
+/// P42: the memory-embeddings static key is seeded from the spawn sampler, which may carry a session token
+/// seeded for another destination (`seed_client_config_auth_if_available`, or the global fallback when model
+/// resolution fails). Startup reindexing and the memory backend's static fallback send it to
+/// `<base_url>/embeddings` without going through `reconstruct_full_config`, so re-check it here.
+pub(super) fn memory_embed_api_key(
+    sampling_config: &SamplingConfig,
+    auth_manager: Option<&AuthManager>,
+) -> Option<String> {
+    crate::auth::session_delivery::withhold_session_bearer(
+        sampling_config.api_key.clone(),
+        &sampling_config.base_url,
+        auth_manager,
+        "memory_embeddings",
+    )
+}
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
 /// The permission events receiver should be used to collect telemetry about permission decisions (YOLO mode, user accept/reject) for upload to GCS.
@@ -273,7 +284,7 @@ pub(crate) async fn spawn_session_actor(
     attribution_callback: Option<fuigo_sampler::SharedAttributionCallback>,
     mut tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
-    initial_client_mcp_servers: Vec<acp::McpServer>,
+    initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     mcp_meta_config_map: McpMetaConfigMap,
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
@@ -380,6 +391,7 @@ pub(crate) async fn spawn_session_actor(
     is_chat_kind: bool,
     spawn_ctx: Option<fuigo_telemetry::subagent_spawn::SpawnPhaseContext>,
     sampling_gate: Option<Arc<tokio::sync::Semaphore>>,
+    turn_owner_lock: Option<crate::session::turn_owner_lock::TurnOwnerLock>,
 ) -> Result<
     (
         SessionHandle,
@@ -434,7 +446,7 @@ pub(crate) async fn spawn_session_actor(
                 "CLI --allow catch-all ignored: always-approve disabled by managed policy"
             );
             if startup_hints.non_interactive {
-                eprintln!("fuigo: --allow catch-all ignored: {reason}");
+                fuigo_tty_utils::cli_eprintln!("fuigo: --allow catch-all ignored: {reason}");
             }
         }
         if !cli_permission_rules.is_empty() {
@@ -586,7 +598,7 @@ pub(crate) async fn spawn_session_actor(
         fuigo_tools::implementations::WebSearchConfig::Disabled
     };
     let embed_base_url = sampling_config.base_url.clone();
-    let embed_api_key = sampling_config.api_key.clone();
+    let embed_api_key = memory_embed_api_key(&sampling_config, auth_manager.as_deref());
     let session_pruning_config: crate::config::PruningConfig = memory_config.as_ref().map_or_else(
         || crate::config::PruningConfig {
             enabled: false,
@@ -1414,18 +1426,42 @@ pub(crate) async fn spawn_session_actor(
     let mut hook_discovery_errors: Vec<fuigo_hooks::error::HookError> = Vec::new();
     let built_hook_registry: Option<Arc<fuigo_hooks::discovery::HookRegistry>> =
         if let Some(override_reg) = hook_registry_override {
-            Some(override_reg)
+            if startup_hints.is_subagent {
+                // A subagent's override IS its parent's live registry: it inherits the parent's gate, never re-derives it
+                Some(override_reg)
+            } else {
+                let cwd_path = std::path::Path::new(&session_info.cwd);
+                let project_trusted =
+                    SessionActor::session_hook_trust(cwd_path, remote_settings.as_ref());
+                Some(SessionActor::revalidate_override_plugin_hooks(
+                    override_reg,
+                    plugin_registry_handle.as_ref(),
+                    plugin_registry.clone(),
+                    cwd_path,
+                    project_trusted,
+                ))
+            }
         } else {
             let cwd_path = std::path::Path::new(&session_info.cwd);
-            let project_trusted = crate::agent::folder_trust::resolve_and_record(
+            let project_trusted =
+                SessionActor::session_hook_trust(cwd_path, remote_settings.as_ref());
+            // The initial load includes the session's plugin hooks: before this, plugin hooks fired only after something triggered a reload
+            // A subagent reaches this branch only when its parent fires no hooks at all; its `plugin_registry` is the process-wide snapshot,
+            // not the parent's view of its own workspace, so it must not pick plugin hooks out of it (they could belong to another workspace)
+            let own_plugins = if startup_hints.is_subagent {
+                None
+            } else {
+                SessionActor::plugins_for_initial_hooks(
+                    plugin_registry_handle.as_ref(),
+                    plugin_registry.clone(),
+                    cwd_path,
+                    project_trusted,
+                )
+            };
+            let (registry, errors) = SessionActor::build_session_hook_registry(
                 cwd_path,
-                remote_settings.as_ref(),
-                false,
-            );
-            let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd_path).ok();
-            let (registry, errors) = crate::util::hooks::discover_hooks(
-                git_root.as_deref(),
                 &rebuild_spec.compat,
+                own_plugins.as_deref(),
                 project_trusted,
             );
             for e in &errors {
@@ -1439,7 +1475,8 @@ pub(crate) async fn spawn_session_actor(
                 Some(Arc::new(registry))
             }
         };
-    let hook_registry_for_handle = built_hook_registry.clone();
+    let hook_registry_for_handle =
+        crate::session::LiveHookRegistry::new(built_hook_registry.clone());
     let workspace_ops_for_handle = workspace_ops.clone();
     #[allow(clippy::arc_with_non_send_sync)]
     let mut _hook_load_errors: Vec<String> = hook_discovery_errors
@@ -1809,6 +1846,8 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
+    // `turn_owner_lock` was taken by `spawn_session_on_thread` before this actor exists, so no `turn_started` is
+    // ever written unlocked.
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         status_wake: Default::default(),
         session_info: session_info.clone(),
@@ -1839,7 +1878,7 @@ pub(crate) async fn spawn_session_actor(
         deny_read_globs,
         mcp_state: mcp_state.clone(),
         mcp_strategy: std::cell::Cell::new(mcp_strategy),
-        initial_client_mcp_servers: initial_client_mcp_servers.clone(),
+        initial_client_mcp_servers: std::cell::RefCell::new(initial_client_mcp_servers.clone()),
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
@@ -2020,6 +2059,7 @@ pub(crate) async fn spawn_session_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(built_hook_registry),
+        hook_registry_live: hook_registry_for_handle.clone(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -2032,6 +2072,7 @@ pub(crate) async fn spawn_session_actor(
         events: crate::session::events::EventTracker::new(
             &crate::session::persistence::session_dir(&session_info),
         ),
+        _turn_owner_lock: turn_owner_lock,
         observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(initial_last_recap_main_turn),
@@ -2106,28 +2147,19 @@ pub(crate) async fn spawn_session_actor(
         let snapshot = session.tool_metadata_snapshot.clone();
         let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_handle()
             .update_resource(fuigo_tools::types::tool_index::ToolIndex(
                 std::sync::Arc::new(tool_index),
             ))
             .await;
     }
     if let Some(client) = managed_gateway_tool_client.clone() {
-        session
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(client)
-            .await;
+        session.tool_bridge_handle().update_resource(client).await;
     }
     {
         let plan_path = session.plan_mode.lock().plan_file_path().to_path_buf();
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_handle()
             .update_resource(fuigo_tools::types::resources::PlanFilePath(plan_path))
             .await;
     }
@@ -2136,9 +2168,7 @@ pub(crate) async fn spawn_session_actor(
         session.wire_permission_auto_llm_classifier().await;
     }
     session
-        .agent
-        .borrow()
-        .tool_bridge()
+        .tool_bridge_handle()
         .update_resource(
             fuigo_tools::implementations::fuigo_build::workflow::WorkflowLaunchHandle(
                 session.workflow_launch_tx.clone(),
@@ -2147,9 +2177,7 @@ pub(crate) async fn spawn_session_actor(
         .await;
     if !background_workflows_enabled {
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_handle()
             .update_resource(
                 fuigo_tools::implementations::fuigo_build::update_goal::GoalUpdateHandle(
                     session.goal_update_tx.clone(),
@@ -2159,9 +2187,7 @@ pub(crate) async fn spawn_session_actor(
     }
     if let Some(ref display_cwd) = prompt_display_cwd {
         session
-            .agent
-            .borrow()
-            .tool_bridge()
+            .tool_bridge_handle()
             .set_display_cwd(std::path::PathBuf::from(display_cwd))
             .await;
     }
@@ -2473,7 +2499,7 @@ pub(crate) async fn spawn_session_on_thread(
     attribution_callback: Option<fuigo_sampler::SharedAttributionCallback>,
     tool_context: ToolContext,
     mcp_servers: Vec<acp::McpServer>,
-    initial_client_mcp_servers: Vec<acp::McpServer>,
+    initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     mcp_meta_config_map: McpMetaConfigMap,
     parent_mcp_pool: Option<crate::session::mcp_servers::SharedMcpPool>,
     acp_mcp_servers: Vec<crate::session::mcp_servers::AcpServerEntry>,
@@ -2588,15 +2614,28 @@ pub(crate) async fn spawn_session_on_thread(
     ),
     acp::Error,
 > {
+    // The session's turn-owner lock, taken before the thread and the actor exist: no `turn_started` is ever written
+    // unlocked, and a load dropped during the wait leaves nothing behind. The wait is async (this runs on the agent's
+    // `LocalSet`) and bounded; a recovery elsewhere that holds the session past the bound fails the load with a retry
+    // message instead of waiting forever, and no actor is started.
+    let turn_owner_lock = crate::session::turn_owner_lock::TurnOwnerLock::acquire(
+        &crate::session::persistence::session_dir(&session_info),
+    )
+    .await
+    .map_err(crate::session::turn_owner_lock::OwnerLockBusy::into_acp_error)?;
     let (init_tx, init_rx) =
         tokio::sync::oneshot::channel::<Result<SessionInitResult, fuigo_agent::AgentBuildError>>();
     let sid = session_info.id.0.to_string();
     let thread_name = format!("ses-{}", &sid[..sid.len().min(8)]);
     const SESSION_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
+    // P136 (Astra r1 #4): the session thread loads part of the session's config (its hooks); its refusals belong to the
+    // session whose setup started it.
+    let notice_scope = fuigo_config::key_naming::NoticeScope::current();
     let join_handle = std::thread::Builder::new()
         .name(thread_name)
         .stack_size(SESSION_THREAD_STACK_SIZE)
         .spawn(move || {
+            let _notice_scope = notice_scope.map(fuigo_config::key_naming::NoticeScope::enter);
             let (initial_last_compaction, initial_prompt_texts) = {
                 let session_dir = crate::session::persistence::session_dir(&session_info);
                 let updates_path = session_dir.join("updates.jsonl");
@@ -2753,6 +2792,7 @@ pub(crate) async fn spawn_session_on_thread(
                         is_chat_kind,
                         spawn_ctx,
                         sampling_gate,
+                        turn_owner_lock,
                     )
                     .await
                     {
@@ -2762,11 +2802,23 @@ pub(crate) async fn spawn_session_on_thread(
                             return;
                         }
                     };
-                let _ = init_tx.send(Ok(SessionInitResult {
+                if let Err(Ok(unclaimed)) = init_tx.send(Ok(SessionInitResult {
                     handle,
                     permission_events_rx,
                     system_prompt,
-                }));
+                })) {
+                    // The load that asked for this actor was dropped during start-up, so nothing will register it or
+                    // ever shut it down; left running it would hold the session's turn-owner lock (and its thread)
+                    // for the life of the process. Shut it down the way an idle unload does.
+                    tracing::warn!(
+                        session_id = %unclaimed.handle.info.id.0,
+                        "session start-up finished after its load was abandoned; shutting the unregistered actor down"
+                    );
+                    let _ = unclaimed.handle.cmd_tx.send(crate::session::SessionCommand::Shutdown(
+                        crate::session::ShutdownKind::Graceful,
+                    ));
+                    drop(unclaimed);
+                }
                 let _ = session_done_rx.await;
             };
             local.block_on(&rt, actor_main);

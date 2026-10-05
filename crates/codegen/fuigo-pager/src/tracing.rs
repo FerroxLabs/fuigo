@@ -325,7 +325,9 @@ pub struct TracingChannelWriter {
 }
 impl io::Write for TracingChannelWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = String::from_utf8_lossy(buf.trim_ascii());
+        // P70b: a log sink. Credentials this process sent upstream are replaced (exact match) before the line is kept.
+        let scrubbed = fuigo_telemetry::sent_credentials::scrub_bytes(buf);
+        let s = String::from_utf8_lossy(scrubbed.as_deref().unwrap_or(buf).trim_ascii());
         if !s.is_empty() {
             match self.tx.try_send(s.into_owned()) {
                 Ok(()) => {}
@@ -385,9 +387,14 @@ pub fn init_tracing() -> TracingHandle {
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into())
         .parse_lossy(&directives);
+    // `log_internal_errors(false)`: the channel writer returns an error once the event loop has
+    // dropped the receiver (shutdown), and tracing-subscriber reports writer errors with a raw
+    // `eprintln!`, which panics when fd 2 is a closed terminal pane (SIGABRT under
+    // `panic = "abort"`). It is the layer's default today; pinned so a bump cannot change it.
     let fmt_layer = fmt::layer()
         .with_target(true)
         .with_ansi(true)
+        .log_internal_errors(false)
         .with_writer(make_writer);
     let otel_layer = fuigo_telemetry::otel_layer::build_otel_layer(
         fuigo_telemetry::otel_layer::OtelClientInfo {
@@ -731,6 +738,17 @@ mod tests {
         writer.write_all(b"  hello world  \n").unwrap();
         let msg = rx.try_recv().unwrap();
         assert_eq!(msg, "hello world");
+    }
+    /// P70b: the pager's log channel is a log sink; a credential this process sent upstream is replaced.
+    #[test]
+    fn channel_writer_scrubs_a_credential_sent_upstream() {
+        use std::io::Write;
+        fuigo_telemetry::sent_credentials::record("p70b-pager-cred-0123456789");
+        let (make_writer, mut rx) = TracingChannelMakeWriter::new();
+        let mut writer = make_writer.make_writer();
+        let line = b"ERROR upstream: bad key p70b-pager-cred-0123456789\n";
+        assert_eq!(writer.write(line).unwrap(), line.len());
+        assert_eq!(rx.try_recv().unwrap(), "ERROR upstream: bad key <redacted>");
     }
     #[test]
     fn channel_writer_skips_empty() {

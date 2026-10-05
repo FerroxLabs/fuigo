@@ -19,6 +19,8 @@
 use std::sync::OnceLock;
 
 pub use fuigo_extra_ca::dispatch;
+/// The identity-disclosure decision (P30/P43), for crates that reach `fuigo_extra_ca` only through here.
+pub use fuigo_extra_ca::fluxrouter;
 
 use fuigo_workspace::permission::ClientType;
 

@@ -182,7 +182,7 @@ async fn test_upload_succeeds_on_first_try() {
     let state = TestServerState::new(0);
     let addr = start_test_server(state.clone(), upload_handler_success).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token");
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token");
 
     let result = client
         .upload("test/path", b"test content", "text/plain")
@@ -197,7 +197,7 @@ async fn test_upload_retries_on_429() {
     let state = TestServerState::new(2); // Fail twice, then succeed
     let addr = start_test_server(state.clone(), upload_handler_429).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(10))
@@ -217,7 +217,7 @@ async fn test_upload_retries_on_500() {
     let state = TestServerState::new(2); // Fail twice, then succeed
     let addr = start_test_server(state.clone(), upload_handler_500).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(10))
@@ -237,7 +237,7 @@ async fn test_upload_does_not_retry_on_400() {
     let state = TestServerState::new(0);
     let addr = start_test_server(state.clone(), upload_handler_400).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(10))
@@ -257,7 +257,7 @@ async fn test_upload_respects_max_retries() {
     let state = TestServerState::new(100); // Always fail
     let addr = start_test_server(state.clone(), upload_handler_always_429).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(10))
@@ -278,7 +278,7 @@ async fn test_upload_respects_retry_after_header() {
     let state = TestServerState::new(1).with_retry_after(1); // 1 second Retry-After
     let addr = start_test_server(state.clone(), upload_handler_429).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(10))
@@ -305,7 +305,7 @@ async fn test_exponential_backoff_increases_delay() {
     let state = TestServerState::new(3); // Fail 3 times, then succeed
     let addr = start_test_server(state.clone(), upload_handler_429).await;
 
-    let client = StorageClient::new(&format!("http://{}/v1", addr), "test-token")
+    let client = StorageClient::with_static_key(&format!("http://{}/v1", addr), "test-token")
         .with_retry_config(
             RetryConfig::new()
                 .with_initial_delay(Duration::from_millis(50))

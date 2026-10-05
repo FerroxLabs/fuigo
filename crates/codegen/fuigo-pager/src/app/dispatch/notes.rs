@@ -237,14 +237,13 @@ pub(crate) fn commit_feedback(
         return None;
     }
 
-    agent.scrollback.push_block(RenderBlock::system(
-        if displaced {
-            "Another question interrupted /feedback. Your report was sent without a trace."
-        } else {
-            "Thanks for the feedback! The Fuigo team is on it."
-        }
-        .to_string(),
-    ));
+    // P152: the thanks waits for the send to succeed (`TaskResult::FeedbackComplete`, see [`FEEDBACK_THANKS`]); a report
+    // that is refused (feedback disabled) or fails is reported once, with its reason, never thanked for first.
+    if displaced {
+        agent.scrollback.push_block(RenderBlock::system(
+            "Another question interrupted /feedback. Your report will be sent without a trace.".to_string(),
+        ));
+    }
 
     Some(feedback_send_effect(
         id,
@@ -256,7 +255,10 @@ pub(crate) fn commit_feedback(
     ))
 }
 
-/// Thank-you is shown immediately; POST is a background effect.
+/// Shown once the shell confirms the report was sent (`TaskResult::FeedbackComplete`).
+pub(crate) const FEEDBACK_THANKS: &str = "Thanks for the feedback! The Fuigo team is on it.";
+
+/// The POST is a background effect; the thank-you follows its success (P152).
 /// The composer is not cleared: the text arrives with the action, not from the prompt.
 /// Early exits drop `images`, whose owner cleans up the staged temp files.
 pub(super) fn dispatch_send_feedback(
@@ -449,6 +451,19 @@ fn encode_feedback_images(
     (encoded, notice)
 }
 
+/// A UX hint, never a gate: the shell said, in `AvailableCommandsUpdate.meta.memoryEnabled`, that this session has memory
+/// off. The pager warns and carries on, because the cache can be stale in either direction (another client may have turned
+/// memory on or off, or the first update may not have been seen). The shell decides at write time (`fuigo/memory/save_note`)
+/// and its refusal is shown to the user.
+pub(crate) fn memory_hint_says_off(agent: &AgentView) -> bool {
+    agent.session.tracker.memory_enabled() == Some(false)
+}
+
+fn memory_hint_notice() -> String {
+    "Memory looks turned off for this session (--no-memory or memory.enabled = false). The note will only be saved if the agent says memory is on."
+        .to_string()
+}
+
 /// Send a raw remember note for LLM-powered rewriting via `fuigo/memory/rewrite`.
 /// Clears remember mode and prompts the LLM to reformat the note with session context.
 /// Falls back to direct `SaveMemoryNote` when no session is available.
@@ -472,6 +487,10 @@ fn send_remember_note(app: &mut AppView, text: String, record_in_history: bool) 
             "Please provide a memory note.".to_string(),
         ));
         return vec![];
+    }
+
+    if memory_hint_says_off(agent) {
+        agent.scrollback.push_block(RenderBlock::system(memory_hint_notice()));
     }
 
     agent.note_draft_consumed();
@@ -553,12 +572,19 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
     };
 
     agent.active_modal = None;
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.scrollback.push_block(RenderBlock::system(format!(
+            "There is no session to save the note to, so it was not saved: {content}"
+        )));
+        return vec![];
+    };
     agent
         .scrollback
         .push_block(RenderBlock::system("Saving memory note...".to_string()));
 
     vec![Effect::SaveMemoryNote {
         agent_id: id,
+        session_id,
         text: content,
         cwd,
     }]

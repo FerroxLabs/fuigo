@@ -20,18 +20,30 @@
 //! Be precise about the boundary, because an overstated guarantee is worse
 //! than none:
 //!
-//! - Only clients built through [`crate::build_reqwest_client`] and
-//!   [`crate::build_blocking_reqwest_client`]. `clippy.toml` disallows the raw
-//!   reqwest constructors, so that is nearly everything — but `fuigo-mcp`
+//! - Only clients built through [`crate::build_reqwest_client`],
+//!   [`crate::build_blocking_reqwest_client`] and
+//!   [`crate::subscription::SubscriptionClient`]. `clippy.toml` disallows the
+//!   raw reqwest constructors, so that is nearly everything — but `fuigo-mcp`
 //!   carries a separate reqwest 0.13 stack, and `fuigo-computer-hub-sdk`
 //!   builds its own OIDC client. Neither is covered here.
+//! - [`crate::subscription::SubscriptionClient`] carries the ONE exemption:
+//!   each instance may resolve exactly its own recipient's host (for the xAI
+//!   subscription, `auth.x.ai` for the token client or `api.x.ai` for the
+//!   inference client) and nothing else on the list. Every other blocked
+//!   name, including the rest of `x.ai`, `grok.com` and `mixpanel.com`, is
+//!   still refused on that client. The exemption is safe only together with
+//!   that client's exact-URL recipient check and its disabled redirects; see
+//!   [`resolver_allowing_exactly`].
 //! - Not websockets that dial an IP directly, and not a literal IP address in
 //!   a URL. There is no name to refuse.
 //! - Not a substitute for removing the URLs. It is the backstop that proves
 //!   the removal worked, and catches the ones we missed.
 //!
 //! Set `FUIGO_ALLOW_UPSTREAM_HOSTS=1` to lift the block — for someone who
-//! genuinely wants to point Fuigo at xAI with their own key.
+//! genuinely wants to point Fuigo at xAI with their own API key. It is
+//! PROCESS-WIDE: every guarded client in the process may then resolve every
+//! blocked name, telemetry backstops (`mixpanel.com`) included. Subscription
+//! login and inference do not need it (see the exemption above).
 
 use std::net::ToSocketAddrs;
 
@@ -75,30 +87,102 @@ pub fn guard_enabled() -> bool {
         .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
 }
 
+/// Whether the guard refuses `host` on a client whose single permitted
+/// vendor host is `allowed` (`None` for every ordinary client). The exception
+/// is an exact, case-sensitive match: resolver names come from the parsed URL,
+/// which is already lowercase, and a trailing-dot spelling is refused.
+fn refuses(host: &str, allowed: Option<&str>) -> bool {
+    guard_enabled() && is_blocked_host(host) && allowed.is_none_or(|allowed| host != allowed)
+}
+
 /// Refuses upstream-vendor names; delegates everything else to the OS resolver.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EgressGuard;
 
 impl Resolve for EgressGuard {
     fn resolve(&self, name: Name) -> Resolving {
-        let host = name.as_str().to_owned();
-        Box::pin(async move {
-            if guard_enabled() && is_blocked_host(&host) {
-                tracing::warn!(
-                    host = %host,
-                    "blocked egress to an upstream vendor host; set {}=1 to allow",
-                    ENV_FUIGO_ALLOW_UPSTREAM_HOSTS
-                );
-                return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                    "fuigo refuses to contact upstream vendor host `{host}` \
-                     (set {ENV_FUIGO_ALLOW_UPSTREAM_HOSTS}=1 to allow)"
-                )));
+        guarded_resolve(name.as_str().to_owned(), None)
+    }
+}
+
+/// [`EgressGuard`] with one exact-host exception. Crate-private: the only
+/// holder is [`crate::subscription::SubscriptionClient`], which also refuses
+/// every URL but its recipient's exact endpoints and never follows a redirect,
+/// so the exception cannot be steered to another path, host or client.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ExactHostException {
+    host: &'static str,
+}
+
+impl Resolve for ExactHostException {
+    fn resolve(&self, name: Name) -> Resolving {
+        guarded_resolve(name.as_str().to_owned(), Some(self.host))
+    }
+}
+
+/// The guard for a client that may resolve `host`, and no other blocked name.
+pub(crate) fn resolver_allowing_exactly(host: &'static str) -> std::sync::Arc<ExactHostException> {
+    std::sync::Arc::new(ExactHostException { host })
+}
+
+fn guarded_resolve(host: String, allowed: Option<&'static str>) -> Resolving {
+    Box::pin(async move {
+        if refuses(&host, allowed) {
+            tracing::warn!(
+                host = %host,
+                "blocked egress to an upstream vendor host; set {}=1 to allow",
+                ENV_FUIGO_ALLOW_UPSTREAM_HOSTS
+            );
+            return Err(Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "fuigo refuses to contact upstream vendor host `{host}` \
+                 (set {ENV_FUIGO_ALLOW_UPSTREAM_HOSTS}=1 to allow)"
+            )));
+        }
+        #[cfg(test)]
+        if test_hook::record_admitted(&host) {
+            return Err(Box::<dyn std::error::Error + Send + Sync>::from(
+                test_hook::ADMITTED_SENTINEL,
+            ));
+        }
+        // Port 0: reqwest overrides it with the scheme's port, or the one
+        // named in the URL. It is a placeholder, not a destination.
+        let addrs =
+            tokio::task::spawn_blocking(move || (host.as_str(), 0).to_socket_addrs()).await??;
+        Ok(Box::new(addrs) as Addrs)
+    })
+}
+
+/// Test-only observation point: lets a test see which names the guard ADMITS
+/// without a real DNS lookup or connection. Thread-local, so it is only active for
+/// a test that arms it on a current-thread runtime (where reqwest's connect future
+/// runs on the arming thread); every other test, and every shipped build, gets the
+/// OS resolver.
+#[cfg(test)]
+pub(crate) mod test_hook {
+    use std::cell::RefCell;
+
+    pub(crate) const ADMITTED_SENTINEL: &str = "test hook: name admitted by the egress guard";
+
+    thread_local! {
+        static ADMITTED: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    }
+
+    /// Arm the hook on this thread; [`take`] returns the names admitted since.
+    pub(crate) fn arm() {
+        ADMITTED.with(|a| *a.borrow_mut() = Some(Vec::new()));
+    }
+
+    pub(crate) fn take() -> Vec<String> {
+        ADMITTED.with(|a| a.borrow_mut().take().unwrap_or_default())
+    }
+
+    pub(super) fn record_admitted(host: &str) -> bool {
+        ADMITTED.with(|a| match a.borrow_mut().as_mut() {
+            Some(names) => {
+                names.push(host.to_owned());
+                true
             }
-            // Port 0: reqwest overrides it with the scheme's port, or the one
-            // named in the URL. It is a placeholder, not a destination.
-            let addrs = tokio::task::spawn_blocking(move || (host.as_str(), 0).to_socket_addrs())
-                .await??;
-            Ok(Box::new(addrs) as Addrs)
+            None => false,
         })
     }
 }
@@ -128,6 +212,37 @@ mod tests {
         ] {
             assert!(is_blocked_host(host), "{host} should be blocked");
         }
+    }
+
+    /// P87: the subscription exception admits exactly one name. Its siblings
+    /// in the same registrable domain, the other vendor domains and spelling
+    /// variants stay refused; ordinary names are unaffected.
+    #[test]
+    fn exact_host_exception_admits_only_that_host() {
+        assert!(
+            guard_enabled(),
+            "FUIGO_ALLOW_UPSTREAM_HOSTS lifts the guard this test pins; unset it"
+        );
+        assert!(!refuses("auth.x.ai", Some("auth.x.ai")));
+        assert!(!refuses("api.x.ai", Some("api.x.ai")));
+        for (host, allowed) in [
+            ("api.x.ai", Some("auth.x.ai")),
+            ("x.ai", Some("auth.x.ai")),
+            ("accounts.x.ai", Some("auth.x.ai")),
+            ("auth.x.ai.", Some("auth.x.ai")),
+            ("AUTH.X.AI", Some("auth.x.ai")),
+            ("api.mixpanel.com", Some("api.x.ai")),
+            ("cli-chat-proxy.grok.com", Some("api.x.ai")),
+            ("auth.x.ai", None),
+            ("api.x.ai", None),
+        ] {
+            assert!(
+                refuses(host, allowed),
+                "{host} must stay refused (allowed {allowed:?})"
+            );
+        }
+        assert!(!refuses("github.com", Some("auth.x.ai")));
+        assert!(!refuses("github.com", None));
     }
 
     #[test]

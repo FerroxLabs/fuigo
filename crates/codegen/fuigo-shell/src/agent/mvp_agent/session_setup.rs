@@ -195,7 +195,7 @@ struct ReplayRouting<'a> {
 struct SessionWorkspace {
     cwd: AbsPathBuf,
     remote_settings: Option<crate::util::config::RemoteSettings>,
-    initial_client_mcp_servers: Vec<acp::McpServer>,
+    initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     mcp_servers: Vec<acp::McpServer>,
     mcp_meta_config_map: McpMetaConfigMap,
 }
@@ -263,7 +263,7 @@ impl MvpAgent {
     }
     /// Start the relay mirror for a session and forward its connection state to the client.
     /// Returns `None` when relay is not configured.
-    fn start_relay_sync(
+    pub(super) fn start_relay_sync(
         &self,
         session_id: &acp::SessionId,
         session_info: &crate::session::info::Info,
@@ -296,9 +296,30 @@ impl MvpAgent {
         &self,
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
+        // P136: every refusal this session's setup records belongs to it, and only those are announced to it.
+        let notice_scope = fuigo_config::key_naming::NoticeScope::new();
+        // P138 d-2: the scope is closed however the setup ends (an error before it announced, or the request being
+        // dropped), so failing `session/new` calls cannot pile up open scopes and push a live one out.
+        let _closer = notice_scope.close_on_drop();
+        notice_scope
+            .scoped(self.new_session_in_scope(arguments, notice_scope))
+            .await
+    }
+    async fn new_session_in_scope(
+        &self,
+        arguments: acp::NewSessionRequest,
+        notice_scope: fuigo_config::key_naming::NoticeScope,
+    ) -> Result<acp::NewSessionResponse, acp::Error> {
         let session_started_at = std::time::Instant::now();
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
-        tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
+        // P70: metadata only. The ACP request's derived `Debug` prints every MCP server's headers and env values,
+        // which routinely carry credentials (and `_meta` is client-defined).
+        tracing::debug!(
+            cwd = %arguments.cwd.display(),
+            mcp_servers = arguments.mcp_servers.len(),
+            has_meta = arguments.meta.is_some(),
+            "Received new session request"
+        );
         let init = self.initialize_request.get().ok_or_else(|| {
             crate::acp_error::invalid_params("initialize must be called before new_session")
         })?;
@@ -329,22 +350,6 @@ impl MvpAgent {
             .as_ref()
             .and_then(|m| m.get("modelId").and_then(|v| v.as_str()))
             .filter(|s| !s.is_empty());
-        #[cfg(all(feature = "local-workspace", unix))]
-        let pending_local_workspace = self
-            .start_own_local_workspace_if_needed(&mut session_meta_for_stamp, cwd.as_path())
-            .await?;
-        #[cfg(all(feature = "local-workspace", not(unix)))]
-        {
-            use crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceIntent;
-            use crate::gateway_bridge::local_workspace_supervisor::SupervisorError;
-            use crate::gateway_bridge::local_workspace_supervisor::parse_local_workspace_intent;
-            if matches!(
-                parse_local_workspace_intent(session_meta_for_stamp.as_ref()),
-                Some(LocalWorkspaceIntent::Own { .. })
-            ) {
-                return Err(SupervisorError::UnsupportedPlatform.into_acp_error());
-            }
-        }
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(arguments.meta.as_ref())?;
         let is_chat_kind =
@@ -372,14 +377,9 @@ impl MvpAgent {
             }
             None => acp::SessionId::new(uuid::Uuid::now_v7().to_string()),
         };
-        #[cfg(all(feature = "local-workspace", unix))]
-        let mut local_ws_reap_guard =
-            self.new_local_workspace_reap_guard(session_id.clone(), false);
-        #[cfg(all(feature = "local-workspace", unix))]
-        if let Some(handle) = pending_local_workspace {
-            self.register_local_workspace_supervisor(session_id.clone(), handle);
-            local_ws_reap_guard = self.new_local_workspace_reap_guard(session_id.clone(), true);
-        }
+        // P148: until its startup notes are announced (or this setup ends), a sibling's trust grant leaves this
+        // session's notes to that announcement.
+        let _announcing = SessionAnnouncing::enter(&self.sessions_announcing, &session_id, notice_scope);
         let mut session_timer = crate::instrumentation_timer!("session.new_session");
         session_timer.with_field("session_id", session_id.0.as_ref());
         session_timer.with_field("cwd", cwd.as_str());
@@ -512,6 +512,18 @@ impl MvpAgent {
         } else {
             let _timer = crate::instrumentation_timer!("session.persistence_init");
             let registry_title_sync = self.registry_title_sync();
+            // Read the policy before the call: a `cfg.borrow()` inside the argument list would be
+            // held across the `.await` below.
+            let title_policy = self
+                .cfg
+                .borrow()
+                .session
+                .title_policy
+                .unwrap_or_default()
+                .for_attachment(
+                    startup_hints_from_meta(arguments.meta.as_ref(), init.meta.as_ref())
+                        .non_interactive,
+                );
             crate::session::persistence::new(
                 &session_info,
                 model_id,
@@ -522,16 +534,7 @@ impl MvpAgent {
                     relay_sync,
                     gateway: Some(self.gateway.clone()),
                     session_summary_model: summary_model,
-                    title_policy: self
-                        .cfg
-                        .borrow()
-                        .session
-                        .title_policy
-                        .unwrap_or_default()
-                        .for_attachment(
-                            startup_hints_from_meta(arguments.meta.as_ref(), init.meta.as_ref())
-                                .non_interactive,
-                        ),
+                    title_policy,
                     registry_title_sync,
                     search_index: self.search_index_cell(),
                     session_kind: client_session_kind,
@@ -599,21 +602,8 @@ impl MvpAgent {
             spawn_timer.with_subphase(fuigo_telemetry::startup::Subphase::SessionSpawn);
             self.spawn_and_register_session(init, spawn_opts).await
         };
-        #[cfg(all(feature = "local-workspace", unix))]
-        if spawn_res.is_err() {
-            self.shutdown_gateway_bridge(&session_id);
-        }
         spawn_res?;
         tracing::debug!(session_id = %session_id.0, "new_session: spawn_session_actor");
-        #[cfg(feature = "local-workspace")]
-        if local_workspace_intent_present(arguments.meta.as_ref()) {
-            self.mark_local_workspace_bound(session_id.clone());
-        }
-        self.maybe_spawn_interactive_trust_prompt(
-            &session_id,
-            cwd.as_path(),
-            remote_settings.as_ref(),
-        );
         let bridge_attach = BridgeAttach::NotAttached;
         let product_analytics = self.product_analytics_enabled();
         if product_analytics || fuigo_telemetry::external::is_active() {
@@ -762,8 +752,16 @@ impl MvpAgent {
         }
         self.attach_status_line(&session_id, arguments.meta.as_ref(), init);
         self.attach_user_message_echo(&session_id, arguments.meta.as_ref(), init);
-        #[cfg(all(feature = "local-workspace", unix))]
-        local_ws_reap_guard.disarm();
+        self.announce_config_notices(&session_id, notice_scope).await;
+        drop(_announcing);
+        // P148: after the start's notes are announced and its notice scope is closed. A client that grants at once
+        // would otherwise reload the project while the scope is open, and the session's own reload would add a
+        // second copy of a note the grant also sends.
+        self.maybe_spawn_interactive_trust_prompt(
+            &session_id,
+            cwd.as_path(),
+            remote_settings.as_ref(),
+        );
         log_session_started(
             &session_id,
             SessionStartKind::New,
@@ -787,6 +785,20 @@ impl MvpAgent {
         arguments: acp::LoadSessionRequest,
         op: AttachOperation,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
+        // P136: as for `session/new`, the refusals this load records are this session's.
+        let notice_scope = fuigo_config::key_naming::NoticeScope::new();
+        // P138 d-2: see `new_session_inner`.
+        let _closer = notice_scope.close_on_drop();
+        notice_scope
+            .scoped(self.attach_session_in_scope(arguments, op, notice_scope))
+            .await
+    }
+    async fn attach_session_in_scope(
+        &self,
+        arguments: acp::LoadSessionRequest,
+        op: AttachOperation,
+        notice_scope: fuigo_config::key_naming::NoticeScope,
+    ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let attach_started_at = std::time::Instant::now();
         let _load_guard = self.begin_session_load(&arguments.session_id);
         reject_chat_kind_without_feature(arguments.meta.as_ref())?;
@@ -794,7 +806,14 @@ impl MvpAgent {
         if !self.is_resident(&arguments.session_id) {
             self.drain_old_session_thread(&arguments.session_id).await;
         }
-        tracing::debug!("Received load session request {arguments:?}");
+        // P70: metadata only, as for `session/new` (MCP headers and env values carry credentials).
+        tracing::debug!(
+            session_id = %arguments.session_id,
+            cwd = %arguments.cwd.display(),
+            mcp_servers = arguments.mcp_servers.len(),
+            has_meta = arguments.meta.is_some(),
+            "Received load session request"
+        );
         let init = self.initialize_request.get().ok_or_else(|| {
             crate::acp_error::invalid_params("initialize must be called before load_session")
         })?;
@@ -886,6 +905,17 @@ impl MvpAgent {
             None
         };
         let registry_title_sync = self.registry_title_sync();
+        // Read the policy before the call: a `cfg.borrow()` inside the argument list would be
+        // held across the `.await` below.
+        let title_policy = self
+            .cfg
+            .borrow()
+            .session
+            .title_policy
+            .unwrap_or_default()
+            .for_attachment(
+                startup_hints_from_meta(request_meta.as_ref(), init.meta.as_ref()).non_interactive,
+            );
         let (persistence_info, persistence) = crate::session::persistence::load_light(
             &session_info,
             backend.as_ref(),
@@ -896,16 +926,7 @@ impl MvpAgent {
                 relay_sync,
                 gateway: Some(self.gateway.clone()),
                 session_summary_model: summary_model,
-                title_policy: self
-                    .cfg
-                    .borrow()
-                    .session
-                    .title_policy
-                    .unwrap_or_default()
-                    .for_attachment(
-                        startup_hints_from_meta(request_meta.as_ref(), init.meta.as_ref())
-                            .non_interactive,
-                    ),
+                title_policy,
                 registry_title_sync,
                 search_index: self.search_index_cell(),
                 session_kind: None,
@@ -925,6 +946,7 @@ impl MvpAgent {
             announcement_state: persisted_announcement_state,
             goal_mode_state: _persisted_goal_mode,
             workflow_runs: persisted_workflow_runs,
+            history_repair_notice,
         } = persistence_info;
         let persisted_base_url = self
             .resolve_sampling_config_for_model(&summary.current_model_id, origin_client.clone())
@@ -983,7 +1005,31 @@ impl MvpAgent {
                 folder_trust::project_scope_allowed(cwd.as_path()),
             ))
         };
-        let (initial_total_tokens, unfinished_subagents) = self
+        let recovery = if self.is_resident(&session_id) {
+            None
+        } else {
+            self.record_interrupted_turn(
+                &session_id,
+                &summary,
+                &crate::session::persistence::session_dir(&session_info),
+                updates_file_path.as_deref(),
+                &persistence,
+            )
+            .await
+        };
+        let (recovered_turn, deferred_recovery) = match recovery {
+            Some(crate::session::interrupted_turn::RecoveryOutcome::Recorded(recovered)) => {
+                (Some(recovered), None)
+            }
+            Some(crate::session::interrupted_turn::RecoveryOutcome::Deferred(deferred)) => {
+                (None, Some(deferred))
+            }
+            None => (None, None),
+        };
+        // Test-only: order the replay after the held marker's write (compiled out of every non-test build).
+        #[cfg(test)]
+        crate::session::persistence::test_seam::await_held_write(&session_id.0).await;
+        let (initial_total_tokens, unfinished_subagents, replayed_through) = self
             .replay_transcript_gate(
                 &session_id,
                 &cwd,
@@ -996,6 +1042,26 @@ impl MvpAgent {
                 no_replay,
             )
             .await?;
+        // A replaying load already carried the marker (it was appended before the replay); resume replays nothing,
+        // so the attaching client gets it live, else it would never learn the turn was lost.
+        // Queued, not awaited: a client may handle notifications only once its load request has returned (the
+        // headless `-p` client does), so awaiting its handling here deadlocked the load (P143). The marker is still
+        // queued before the load returns, ahead of anything the session sends next; only the delivery log waits.
+        if no_replay
+            && let Some(recovered) = &recovered_turn
+            && let Some(completion) = self.send_interrupted_turn_marker(
+                &session_id,
+                &recovered.marker_line,
+                persist_data.as_ref(),
+                target_client_id.as_ref(),
+            )
+        {
+            tokio::spawn(Self::report_interrupted_turn_marker_delivery(
+                session_id.clone(),
+                completion,
+            ));
+        }
+        let interrupted_turn = recovered_turn.map(|recovered| recovered.turn);
         self.attach_status_line(&session_id, request_meta.as_ref(), init);
         self.attach_user_message_echo(&session_id, request_meta.as_ref(), init);
         let ClientCaps {
@@ -1010,6 +1076,12 @@ impl MvpAgent {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .or_else(|| summary.prompt_display_cwd.clone());
+        // What this load's replay showed to every subscriber, for the late-marker delivery of a deferred recovery.
+        let broadcast_replay = crate::session::interrupted_turn::BroadcastReplay::new(
+            updates_file_path.clone(),
+            replayed_through,
+            target_client_id.as_ref(),
+        );
         let restored_from_disk = if !self.is_resident(&session_id) {
             tracing::info!(
                 session_id = %session_id.0,
@@ -1065,6 +1137,18 @@ impl MvpAgent {
                 origin_client.clone(),
             );
             drop(spawn_timer);
+            if let Some(turn) = interrupted_turn {
+                self.finish_interrupted_turn(&session_id, turn).await;
+            }
+            // Only once the actor is registered: a late marker is then delivered live, and the actor has taken its
+            // own shared lock before the deferred recovery's shared hold is released.
+            if let Some(deferred) = deferred_recovery {
+                // The model is told now, before the load returns and so before any prompt can reach the actor: the
+                // turn is lost whether or not its late marker lands, and waiting for the marker let the first
+                // continuation request go out without the reminder (P143, Astra r2).
+                self.note_interrupted_turn(&session_id, deferred.turn());
+                self.finish_deferred_recovery(session_id.clone(), deferred, broadcast_replay);
+            }
             true
         } else {
             tracing::info!(
@@ -1072,8 +1156,20 @@ impl MvpAgent {
                 mcp_server_count = mcp_servers.len(),
                 "load_session: reconnecting to existing session, updating MCP servers"
             );
+            // Became resident while recovery ran (a concurrent load of the same session registered first).
+            if let Some(deferred) = deferred_recovery {
+                // The model is told now, before the load returns and so before any prompt can reach the actor: the
+                // turn is lost whether or not its late marker lands, and waiting for the marker let the first
+                // continuation request go out without the reminder (P143, Astra r2).
+                self.note_interrupted_turn(&session_id, deferred.turn());
+                self.finish_deferred_recovery(session_id.clone(), deferred, broadcast_replay);
+            }
             let attach_hints = explicit_startup_hints(request_meta.as_ref());
             self.with_resident_mut(&session_id, |handle| {
+                // The actor's plugin reload re-merges its own copy of the seed (P141, Astra r1): it gets the new one too.
+                let _ = handle.cmd_tx.send(crate::session::SessionCommand::SetClientMcpSeed {
+                    seed: initial_client_mcp_servers.clone(),
+                });
                 handle.initial_client_mcp_servers = initial_client_mcp_servers;
                 if let Some(hints) = attach_hints {
                     let _ =
@@ -1093,6 +1189,14 @@ impl MvpAgent {
             });
             false
         };
+        if let Some(notice) = history_repair_notice
+            && let Some(handle) = self.resident_handle(&session_id)
+        {
+            let _ = handle
+                .cmd_tx
+                .send(SessionCommand::NotifyHistoryRepaired { notice });
+        }
+        self.announce_config_notices(&session_id, notice_scope).await;
         self.emit_background_tasks_snapshot_and_wait(&session_id)
             .await;
         {
@@ -1177,6 +1281,194 @@ impl MvpAgent {
         );
         Ok(response)
     }
+    /// Records a turn the previous process never finished (see `recover_interrupted_turn` for the liveness,
+    /// idempotency and ordering rules); the caller finishes it once the actor is up.
+    async fn record_interrupted_turn(
+        &self,
+        session_id: &acp::SessionId,
+        summary: &crate::session::persistence::Summary,
+        events_dir: &std::path::Path,
+        updates_file_path: Option<&std::path::Path>,
+        persistence: &crate::session::persistence::PersistenceHandle,
+    ) -> Option<crate::session::interrupted_turn::RecoveryOutcome> {
+        // Owned, so an append that outlives the recovery's bound can be finished after this load returns.
+        let persistence = persistence.clone();
+        let outcome = crate::session::interrupted_turn::recover_interrupted_turn(
+            events_dir,
+            updates_file_path,
+            summary,
+            session_id,
+            move |update| async move { persistence.append_update_durably(update).await },
+        )
+        .await?;
+        if let crate::session::interrupted_turn::RecoveryOutcome::Recorded(recovered) = &outcome {
+            Self::log_recorded_interrupted_turn(session_id, &recovered.turn);
+        }
+        Some(outcome)
+    }
+    fn log_recorded_interrupted_turn(
+        session_id: &acp::SessionId,
+        turn: &crate::session::interrupted_turn::InterruptedTurn,
+    ) {
+        tracing::warn!(
+            session_id = %session_id.0,
+            trace_turn = ?turn.trace_turn,
+            prompt_id = %turn.prompt_id,
+            started_at = ?turn.started_at,
+            "load_session: previous process left a turn unfinished; recorded it as interrupted"
+        );
+        fuigo_telemetry::unified_log::warn(
+            "load_session: interrupted turn recorded",
+            Some(session_id.0.as_ref()),
+            Some(serde_json::json!({
+                "trace_turn": turn.trace_turn,
+                "prompt_id": turn.prompt_id,
+                "started_at": turn.started_at,
+            })),
+        );
+    }
+    /// Finishes a recovery whose marker append outlived its bound: when the append commits, the lost turn is closed
+    /// and, if the session is still loaded, the client gets the marker live (unless the load's own replay, which
+    /// read `updates.jsonl` through `replayed`'s offset, already carried it) and the trace gets its turn result. The
+    /// model's reminder is not left to this task: the load queues it before returning (`note_interrupted_turn`). The
+    /// task is bound to the agent (`spawn_bound`): it holds a `LocalRef`, and an agent dropped first drops it (the
+    /// handle then completes).
+    pub(super) fn finish_deferred_recovery(
+        &self,
+        session_id: acp::SessionId,
+        deferred: crate::session::interrupted_turn::DeferredRecovery,
+        replayed: Option<crate::session::interrupted_turn::BroadcastReplay>,
+    ) -> tokio::task::JoinHandle<()> {
+        self.spawn_bound(move |agent_ref| Box::pin(async move {
+            #[cfg(test)]
+            let _done = crate::session::persistence::test_seam::FinisherDone(session_id.0.to_string());
+            let Some(recovered) = deferred.finish().await else {
+                return;
+            };
+            Self::log_recorded_interrupted_turn(&session_id, &recovered.turn);
+            let agent = agent_ref.get();
+            if agent.resident_handle(&session_id).is_none() {
+                // Unloaded meanwhile: the marker is on disk, and the next load replays it.
+                return;
+            }
+            // The model was told when the load spawned the actor (`note_interrupted_turn`); only the trace result is
+            // left, and it does not wait on the client.
+            agent.upload_interrupted_turn_result(&session_id, &recovered.turn).await;
+            // The load's replay ran just after recovery returned `Deferred`: a marker it already carried to every
+            // subscriber is not forwarded again (see `forward_late_marker_unless_replayed`).
+            crate::session::interrupted_turn::forward_late_marker_unless_replayed(
+                replayed,
+                &recovered.marker_line,
+                || {
+                    agent.forward_interrupted_turn_marker(
+                        &session_id,
+                        &recovered.marker_line,
+                        None,
+                        None,
+                    )
+                },
+            )
+            .await;
+        }))
+    }
+    /// Sends the interrupted-turn marker to the attaching client as a live (not replayed) update and waits for the
+    /// client to handle it. Only for callers that are not inside the client's own `session/load` (see `load_session`).
+    async fn forward_interrupted_turn_marker(
+        &self,
+        session_id: &acp::SessionId,
+        marker_line: &str,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+    ) {
+        if let Some(completion) =
+            self.send_interrupted_turn_marker(session_id, marker_line, persist_data, target_client_id)
+        {
+            Self::report_interrupted_turn_marker_delivery(session_id.clone(), completion).await;
+        }
+    }
+    /// Queues the interrupted-turn marker for the attaching client as a live (not replayed) update; the receiver
+    /// resolves once the client has handled it.
+    fn send_interrupted_turn_marker(
+        &self,
+        session_id: &acp::SessionId,
+        marker_line: &str,
+        persist_data: Option<&serde_json::Value>,
+        target_client_id: Option<&serde_json::Value>,
+    ) -> Option<tokio::sync::oneshot::Receiver<fuigo_acp_lib::AcpResult<()>>> {
+        let mut collapser = crate::session::storage::ReplayToolCollapser::new();
+        let completion = self.forward_raw_replay_line(
+            marker_line,
+            persist_data,
+            target_client_id,
+            false,
+            &mut collapser,
+        );
+        if completion.is_none() {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "load_session: interrupted-turn marker could not be forwarded"
+            );
+        }
+        completion
+    }
+    /// Logs a marker the client did not handle.
+    async fn report_interrupted_turn_marker_delivery(
+        session_id: acp::SessionId,
+        completion: tokio::sync::oneshot::Receiver<fuigo_acp_lib::AcpResult<()>>,
+    ) {
+        if let Ok(Err(error)) = completion.await {
+            tracing::warn!(
+                session_id = %session_id.0,
+                ?error,
+                "load_session: interrupted-turn marker was not delivered"
+            );
+        }
+    }
+    /// Uploads the `turn_result.json` the dead process never wrote, so the trace turn is not left with start-of-turn artifacts only.
+    async fn finish_interrupted_turn(
+        &self,
+        session_id: &acp::SessionId,
+        turn: crate::session::interrupted_turn::InterruptedTurn,
+    ) {
+        self.note_interrupted_turn(session_id, &turn);
+        self.upload_interrupted_turn_result(session_id, &turn).await;
+    }
+    /// Queues the model's interrupted-turn reminder on the resident actor, ahead of any prompt sent after this.
+    fn note_interrupted_turn(
+        &self,
+        session_id: &acp::SessionId,
+        turn: &crate::session::interrupted_turn::InterruptedTurn,
+    ) {
+        if let Some(handle) = self.resident_handle(session_id) {
+            let _ = handle
+                .cmd_tx
+                .send(crate::session::SessionCommand::NoteInterruptedTurn { turn: turn.clone() });
+        }
+    }
+    /// Uploads the lost turn's `turn_result.json` (see [`Self::finish_interrupted_turn`]).
+    async fn upload_interrupted_turn_result(
+        &self,
+        session_id: &acp::SessionId,
+        turn: &crate::session::interrupted_turn::InterruptedTurn,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        // No trace turn when the lost turn is not the summary's newest prompt: nothing names its trace dir.
+        if let Some(trace_turn) = turn.trace_turn
+            && let Some(ctx) = self.get_trace_context(&handle.info, trace_turn).await
+        {
+            let result = turn.turn_result();
+            crate::upload::turn::spawn_upload_task("interrupted_turn_result", async move {
+                crate::upload::trace::upload_turn_result(
+                    &ctx,
+                    &result,
+                    crate::upload::turn::UploadWait::Confirm,
+                )
+                .await;
+            });
+        }
+    }
     /// Refuses a cwd that is neither a fuigo worktree nor the session's own, so it cannot detach a real checkout.
     async fn restore_session_code(
         &self,
@@ -1245,7 +1537,7 @@ impl MvpAgent {
         code_restore_info
     }
     /// Replay-gate phase: replay the transcript (unless `no_replay`), reopen the live-output gate, drain deltas so replay precedes the response.
-    /// Stale-task reconciliation runs even under `no_replay`: it corrects state.
+    /// Stale-task reconciliation runs even under `no_replay`: it corrects state (queued, but awaited only after a replay).
     async fn replay_transcript_gate(
         &self,
         session_id: &acp::SessionId,
@@ -1253,14 +1545,14 @@ impl MvpAgent {
         updates_file_path: &Option<PathBuf>,
         routing: ReplayRouting<'_>,
         no_replay: bool,
-    ) -> Result<(u64, Vec<(String, String)>), acp::Error> {
+    ) -> Result<(u64, Vec<(String, String)>, Option<u64>), acp::Error> {
         let session_id = session_id.clone();
         let cwd = cwd.clone();
         let updates_file_path = updates_file_path.clone();
         let persist_data = routing.persist_data.cloned();
         let target_client_id = routing.target_client_id.cloned();
         let cursor = routing.cursor.map(str::to_string);
-        let (initial_total_tokens, delta_completions, unfinished_subagents) = if no_replay {
+        let (initial_total_tokens, delta_completions, unfinished_subagents, replayed_through) = if no_replay {
             tracing::info!(
                 session_id = %session_id.0,
                 "Skipping session replay (session/resume, or a noReplay load)"
@@ -1269,6 +1561,7 @@ impl MvpAgent {
                 Self::extract_initial_tokens_from_updates(&updates_file_path),
                 Vec::new(),
                 Vec::new(),
+                None,
             )
         } else {
             let (tokens, replay_end_offset, unfinished_subagents) = self
@@ -1283,7 +1576,7 @@ impl MvpAgent {
                 .await?;
             let cursor_mark_replay = cursor.is_none();
             let _timer = crate::instrumentation_timer!("session.delta_flush_replay");
-            let completions = match self.flush_session(&session_id).await {
+            let (completions, replayed_through) = match self.flush_session(&session_id).await {
                 Ok(()) => self.replay_session_updates_from_offset_enqueue(
                     &session_id,
                     &updates_file_path,
@@ -1298,10 +1591,15 @@ impl MvpAgent {
                         reason,
                         "Post-replay flush failed, skipping delta replay"
                     );
-                    Vec::new()
+                    (Vec::new(), replay_end_offset)
                 }
             };
-            (tokens, completions, unfinished_subagents)
+            (
+                tokens,
+                completions,
+                unfinished_subagents,
+                Some(replayed_through),
+            )
         };
         if let Some(handle) = self.resident_handle(&session_id) {
             handle
@@ -1315,10 +1613,23 @@ impl MvpAgent {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
             self.reconcile_stale_background_tasks(&session_id, &updates_file_path)
         };
-        for rx in reconcile_completions {
-            let _ = rx.await;
+        if no_replay {
+            // Nothing was replayed for these to follow, and a no-replay client may handle notifications only once its
+            // load request has returned (headless `-p`): awaiting them here would deadlock the load (P143). They are
+            // queued before the load returns either way.
+            if !reconcile_completions.is_empty() {
+                tokio::spawn(async move {
+                    for rx in reconcile_completions {
+                        let _ = rx.await;
+                    }
+                });
+            }
+        } else {
+            for rx in reconcile_completions {
+                let _ = rx.await;
+            }
         }
-        Ok((initial_total_tokens, unfinished_subagents))
+        Ok((initial_total_tokens, unfinished_subagents, replayed_through))
     }
     /// Enqueue a persist+broadcast of the live task list before `session/load`
     /// returns. Cold spawn has an empty registry, so this writes `tasks: []` and
@@ -1712,6 +2023,29 @@ pub(super) fn load_request_for_resume(args: acp::ResumeSessionRequest) -> acp::L
         .mcp_servers(mcp_servers)
         .meta(meta.unwrap_or_default())
 }
+/// Marks a session as still announcing its startup config notices while alive (see `MvpAgent::sessions_announcing`).
+struct SessionAnnouncing {
+    set: Rc<RefCell<std::collections::HashMap<acp::SessionId, fuigo_config::key_naming::NoticeScope>>>,
+    session_id: acp::SessionId,
+}
+
+impl SessionAnnouncing {
+    fn enter(
+        set: &Rc<RefCell<std::collections::HashMap<acp::SessionId, fuigo_config::key_naming::NoticeScope>>>,
+        session_id: &acp::SessionId,
+        scope: fuigo_config::key_naming::NoticeScope,
+    ) -> Self {
+        set.borrow_mut().insert(session_id.clone(), scope);
+        Self { set: set.clone(), session_id: session_id.clone() }
+    }
+}
+
+impl Drop for SessionAnnouncing {
+    fn drop(&mut self) {
+        self.set.borrow_mut().remove(&self.session_id);
+    }
+}
+
 #[cfg(test)]
 mod session_kind_claim_tests {
     use super::parse_client_session_kind;

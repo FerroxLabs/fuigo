@@ -9,9 +9,8 @@ pub fn run(graph: &mut Graph<GraphConfig, GraphNode, GraphEdge>) {
     if graph_config.acyclicer.is_some()
         && graph_config.acyclicer.clone().unwrap() == "greedy".to_string()
     {
-        // TODO: need to implement this algorithm
-        println!("greedy_fas");
-        // greedyFAS
+        // TODO: need to implement this algorithm (greedyFAS). Fuigo never selects it
+        // (`acyclicer` stays None); no print here: a dead stdout would abort (R077).
     } else {
         fas = Some(dfs_fas(graph));
         // println!("dfs_fas");

@@ -357,9 +357,7 @@ impl SessionActor {
         }
         state.rewindable = true;
         state.front_message_committed = false;
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .update_resource(
                 fuigo_tools::implementations::fuigo_build::task::types::CurrentPromptIdResource(
                     prompt_id.clone(),
@@ -919,6 +917,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn emit_session_idle_finalizes_orphan_and_persists_finish() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -953,6 +955,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn emit_session_idle_skips_live_coordinator_child() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -974,6 +980,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn emit_session_idle_skips_reconcile_while_suppressed() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1002,6 +1012,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_running_subagents_finalizes_orphan_and_persists_finish() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1029,6 +1043,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_running_subagents_skips_live_coordinator_child() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1052,6 +1070,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn maybe_drain_finalizes_orphan_while_parent_turn_running() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
@@ -1076,6 +1098,10 @@ mod live_orphan_hook_tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn maybe_drain_throttles_live_orphan_reconcile() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _home = fuigo_test_support::FuigoHome::new();
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {

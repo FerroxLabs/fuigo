@@ -94,6 +94,7 @@ pub(super) async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 fn side_question_error_to_acp(err: SideQuestionError) -> acp::Error {
     match err {
         SideQuestionError::Sampling(e) => crate::sampling::error::map_sampling_err_to_acp(e),
+        SideQuestionError::BudgetDenied(denial) => denial.to_acp_error(),
         e @ SideQuestionError::PrepareClient(_) => crate::acp_error::internal_error(e.to_string()),
         e @ SideQuestionError::EmptyResponse => crate::acp_error::typed(
             acp::Error::internal_error(),
@@ -157,5 +158,26 @@ mod tests {
             assert_eq!(data["message"], text.as_str(), "{acp_err:?}");
             assert_eq!(data["error_kind"], kind, "{acp_err:?}");
         }
+    }
+
+    /// Contract D.4: a side question the token-budget guard refused reaches the client as the same
+    /// typed denial a refused prompt does, not as an `api` failure.
+    #[test]
+    fn a_budget_denied_side_question_is_the_typed_denial() {
+        use crate::acp_error::{ExecutionBudgetDenial, ExecutionBudgetRule};
+        let denial = ExecutionBudgetDenial {
+            rule: ExecutionBudgetRule::TokenUsageUnknown,
+            total_token_limit: Some(10),
+            total_tokens_used: 0,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: true,
+        };
+        let acp_err = side_question_error_to_acp(SideQuestionError::BudgetDenied(denial.clone()));
+        assert_eq!(
+            serde_json::to_value(&acp_err).unwrap(),
+            serde_json::to_value(denial.to_acp_error()).unwrap()
+        );
+        assert_eq!(ExecutionBudgetDenial::from_acp_error(&acp_err), Some(denial));
     }
 }

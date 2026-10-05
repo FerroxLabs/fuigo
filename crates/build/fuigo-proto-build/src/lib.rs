@@ -1,11 +1,14 @@
+// Build-time helper: runs only inside build scripts, where stdout is cargo's `cargo:` directive
+// protocol and stderr is cargo's build log. Nothing here ships (R077 workspace print deny).
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 mod debug_redact;
 pub mod find_protoc;
 
 use anyhow::Context;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::env;
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 /// Find the protoc well-known types include directory.
 ///
@@ -30,6 +33,63 @@ fn find_protoc_include_dir(protoc: Option<&Path>) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// The path to hand cargo as `rerun-if-changed` for `protoc`.
+///
+/// A path with a directory part (`$PROTOC`, the `bin/protoc` wrapper) is a real file relative to
+/// the build script's directory and is used as given. A bare name (`protoc`, found on `PATH`) is
+/// NOT: cargo would look for `<package>/protoc`, never find it, and treat the build script as
+/// stale on every invocation -- rebuilding this crate's dependents each time. A bare name is
+/// therefore resolved through `path_var` the way `execvp` does (first directory holding an
+/// executable file of that name; an empty entry is the current directory) and the absolute path
+/// returned; when it cannot be resolved there is nothing to track and `None` is returned.
+///
+/// `PATH` itself is deliberately not tracked (`rerun-if-env-changed=PATH`): shells, IDEs and
+/// test harnesses routinely run cargo with different `PATH`s that select the same protoc, and
+/// every such difference would rerun the build script and rebuild all of its dependents -- the
+/// very cost this function removes. Switching to a different protoc via `PATH` (or by setting
+/// `PROTOC`, which is not a rerun trigger either) needs a `cargo clean -p` of the generating crate.
+fn protoc_rerun_path(protoc: &Path, path_var: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let mut components = protoc.components();
+    let bare = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !bare {
+        return Some(protoc.to_path_buf());
+    }
+    let candidates: Vec<PathBuf> = if cfg!(windows) && protoc.extension().is_none() {
+        vec![protoc.with_extension("exe"), protoc.to_path_buf()]
+    } else {
+        vec![protoc.to_path_buf()]
+    };
+    search_dirs(path_var?)
+        .flat_map(|dir| candidates.iter().map(move |name| dir.join(name)))
+        .find(|candidate| is_executable_file(candidate))
+        .and_then(|found| std::path::absolute(found).ok())
+}
+
+/// The directories `PATH` names, in order; an empty entry is the current directory.
+fn search_dirs(path_var: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
+    env::split_paths(path_var).map(|dir| {
+        if dir.as_os_str().is_empty() {
+            PathBuf::from(".")
+        } else {
+            dir
+        }
+    })
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 pub struct FuigoProtoBuilder {
@@ -136,10 +196,20 @@ impl FuigoProtoBuilder {
         let includes = Vec::from_iter(includes);
 
         if let Some(protoc) = protoc {
-            println!(
-                "cargo:rerun-if-changed={}",
-                protoc.to_str().context("protoc path not UTF-8")?
-            );
+            match protoc_rerun_path(protoc, env::var_os("PATH").as_deref()) {
+                Some(tracked) if tracked.as_path() == protoc => println!(
+                    "cargo:rerun-if-changed={}",
+                    protoc.to_str().context("protoc path not UTF-8")?
+                ),
+                // Resolved from PATH: a non-UTF-8 directory cannot be printed to cargo, and
+                // must not fail a build that previously succeeded; just do not track it.
+                Some(tracked) => {
+                    if let Some(tracked) = tracked.to_str() {
+                        println!("cargo:rerun-if-changed={tracked}");
+                    }
+                }
+                None => {}
+            }
         }
 
         // protoc writes the dependency list to a real file, and we read it
@@ -388,5 +458,127 @@ pub fn configure() -> FuigoProtoBuilder {
         pbjson_exclude: Vec::new(),
         file_descriptor_set_path: None,
         honor_debug_redact: false,
+    }
+}
+
+#[cfg(test)]
+mod protoc_rerun_path_tests {
+    use super::protoc_rerun_path;
+    use std::path::{Path, PathBuf};
+
+    /// An executable stand-in for protoc at `path`.
+    fn executable(path: &Path) {
+        std::fs::write(path, "").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn exe_name() -> &'static str {
+        if cfg!(windows) {
+            "protoc.exe"
+        } else {
+            "protoc"
+        }
+    }
+
+    /// P74: a bare `protoc` from PATH must be tracked by its absolute location, never as the
+    /// relative `protoc` that does not exist next to the package (which made cargo rerun the
+    /// build script, and rebuild every dependent, on every invocation).
+    #[test]
+    fn bare_name_resolves_to_the_absolute_path_on_path() {
+        let empty = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let protoc = bin.path().join(exe_name());
+        executable(&protoc);
+        let path_var = std::env::join_paths([empty.path(), bin.path()]).unwrap();
+
+        let tracked = protoc_rerun_path(Path::new("protoc"), Some(&path_var))
+            .expect("protoc on PATH must be tracked");
+
+        assert!(tracked.is_absolute(), "{}", tracked.display());
+        assert_eq!(tracked, std::path::absolute(&protoc).unwrap());
+        assert!(tracked.exists());
+    }
+
+    #[test]
+    fn first_path_entry_wins() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        executable(&first.path().join(exe_name()));
+        executable(&second.path().join(exe_name()));
+        let path_var = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(
+            protoc_rerun_path(Path::new("protoc"), Some(&path_var)),
+            Some(std::path::absolute(first.path().join(exe_name())).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_directory_named_protoc_on_path_is_skipped() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(first.path().join(exe_name())).unwrap();
+        executable(&second.path().join(exe_name()));
+        let path_var = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(
+            protoc_rerun_path(Path::new("protoc"), Some(&path_var)),
+            Some(std::path::absolute(second.path().join(exe_name())).unwrap())
+        );
+    }
+
+    /// Astra P74 LOW: `execvp` skips a non-executable file, so the tracked file must too.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_executable_file_on_path_is_skipped() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::write(first.path().join("protoc"), "").unwrap();
+        executable(&second.path().join("protoc"));
+        let path_var = std::env::join_paths([first.path(), second.path()]).unwrap();
+
+        assert_eq!(
+            protoc_rerun_path(Path::new("protoc"), Some(&path_var)),
+            Some(std::path::absolute(second.path().join("protoc")).unwrap())
+        );
+    }
+
+    /// Astra P74 LOW: an empty PATH entry is the current directory.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_path_entry_is_the_current_directory() {
+        let dirs: Vec<PathBuf> =
+            super::search_dirs(std::ffi::OsStr::new(":/usr/bin::/bin:")).collect();
+        assert_eq!(
+            dirs,
+            ["", "/usr/bin", "", "/bin", ""]
+                .map(|d| PathBuf::from(if d.is_empty() { "." } else { d }))
+                .to_vec()
+        );
+    }
+
+    #[test]
+    fn bare_name_not_on_path_is_not_tracked() {
+        let empty = tempfile::tempdir().unwrap();
+        let path_var = std::env::join_paths([empty.path()]).unwrap();
+        assert_eq!(
+            protoc_rerun_path(Path::new("protoc"), Some(&path_var)),
+            None
+        );
+        assert_eq!(protoc_rerun_path(Path::new("protoc"), None), None);
+    }
+
+    #[test]
+    fn a_path_with_a_directory_part_is_kept_as_given() {
+        for given in ["../../bin/protoc", "/opt/protoc/bin/protoc", "bin/protoc"] {
+            assert_eq!(
+                protoc_rerun_path(Path::new(given), None),
+                Some(PathBuf::from(given))
+            );
+        }
     }
 }

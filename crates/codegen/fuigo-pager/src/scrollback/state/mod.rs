@@ -229,6 +229,12 @@ pub struct ScrollbackState {
     /// Test-only count of full `rebuild_layout` calls, so reveal tests can assert the fast path skips the O(history) rebuild for visible matches.
     #[cfg(test)]
     layout_rebuilds: usize,
+    /// Full fold/gap/virtual_y passes (`rebuild_virtual_y_from_heights`), counted so tests can bound per-event layout cost.
+    #[cfg(test)]
+    virtual_y_rebuilds: usize,
+    /// Full layout-cache builds (`rebuild_layout_cache`: every entry re-estimated), counted alongside `virtual_y_rebuilds`.
+    #[cfg(test)]
+    layout_cache_builds: usize,
 
     /// Height override for the inline-edited entry: measurement reports this instead of the block's natural height.
     /// The layout then reserves room for the live edit textarea.
@@ -290,6 +296,10 @@ impl ScrollbackState {
             content_generation: 0,
             #[cfg(test)]
             layout_rebuilds: 0,
+            #[cfg(test)]
+            virtual_y_rebuilds: 0,
+            #[cfg(test)]
+            layout_cache_builds: 0,
             inline_edit_height: None,
             cwd: None,
         }
@@ -758,6 +768,78 @@ impl ScrollbackState {
         self.invalidate_layout_cache();
         self.bump_content_generation();
         removed
+    }
+
+    /// Push a standalone row for a lifecycle event's plugin hook runs (`session_start`, `user_prompt_submit`, `stop`, ...).
+    /// Lifecycle rows are not tool calls: tool-usage statistics skip them.
+    pub fn push_lifecycle_hooks(
+        &mut self,
+        event_name: String,
+        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
+    ) -> EntryId {
+        use super::blocks::tool::{LifecycleEventBlock, ToolCallHookData};
+        let block = LifecycleEventBlock::new(&event_name);
+        let mut entry = super::entry::ScrollbackEntry::new(RenderBlock::ToolCall(
+            ToolCallBlock::Lifecycle(block),
+        ));
+        entry.hook_data = Some(ToolCallHookData {
+            pre_hooks: Vec::new(),
+            post_hooks: Vec::new(),
+            lifecycle: vec![(event_name, hook_entries)],
+        });
+        self.push(entry)
+    }
+
+    /// Attach hook data to a tool call entry.
+    pub fn attach_hooks(
+        &mut self,
+        id: EntryId,
+        phase: super::blocks::tool::HookPhase,
+        hook_entries: Vec<super::blocks::tool::HookRunEntry>,
+    ) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            let data = entry.hook_data.get_or_insert_with(Default::default);
+            // Append: a row that Edit coalescing merged from several calls collects every call's batches
+            match phase {
+                super::blocks::tool::HookPhase::Pre => data.pre_hooks.extend(hook_entries),
+                super::blocks::tool::HookPhase::Post => data.post_hooks.extend(hook_entries),
+            }
+            entry.invalidate_cache();
+            // A thought's fold claim depends on `hook_data`, so it is the one kind whose fold membership a batch can change
+            let is_thinking = entry.block.is_thinking();
+            self.mark_hook_row_dirty(id, is_thinking);
+        }
+    }
+
+    /// Schedule the least layout work a hook batch on row `id` needs.
+    /// Hook data feeds neither gaps nor tool fold membership (only a thought's claim), so the row's own height is all that can move.
+    /// A full fold/gap pass per batch would be O(history) on every hook event; this keeps an ordinary row on the O(rows below) patch.
+    /// Hidden members and synthetic headers have their height owned by the fold, not measurement (the same rule as `measure_window_exact`).
+    /// They need no layout work at all: they repaint from live data, and expanding their group runs a full rebuild that measures them.
+    fn mark_hook_row_dirty(&mut self, id: EntryId, membership_may_change: bool) {
+        if membership_may_change || self.gaps_may_be_dirty {
+            // Already structurally dirty, or the batch can re-shape a fold
+            self.mark_structurally_dirty(id);
+            return;
+        }
+        let idx = self.entries.get_index_of(&id);
+        if idx.is_some_and(|idx| !self.visible_entry_range().contains(&idx)) {
+            // A row outside the shown range (another turn in SingleTurn): Case 2's fast path would add its growth to total_height,
+            // which sums the shown range only. The full pass recomputes the total from that range.
+            self.mark_structurally_dirty(id);
+            return;
+        }
+        let info = idx.and_then(|idx| self.layout_cache.as_ref()?.entries.get(idx).copied());
+        match info {
+            Some(info)
+                if info.height == 0
+                    || (info.is_group_header() && !info.is_expanded_verb_header()) => {}
+            // No cache yet, or a row the cache hasn't seen: the next build measures it from scratch either way
+            // A measured row: remeasure it alone and patch virtual_y below it
+            _ => {
+                self.dirty_heights.insert(id);
+            }
+        }
     }
 
     /// Push a text chunk to an agent message entry.

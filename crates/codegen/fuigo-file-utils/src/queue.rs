@@ -1402,6 +1402,12 @@ impl UploadQueue {
         .instrument(span)
         .await
     }
+    /// The upload method this queue's worker sends through, resolved now. P71: the destination
+    /// class of anything handed to [`Self::enqueue`] is decided on this, at send time, by
+    /// `destination_gate`; a caller that shapes a record by destination asks here.
+    pub fn upload_method(&self) -> crate::upload_config::UploadMethod {
+        self.resolver.resolve().upload_method
+    }
     /// Current queue statistics.
     pub fn stats(&self) -> &UploadQueueStats {
         &self.stats
@@ -2016,6 +2022,16 @@ fn is_non_retryable_error(error: &anyhow::Error) -> bool {
 /// `RetryPolicy`; direct-mode (gcloud) errors are unstructured strings, so
 /// 401/403 are detected by message scraping as a safety net.
 fn upload_disposition(error: &anyhow::Error) -> Disposition {
+    // P47: the bearer may not go to this destination, so nothing was sent. No refresh or retry can change the
+    // destination: terminal, never parked.
+    if fuigo_auth::find_bearer_refusal(error.as_ref()).is_some() {
+        return Disposition::Terminal;
+    }
+    // P71: the destination may not receive content (neither FluxRouter-operated nor the operator's own
+    // bucket), so nothing was sent and no retry or refresh can change that: terminal, never parked.
+    if crate::destination_gate::is_withheld(error) {
+        return Disposition::Terminal;
+    }
     if let Some(http) = error.downcast_ref::<HttpUploadError>() {
         return STORAGE_RETRY_POLICY
             .classify(http.status_code)
@@ -2051,6 +2067,17 @@ async fn upload_with_retries(
     mut permit: Option<&mut ConcurrencyPermit>,
 ) -> anyhow::Result<(String, BlobCompression, u64)> {
     let should_compress = item.compress && original_size >= COMPRESS_MIN_BYTES;
+    // P149 (S14/K16): a text artifact goes through the process's upload filter before any attempt, so every enqueue
+    // path (shell, workspace) and every spill recovered from an earlier run is covered. The spill file itself is not
+    // rewritten (its sidecar's sha256 must keep matching for restart recovery): when the filter changes the bytes, a
+    // filtered copy is what is sent, with the same compression and multipart routing.
+    let filtered = match crate::payload_filter::filtered_copy(item.source.path(), &item.content_type) {
+        Ok(filtered) => filtered,
+        Err(error) => {
+            tracing::warn!(%error, "upload queue: could not read an artifact to filter it; not uploading it");
+            return Err(anyhow::anyhow!("read artifact for upload filter: {error}"));
+        }
+    };
     let mut auth_retried = false;
     let mut parked = false;
     loop {
@@ -2058,17 +2085,22 @@ async fn upload_with_retries(
         let wrapped = ResolvedStorageConfig::from_resolver_async(resolver).await;
         let last_wire_attempt = Instant::now();
         let attempt_bearer = wrapped.wire_bearer();
+        let source = filtered.as_ref().map_or(item.source.path(), |c| c.path());
         let result = if should_compress {
-            stream_compress_upload(&wrapped, &item.gcs_path, item.source.path()).await
+            stream_compress_upload(&wrapped, &item.gcs_path, source).await
         } else {
             upload_file(
                 &wrapped,
                 &item.gcs_path,
-                item.source.path(),
+                source,
                 &item.content_type,
             )
             .await
-            .map(|url| (url, BlobCompression::None, original_size))
+            .map(|url| {
+                // P149 (Astra r3 #6): a filtered copy is what was stored.
+                let stored = filtered.as_ref().map_or(original_size, |c| file_size(c.path()));
+                (url, BlobCompression::None, stored)
+            })
         };
         match result {
             Ok(r) => {

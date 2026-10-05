@@ -336,7 +336,8 @@ impl SubagentSnapshotDto {
             }
             SubagentSnapshotStatus::Failed { error } => {
                 dto.status = "failed".into();
-                dto.failure_error = Some(error);
+                // P70b display sink: returned to the client inside a successful `fuigo/subagent/get` reply.
+                dto.failure_error = Some(fuigo_telemetry::sent_credentials::scrub_owned(error));
             }
             SubagentSnapshotStatus::Cancelled { reason } => {
                 dto.status = "cancelled".into();

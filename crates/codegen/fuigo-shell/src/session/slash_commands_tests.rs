@@ -805,11 +805,12 @@ fn loop_prompt_matches_pager_wording() {
 #[test]
 fn build_tools_meta_serialises_tool_names() {
     let names = vec!["scheduler_create".to_string(), "image_gen".to_string()];
-    let v = build_tools_meta(&names);
+    let v = build_tools_meta(&names, true);
     assert_eq!(
         serde_json::Value::Object(v),
-        serde_json::json!({"tools": ["scheduler_create", "image_gen"]})
+        serde_json::json!({"tools": ["scheduler_create", "image_gen"], "memoryEnabled": true})
     );
+    assert_eq!(build_tools_meta(&names, false)["memoryEnabled"], serde_json::json!(false));
 }
 
 #[test]

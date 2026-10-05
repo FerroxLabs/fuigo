@@ -157,6 +157,12 @@ pub struct ClientCapabilities {
     #[serde(default)]
     pub fs_write: bool,
 
+    /// P125: whether the client wants the leader's relay-refusal state on every registration: the refusal when the
+    /// leader refuses its relay, and an explicit "cleared" when it does not, so a client that reconnects reconciles
+    /// whatever it cached. Without it the client is told only of a refusal.
+    #[serde(default)]
+    pub relay_refusal_state: bool,
+
     /// Whether this client will draw a status row (`fuigo/statusLine`).
     /// When true, the leader injects `clientStatusLine: true`.
     /// The agent then builds the payload for a client that asked, not for whichever one started the process.
@@ -168,6 +174,27 @@ pub struct ClientCapabilities {
     /// When true, the leader injects `clientUserMessageEcho: true` so the answer travels with the session.
     #[serde(default)]
     pub user_message_echo: bool,
+
+    /// P142: whether this client shows the leader's one-off process notices ([`LEADER_NOTICE_METHOD`]). The leader
+    /// runs the agent, so a notice the agent prints (an old memory folder it did not move, uploads it withheld) goes
+    /// to `~/.fuigo/leader.log`, which nobody reads; the leader sends each one, once, to the clients that ask. A client
+    /// that does not ask (a raw ACP client, an older Fuigo) is sent none, and the notice waits for one that does.
+    #[serde(default)]
+    pub leader_notices: bool,
+}
+
+/// P142: the extension notification that carries one leader process notice (`params.message`, the text as it was
+/// printed). It has the ACP `_` prefix, so the client decoder delivers it as the `fuigo/leader/notice` extension.
+pub const LEADER_NOTICE_METHOD: &str = "_fuigo/leader/notice";
+
+/// P142: the JSON-RPC line of a [`LEADER_NOTICE_METHOD`] notification for `message`.
+pub fn leader_notice_payload(message: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": LEADER_NOTICE_METHOD,
+        "params": { "message": message },
+    })
+    .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -185,6 +212,11 @@ pub struct LeaderCapabilities {
     /// Old leaders default to `false`, so a new client falls back to advising a manual restart.
     #[serde(default)]
     pub relaunch_v1: bool,
+    /// Whether the leader supports [`ControlCommand::StopForDowngrade`] (P124): `fuigo update` asks a leader that is newer than the
+    /// binary it just installed to stop, so an explicit downgrade is not silently served by the newer leader.
+    /// Old leaders default to `false`.
+    #[serde(default)]
+    pub downgrade_stop_v1: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -214,6 +246,13 @@ pub enum ControlCommand {
     ///
     /// `to_version` is the version `fuigo update` just installed; the leader declines if it already runs that version or newer.
     RelaunchForUpdate {
+        to_version: String,
+    },
+    /// Ask the leader to stop after an EXPLICIT downgrade (P124): `fuigo update --version X` or `--force` installed `to_version`,
+    /// which is strictly older than the leader. Same drain and exit as [`ControlCommand::RelaunchForUpdate`] (clients reconnect and
+    /// the next connect spawns a leader from the installed binary); acked with `Relaunching`, declined with `RelaunchDeclined`
+    /// unless the leader is strictly newer than `to_version`. The ordinary relaunch keeps its never-downgrade guard.
+    StopForDowngrade {
         to_version: String,
     },
 }
@@ -583,6 +622,7 @@ mod tests {
                 profile_formats: vec![ProfileArtifactFormat::Svg],
                 workspace_exposure: true,
                 relaunch_v1: true,
+                downgrade_stop_v1: true,
             }),
         };
 
@@ -601,6 +641,7 @@ mod tests {
                     profile_formats,
                     workspace_exposure: true,
                     relaunch_v1: true,
+                downgrade_stop_v1: true,
                 }),
             } if profile_formats == vec![ProfileArtifactFormat::Svg]
         ));

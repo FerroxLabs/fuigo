@@ -36,6 +36,8 @@ pub fn record_grove_wt_create(strategy: &'static str, duration: Duration) {
         _ => &CREATE_OTHER,
     };
     counter.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    test_thread::bump(metric_strategy);
     LAST_DURATION_NS.store(duration.as_nanos() as u64, Ordering::Relaxed);
     tracing::info!(
         metric = "grove_wt_create_duration_seconds",
@@ -66,35 +68,58 @@ pub fn grove_wt_create_last_duration_ns() -> u64 {
     LAST_DURATION_NS.load(Ordering::Relaxed)
 }
 
+/// Test-only per-thread view of the create counters. The process-global counters above are bumped by every test in
+/// the binary that creates a worktree, so a test that asserts "this strategy was (not) recorded" against them races
+/// with concurrent tests. `execute_create_worktree` records on the calling thread, and a `#[test]` runs on its own
+/// thread, so this view counts only what the current test did.
+#[cfg(test)]
+pub(crate) mod test_thread {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    thread_local! {
+        static COUNTS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
+    }
+
+    pub(super) fn bump(strategy: &str) {
+        COUNTS.with(|c| *c.borrow_mut().entry(strategy.to_owned()).or_insert(0) += 1);
+    }
+
+    /// Creates of `strategy` recorded by the current thread only (same label mapping as `grove_wt_create_count`).
+    pub(crate) fn count(strategy: &str) -> u64 {
+        COUNTS.with(|c| c.borrow().get(strategy).copied().unwrap_or(0))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn record_increments_named_strategy_counter() {
-        let before = grove_wt_create_count("copy");
+        let before = test_thread::count("copy");
         record_grove_wt_create("copy", Duration::from_millis(12));
-        assert_eq!(grove_wt_create_count("copy"), before + 1);
+        assert_eq!(test_thread::count("copy"), before + 1);
         assert!(grove_wt_create_last_duration_ns() >= 12_000_000);
     }
 
     #[test]
     fn standalone_counts_as_copy_metric_label() {
-        let before = grove_wt_create_count("copy");
+        let before = test_thread::count("copy");
         record_grove_wt_create("standalone", Duration::from_millis(1));
-        assert_eq!(grove_wt_create_count("copy"), before + 1);
+        assert_eq!(test_thread::count("copy"), before + 1);
     }
 
     #[test]
     fn grove_fuse_and_grove_nfs_have_named_counters() {
-        let fuse_before = grove_wt_create_count("grove-fuse");
-        let nfs_before = grove_wt_create_count("grove-nfs");
-        let alias_before = grove_wt_create_count("nfs");
+        let fuse_before = test_thread::count("grove-fuse");
+        let nfs_before = test_thread::count("grove-nfs");
+        let alias_before = test_thread::count("nfs");
         record_grove_wt_create("grove-fuse", Duration::from_millis(1));
         record_grove_wt_create("grove-nfs", Duration::from_millis(1));
         record_grove_wt_create("nfs", Duration::from_millis(1));
-        assert_eq!(grove_wt_create_count("grove-fuse"), fuse_before + 1);
-        assert_eq!(grove_wt_create_count("grove-nfs"), nfs_before + 1);
-        assert_eq!(grove_wt_create_count("nfs"), alias_before + 1);
+        assert_eq!(test_thread::count("grove-fuse"), fuse_before + 1);
+        assert_eq!(test_thread::count("grove-nfs"), nfs_before + 1);
+        assert_eq!(test_thread::count("nfs"), alias_before + 1);
     }
 }

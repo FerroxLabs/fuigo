@@ -209,7 +209,7 @@ fn print_component_summary(manifest: &PluginManifest, root: &Path) {
         manifest.mcp_config_path(root).is_some() || manifest.inline_mcp_servers().is_some();
     let has_lsp =
         manifest.lsp_config_path(root).is_some() || manifest.inline_lsp_servers().is_some();
-    println!(
+    fuigo_tty_utils::cli_println!(
         "  components: {} skill dir(s), {} command dir(s), {} agent dir(s){}{}{}",
         skills.len(),
         commands.len(),
@@ -270,9 +270,9 @@ fn cmd_list(json: bool, available: bool) -> Result<()> {
         if available {
             entries.extend(available_plugins(&registry));
         }
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if repos.is_empty() {
-        println!("No plugins installed. Run `fuigo plugin install --help` to get started.");
+        fuigo_tty_utils::cli_println!("No plugins installed. Run `fuigo plugin install --help` to get started.");
     } else {
         for (repo_key, repo) in &repos {
             let mp = repo
@@ -281,7 +281,7 @@ fn cmd_list(json: bool, available: bool) -> Result<()> {
                 .map(|mp| format!(" ({})", mp.source_display_name))
                 .unwrap_or_default();
             let names: Vec<&str> = repo.plugins.keys().map(|s| s.as_str()).collect();
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "  {repo_key}: {} [{}]{mp}",
                 names.join(", "),
                 kind_label(&repo.kind)
@@ -424,7 +424,7 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
             InstallSource::Git { url, .. } => format!("from git repo {url}"),
             InstallSource::Local { path, .. } => format!("from directory {}", path.display()),
         };
-        eprintln!("{}", trust_prompt(&subject, source));
+        fuigo_tty_utils::cli_eprintln!("{}", trust_prompt(&subject, source));
         std::process::exit(1);
     }
 
@@ -434,7 +434,7 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
                 tracing::warn!("{w}");
             }
             log_plugin_installed(install_kind(!outcome.is_local), true, None);
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "Installed {} plugin(s) from {source}: {}",
                 outcome.plugin_names.len(),
                 outcome.plugin_names.join(", "),
@@ -467,7 +467,7 @@ fn cmd_install_marketplace(
             },
         };
         let subject = format!("\"{}\" from marketplace \"{from}\"", mref.name);
-        eprintln!("{}", trust_prompt(&subject, source));
+        fuigo_tty_utils::cli_eprintln!("{}", trust_prompt(&subject, source));
         std::process::exit(1);
     }
 
@@ -487,7 +487,7 @@ fn cmd_install_marketplace(
                     .first()
                     .map(String::as_str)
                     .unwrap_or(&mref.name);
-                println!(
+                fuigo_tty_utils::cli_println!(
                     "Plugin \"{}\" is already installed from {}. \
                      Run `fuigo plugin update {}` to update it.",
                     mref.name, outcome.source_display_name, update_name,
@@ -496,9 +496,9 @@ fn cmd_install_marketplace(
             }
             log_plugin_installed(install_kind(outcome.source_is_git), true, None);
             if let Some(note) = &outcome.other_copies_note {
-                println!("{note}");
+                fuigo_tty_utils::cli_println!("{note}");
             }
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "Installed {} plugin(s) from {}: {}",
                 outcome.plugin_names.len(),
                 outcome.source_display_name,
@@ -526,7 +526,7 @@ fn cmd_uninstall(name: &str, confirm: bool, keep_data: bool) -> Result<()> {
                 success: true,
             });
             let suffix = if keep_data { " (data preserved)" } else { "" };
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "Uninstalled {} plugin(s): {}{suffix}",
                 outcome.removed_plugins.len(),
                 outcome.removed_plugins.join(", "),
@@ -557,7 +557,7 @@ fn cmd_update(name: Option<&str>) -> Result<()> {
     let outcomes = plugin::update_plugins(name).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if outcomes.is_empty() {
-        println!("No installed plugins to update.");
+        fuigo_tty_utils::cli_println!("No installed plugins to update.");
         return Ok(());
     }
 
@@ -568,23 +568,23 @@ fn cmd_update(name: Option<&str>) -> Result<()> {
                 old_commit,
                 new_commit,
             } => {
-                println!(
+                fuigo_tty_utils::cli_println!(
                     "{repo_key}: updated ({} -> {})",
                     abbreviated_commit(old_commit.as_deref()),
                     abbreviated_commit(new_commit.as_deref()),
                 );
             }
             RepoUpdateOutcome::AlreadyUpToDate { repo_key } => {
-                println!("{repo_key}: already up to date");
+                fuigo_tty_utils::cli_println!("{repo_key}: already up to date");
             }
             RepoUpdateOutcome::Pinned { repo_key, ref_name } => {
-                println!("{repo_key}: pinned to {ref_name}, skipping");
+                fuigo_tty_utils::cli_println!("{repo_key}: pinned to {ref_name}, skipping");
             }
             RepoUpdateOutcome::LiveLocal { repo_key } => {
-                println!("{repo_key}: local symlink, already live");
+                fuigo_tty_utils::cli_println!("{repo_key}: local symlink, already live");
             }
             RepoUpdateOutcome::Failed { repo_key, error } => {
-                eprintln!("{repo_key}: update failed: {error}");
+                fuigo_tty_utils::cli_eprintln!("{repo_key}: update failed: {error}");
             }
         }
     }
@@ -604,7 +604,7 @@ fn cmd_enable(name: &str) -> Result<()> {
     }
     fuigo_shell::config::add_enabled_plugin(name)
         .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {e}"))?;
-    println!("Enabled plugin: {name}");
+    fuigo_tty_utils::cli_println!("Enabled plugin: {name}");
     Ok(())
 }
 
@@ -621,7 +621,7 @@ fn cmd_disable(name: &str) -> Result<()> {
     }
     fuigo_shell::config::add_disabled_plugin(name)
         .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {e}"))?;
-    println!("Disabled plugin: {name}");
+    fuigo_tty_utils::cli_println!("Disabled plugin: {name}");
     Ok(())
 }
 
@@ -640,12 +640,12 @@ fn cmd_details(name: &str) -> Result<()> {
         .map(|mp| format!("\n  source: {}", mp.source_display_name))
         .unwrap_or_default();
 
-    println!("{repo_key}");
-    println!("  path: {}", repo.path.display());
-    println!("  kind: {}{mp}", kind_label(&repo.kind));
-    println!("  installed: {}", repo.installed_at);
-    println!("  updated: {}", repo.updated_at);
-    println!("  plugins ({}):", repo.plugins.len());
+    fuigo_tty_utils::cli_println!("{repo_key}");
+    fuigo_tty_utils::cli_println!("  path: {}", repo.path.display());
+    fuigo_tty_utils::cli_println!("  kind: {}{mp}", kind_label(&repo.kind));
+    fuigo_tty_utils::cli_println!("  installed: {}", repo.installed_at);
+    fuigo_tty_utils::cli_println!("  updated: {}", repo.updated_at);
+    fuigo_tty_utils::cli_println!("  plugins ({}):", repo.plugins.len());
     for (pname, p) in &repo.plugins {
         let ver = p
             .version
@@ -657,12 +657,12 @@ fn cmd_details(name: &str) -> Result<()> {
             .as_deref()
             .map(|s| format!(" (subdir: {s})"))
             .unwrap_or_default();
-        println!("    {pname}{ver}{sub}");
+        fuigo_tty_utils::cli_println!("    {pname}{ver}{sub}");
     }
 
     if let Ok(ManifestLoadResult::Found(manifest)) = load_manifest(&repo.path) {
         if let Some(ref desc) = manifest.description {
-            println!("  description: {desc}");
+            fuigo_tty_utils::cli_println!("  description: {desc}");
         }
         print_component_summary(&manifest, &repo.path);
     }
@@ -679,19 +679,19 @@ fn cmd_validate(path: &str) -> Result<()> {
             manifest
                 .validate()
                 .map_err(|e| anyhow::anyhow!("Manifest validation failed: {e}"))?;
-            println!("Plugin manifest is valid.");
-            println!("  name: {}", manifest.name);
+            fuigo_tty_utils::cli_println!("Plugin manifest is valid.");
+            fuigo_tty_utils::cli_println!("  name: {}", manifest.name);
             if let Some(ref v) = manifest.version {
-                println!("  version: {v}");
+                fuigo_tty_utils::cli_println!("  version: {v}");
             }
             if let Some(ref d) = manifest.description {
-                println!("  description: {d}");
+                fuigo_tty_utils::cli_println!("  description: {d}");
             }
             print_component_summary(&manifest, &root);
             Ok(())
         }
         Ok(ManifestLoadResult::NotFound) => {
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "No plugin.json found. Fuigo discovers skills, agents, and hooks \
                  automatically from standard directories. A manifest is only needed \
                  for custom paths or metadata."
@@ -726,7 +726,9 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     );
 
     if !force {
-        let out = std::process::Command::new("git")
+        let mut status_cmd = std::process::Command::new("git");
+        fuigo_tty_utils::remove_fuigo_owned_secrets(&mut status_cmd);
+        let out = status_cmd
             .args(["status", "--porcelain"])
             .current_dir(&root)
             .output()?;
@@ -736,14 +738,15 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        println!("Would create tag: {tag}");
+        fuigo_tty_utils::cli_println!("Would create tag: {tag}");
         if push {
-            println!("Would push tag to remote.");
+            fuigo_tty_utils::cli_println!("Would push tag to remote.");
         }
         return Ok(());
     }
 
     let mut cmd = std::process::Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     cmd.args(["tag", &tag]);
     if force {
         cmd.arg("--force");
@@ -755,10 +758,11 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    println!("Created tag: {tag}");
+    fuigo_tty_utils::cli_println!("Created tag: {tag}");
 
     if push {
         let mut push_cmd = std::process::Command::new("git");
+        fuigo_tty_utils::remove_fuigo_owned_secrets(&mut push_cmd);
         push_cmd.args(["push", "origin", &tag]);
         if force {
             push_cmd.arg("--force");
@@ -770,7 +774,7 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        println!("Pushed tag {tag} to origin.");
+        fuigo_tty_utils::cli_println!("Pushed tag {tag} to origin.");
     }
     Ok(())
 }
@@ -818,9 +822,9 @@ fn marketplace_list(
                 }
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&entries)?);
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string_pretty(&entries)?);
     } else if sources.is_empty() {
-        println!(
+        fuigo_tty_utils::cli_println!(
             "No marketplace sources configured.\n\
              Run `fuigo plugin marketplace add --help` to get started."
         );
@@ -830,13 +834,13 @@ fn marketplace_list(
                 SourceKind::Git { url, .. } => url.clone(),
                 SourceKind::Local { path } => path.display().to_string(),
             };
-            println!("  {}: {id}", s.name);
+            fuigo_tty_utils::cli_println!("  {}: {id}", s.name);
         }
     }
     Ok(())
 }
 
-fn marketplace_add(
+pub(crate) fn marketplace_add(
     sources: &[fuigo_plugin_marketplace::MarketplaceSource],
     url: &str,
     force: bool,
@@ -904,76 +908,103 @@ fn marketplace_add(
     };
     let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
 
-    // Held across the read and the write. This runs in the CLI process while a
-    // TUI may be editing the same file, which is exactly the cross-process lost
-    // update the shared lock exists to prevent.
-    let _config_lock = fuigo_config::fs_atomic::lock_config_for_write(&config_path)?;
+    // The shared read-modify-write (`fuigo_config::fs_atomic::edit_locked`):
+    // under the lock every writer of this file takes, renamed only over the
+    // version read. This runs in the CLI process while a TUI may be editing the
+    // same file, which is exactly the cross-process lost update the lock exists
+    // to prevent. The closure may run more than once; it only edits text.
+    edit_user_config(&config_path, |current| {
+        // Only a missing file is empty; a hard read error must not become a
+        // whole-file replacement.
+        let content = match current.map(|b| std::str::from_utf8(b.unwrap_or_default())) {
+            Ok(Ok(text)) => text,
+            Ok(Err(_)) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to edit {}: it could not be read (stream did not contain valid UTF-8)",
+                    config_path.display()
+                ));
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to edit {}: it could not be read ({e})",
+                    config_path.display()
+                ));
+            }
+        };
+        let mut doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {e}"))?;
 
-    // Only a missing file is empty; a hard read error must not become a
-    // whole-file replacement by the atomic write below.
-    let content = match std::fs::read_to_string(&config_path) {
-        Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(anyhow::anyhow!(
-                "refusing to edit {}: it could not be read ({e})",
-                config_path.display()
-            ));
+        if doc.get("marketplace").is_none() {
+            doc["marketplace"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-    };
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Failed to parse config.toml: {e}"))?;
-
-    if doc.get("marketplace").is_none() {
-        doc["marketplace"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    if doc["marketplace"].get("sources").is_none() {
-        doc["marketplace"]["sources"] =
-            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
-    }
-
-    let sources = doc["marketplace"]["sources"]
-        .as_array_of_tables_mut()
-        .ok_or_else(|| anyhow::anyhow!("marketplace.sources is not an array of tables"))?;
-
-    // Re-checked against the document read *under the lock*. The check further
-    // up ran before the lock existed, so two concurrent identical adds both
-    // passed it and then serialized into two identical entries.
-    let duplicate = sources.iter().any(|t| match &input {
-        MarketplaceAddInput::GitUrl(git_url) => t
-            .get("git")
-            .and_then(toml_edit::Item::as_str)
-            .is_some_and(|u| u.trim_end_matches(".git") == git_url.trim_end_matches(".git")),
-        MarketplaceAddInput::LocalPath(path) => t
-            .get("path")
-            .and_then(toml_edit::Item::as_str)
-            .is_some_and(|p| std::path::Path::new(p) == path.as_path()),
-    });
-    if duplicate {
-        bail!("Marketplace source already configured: {identity}");
-    }
-
-    let mut entry = toml_edit::Table::new();
-    entry["name"] = toml_edit::value(&name);
-    match &input {
-        MarketplaceAddInput::GitUrl(git_url) => {
-            entry["git"] = toml_edit::value(git_url);
+        if doc["marketplace"].get("sources").is_none() {
+            doc["marketplace"]["sources"] =
+                toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
         }
-        MarketplaceAddInput::LocalPath(path) => {
-            entry["path"] = toml_edit::value(path.display().to_string());
+
+        let sources = doc["marketplace"]["sources"]
+            .as_array_of_tables_mut()
+            .ok_or_else(|| anyhow::anyhow!("marketplace.sources is not an array of tables"))?;
+
+        // Re-checked against the document read *under the lock*. The check further
+        // up ran before the lock existed, so two concurrent identical adds both
+        // passed it and then serialized into two identical entries.
+        let duplicate = sources.iter().any(|t| match &input {
+            MarketplaceAddInput::GitUrl(git_url) => t
+                .get("git")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(|u| u.trim_end_matches(".git") == git_url.trim_end_matches(".git")),
+            MarketplaceAddInput::LocalPath(path) => t
+                .get("path")
+                .and_then(toml_edit::Item::as_str)
+                .is_some_and(|p| std::path::Path::new(p) == path.as_path()),
+        });
+        if duplicate {
+            bail!("Marketplace source already configured: {identity}");
         }
-    }
-    sources.push(entry);
 
-    fuigo_config::fs_atomic::write_atomically(
-        &config_path,
-        &doc.to_string(),
-        fuigo_config::fs_atomic::replacement_mode(&config_path, 0o600),
-    )?;
+        let mut entry = toml_edit::Table::new();
+        entry["name"] = toml_edit::value(&name);
+        match &input {
+            MarketplaceAddInput::GitUrl(git_url) => {
+                entry["git"] = toml_edit::value(git_url);
+            }
+            MarketplaceAddInput::LocalPath(path) => {
+                entry["path"] = toml_edit::value(path.display().to_string());
+            }
+        }
+        sources.push(entry);
+        Ok(fuigo_config::fs_atomic::Edit::Replace {
+            contents: doc.to_string().into_bytes(),
+            value: (),
+        })
+    })?;
 
-    println!("Added marketplace source: {name} ({identity})");
+    fuigo_tty_utils::cli_println!("Added marketplace source: {name} ({identity})");
     Ok(())
+}
+
+/// Read-modify-write the user's `config.toml` through the shared helper
+/// (`fuigo_config::fs_atomic::edit_locked`, on `config.toml.lock`): the temp is
+/// synced outside the lock, renamed only over the version `edit` was given, and
+/// removed on every failure. The replacement keeps the file's owner bits
+/// (group/world dropped; `0600` for a new file), as `write_atomically` with
+/// `replacement_mode(.., 0o600)` did.
+fn edit_user_config<T>(
+    config_path: &Path,
+    edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>>,
+) -> Result<T> {
+    use fuigo_config::fs_atomic::EditError;
+    fuigo_config::fs_atomic::edit_locked(
+        config_path,
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(config_path, bytes, 0o600),
+        edit,
+    )
+    .map_err(|e| match e {
+        EditError::Edit(e) => e,
+        EditError::Lock(e) | EditError::Write(e) => e.into(),
+    })
 }
 
 /// Resolve `remove` input to a source: exact name match first, then the same URL or path matching `marketplace add` uses.
@@ -1050,31 +1081,31 @@ fn marketplace_remove(
     // gone -- and the command printed "Removed marketplace source" anyway.
     let config_path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
     let mut removed_from_config = false;
-    // Same lock as every other writer of this file, held across read and write.
-    match fuigo_config::fs_atomic::lock_config_for_write(&config_path) {
-        Ok(_config_lock) => {
-            if let Ok(content) = std::fs::read_to_string(&config_path)
-                && let Some(new) = plugin::remove_toml_marketplace_block(&content, &identity)
-            {
-                if let Err(e) = fuigo_config::fs_atomic::write_atomically(
-                    &config_path,
-                    &new,
-                    fuigo_config::fs_atomic::replacement_mode(&config_path, 0o600),
-                ) {
-                    tracing::warn!("failed to write config.toml: {e}");
-                } else {
-                    removed_from_config = true;
-                }
-            }
-        }
-        Err(e) => tracing::warn!("failed to lock config.toml: {e}"),
+    // The shared read-modify-write, as every other writer of this file does it.
+    match edit_user_config(&config_path, |current| {
+        let Ok(Some(bytes)) = current else {
+            return Ok(fuigo_config::fs_atomic::Edit::Keep(false));
+        };
+        let Ok(content) = std::str::from_utf8(bytes) else {
+            return Ok(fuigo_config::fs_atomic::Edit::Keep(false));
+        };
+        Ok(match plugin::remove_toml_marketplace_block(content, &identity) {
+            Some(new) => fuigo_config::fs_atomic::Edit::Replace {
+                contents: new.into_bytes(),
+                value: true,
+            },
+            None => fuigo_config::fs_atomic::Edit::Keep(false),
+        })
+    }) {
+        Ok(removed) => removed_from_config = removed,
+        Err(e) => tracing::warn!("failed to update config.toml: {e}"),
     }
 
     // Fallback: settings.json or known_marketplaces.json
     let removed_anywhere =
         removed_from_config || plugin::try_remove_source_from_json_files(&identity);
     if !removed_anywhere {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Warning: source was found but could not be removed from config files.\n\
              It may be defined in a managed or read-only settings file."
         );
@@ -1093,9 +1124,9 @@ fn marketplace_remove(
     let uninstalled = plugin::uninstall_marketplace_source_plugins(&identity);
 
     if uninstalled.is_empty() {
-        println!("Removed marketplace source: {} ({identity})", source.name);
+        fuigo_tty_utils::cli_println!("Removed marketplace source: {} ({identity})", source.name);
     } else {
-        println!(
+        fuigo_tty_utils::cli_println!(
             "Removed marketplace source and uninstalled {} plugin(s): {}",
             uninstalled.len(),
             uninstalled.join(", "),
@@ -1138,7 +1169,7 @@ fn marketplace_update_with_cache_root(
                 cache_root,
             ) {
                 Ok(_) => {
-                    println!("  {}: synced", source.name);
+                    fuigo_tty_utils::cli_println!("  {}: synced", source.name);
                     refreshed += 1;
                 }
                 Err(e) => errors.push(format!("{}: {e}", source.name)),
@@ -1149,17 +1180,17 @@ fn marketplace_update_with_cache_root(
     if refreshed == 0 && errors.is_empty() {
         if let Some(filter) = name {
             if name_matched {
-                println!("Source \"{filter}\" is local, nothing to sync.");
+                fuigo_tty_utils::cli_println!("Source \"{filter}\" is local, nothing to sync.");
             } else {
                 bail!("Marketplace source \"{filter}\" not found.");
             }
         } else {
-            println!("No marketplace sources configured.");
+            fuigo_tty_utils::cli_println!("No marketplace sources configured.");
         }
     } else if errors.is_empty() {
-        println!("Refreshed {refreshed} source(s).");
+        fuigo_tty_utils::cli_println!("Refreshed {refreshed} source(s).");
     } else {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Refreshed {refreshed} source(s) with {} error(s): {}",
             errors.len(),
             errors.join("; "),
@@ -1292,7 +1323,7 @@ mod tests {
     #[test]
     fn marketplace_update_force_syncs_fresh_git_cache() {
         if !git_available() {
-            eprintln!("skipping git-dependent test: git binary not available");
+            fuigo_tty_utils::cli_eprintln!("skipping git-dependent test: git binary not available");
             return;
         }
         let remote = tempfile::tempdir().unwrap();

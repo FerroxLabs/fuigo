@@ -17,7 +17,8 @@ portable-pty = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true }
+# `test-util`: `loopback` probes each candidate address on a paused clock.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 tokio-util = { workspace = true, features = ["compat"] }
 tracing = { workspace = true }

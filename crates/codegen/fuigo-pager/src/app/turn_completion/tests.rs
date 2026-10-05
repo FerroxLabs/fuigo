@@ -1405,6 +1405,7 @@ fn base_input<'a>(stop: TurnStopReason) -> TerminalMarkerInput<'a> {
         cancellation_category: None,
         error_kind: None,
         error_banner_present: false,
+        verdicts: None,
     }
 }
 

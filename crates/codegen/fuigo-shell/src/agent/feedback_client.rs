@@ -306,13 +306,14 @@ pub struct FeedbackClient {
 impl FeedbackClient {
     pub fn new(base_url: impl Into<String>, user_token: Option<String>) -> Self {
         let http = crate::http::shared_client();
+        let base_url = base_url.into();
         let credentials =
             crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(user_token);
-        let client = Self::build_middleware_client(&http, &credentials);
+        let client = Self::build_middleware_client(&http, &credentials, &base_url);
         Self {
             http,
             client,
-            base_url: base_url.into(),
+            base_url,
             credentials,
             session_id: None,
         }
@@ -340,13 +341,14 @@ impl FeedbackClient {
         base_url: impl Into<String>,
         user_token: Option<String>,
     ) -> Self {
+        let base_url = base_url.into();
         let credentials =
             crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(user_token);
-        let client = Self::build_middleware_client(&http, &credentials);
+        let client = Self::build_middleware_client(&http, &credentials, &base_url);
         Self {
             http,
             client,
-            base_url: base_url.into(),
+            base_url,
             credentials,
             session_id: None,
         }
@@ -372,14 +374,15 @@ impl FeedbackClient {
     /// Rebuild the middleware-wrapped client from the current credentials.
     /// Called by each builder method so the middleware sees the final state.
     fn rebuild_middleware(&mut self) {
-        self.client = Self::build_middleware_client(&self.http, &self.credentials);
+        self.client = Self::build_middleware_client(&self.http, &self.credentials, &self.base_url);
     }
 
     fn build_middleware_client(
         http: &reqwest::Client,
         credentials: &crate::util::fuigo_auth_credentials::FuigoAuthCredentials,
+        base_url: &str,
     ) -> reqwest_middleware::ClientWithMiddleware {
-        let provider = Self::make_auth_provider(credentials);
+        let provider = Self::make_auth_provider(credentials, base_url);
         // max_retries=0: the middleware stamps the auth header but does NOT drive its own ServerRejected recovery on 401
         // Background consumers (signals sync, turn deltas) retry at the application level via with_one_shot_auth_retry or try_refresh_and_retry_sync
         // Those first wait for the proactive refresh to complete before falling back to active recovery
@@ -390,8 +393,12 @@ impl FeedbackClient {
             .build()
     }
 
+    /// P47: the session token goes only where the service-endpoint trust class admits the destination, with
+    /// `base_url` (the resolved `[endpoints].feedback_base_url`) as the configured service base. With no
+    /// `AuthManager`, a `user_token` is treated as the session token it is; a deployment key keeps its own rules.
     fn make_auth_provider(
         credentials: &crate::util::fuigo_auth_credentials::FuigoAuthCredentials,
+        base_url: &str,
     ) -> Arc<dyn fuigo_auth::AuthCredentialProvider> {
         if let Some(am) = credentials.auth_manager() {
             Arc::new(
@@ -399,6 +406,8 @@ impl FeedbackClient {
                     am.clone(),
                     credentials.deployment_key.clone(),
                     credentials.alpha_test_key.clone(),
+                    Some(base_url.to_owned()),
+                    "feedback",
                 ),
             )
         } else {
@@ -406,9 +415,19 @@ impl FeedbackClient {
                 .deployment_key
                 .clone()
                 .or(credentials.user_token.clone());
+            let destination =
+                if credentials.deployment_key.is_none() && credentials.user_token.is_some() {
+                    crate::auth::session_delivery::service_bearer_destination(
+                        Some(base_url.to_owned()),
+                        "feedback",
+                    )
+                } else {
+                    fuigo_auth::BearerDestination::Unrestricted
+                };
             Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
                 Box::new(credentials.clone()),
                 wire_bearer,
+                destination,
             ))
         }
     }
@@ -416,20 +435,20 @@ impl FeedbackClient {
     fn record_401_attribution_if_needed(
         &self,
         response: &reqwest::Response,
-        stamp: Option<&fuigo_auth::StampedBearerSuffix>,
+        stamp: Option<&fuigo_auth::StampedBearerFingerprint>,
         op: &str,
     ) {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED
             && let Some(am) = self.credentials.auth_manager()
         {
-            // Attribute what the middleware stamped, never a re-resolved or constructor-time credential (see `StampedBearerSuffix`)
+            // Attribute what the middleware stamped, never a re-resolved or constructor-time credential (see `StampedBearerFingerprint`)
             // `None` means the request went out with no bearer
             crate::auth::attribution::record_consumer_401(
                 am.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::FeedbackClient,
                 op,
-                stamp.map(|s| s.0.as_str()),
+                stamp.map(|s| &s.0),
             );
         }
     }
@@ -462,17 +481,21 @@ impl FeedbackClient {
 
     /// Create a POST request builder with common headers.
     fn post(&self, url: &str) -> RequestBuilder {
-        self.add_common_headers(self.http.post(url))
+        self.add_common_headers(self.http.post(url), url)
     }
 
     /// Create a GET request builder with common headers.
     fn get(&self, url: &str) -> RequestBuilder {
-        self.add_common_headers(self.http.get(url))
+        self.add_common_headers(self.http.get(url), url)
     }
 
-    fn add_common_headers(&self, builder: RequestBuilder) -> RequestBuilder {
+    fn add_common_headers(&self, builder: RequestBuilder, url: &str) -> RequestBuilder {
+        // P43: the client version is identity-class; only a FluxRouter-operated destination gets it.
         let builder = builder
-            .header(CLIENT_VERSION_HEADER, fuigo_version::VERSION)
+            .headers(
+                fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
+                    .header_map([(CLIENT_VERSION_HEADER, fuigo_version::VERSION)]),
+            )
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
@@ -837,6 +860,32 @@ pub(crate) fn snapshot_to_turn_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P43 hostile: a feedback service that is not FluxRouter-operated gets no client version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn feedback_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "agent::feedback_client::tests::feedback_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let base = front.front_service(&base);
+        let client = FeedbackClient::new(base, Some("tok".to_string()));
+        let _ = client.get_feedback_config().await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity_headers(&seen, "feedback");
+    }
+    /// P43. The FluxRouter side of the feedback decision, on the builder every request uses.
+    #[test]
+    fn feedback_common_headers_keep_identity_for_fluxrouter() {
+        let client = FeedbackClient::new("https://api.fluxrouter.ai/v1", None);
+        let request = client.get("https://api.fluxrouter.ai/v1/feedback/config").build().unwrap();
+        assert_eq!(request.headers()[CLIENT_VERSION_HEADER], fuigo_version::VERSION);
+        let request = client.get("https://feedback.example/v1/feedback/config").build().unwrap();
+        assert!(!request.headers().contains_key(CLIENT_VERSION_HEADER));
+    }
 
     #[test]
     fn test_signals_to_update() {
@@ -1046,6 +1095,11 @@ mod forbidden_tests {
 
     #[tokio::test]
     async fn send_empty_returns_ok_on_403() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "agent::feedback_client::forbidden_tests::send_empty_returns_ok_on_403",
+        ) else {
+            return;
+        };
         let router = Router::new().route(
             "/v1/feedback/requests/{id}/complete",
             post(|| async { forbidden_handler() }),
@@ -1053,8 +1107,8 @@ mod forbidden_tests {
         let (addr, _) = start_server(router).await;
 
         let client = FeedbackClient::with_client(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
+            crate::http::shared_client(),
+            front.front(&format!("http://{addr}/v1")),
             Some("tok".into()),
         );
         let submission: FeedbackSubmission = serde_json::from_value(serde_json::json!({
@@ -1069,6 +1123,11 @@ mod forbidden_tests {
 
     #[tokio::test]
     async fn send_json_bails_on_403_with_clear_message() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "agent::feedback_client::forbidden_tests::send_json_bails_on_403_with_clear_message",
+        ) else {
+            return;
+        };
         let router = Router::new().route(
             "/v1/feedback/config",
             axum::routing::get(|| async { forbidden_handler() }),
@@ -1076,8 +1135,8 @@ mod forbidden_tests {
         let (addr, _) = start_server(router).await;
 
         let client = FeedbackClient::with_client(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
+            crate::http::shared_client(),
+            front.front(&format!("http://{addr}/v1")),
             Some("tok".into()),
         );
         let result = client.get_feedback_config().await;

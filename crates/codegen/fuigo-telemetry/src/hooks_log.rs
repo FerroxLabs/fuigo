@@ -79,7 +79,7 @@ where
         }
     };
 
-    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+    let (non_blocking, guard) = crate::appender::scrubbed_non_blocking(file);
     let guard_slot = LOG_GUARD.get_or_init(|| Mutex::new(None));
     if let Ok(mut slot) = guard_slot.lock() {
         *slot = Some(guard);

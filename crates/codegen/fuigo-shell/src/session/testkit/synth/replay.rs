@@ -16,7 +16,9 @@ fn parse_or<T: std::str::FromStr>(key: &str, found: Option<String>, default: T) 
     match text.parse() {
         Ok(value) => value,
         Err(_) => {
-            eprintln!("[testkit] ignoring unparseable {key}={text:?}; using default");
+            fuigo_tty_utils::cli_eprintln!(
+                "[testkit] ignoring unparseable {key}={text:?}; using default"
+            );
             default
         }
     }

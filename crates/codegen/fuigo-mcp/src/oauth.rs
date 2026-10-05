@@ -47,6 +47,27 @@ pub(crate) async fn discover_metadata_bounded(
         })
 }
 
+/// Whether a discovery failure means the authorization server metadata could not be FETCHED (an HTTP error status such
+/// as 500, a network failure, the bounded timeout): a passing problem to retry. Every other failure (an issuer or
+/// resource mismatch, a missing issuer, no OAuth at all) is a verdict about the metadata itself.
+pub(crate) fn metadata_unavailable(error: &AuthError) -> bool {
+    match error {
+        AuthError::HttpError(_) => true,
+        // rmcp's `discovery_failed` wraps every failed GET. Only a retryable status (rmcp raises "unexpected HTTP status"
+        // for 5xx/408/425/429 alone) or a transport failure counts; a cross-origin or looping redirect, a refused
+        // address or an oversized body is a verdict, not a blip (Astra r1).
+        AuthError::MetadataError(message) => {
+            message.starts_with("OAuth metadata discovery failed for")
+                && ["unexpected HTTP status", "error sending request", "timed out"]
+                    .iter()
+                    .any(|cause| message.contains(cause))
+        }
+        // `discover_metadata_bounded`'s own timeout.
+        AuthError::InternalError(message) => message.starts_with("OAuth metadata discovery timed out"),
+        _ => false,
+    }
+}
+
 struct InFlightEntry {
     rx: watch::Receiver<Option<Result<(), String>>>,
     generation: u64,
@@ -292,7 +313,8 @@ async fn try_token_refresh(
     if !hydrated {
         return false;
     }
-    match mgr.refresh_token().await {
+    let (refreshed, refusal) = crate::http_policy::capture_refusal(mgr.refresh_token()).await;
+    match refreshed {
         Ok(_) => {
             tracing::info!(
                 server = server_name,
@@ -303,7 +325,7 @@ async fn try_token_refresh(
         Err(e) => {
             tracing::info!(
                 server = server_name,
-                %e,
+                error = %crate::http_policy::explain_token_error(&e, refusal.as_deref()),
                 "Token refresh failed, falling through to browser auth"
             );
             false
@@ -339,6 +361,21 @@ pub(crate) async fn ensure_oauth_ready(
             Err(e)
         }
     };
+    // `initialize_from_store` re-resolves metadata itself when the manager holds none, and rmcp then falls back to
+    // endpoints it guesses from the server's base URL (`{base}/token`, no issuer, so its stored-issuer check is
+    // skipped). A stored refresh token for another authorization server could then be sent to the resource server.
+    // Hydrate only when this pass validated metadata, so every token endpoint rmcp configures came from a document
+    // the adapter judged.
+    if discovery.is_err() {
+        tracing::warn!(
+            server = server_name,
+            "No validated authorization server metadata; not loading stored OAuth credentials (they would be bound to guessed endpoints)"
+        );
+        return OauthReadiness {
+            discovery,
+            hydrated: false,
+        };
+    }
     let hydrated =
         match tokio::time::timeout(OAUTH_DISCOVERY_TIMEOUT, mgr.initialize_from_store()).await {
             Ok(Ok(hydrated)) => hydrated,
@@ -474,15 +511,8 @@ async fn await_callback_or_disk_token(
                 .map_err(|_| "Callback channel dropped".to_string())?
                 .map_err(|e| format!("OAuth callback failed: {e}"))?;
 
-            // Pass RFC 9207 `iss` when present (required if the AS advertises it).
             let mgr = auth_manager.lock().await;
-            mgr.exchange_code_for_token_with_issuer(
-                &callback.code,
-                &callback.state,
-                callback.issuer.as_deref(),
-            )
-            .await
-            .map_err(|e| format!("Token exchange failed: {e}"))?;
+            exchange_callback(&mgr, &callback).await?;
 
             tracing::info!(server = server_name, "MCP OAuth authentication successful");
         }
@@ -508,6 +538,27 @@ async fn await_callback_or_disk_token(
     }
 
     Ok(())
+}
+
+/// Pass RFC 9207 `iss` when present (required if the AS advertises it). A refused token endpoint is named in the error.
+async fn exchange_callback(
+    mgr: &AuthorizationManager,
+    callback: &OAuthCallbackPayload,
+) -> Result<(), String> {
+    let (result, refusal) = crate::http_policy::capture_refusal(
+        mgr.exchange_code_for_token_with_issuer(
+            &callback.code,
+            &callback.state,
+            callback.issuer.as_deref(),
+        ),
+    )
+    .await;
+    result.map(|_| ()).map_err(|e| {
+        format!(
+            "Token exchange failed: {}",
+            crate::http_policy::explain_token_error(&e, refusal.as_deref())
+        )
+    })
 }
 
 fn html_escape(s: &str) -> String {
@@ -617,9 +668,7 @@ fn start_oauth_callback_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rmcp::transport::auth::{
-        AuthorizationManager, AuthorizationMetadata, OAuthClientConfig,
-    };
+    use crate::rmcp::transport::auth::{AuthorizationManager, OAuthClientConfig};
 
     const TEST_ISSUER: &str = "https://auth.example.com";
 
@@ -665,87 +714,6 @@ mod tests {
         let err = parse_oauth_callback_params(&p).unwrap_err();
         assert!(err.contains("access_denied"));
         assert!(err.contains("user said no"));
-    }
-
-    fn require_iss_metadata(token_endpoint: String) -> AuthorizationMetadata {
-        // non_exhaustive: build via Default.
-        let mut meta = AuthorizationMetadata::default();
-        meta.authorization_endpoint = "https://auth.example.com/authorize".to_string();
-        meta.token_endpoint = token_endpoint;
-        meta.issuer = Some(TEST_ISSUER.to_string());
-        meta.additional_fields.insert(
-            "authorization_response_iss_parameter_supported".to_string(),
-            serde_json::json!(true),
-        );
-        meta
-    }
-
-    async fn manager_ready_for_exchange(token_endpoint: String) -> (AuthorizationManager, String) {
-        let mut mgr = crate::http_policy::auth_manager("http://localhost/mcp")
-            .await
-            .unwrap();
-        mgr.set_metadata(require_iss_metadata(token_endpoint));
-        mgr.configure_client(
-            OAuthClientConfig::new("fuigo-test-client", "http://127.0.0.1:0/callback")
-                .with_application_type("native"),
-        )
-        .unwrap();
-        let auth_url = mgr.get_authorization_url(&[]).await.unwrap();
-        let state = url::Url::parse(&auth_url)
-            .unwrap()
-            .query_pairs()
-            .find(|(k, _)| k == "state")
-            .expect("auth URL must include state")
-            .1
-            .into_owned();
-        (mgr, state)
-    }
-
-    async fn start_mock_token_endpoint() -> String {
-        use axum::{Router, body::Body, http::Response, routing::post};
-        let app = Router::new().route(
-            "/token",
-            post(|| async {
-                Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"access_token":"at-ok","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-ok"}"#,
-                    ))
-                    .unwrap()
-            }),
-        );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}/token")
-    }
-
-    #[tokio::test]
-    async fn after_fix_passes_iss_and_token_exchange_succeeds() {
-        let token_ep = start_mock_token_endpoint().await;
-        let (mgr, state) = manager_ready_for_exchange(token_ep).await;
-
-        let callback = parse_oauth_callback_params(&params(&[
-            ("code", "auth-code"),
-            ("state", &state),
-            ("iss", TEST_ISSUER),
-        ]))
-        .unwrap();
-
-        let token = mgr
-            .exchange_code_for_token_with_issuer(
-                &callback.code,
-                &callback.state,
-                callback.issuer.as_deref(),
-            )
-            .await
-            .expect("with_issuer must succeed when callback iss matches AS");
-
-        use oauth2::TokenResponse as _;
-        assert_eq!(token.access_token().secret(), "at-ok");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -818,6 +786,296 @@ mod tests {
             err.contains("Dynamic client registration"),
             "a discovery failure must degrade to existing metadata, not abort: {err}"
         );
+    }
+
+    // ---- P117: the token endpoint must be one the authorization server controls ----
+
+    /// A loopback authorization server (origin A) whose metadata names its own `/token` until `hostile` is set,
+    /// then a recorder on a second origin (B). Both token endpoints answer with a valid token response.
+    struct TokenBindingRig {
+        as_base: String,
+        as_token_hits: Arc<std::sync::atomic::AtomicUsize>,
+        recorder_hits: Arc<std::sync::atomic::AtomicUsize>,
+        recorder_bodies: Arc<std::sync::Mutex<Vec<String>>>,
+        hostile: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl TokenBindingRig {
+        fn issuer(&self) -> String {
+            format!("{}/mcp", self.as_base)
+        }
+    }
+
+    async fn token_binding_rig() -> TokenBindingRig {
+        use axum::{Router, body::Body, http::Response, routing::post};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        fn token_ok() -> Response<Body> {
+            Response::builder()
+                .status(200)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"access_token":"at-ok","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-ok"}"#,
+                ))
+                .unwrap()
+        }
+
+        let recorder_hits = Arc::new(AtomicUsize::new(0));
+        let recorder_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (hits, bodies) = (recorder_hits.clone(), recorder_bodies.clone());
+        let recorder = Router::new().route(
+            "/token",
+            post(move |body: String| {
+                let (hits, bodies) = (hits.clone(), bodies.clone());
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    bodies.lock().unwrap().push(body);
+                    token_ok()
+                }
+            }),
+        );
+        let recorder_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let recorder_base = format!("http://{}", recorder_listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            axum::serve(recorder_listener, recorder).await.unwrap();
+        });
+
+        let as_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let as_base = format!("http://{}", as_listener.local_addr().unwrap());
+        let as_token_hits = Arc::new(AtomicUsize::new(0));
+        let hostile = Arc::new(AtomicBool::new(false));
+        let (own_hits, flag, base, foreign) = (
+            as_token_hits.clone(),
+            hostile.clone(),
+            as_base.clone(),
+            recorder_base,
+        );
+        let app = Router::new()
+            .route(
+                "/token",
+                post(move || {
+                    let own_hits = own_hits.clone();
+                    async move {
+                        own_hits.fetch_add(1, Ordering::SeqCst);
+                        token_ok()
+                    }
+                }),
+            )
+            .fallback(move |uri: axum::http::Uri| {
+                let (flag, base, foreign) = (flag.clone(), base.clone(), foreign.clone());
+                async move {
+                    use axum::response::IntoResponse as _;
+                    if !uri.path().contains("oauth-authorization-server") {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
+                    }
+                    let token_endpoint = if flag.load(Ordering::SeqCst) {
+                        format!("{foreign}/token")
+                    } else {
+                        format!("{base}/token")
+                    };
+                    axum::Json(serde_json::json!({
+                        // rmcp 3.x requires the issuer to be exactly the one the discovery URL implies for the /mcp resource
+                        "issuer": format!("{base}/mcp"),
+                        "authorization_endpoint": format!("{base}/authorize"),
+                        "token_endpoint": token_endpoint,
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"],
+                        "authorization_response_iss_parameter_supported": true,
+                    }))
+                    .into_response()
+                }
+            });
+        tokio::spawn(async move {
+            axum::serve(as_listener, app).await.unwrap();
+        });
+        TokenBindingRig {
+            as_base,
+            as_token_hits,
+            recorder_hits,
+            recorder_bodies,
+            hostile,
+        }
+    }
+
+    /// Discover and configure the way the real flow does (`ensure_oauth_ready` then `configure_client`).
+    async fn configure_from_discovery(mgr: &mut AuthorizationManager) {
+        let metadata = discover_metadata_bounded(mgr)
+            .await
+            .expect("the rig's metadata is discoverable");
+        mgr.set_metadata(metadata);
+        mgr.configure_client(
+            OAuthClientConfig::new("fuigo-test-client", "http://127.0.0.1:0/callback")
+                .with_application_type("native"),
+        )
+        .unwrap();
+    }
+
+    /// The real post-callback exchange, as the browser flow runs it.
+    async fn exchange(mgr: &AuthorizationManager, issuer: &str) -> Result<(), String> {
+        let auth_url = mgr.get_authorization_url(&[]).await.unwrap();
+        let state = url::Url::parse(&auth_url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .expect("auth URL must include state")
+            .1
+            .into_owned();
+        exchange_callback(
+            mgr,
+            &OAuthCallbackPayload {
+                code: "auth-code".to_string(),
+                state,
+                issuer: Some(issuer.to_string()),
+            },
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn legitimate_same_origin_exchange_and_refresh_still_work() {
+        use std::sync::atomic::Ordering;
+        let rig = token_binding_rig().await;
+        let mut mgr = crate::http_policy::auth_manager(&format!("{}/mcp", rig.as_base))
+            .await
+            .unwrap();
+        configure_from_discovery(&mut mgr).await;
+        exchange(&mgr, &rig.issuer()).await.expect("same-origin code exchange");
+        assert_eq!(rig.as_token_hits.load(Ordering::SeqCst), 1);
+        mgr.refresh_token().await.expect("same-origin refresh");
+        assert_eq!(rig.as_token_hits.load(Ordering::SeqCst), 2);
+        assert_eq!(rig.recorder_hits.load(Ordering::SeqCst), 0);
+    }
+
+    /// A resource server R whose protected-resource document carries a stray `token_endpoint` and names no
+    /// authorization server; every other discovery URL is 404. Its `/token` records what it receives.
+    async fn resource_server_with_stray_token_endpoint() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{Router, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let doc_base = base.clone();
+        let app = Router::new()
+            .route(
+                "/token",
+                post(move || {
+                    let counter = counter.clone();
+                    async move {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::BAD_REQUEST
+                    }
+                }),
+            )
+            .fallback(move |uri: axum::http::Uri| {
+                let doc_base = doc_base.clone();
+                async move {
+                    use axum::response::IntoResponse as _;
+                    if uri.path().contains("oauth-protected-resource") {
+                        return axum::Json(serde_json::json!({
+                            "resource": format!("{doc_base}/mcp"),
+                            "authorization_servers": [],
+                            "token_endpoint": format!("{doc_base}/token"),
+                        }))
+                        .into_response();
+                    }
+                    axum::http::StatusCode::NOT_FOUND.into_response()
+                }
+            });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (base, hits)
+    }
+
+    #[tokio::test]
+    async fn stored_refresh_token_for_another_issuer_never_reaches_synthesized_fallback_endpoints() {
+        // Astra r3 HIGH: with no usable AS metadata rmcp's hydration re-resolves and synthesizes `{base}/token`.
+        use crate::rmcp::transport::auth::InMemoryCredentialStore;
+        use std::sync::atomic::Ordering;
+        let rig = token_binding_rig().await;
+        let store = InMemoryCredentialStore::new();
+        let mut first = crate::http_policy::auth_manager(&format!("{}/mcp", rig.as_base))
+            .await
+            .unwrap();
+        first.set_credential_store(store.clone());
+        configure_from_discovery(&mut first).await;
+        exchange(&first, &rig.issuer()).await.expect("legitimate exchange stores credentials for issuer A");
+
+        let (resource_base, resource_hits) = resource_server_with_stray_token_endpoint().await;
+        let mut second = crate::http_policy::auth_manager(&format!("{resource_base}/mcp"))
+            .await
+            .unwrap();
+        second.set_credential_store(store);
+        let ready = ensure_oauth_ready("fake", &mut second).await;
+        let (refreshed, _refusal) = if ready.hydrated {
+            crate::http_policy::capture_refusal(second.refresh_token()).await
+        } else {
+            (Err(crate::rmcp::transport::auth::AuthError::NoAuthorizationSupport), None)
+        };
+        assert!(refreshed.is_err(), "no refresh may succeed against unvalidated metadata");
+        assert_eq!(
+            resource_hits.load(Ordering::SeqCst),
+            0,
+            "issuer A's refresh token reached the resource server (hydrated={})",
+            ready.hydrated
+        );
+        assert!(!ready.hydrated, "hydration must not run on synthesized fallback metadata");
+    }
+
+    #[tokio::test]
+    async fn code_is_never_sent_to_a_token_endpoint_on_a_foreign_origin() {
+        use std::sync::atomic::Ordering;
+        let rig = token_binding_rig().await;
+        rig.hostile.store(true, Ordering::SeqCst);
+        let mut mgr = crate::http_policy::auth_manager(&format!("{}/mcp", rig.as_base))
+            .await
+            .unwrap();
+        configure_from_discovery(&mut mgr).await;
+        let err = exchange(&mgr, &rig.issuer())
+            .await
+            .expect_err("hostile metadata must not receive the authorization code");
+        assert_eq!(
+            rig.recorder_hits.load(Ordering::SeqCst),
+            0,
+            "the foreign endpoint received a request: {:?}",
+            rig.recorder_bodies.lock().unwrap()
+        );
+        assert!(err.contains("refus"), "must say it refused: {err}");
+        assert!(
+            err.contains("origin"),
+            "must say why (the endpoint is not on the authorization server's origin): {err}"
+        );
+        assert!(!err.contains("auth-code"), "no credential in the message: {err}");
+    }
+
+    #[tokio::test]
+    async fn refresh_token_is_never_sent_to_a_token_endpoint_on_a_foreign_origin() {
+        use std::sync::atomic::Ordering;
+        let rig = token_binding_rig().await;
+        let mut mgr = crate::http_policy::auth_manager(&format!("{}/mcp", rig.as_base))
+            .await
+            .unwrap();
+        configure_from_discovery(&mut mgr).await;
+        exchange(&mgr, &rig.issuer()).await.expect("legitimate first exchange");
+
+        // The metadata later turns hostile (a changed or compromised server); the next refresh must not follow it.
+        rig.hostile.store(true, Ordering::SeqCst);
+        configure_from_discovery(&mut mgr).await;
+        let (refreshed, refusal) = crate::http_policy::capture_refusal(mgr.refresh_token()).await;
+        let err = crate::http_policy::explain_token_error(
+            &refreshed.expect_err("hostile metadata must not receive the refresh token"),
+            refusal.as_deref(),
+        );
+        assert_eq!(
+            rig.recorder_hits.load(Ordering::SeqCst),
+            0,
+            "the foreign endpoint received a request: {:?}",
+            rig.recorder_bodies.lock().unwrap()
+        );
+        assert!(err.contains("refus"), "must say it refused: {err}");
+        assert!(err.contains("origin"), "must say why: {err}");
+        assert!(!err.contains("rt-ok"), "no credential in the message: {err}");
     }
 
     #[tokio::test]

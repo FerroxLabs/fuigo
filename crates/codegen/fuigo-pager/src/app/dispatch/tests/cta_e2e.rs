@@ -517,6 +517,9 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
 
 #[test]
 fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::app::agent_view::CtaPhase;
     // Redirect config reads to an empty temp home so the catalog load's read of the dismissed set is hermetic, not just deterministic
     {
@@ -524,6 +527,7 @@ fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
         static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
         HOME.get_or_init(|| {
             let tmp = tempfile::tempdir().expect("tempdir creation");
+            crate::test_util::require_own_process_for("FUIGO_HOME");
             unsafe {
                 std::env::set_var("FUIGO_HOME", tmp.path());
             }
@@ -1585,6 +1589,9 @@ fn cta_mcps_loaded_err_sets_error() {
 
 #[test]
 fn cta_mcps_loaded_ignored_for_stale_phase_or_plugin() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use crate::app::agent_view::CtaPhase;
     use crate::views::mcps_modal::McpServerDisplayStatus;
     // Wrong plugin name.
@@ -1670,6 +1677,7 @@ mod cta_e2e {
         static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
         HOME.get_or_init(|| {
             let tmp = tempfile::tempdir().expect("tempdir creation");
+            crate::test_util::require_own_process_for("FUIGO_HOME");
             unsafe {
                 std::env::set_var("FUIGO_HOME", tmp.path());
             }
@@ -1743,6 +1751,9 @@ mod cta_e2e {
 
     #[test]
     fn happy_path_with_auth_handoff() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
 
@@ -1845,6 +1856,9 @@ mod cta_e2e {
 
     #[test]
     fn no_reload_path_enters_awaiting_mcps_directly() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -1870,6 +1884,9 @@ mod cta_e2e {
 
     #[test]
     fn no_auth_path_settles_installed_without_modal() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         // All of the plugin's servers are Ready (terminal, no auth), so settle
@@ -1917,6 +1934,9 @@ mod cta_e2e {
 
     #[test]
     fn skills_only_install_settles_installed_without_fetch() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         // Skills-only plugin: clear has_mcp so connect captures expects_mcp=false.
@@ -1952,6 +1972,9 @@ mod cta_e2e {
 
     #[test]
     fn install_error_settles_error() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -1980,6 +2003,9 @@ mod cta_e2e {
 
     #[test]
     fn reload_error_settles_error() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -2011,6 +2037,9 @@ mod cta_e2e {
 
     #[test]
     fn mcps_error_settles_error() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         let effects = dispatch(
@@ -2095,6 +2124,9 @@ mod cta_e2e {
 
     #[test]
     fn plugin_name_parity_match_hands_off() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         dispatch(
@@ -2115,6 +2147,9 @@ mod cta_e2e {
 
     #[test]
     fn plugin_name_parity_mismatch_degrades_to_installed() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         // A NeedsAuth server whose section plugin-name does not match the CTA name is not a handoff trigger

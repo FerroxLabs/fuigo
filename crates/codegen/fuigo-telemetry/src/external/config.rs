@@ -105,7 +105,7 @@ pub struct ExternalClientInfo {
 ///
 /// There is deliberately **no `headers` key**: collector auth comes from the `OTEL_EXPORTER_OTLP_HEADERS` env var only.
 /// That keeps collector tokens off disk.
-#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ExternalOtelFileConfig {
     /// Mirrors `FUIGO_EXTERNAL_OTEL` (env wins).
@@ -127,9 +127,40 @@ pub struct ExternalOtelFileConfig {
     pub log_tool_details: Option<bool>,
 }
 
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ExternalOtelFileConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            enabled,
+            metrics_exporter,
+            logs_exporter,
+            endpoint,
+            protocol,
+            certificate,
+            client_certificate,
+            client_key,
+            log_user_prompts,
+            log_tool_details,
+        } = self;
+        f.debug_struct("ExternalOtelFileConfig")
+            .field("enabled", enabled)
+            .field("metrics_exporter", metrics_exporter)
+            .field("logs_exporter", logs_exporter)
+            .field("endpoint", &endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field("protocol", protocol)
+            .field("certificate", certificate)
+            .field("client_certificate", client_certificate)
+            .field("client_key", client_key)
+            .field("log_user_prompts", log_user_prompts)
+            .field("log_tool_details", log_tool_details)
+            .finish()
+    }
+}
+
 /// Returned by [`ExternalOtelConfig::resolve`] only when the double opt-in is satisfied.
 /// `None` means the module is never constructed (zero allocation, zero threads, zero sockets).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ExternalOtelConfig {
     pub metrics_exporter: ExporterSelection,
     pub logs_exporter: ExporterSelection,
@@ -174,6 +205,65 @@ pub struct ExternalOtelConfig {
     /// Which layer supplied the master switch (`"env"` | `"config"`), for the internal adoption meta-event.
     /// `remote` is not a possible startup source (init reads env and local config only).
     pub enabled_source: &'static str,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ExternalOtelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            metrics_exporter,
+            logs_exporter,
+            logs_transport,
+            metrics_transport,
+            logs_endpoint,
+            metrics_endpoint,
+            logs_headers,
+            metrics_headers,
+            logs_ca_certificate,
+            metrics_ca_certificate,
+            logs_client_certificate,
+            logs_client_key,
+            metrics_client_certificate,
+            metrics_client_key,
+            timeout,
+            metric_export_interval,
+            logs_export_interval,
+            gates,
+            temporality,
+            include_session_id_on_metrics,
+            include_version_on_metrics,
+            client,
+            internal_pipeline_consumed_otel_vars,
+            enabled_source,
+        } = self;
+        f.debug_struct("ExternalOtelConfig")
+            .field("metrics_exporter", metrics_exporter)
+            .field("logs_exporter", logs_exporter)
+            .field("logs_transport", logs_transport)
+            .field("metrics_transport", metrics_transport)
+            .field("logs_endpoint", &fuigo_auth::redact_url(logs_endpoint))
+            .field("metrics_endpoint", &fuigo_auth::redact_url(metrics_endpoint))
+            .field("logs_headers", &logs_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("metrics_headers", &metrics_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("logs_ca_certificate", logs_ca_certificate)
+            .field("metrics_ca_certificate", metrics_ca_certificate)
+            .field("logs_client_certificate", logs_client_certificate)
+            .field("logs_client_key", logs_client_key)
+            .field("metrics_client_certificate", metrics_client_certificate)
+            .field("metrics_client_key", metrics_client_key)
+            .field("timeout", timeout)
+            .field("metric_export_interval", metric_export_interval)
+            .field("logs_export_interval", logs_export_interval)
+            .field("gates", gates)
+            .field("temporality", temporality)
+            .field("include_session_id_on_metrics", include_session_id_on_metrics)
+            .field("include_version_on_metrics", include_version_on_metrics)
+            .field("client", client)
+            .field("internal_pipeline_consumed_otel_vars", internal_pipeline_consumed_otel_vars)
+            .field("enabled_source", enabled_source)
+            .finish()
+    }
 }
 
 fn env_bool(raw: &str) -> Option<bool> {

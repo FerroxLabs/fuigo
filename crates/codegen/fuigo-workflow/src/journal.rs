@@ -89,6 +89,46 @@ impl Journal {
         }
     }
 
+    /// Start the durable journal of a NEW run: write the v2 header (and the empty dispatch sidecar)
+    /// now, at run creation, before the engine runs a single step.
+    ///
+    /// That header is the positive evidence that tells a run created by this version apart from a
+    /// legacy one. Without it a run paused or stopped before its first journaled step left no file at
+    /// all, which [`Journal::load`] cannot tell from a legacy run whose first effect went out unrecorded
+    /// (legacy journals record only after the effect), so its resume failed with
+    /// [`JournalError::LegacyBoundary`]. With it, such a resume loads a header-only v2 journal and
+    /// starts the run afresh with nothing to replay. A missing, empty, or header-less file is still
+    /// legacy: absence alone is never read as "fresh".
+    ///
+    /// Refuses when the journal or its dispatch sidecar already exists, so it can never put a header
+    /// in front of someone's entries or adopt an older run's dispatch intents. Both files are created
+    /// exclusively (`O_EXCL`), sidecar first, so an interrupted creation leaves no header and stays
+    /// fail-closed legacy, and two creators of one path cannot both succeed.
+    pub fn create(path: PathBuf) -> Result<Self, JournalError> {
+        let sidecar = path.with_extension("dispatch-v2.jsonl");
+        // Up-front check so a refusal leaves nothing behind; the exclusive creates below are what
+        // make the refusal race-free.
+        for existing in [&path, &sidecar] {
+            match std::fs::symlink_metadata(existing) {
+                Ok(_) => {
+                    return Err(JournalError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!("journal file already exists: {}", existing.display()),
+                    )));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        create_new_file(&sidecar, b"")?;
+        create_new_file(&path, V2_HEADER)?;
+        Ok(Self {
+            bytes: V2_HEADER.len() as u64,
+            versioned: true,
+            ..Self::new(Some(path))
+        })
+    }
+
     pub fn load(path: PathBuf) -> Result<Self, JournalError> {
         let content = match read_journal_bounded(&path) {
             Ok(content) => content,
@@ -437,14 +477,63 @@ fn terminate_line(path: &Path) -> std::io::Result<()> {
     file.sync_data()
 }
 
-fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// Create the journal's folder owner-only on Unix (P150, D6/S14): the journal holds tool results from the session.
+fn create_parent_owner_only(path: &Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
     }
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(parent)
+}
+
+/// Options that create a journal file 0600 on Unix (P150, D6/S14).
+fn owner_only(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
+    options
+}
+
+/// Tighten a journal file an older version left looser (Unix). Best effort: a filesystem without modes must not stop
+/// the run.
+fn tighten_owner_only(file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if file
+            .metadata()
+            .is_ok_and(|meta| meta.permissions().mode() & 0o777 != 0o600)
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+}
+
+fn create_new_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    create_parent_owner_only(path)?;
+    let mut file = owner_only(std::fs::OpenOptions::new().write(true).create_new(true)).open(path)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    create_parent_owner_only(path)?;
+    let mut file = owner_only(std::fs::OpenOptions::new().create(true).append(true)).open(path)?;
+    tighten_owner_only(&file);
     file.write_all(line.as_bytes())?;
     file.sync_all()?;
     #[cfg(unix)]
@@ -525,6 +614,135 @@ mod tests {
             Journal::load(path).is_err(),
             "missing recovery metadata must fail closed"
         );
+    }
+
+    /// P45: a run paused or stopped before its first journaled step resumes as a fresh start. The
+    /// header written at creation is what makes the reload v2; nothing is replayed.
+    #[test]
+    fn created_journal_with_no_step_reloads_as_v2_and_dispatches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflows").join("wf_x").join("journal.jsonl");
+        let created = Journal::create(path.clone()).unwrap();
+        assert!(created.is_empty());
+        drop(created);
+        assert_eq!(std::fs::read(&path).unwrap(), V2_HEADER);
+        assert_eq!(
+            std::fs::read(path.with_extension("dispatch-v2.jsonl")).unwrap(),
+            b""
+        );
+
+        let mut restored = Journal::load(path.clone()).unwrap();
+        assert!(restored.is_empty());
+        assert_eq!(restored.replay(0, "spawn_agent", "hash").unwrap(), None);
+        restored.dispatch(0, "spawn_agent", "hash").unwrap();
+        restored
+            .record(0, "spawn_agent", "hash".into(), serde_json::json!("done"))
+            .unwrap();
+        let content = std::fs::read(&path).unwrap();
+        assert!(content.starts_with(V2_HEADER));
+        assert_eq!(
+            content[V2_HEADER.len()..].iter().filter(|b| **b == b'\n').count(),
+            1,
+            "resume appends after the one header; it must not write a second"
+        );
+        assert_eq!(
+            Journal::load(path)
+                .unwrap()
+                .replay(0, "spawn_agent", "hash")
+                .unwrap(),
+            Some(serde_json::json!("done"))
+        );
+    }
+
+    /// P150 (D6/S14, Astra r3): the workflow journal and its dispatch sidecar hold tool results from the session, so
+    /// they are owner-only on Unix, and a journal an older version left 0644 is tightened on the next append.
+    #[cfg(unix)]
+    #[test]
+    fn p150_journal_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workflows").join("wf_x").join("journal.jsonl");
+        let sidecar = path.with_extension("dispatch-v2.jsonl");
+        drop(Journal::create(path.clone()).unwrap());
+        assert_eq!(mode(&path), 0o600, "new journal");
+        assert_eq!(mode(&sidecar), 0o600, "new sidecar");
+        assert_eq!(mode(path.parent().unwrap()) & 0o077, 0, "journal folder");
+        for p in [&path, &sidecar] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let mut restored = Journal::load(path.clone()).unwrap();
+        restored.dispatch(0, "spawn_agent", "hash").unwrap();
+        restored
+            .record(0, "spawn_agent", "hash".into(), serde_json::json!("done"))
+            .unwrap();
+        assert_eq!(mode(&path), 0o600, "appended journal is tightened");
+        assert_eq!(mode(&sidecar), 0o600, "appended sidecar is tightened");
+    }
+
+    #[test]
+    fn create_refuses_an_existing_journal_or_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("journal.jsonl");
+        let legacy = "{\"seq\":0,\"kind\":\"log\",\"req_hash\":\"x\",\"result\":null,\"at_ms\":1}\n";
+        std::fs::write(&path, legacy).unwrap();
+        assert!(matches!(
+            Journal::create(path.clone()),
+            Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), legacy);
+        assert!(!path.with_extension("dispatch-v2.jsonl").exists());
+
+        // An older run's dispatch intents must never be adopted by a "fresh" journal.
+        let other = dir.path().join("other.jsonl");
+        let sidecar = other.with_extension("dispatch-v2.jsonl");
+        let intent = "{\"seq\":0,\"kind\":\"spawn_agent\",\"req_hash\":\"h\",\"operation_id\":\"0:spawn_agent:h\",\"state\":\"dispatched\"}\n";
+        std::fs::write(&sidecar, intent).unwrap();
+        assert!(matches!(
+            Journal::create(other.clone()),
+            Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+        assert!(!other.exists(), "a refused create must not write a header");
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), intent);
+
+        // The second of two creators of one path fails; the first's header stays single.
+        let raced = dir.path().join("raced.jsonl");
+        Journal::create(raced.clone()).unwrap();
+        assert!(Journal::create(raced.clone()).is_err());
+        assert_eq!(std::fs::read(&raced).unwrap(), V2_HEADER);
+    }
+
+    /// P45: only the header is evidence of v2. A missing file, an empty file, and a torn header are
+    /// all still legacy on load and fail closed at the first boundary.
+    #[test]
+    fn journal_without_a_v2_header_is_still_a_legacy_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("missing.jsonl");
+        let mut journal = Journal::load(missing.clone()).unwrap();
+        assert!(matches!(
+            journal.dispatch(0, "spawn_agent", "hash"),
+            Err(JournalError::LegacyBoundary)
+        ));
+        assert!(!missing.exists(), "a refused boundary must not write a header");
+
+        let empty = dir.path().join("empty.jsonl");
+        std::fs::write(&empty, b"").unwrap();
+        let mut journal = Journal::load(empty.clone()).unwrap();
+        // The engine runs this before every record and dispatch (`Ctx::record`, `dispatch`).
+        assert!(matches!(
+            journal.initialize_recovery(),
+            Err(JournalError::LegacyBoundary)
+        ));
+        assert_eq!(std::fs::read(&empty).unwrap(), b"");
+
+        let torn = dir.path().join("torn.jsonl");
+        std::fs::write(&torn, &V2_HEADER[..V2_HEADER.len() - 5]).unwrap();
+        let mut journal = Journal::load(torn).unwrap();
+        assert!(matches!(
+            journal.dispatch(0, "spawn_agent", "hash"),
+            Err(JournalError::LegacyBoundary)
+        ));
     }
 
     #[test]

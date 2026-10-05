@@ -456,4 +456,56 @@ mod tests {
             "User file should not be deleted"
         );
     }
+
+    /// P10. The memory guide shipped four wrong defaults, telling users that Dream
+    /// consolidation and the pre-compaction flush run automatically when both are off.
+    /// This guide is compiled into the binary, so a wrong line here is a shipped
+    /// product claim, not a documentation nit.
+    ///
+    /// The matching pin on the code side is
+    /// `fuigo_config_types::memory::tests::documented_memory_defaults_match_the_code`.
+    /// A default that changes must change here too, and vice versa.
+    #[test]
+    fn memory_guide_publishes_the_real_defaults() {
+        let guide = USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "13-memory.md")
+            .expect("13-memory.md is in the user guide");
+        let c = guide.content;
+
+        for row in [
+            "| `enabled` | `false` | Enable automatic Dream consolidation |",
+            "| `enabled` | `false` | Enable the pre-compaction memory flush |",
+        ] {
+            assert!(c.contains(row), "13-memory.md lost the corrected row: {row}");
+        }
+        assert!(
+            c.contains("| `idle_timeout_secs` | unset |"),
+            "13-memory.md must not claim a 300s idle-flush default"
+        );
+        assert!(
+            c.contains("Dream is **off by default**"),
+            "13-memory.md must not claim Dream runs automatically"
+        );
+        // The one that is genuinely on, and was documented as off.
+        assert!(
+            c.contains("| `enabled` | `true` | Enable memory."),
+            "13-memory.md must document memory as enabled by default"
+        );
+
+        // Claims the old text made that must not come back.
+        for stale in [
+            "Dream also runs automatically",
+            "# Run automatic consolidation (default: true)",
+            "| `enabled` | `true` | Enable automatic Dream consolidation |",
+            "| `enabled` | `true` | Enable the pre-compaction memory flush |",
+            "| `idle_timeout_secs` | `300` |",
+            "| `enabled` | `false` | Enable memory |",
+        ] {
+            assert!(
+                !c.contains(stale),
+                "13-memory.md reintroduced a false default: {stale}"
+            );
+        }
+    }
 }

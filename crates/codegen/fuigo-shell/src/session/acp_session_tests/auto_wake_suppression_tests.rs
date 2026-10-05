@@ -231,13 +231,7 @@ async fn cancel_barrier_rejects_task_completion_wake_without_reporting_it() {
                 .clone()
                 .expect("task-wake gate");
             gate.set(true);
-            let resources = actor
-                .agent
-                .borrow()
-                .tool_bridge()
-                .clone()
-                .shared_resources()
-                .await;
+            let resources = actor.tool_bridge_handle().shared_resources().await;
             {
                 let mut resources = resources.lock().await;
                 resources.insert(reservations.clone());

@@ -1,0 +1,34 @@
+Astra round 4 (codex 0.160.0, model gpt-6-astra, read-only) on dbf192cf..f9293c89 -- final report only.
+Raw transcript (6823 lines) not committed; sha256 2c6116a28044bc917b455682e8e6c2021e8203414fffe514940ae700ac8a0ba9; copy at hetzner-dsm:/root/fuigo-builds/p83/audits/p83-astra-r4.raw.txt
+
+Audited `dbf192cf..f9293c89` at clean HEAD `f9293c893b6f28aaf56ac778fb36c0030089864c`. Read-only; no builds or tests run. **No new blocking soundness defect found. Two follow-ups remain.**
+
+1. **HIGH — Relocation still invalidates bound pointers; unchanged, previously accepted follow-up.**  
+   [local_ref.rs:204](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:204), dereference at [line 46](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:46).
+
+   Initialize an agent, move its contents into another allocation, free the original allocation, then poll its background work: `LocalRef::get()` can dereference the old address. `BoundTasks` does not enforce address stability.
+
+   **Tests:** Not caught; current teardown tests deliberately use stable `Rc` ownership. This remains pre-existing relative to `dbf192cf`, with the round-3 architectural-follow-up disposition. It does **not independently block this packet**.
+
+2. **MEDIUM — The diagnostic can deadlock before the intended abort.**  
+   [local_ref.rs:107](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:107).
+
+   Concrete scenario: another thread holds `stderr().lock()` while waiting for a notification sent after agent teardown. A bound future releases the agent’s last owner; `abort_reentrant_drop()` waits for that stderr lock, so neither teardown nor `process::abort()` completes. The synchronous lock acquisition is present in the pinned [Rust 1.94 implementation](https://raw.githubusercontent.com/rust-lang/rust/1.94.0/library/std/src/io/stdio.rs).
+
+   **Tests:** Not caught. The subprocess cases have uncontended stderr and the parent drains their output. A contention regression would need an external timeout.
+
+   **Disposition:** Non-blocking termination/liveness follow-up; this does not recreate the escaping-unwind/use-after-free path. Calling `abort()` directly removes the dependency.
+
+The requested lifecycle checks otherwise support landing:
+
+- **Completion and cancellation:** Both now destroy the inner future while holding the slot borrow. During `Driver::drop`, its `Rc` remains strong, so the registry can still upgrade the weak reference and detect reentrant owner destruction.
+- **Borrowing and panics:** I found no reachable double borrow in the converted paths. A poll panic unwinds the `RefMut` before Tokio destroys the driver. Assignment cleanup prevents a panicking completed-future destructor from leaving that same future available for another destruction.
+- **Destructor-spawned work:** Spawning uses the separate registry. During owner teardown, `closed` synchronously destroys newly submitted futures; during driver completion/cancellation, the original slot remains visibly borrowed.
+- **Abort safeguard:** Removing tracing closes the reported subscriber-panic route. The fixed literal stderr write introduces no user formatting callback; the remaining concern is blocking above.
+- **Wakers:** Teardown drains futures before invoking wakes, catches wake panics, and safely retains/forgets panic payloads. The revised test observes the second future’s destruction **inside** the wake callback and now discriminates ordering.
+- **Converted call sites:** No escaped `LocalRef` found. Coordinator run/validate/describe futures remain in owned collections; detached worker, presentation, and upload work receives owned state.
+
+The new subprocess test meaningfully covers completed-future destruction and LocalSet cancellation: it checks actual child entry and SIGABRT. Coverage remains narrower than full soundness: no direct Driver panic/destructor-spawn regression, no Windows abort case, and the ACP reproducer still does not synchronize specifically on a live `LeaderGuard`.
+
+**LAND-WITH-FOLLOWUPS**
+exit=0

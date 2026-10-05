@@ -23,3 +23,6 @@ anyhow = { workspace = true }
 env_logger = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 dirs = { workspace = true }
+
+[lints]
+workspace = true

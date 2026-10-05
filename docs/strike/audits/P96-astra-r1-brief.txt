@@ -1,0 +1,29 @@
+Independent audit of packet P96 in this git worktree (Rust, repo "fuigo"). Read-only. Do not run cargo.
+Diff range: fe16738c20220d960dc617f3bb131a4d884ae9c0..HEAD (use `git diff fe16738c..HEAD -- crates`).
+
+Problem being fixed: when a line of a session's chat_history.jsonl is torn or corrupt, the lenient reader
+(JsonlStorageAdapter::read_chat_history_sync) skips it. A ToolResult whose tool call was on that line is orphaned and
+strict providers reject every request (HTTP 400). Until now the user had to run `fuigo/session/repair` by hand.
+
+Claims to check (the approved behaviour):
+1. At session load (persistence::load_light -> JsonlStorageAdapter::repair_after_corrupt_load, file
+   crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs), compaction_utils::repair_history runs ONLY when
+   the reader skipped at least one line AND the repair changes the history. A clean session is not rewritten and gets
+   no backup.
+2. Before the rewrite, the file as found is copied once to chat_history.jsonl.pre-repair (staged + renamed, first copy
+   wins). If the copy fails, the disk file is NOT rewritten: not by the repair and not by any later rewrite in this
+   process (rewrite_gate, called from JsonlStorageAdapter::replace_chat_history and from
+   acp_session.rs persist_chat_history_jsonl_sync). The repaired history is used in memory. Appends continue.
+3. The user gets one visible note (SessionCommand::NotifyHistoryRepaired -> FuigoSessionUpdate::ImageDropped{notes},
+   the existing system-note channel) with counts and the backup path, plus a tracing::warn.
+4. A session that is resident (live) in this process is never repaired by a second session/load (reconnect):
+   load_light gets repair_corrupt_history = !is_resident.
+5. Tests: crates/codegen/fuigo-shell/tests/corrupt_history_auto_repair_acp.rs (real session/load, six scenarios) and the
+   unit tests in load_repair.rs.
+
+Find defects. For each: severity BLOCKER/HIGH/MEDIUM/LOW, file:line, a concrete scenario, and whether an existing test
+catches it. Look in particular for: a path that rewrites chat_history.jsonl at or after load without the backup; data
+loss; a clean session being rewritten or backed up; the repair running under a live session or racing another writer;
+the gate (a process-global set keyed by path) refusing writes it should allow or leaking between sessions; wrong or
+misleading notice text; tests that do not exercise the production path or cannot fail.
+End with exactly one verdict line: LAND / LAND-WITH-FOLLOWUPS / DO-NOT-LAND.

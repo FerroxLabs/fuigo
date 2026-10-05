@@ -1,0 +1,10 @@
+# P78 Astra round 5 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..f9ecfdf4
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `37a5b9d4..f9ecfdf4` using git and file reads only. No new findings.
+
+1. **LOW — Retained, documented scanner limitation.** [theme_pin_guard_tests.rs:569](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:569): an unrelated nested parameter named `_theme` after the guard binding triggers a false failure. Existing self-tests do not cover that scenario. None of the four listed readers encounters it. The conservative rejection is deliberate and documented; no pre-landing code change or mandatory follow-up is needed.
+
+Matcher, gutter, atomic-dump, and modal-isolation fixes remain supported. No weakened assertions, remaining silent matcher waits, protected-test changes, or source-level compilation issues found. Compilation, Clippy, and runtime were not executed.
+
+LAND
