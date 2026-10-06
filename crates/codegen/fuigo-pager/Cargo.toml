@@ -6,6 +6,7 @@ license = "Apache-2.0"
 authors = ["Ferrox Labs"]
 
 [dependencies]
+fuigo-auth = { workspace = true }
 # TTY safety — detach subprocesses from the controlling terminal
 dunce = { workspace = true }
 fuigo-tty-utils = { workspace = true }
@@ -182,6 +183,11 @@ core-foundation = { workspace = true }
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
+fuigo-secrets = { workspace = true, features = ["test-support"] }
+# P71 test seam: loopback mocks stand in for a FluxRouter-operated proxy. Dev-dependency ONLY (upload_gate_guard pins it).
+fuigo-file-utils = { path = "../fuigo-file-utils", features = ["test-loopback-operator"] }
+# `fs_atomic::stage_fault`, to make a config write fail inside its temp (tests only).
+fuigo-config = { workspace = true, features = ["test-seams"] }
 # The fixture that builds a `[ui.status_line]` section field by field.
 fuigo-status-line = { workspace = true, features = ["test-support"] }
 fuigo-pager-render = { path = "../fuigo-pager-render", features = ["test-support"] }
@@ -288,9 +294,7 @@ default-bazel = [
     "jemalloc",
     "sandbox-enforce",
     "test-support",
-    "local-workspace",
     ]
-local-workspace = ["fuigo-shell/local-workspace"]
 # No-op on this crate: the actual `#[global_allocator]` (and the
 # `tikv-jemallocator` dep) live on the composition-root binary
 # `fuigo-pager-bin`, which owns `main.rs`. Kept as an empty feature so the

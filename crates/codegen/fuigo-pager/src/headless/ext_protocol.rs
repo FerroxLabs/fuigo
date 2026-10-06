@@ -89,7 +89,8 @@ pub(crate) fn handle_ext_notification(
         "fuigo/task_backgrounded" => decode_task_backgrounded(method, params),
         "fuigo/task_completed" => decode_task_completed(method, params),
         "fuigo/monitor_event" => ExtEvent::MonitorEvent,
-        "fuigo/leader/version_mismatch" => {
+        // The decoder strips the ACP `_`; the prefixed arm is defence in depth for a method that reaches here unstripped
+        "fuigo/leader/version_mismatch" | "_fuigo/leader/version_mismatch" => {
             match crate::acp::version_mismatch_banner(params) {
                 Some(banner) => tracing::warn!(%banner, "fuigo/leader/version_mismatch"),
                 None => {
@@ -221,6 +222,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         ImageCompressed {
             message: String,
         },
+        ConfigNotice {
+            message: String,
+        },
         MemoryFlushStarted {},
         MemoryFlushCompleted {
             result: String,
@@ -299,6 +303,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         }
         FuigoUpdate::ImageCompressed { message } => {
             ExtEvent::Lifecycle(Lifecycle::ImageCompressed { message })
+        }
+        FuigoUpdate::ConfigNotice { message } => {
+            ExtEvent::Lifecycle(Lifecycle::ConfigNotice { message })
         }
         FuigoUpdate::MemoryFlushStarted {} => ExtEvent::Lifecycle(Lifecycle::MemoryFlushStarted),
         FuigoUpdate::MemoryFlushCompleted { result, path } => {

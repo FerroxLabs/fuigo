@@ -144,7 +144,7 @@ async fn heuristic_images_stripped_does_not_rewrite_history() {
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -184,7 +184,7 @@ async fn server_rejected_strip_persists_only_after_completed() {
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -247,7 +247,7 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -325,7 +325,7 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -438,7 +438,7 @@ async fn rejected_rewind_preserves_queued_image_strip() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -508,7 +508,7 @@ async fn failed_compaction_replay_preserves_queued_image_strip() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
             let unique = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -619,7 +619,7 @@ async fn pending_strip_bound_preserves_detached_and_new_url_entries() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -700,7 +700,7 @@ async fn timed_out_strip_survives_when_images_stripped_is_still_queued() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -774,7 +774,7 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
         .run_until(async {
             let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             // Nothing seeded: the buffered URL matches no stored image, so the apply resolves as `NoMatch` rather than `Applied`
@@ -812,7 +812,7 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             seed_image(&actor, PERSIST_GATE_IMAGE_URI).await;
@@ -855,7 +855,7 @@ async fn multi_image_blame_is_judged_on_unique_urls() {
         .run_until(async {
             let (gateway_tx, _) =
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
-            let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let (persistence_tx, _persistence_rx) = super::support::answering_persistence();
             let actor =
                 Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
             let second_uri = "data:image/png;base64,c2Vjb25kLWltYWdl";

@@ -56,6 +56,9 @@ fn mark_summary_used(session_dir: &std::path::Path) {
 #[tokio::test]
 #[serial]
 async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -83,6 +86,9 @@ async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
 #[tokio::test]
 #[serial]
 async fn list_sessions_fills_missing_label_on_kinded_fork_without_changing_kind() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -126,6 +132,9 @@ async fn list_sessions_fills_missing_label_on_kinded_fork_without_changing_kind(
 #[tokio::test]
 #[serial]
 async fn list_sessions_leaves_kinded_labeled_worktree_summary_untouched() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -160,6 +169,9 @@ async fn list_sessions_leaves_kinded_labeled_worktree_summary_untouched() {
 #[tokio::test]
 #[serial]
 async fn list_sessions_leaves_untagged_summary_outside_worktrees_untouched() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let plain_cwd = home.path().join("project");
@@ -187,6 +199,9 @@ async fn list_sessions_leaves_untagged_summary_outside_worktrees_untouched() {
 #[tokio::test]
 #[serial]
 async fn repair_keeps_summary_untagged_when_locked_write_fails() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -212,6 +227,9 @@ async fn repair_keeps_summary_untagged_when_locked_write_fails() {
 #[tokio::test]
 #[serial]
 async fn repair_adopts_kinded_summary_when_mtime_restore_fails() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -241,6 +259,9 @@ async fn repair_adopts_kinded_summary_when_mtime_restore_fails() {
 #[tokio::test]
 #[serial]
 async fn init_session_load_backfills_worktree_identity_on_untagged_summary() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -269,6 +290,9 @@ async fn init_session_load_backfills_worktree_identity_on_untagged_summary() {
 #[tokio::test]
 #[serial]
 async fn init_session_load_leaves_untagged_summary_outside_worktrees_untouched() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let plain_cwd = home.path().join("project");
@@ -298,6 +322,9 @@ async fn init_session_load_leaves_untagged_summary_outside_worktrees_untouched()
 #[tokio::test]
 #[serial]
 async fn init_session_load_fills_missing_label_on_kinded_fork_without_changing_kind() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -340,6 +367,9 @@ async fn init_session_load_fills_missing_label_on_kinded_fork_without_changing_k
 #[tokio::test]
 #[serial]
 async fn list_sessions_recent_fills_missing_label_on_kinded_fork_without_changing_kind() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -376,6 +406,9 @@ async fn list_sessions_recent_fills_missing_label_on_kinded_fork_without_changin
 #[tokio::test]
 #[serial]
 async fn list_sessions_recent_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let info = Info {
@@ -402,6 +435,9 @@ async fn list_sessions_recent_repairs_untagged_worktree_summary_in_rows_and_on_d
 #[tokio::test]
 #[serial]
 async fn list_sessions_heal_does_not_evict_recent_sessions_from_mtime_window() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());

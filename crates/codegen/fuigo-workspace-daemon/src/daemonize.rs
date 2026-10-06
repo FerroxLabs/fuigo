@@ -129,7 +129,7 @@ pub fn apply_workspace_oom_protect() -> bool {
                 return true;
             }
             // stderr is already the log channel when daemonized.
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "failed to lower oom_score_adj to {}: {e}",
                 WORKSPACE_SERVER_OOM_SCORE_ADJ
             );
@@ -337,17 +337,19 @@ impl PidFile {
         };
 
         // tracing is not initialized this early; in daemonized mode stderr is already redirected to the log file, so eprintln! is the log channel
-        eprintln!("taking over from predecessor workspace-server (pid {pid})");
+        fuigo_tty_utils::cli_eprintln!("taking over from predecessor workspace-server (pid {pid})");
         if let Err(e) = predecessor.signal(false) {
-            eprintln!("failed to signal predecessor (pid {pid}): {e}");
+            fuigo_tty_utils::cli_eprintln!("failed to signal predecessor (pid {pid}): {e}");
         }
         if let Some(guard) = Self::poll_acquire(path, grace)? {
             return Ok(Some(guard));
         }
 
-        eprintln!("predecessor (pid {pid}) did not release the pidfile lock in time; killing it");
+        fuigo_tty_utils::cli_eprintln!(
+            "predecessor (pid {pid}) did not release the pidfile lock in time; killing it"
+        );
         if let Err(e) = predecessor.signal(true) {
-            eprintln!("failed to kill predecessor (pid {pid}): {e}");
+            fuigo_tty_utils::cli_eprintln!("failed to kill predecessor (pid {pid}): {e}");
         }
         if let Some(guard) = Self::poll_acquire(path, TAKEOVER_KILL_GRACE)? {
             return Ok(Some(guard));
@@ -355,7 +357,9 @@ impl PidFile {
 
         // The holder we signaled is dead yet the lock is still owned: a concurrent newer spawn won it
         // Decline rather than run a second instance
-        eprintln!("pidfile lock is still held after killing pid {pid}; exiting");
+        fuigo_tty_utils::cli_eprintln!(
+            "pidfile lock is still held after killing pid {pid}; exiting"
+        );
         Ok(None)
     }
 

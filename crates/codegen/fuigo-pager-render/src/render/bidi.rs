@@ -21,10 +21,51 @@ use unicode_width::UnicodeWidthStr;
 
 static RTL_BIDI_ENABLED: AtomicBool = AtomicBool::new(false);
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// Test-only per-thread pin of the latch; see [`pin_for_current_thread`].
+    static THREAD_PIN: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
 /// Whether optional app-side bidi reordering is enabled (default false).
 #[inline]
 pub fn is_enabled() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(pinned) = THREAD_PIN.with(std::cell::Cell::get) {
+        return pinned;
+    }
     RTL_BIDI_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Restores the calling thread's previous pin when dropped (including on a panic).
+#[cfg(any(test, feature = "test-support"))]
+#[must_use = "the pin lasts only while the guard is alive"]
+pub struct ThreadPinGuard {
+    previous: Option<bool>,
+    /// Not `Send`: the guard must drop on the thread it pinned.
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ThreadPinGuard {
+    fn drop(&mut self) {
+        THREAD_PIN.with(|pin| pin.set(self.previous));
+    }
+}
+
+/// Test-only: make [`is_enabled`] return `enabled` on the calling thread until the guard drops.
+///
+/// The latch is process-wide, and every test that builds a scrollback or app view writes it from its appearance config
+/// ([`set_enabled`]), so a test that needs bidi on cannot hold it on by writing the global (and writing it would leak `true`
+/// into every concurrently running test). Rendering and copy paths read the latch on the calling thread, so a per-thread pin
+/// scopes the setting to exactly one test.
+#[cfg(any(test, feature = "test-support"))]
+pub fn pin_for_current_thread(enabled: bool) -> ThreadPinGuard {
+    let previous = THREAD_PIN.with(|pin| pin.replace(Some(enabled)));
+    ThreadPinGuard {
+        previous,
+        _not_send: std::marker::PhantomData,
+    }
 }
 
 /// Set the process-wide enable latch (called when appearance config loads).

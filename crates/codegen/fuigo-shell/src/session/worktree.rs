@@ -893,6 +893,12 @@ mod tests {
     }
     #[tokio::test]
     async fn resume_in_worktree_falls_through_to_remote_when_not_found_locally() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // An exclusive `FUIGO_HOME` of this test's own; see
+        // `create_worktree_for_resume_produces_independent_worktree`.
+        let _home = fuigo_test_support::FuigoHome::new();
         let req = ResumeSessionInWorktreeRequest {
             session_id: "nonexistent-session-id".to_string(),
             source_cwd: "/tmp/definitely-not-a-repo".to_string(),
@@ -952,6 +958,18 @@ mod tests {
     }
     #[tokio::test]
     async fn create_worktree_for_resume_produces_independent_worktree() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // `create_worktree_for_resume` resolves its destination to
+        // `$FUIGO_HOME/worktrees/<slug>/<label>`, reading `FUIGO_HOME` fresh from the
+        // process environment. Without an exclusive home of its own this test wrote its
+        // worktree inside a concurrently-running `worktree_heal_tests` temp dir and the
+        // directory vanished under it when that test's `TempDir` dropped: measured as
+        // +3/-1 churn between two identical full runs at 8e11724, and reproduced in
+        // 0.15s by running this module alongside `worktree_heal_tests` alone.
+        // The guard is exclusive process-wide (`fuigo_test_support::env::PROCESS_ANCHORS`).
+        let _home = fuigo_test_support::FuigoHome::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir(&repo_path).unwrap();
@@ -980,6 +998,12 @@ mod tests {
     }
     #[tokio::test]
     async fn create_worktree_for_resume_honors_git_ref() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // An exclusive `FUIGO_HOME` of this test's own; see
+        // `create_worktree_for_resume_produces_independent_worktree`.
+        let _home = fuigo_test_support::FuigoHome::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir(&repo_path).unwrap();
@@ -1022,6 +1046,12 @@ mod tests {
     }
     #[tokio::test]
     async fn cleanup_worktree_on_failure_removes_created_worktree() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // An exclusive `FUIGO_HOME` of this test's own; see
+        // `create_worktree_for_resume_produces_independent_worktree`.
+        let _home = fuigo_test_support::FuigoHome::new();
         let tmp = tempfile::TempDir::new().unwrap();
         let repo_path = tmp.path().join("repo");
         std::fs::create_dir(&repo_path).unwrap();
@@ -1049,6 +1079,12 @@ mod tests {
     }
     #[test]
     fn worktree_base_dir_extracts_repo_name() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // An exclusive `FUIGO_HOME` of this test's own; see
+        // `create_worktree_for_resume_produces_independent_worktree`.
+        let _home = fuigo_test_support::FuigoHome::new();
         let base = worktree_base_dir(Path::new("/home/user/projects/my-repo"));
         assert!(base.ends_with("worktrees/projects-my-repo"));
     }

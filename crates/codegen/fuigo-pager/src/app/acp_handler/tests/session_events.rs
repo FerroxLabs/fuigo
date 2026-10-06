@@ -92,6 +92,59 @@
         }
     }
 
+    /// The load-time history repair note (P96) is shown as its own plain system note, word for word.
+    /// It used to travel as `ImageDropped`, which logged it as "Image dropped: ...".
+    #[test]
+    fn history_repaired_is_shown_as_a_plain_system_note() {
+        use crate::scrollback::block::RenderBlock;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let before = scrollback.len();
+        let message = "Session history repaired: removed 2 tool results that had lost their tool calls. \
+                       Backup of the file as it was: /s/chat_history.jsonl.pre-repair."
+            .to_string();
+        let update = FuigoSessionUpdate::HistoryRepaired {
+            message: message.clone(),
+        };
+        let changed = apply_session_event(&update, &mut session, &mut scrollback, false);
+        assert!(changed);
+        assert_eq!(scrollback.len(), before + 1);
+        let entry = scrollback.entries_mut().last().expect("entry pushed");
+        match &entry.block {
+            RenderBlock::System(b) => {
+                assert_eq!(b.text, message, "the note is rendered as sent");
+                assert!(!b.text.to_lowercase().contains("image"));
+            }
+            other => panic!("expected System block, got {other:?}"),
+        }
+        // On the wire it has its own name, and a client that predates it decodes it without an error.
+        let wire = serde_json::to_value(&update).expect("serialize");
+        assert_eq!(wire["sessionUpdate"], "history_repaired");
+        assert_eq!(wire["message"], message.as_str());
+    }
+
+    /// P133: a refused reference to the saved API key is shown as a plain system note, word for word.
+    #[test]
+    fn config_notice_is_shown_as_a_plain_system_note() {
+        use crate::scrollback::block::RenderBlock;
+        let mut session = make_session(Some("s1"));
+        let mut scrollback = ScrollbackState::new();
+        let before = scrollback.len();
+        let message = "/w/repo/.fuigo/config.toml: `mcp_servers.s.env.T` names FUIGO_API_KEY, the saved API key, and was ignored."
+            .to_string();
+        let update = FuigoSessionUpdate::ConfigNotice {
+            message: message.clone(),
+        };
+        assert!(apply_session_event(&update, &mut session, &mut scrollback, false));
+        assert_eq!(scrollback.len(), before + 1);
+        match &scrollback.entries_mut().last().expect("entry pushed").block {
+            RenderBlock::System(b) => assert_eq!(b.text, message),
+            other => panic!("expected System block, got {other:?}"),
+        }
+        let wire = serde_json::to_value(&update).expect("serialize");
+        assert_eq!(wire["sessionUpdate"], "config_notice");
+    }
+
     /// A successful compression needs no user action: log-only, no toast, no scrollback block, no redraw.
     /// The same holds live and on session replay.
     #[test]
@@ -141,6 +194,7 @@
             max_retries: 3,
             reason: "rate limited".into(),
             error_type: None,
+            verdicts: None,
         };
         apply_retry_state(&retry, &mut session, &mut scrollback, false);
         assert!(
@@ -161,6 +215,7 @@
                 reason: "rate limited".into(),
                 is_rate_limited: true,
                 error_type: None,
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -179,6 +234,7 @@
             reason: "".into(),
             is_rate_limited: true,
             error_type: None,
+            verdicts: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -202,6 +258,7 @@
             reason: reason.clone(),
             is_rate_limited: true,
             error_type: None,
+            verdicts: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -235,6 +292,7 @@
                 .into(),
             is_rate_limited: true,
             error_type: None,
+            verdicts: None,
         };
 
         let mut session = make_session(Some("s1"));
@@ -272,6 +330,7 @@
                 reason: "server error".into(),
                 is_rate_limited: false,
                 error_type: None,
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -303,6 +362,7 @@
                     .into(),
                 is_rate_limited: true,
                 error_type: None,
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -345,6 +405,7 @@
                 reason: reason.into(),
                 is_rate_limited: false,
                 error_type: Some(SamplingErrorKind::EmptyResponse.as_str().to_string()),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback,
@@ -375,6 +436,7 @@
                 reason: "empty response from model (reasoning_only)".into(),
                 is_rate_limited: false,
                 error_type: None,
+                verdicts: None,
             },
             &mut session,
             &mut scrollback,
@@ -399,6 +461,7 @@
             &RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.into(),
                 message: DISK_FULL_USER_MESSAGE.into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback,
@@ -430,6 +493,7 @@
                 reason: "status 403: run out of credits".into(),
                 is_rate_limited: false,
                 error_type: None,
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -459,6 +523,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: "status 403: run out of credits".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -490,6 +555,7 @@
                 message:
                     "API error (status 402 Payment Required): Fuigo usage balance exhausted"
                         .into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -515,6 +581,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: "internal server error".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -566,6 +633,7 @@
                 message: "Unauthorized (401) from https://cli-chat-proxy.grok.com/v1/messages: \
                           no auth context"
                     .into(),
+                          verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -595,6 +663,7 @@
             &RetryState::Failed {
                 error_type: "auth".into(),
                 message: "Unauthorized (401) from https://proxy/v1/messages".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -615,6 +684,7 @@
                 error_type: "api".into(),
                 message: "Unauthorized (401) from https://proxy/v1/responses: invalid credentials"
                     .into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -635,6 +705,7 @@
                 message: "Unauthorized (401) ... deprecated authentication method (WebLogin) ... \
                           run `fuigo logout` then `fuigo login`"
                     .into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -653,6 +724,7 @@
             &RetryState::Failed {
                 error_type: "api".into(),
                 message: r#"API error (status 500 Internal Server Error): {"error":"upstream exploded"}"#.into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -682,6 +754,7 @@
                 error_type: "api".into(),
                 message: "API error (status 403 Forbidden): Access to the chat endpoint is denied"
                     .into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback,
@@ -714,6 +787,7 @@
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
                     .into(),
+                          verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -738,6 +812,7 @@
                 message: "API error (status 500): the prompt is too long for this model's \
                           context window"
                     .into(),
+                          verdicts: None,
             },
             &mut session,
             &mut scrollback,
@@ -766,6 +841,7 @@
             &RetryState::Failed {
                 error_type: CONTEXT_LENGTH_ERROR_TYPE.into(),
                 message: "the prompt is too long for this model's context window".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -958,7 +1034,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, None, &mut agent, false);
         assert!(changed);
 
         let info = agent.subagent_sessions.get(child_sid).unwrap();
@@ -996,7 +1072,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let _ = handle_child_session_notification(update, child_sid, None, &mut agent, false);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -1015,7 +1091,7 @@
             percentage: 85,
             reason: "threshold".into(),
         };
-        let changed = handle_child_session_notification(update, "unknown-child", &mut agent, false);
+        let changed = handle_child_session_notification(update, "unknown-child", None, &mut agent, false);
         assert!(!changed);
     }
 
@@ -1034,7 +1110,7 @@
             elapsed_ms: Some(300),
             summary_preview: None,
         };
-        let changed = handle_child_session_notification(update, child_sid, &mut agent, false);
+        let changed = handle_child_session_notification(update, child_sid, None, &mut agent, false);
         // No child_view means nothing visible changed, so it must not trigger a redraw
         assert!(!changed);
         // SubagentInfo is still updated for data correctness even though nothing redraws
@@ -1047,7 +1123,7 @@
     fn child_unknown_event_returns_false() {
         let mut agent = make_agent(Some("root-sess"));
         let update = FuigoSessionUpdate::MemoryFlushStarted;
-        let changed = handle_child_session_notification(update, "child-1", &mut agent, false);
+        let changed = handle_child_session_notification(update, "child-1", None, &mut agent, false);
         assert!(!changed);
     }
 
@@ -1125,6 +1201,7 @@
             FuigoSessionUpdate::HookExecution {
                 event_name: "user_prompt_submit".into(),
                 tool_name: None,
+                tool_call_id: None,
                 prompt_id: Some("p1".into()),
                 runs: vec![],
             },
@@ -1133,6 +1210,9 @@
                 message: "resized".into(),
             },
             FuigoSessionUpdate::ImageDropped { notes: vec![] },
+            FuigoSessionUpdate::HistoryRepaired {
+                message: "Session history repaired: test".into(),
+            },
         ];
         for update in updates {
             let label = format!("{update:?}");
@@ -1184,6 +1264,7 @@
                     max_retries: 3,
                     reason: "overloaded".into(),
                     error_type: None,
+                    verdicts: None,
                 }));
             agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
                 prompt_id: "task-completed-1".into(),
@@ -1282,6 +1363,7 @@
             &RetryState::Failed {
                 error_type: "encrypted_content_mismatch".into(),
                 message: "incompatible history".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);
@@ -1301,6 +1383,7 @@
             &RetryState::Failed {
                 error_type: "api_400".into(),
                 message: "bad request".into(),
+                verdicts: None,
             },
             &mut session,
             &mut scrollback, false);

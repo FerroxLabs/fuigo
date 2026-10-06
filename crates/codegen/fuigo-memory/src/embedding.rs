@@ -145,7 +145,13 @@ fn build_static_middleware_client(
     api_key: Option<String>,
 ) -> reqwest_middleware::ClientWithMiddleware {
     let provider: std::sync::Arc<dyn fuigo_auth::AuthCredentialProvider> = std::sync::Arc::new(
-        fuigo_auth::StaticAuthCredentialProvider::new(Box::new(NoopHttpAuth), api_key),
+        // Inference class, not a P47 service: the caller already decided this key against the destination
+        // (P42 `withhold_session_bearer` / `embedding_session_credentials` in fuigo-shell).
+        fuigo_auth::StaticAuthCredentialProvider::new(
+            Box::new(NoopHttpAuth),
+            api_key,
+            fuigo_auth::BearerDestination::Unrestricted,
+        ),
     );
     build_middleware_client(provider)
 }
@@ -200,11 +206,15 @@ impl EmbeddingProvider for ApiEmbeddingProvider {
                     tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                 }
 
+                // P43: identity-class header, FluxRouter-operated destinations only.
                 let request = fuigo_http::shared_client()
                     .post(format!("{}/embeddings", self.api_base))
                     .json(&body_json)
                     .header("X-XAI-Token-Auth", "xai-grok-cli")
-                    .header("x-fuigo-client-version", fuigo_version::VERSION);
+                    .headers(
+                        fuigo_http::fluxrouter::IdentityDisclosure::for_destination(&self.api_base)
+                            .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+                    );
 
                 let req = match request.build() {
                     Ok(r) => r,
@@ -325,6 +335,37 @@ impl EmbeddingProvider for MockEmbeddingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P43 hostile: an embeddings host that is not FluxRouter-operated gets no client version.
+    /// A raw loopback listener records the request head and answers 400 (not retried).
+    #[tokio::test]
+    async fn embedding_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let _ = socket
+                .write_all(b"HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+                .await;
+            String::from_utf8_lossy(&head).to_ascii_lowercase()
+        });
+        let client = reqwest_middleware::ClientBuilder::new(fuigo_http::shared_client()).build();
+        let provider = ApiEmbeddingProvider::new(api_base, "m".into(), 4, client);
+        let _ = provider.embed_batch(&["hello"]).await;
+        let head = server.await.unwrap();
+        assert!(head.starts_with("post /v1/embeddings"), "no embeddings request: {head}");
+        assert!(!head.contains("x-fuigo-client-version"), "identity leaked: {head}");
+    }
 
     #[tokio::test]
     async fn test_mock_embedding_deterministic() {

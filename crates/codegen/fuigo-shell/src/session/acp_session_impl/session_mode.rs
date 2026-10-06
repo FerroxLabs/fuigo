@@ -129,14 +129,22 @@ impl SessionActor {
                 tool_configs = def.tool_config.tools.len(),
                 "Resolved AgentDefinition for session mode"
             );
-            self.agent
-                .borrow()
-                .update_policies_from_definition(def)
-                .await;
+            // `Agent::update_policies_from_definition` is a documented no-op (policies live in
+            // the registry now); calling it held a `Ref<Agent>` across an await for nothing.
             *self.active_agent_type.lock() = Some(def.name.clone());
         }
         if let Some(ref def) = agent_def {
-            let new_prompt = self.agent.borrow().render_prompt_for_definition(def).await;
+            // Take the context and a bridge handle in one short borrow, then render: a
+            // `Ref<Agent>` parked across the render await would make a harness rebuild's
+            // `borrow_mut` panic.
+            let (ctx, bridge) = {
+                let agent = self.agent.borrow();
+                (
+                    agent.prompt_context_for_definition(def),
+                    std::sync::Arc::clone(agent.tool_bridge()),
+                )
+            };
+            let new_prompt = ctx.render(&bridge).await.unwrap_or_default();
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
@@ -145,6 +153,8 @@ impl SessionActor {
                 }
             }
             self.chat_state_handle.replace_conversation(conversation);
+            self.note_history_not_rewritten("the new mode's instructions")
+                .await;
         }
     }
     /// Settle the mode a turn runs in, applying the prompt's declaration when it made one.
@@ -368,9 +378,7 @@ impl SessionActor {
             "plan_path": plan_path.display().to_string(),
             "plan_has_content": plan_has_content,
         });
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .render_prompt(template, &extra)
             .await
     }

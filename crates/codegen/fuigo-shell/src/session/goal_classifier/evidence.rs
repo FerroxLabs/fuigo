@@ -48,6 +48,7 @@ const DIFF_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 /// Build a `tokio::process::Command` for `git` with `kill_on_drop(true)` so a `tokio::time::timeout` firing reaps the child instead of orphaning it.
 fn git_command(cwd: &Path) -> Command {
     let mut cmd = Command::new(git_bin());
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.current_dir(cwd).kill_on_drop(true);
     cmd
 }

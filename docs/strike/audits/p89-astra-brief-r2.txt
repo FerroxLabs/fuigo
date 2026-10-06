@@ -1,0 +1,26 @@
+You are an independent adversarial code auditor. Read-only: do not build, run tests or modify files.
+Repository: the git worktree in the current directory. Audit 84569ea8..HEAD (branch strike/p89), round 2.
+
+Read docs/strike/audits/p89-astra-brief-r1.txt for the context and the change. Round 1's report is
+docs/strike/audits/p89-astra-r1.txt. Since round 1 the fix commit changed as follows:
+- Finding 1 (HIGH, unknown usage): `exhaustion()` now treats a TERMINAL record that still lists a required
+  pending attempt under a token budget (limits.total or limits.output) as `TokenUsageUnknown`, so such a
+  record never reopens (fail closed, Contract D.4); `budget_denial` marks that rule's denial unknown_usage;
+  `goal_end_reason` gives a specific message. Without a token budget the in-flight attempts are still settled
+  into the archived receipt (their call debit kept). Question for you: is any token-budgeted path still
+  able to reopen with usage the record never saw (output-only budgets, optional attempts, child grants'
+  attempts, attempts abandoned/superseded)? Is refusing to resume a budgeted goal after Esc mid-request the
+  right trade-off, or is there a sound way to keep it resumable without making the budget a no-op?
+- Finding 2 (MEDIUM, reservation race): `reserve`, `give_back_reservation` and `issue_terminal` now hold
+  RESERVATION_OWNERS across the sampler's reserve/release call (lock order owners -> sampler budget).
+- Finding 3 (MEDIUM): the Reopen transition itself returns the typed refusal (`goal_ended_error`).
+- Finding 4 (LOW): a same-key two-instance ownership test was added to the tight L-2 child test. The
+  dropped-future cancel path is still tested by calling `emit_turn_completed` directly (what
+  `cancel_running_task` calls), not by dropping a running prompt.
+- Also: `issue_terminal` no longer checks `exhaustion` (redundant: `may_reopen` checks it at reopen time;
+  counters only grow, deadlines only pass).
+
+Re-check those fixes for correctness and for new defects (deadlock, double release, lost reservation on an
+error path, typed error lost across the persistence actor), then re-audit the whole change for anything
+round 1 missed. Report BLOCKER / HIGH / MEDIUM / LOW with file:line and a concrete scenario; say plainly if a
+round-1 finding is not fixed. End with a one-line verdict: whether any BLOCKER/HIGH remains.

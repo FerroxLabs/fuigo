@@ -103,7 +103,7 @@ For automation that must run tools without interactive approval, use always-appr
 
 ### Disable always-approve (administrators)
 
-Organizations can prevent always-approve from being enabled via CLI, TUI, or `/always-approve`. Set this in `requirements.toml` (user-level under `~/.fuigo/`, or system-wide under `/etc/fuigo/` for enforcement users cannot remove):
+Organizations can prevent always-approve from being enabled via CLI, TUI, or `/always-approve`. Set this in the system-wide `/etc/fuigo/requirements.toml`, or serve it from your console (Fuigo keeps its synced copy at `~/.fuigo/requirements.toml`; a hand-made file there is moved aside, not applied):
 
 ```toml
 [ui]

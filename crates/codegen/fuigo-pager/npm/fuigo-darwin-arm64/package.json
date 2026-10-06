@@ -1,8 +1,13 @@
 {
     "name": "@fuigo/darwin-arm64",
-    "version": "1.0.20",
+    "version": "1.0.21",
     "description": "darwin-arm64 binary for fuigo. Do not install directly; install fuigo instead.",
     "license": "Apache-2.0",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/FerroxLabs/fuigo.git",
+        "directory": "crates/codegen/fuigo-pager/npm/fuigo-darwin-arm64"
+    },
     "files": [
         "bin/",
         "THIRD_PARTY_NOTICES.md",

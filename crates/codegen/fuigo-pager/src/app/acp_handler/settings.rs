@@ -459,13 +459,19 @@ pub(super) fn apply_announcements_update(
     app.active_announcements = announcements;
     app.announcements_last_gen = next_gen;
     // Opportunistic per-ID prune on a real update (never per frame) so the hidden set cannot grow unboundedly.
+    let before_prune = app.hidden_announcement_ids.clone();
     if fuigo_announcements::prune_hidden_announcement_ids(
         &mut app.hidden_announcement_ids,
         &app.active_announcements,
     ) {
+        let changed = before_prune
+            .difference(&app.hidden_announcement_ids)
+            .cloned()
+            .collect();
         app.pending_effects
             .push(Effect::PersistAnnouncementsHidden {
                 hidden_ids: app.hidden_announcement_ids.clone(),
+                changed,
             });
     }
     app.sync_session_announcement_slash_gate();

@@ -599,6 +599,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_success_writes_cache_and_returns_counts() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_success_writes_cache_and_returns_counts",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let bundle = sample_bundle();
@@ -607,6 +612,7 @@ mod tests {
             serde_json::to_value(&bundle).unwrap(),
         )
         .await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let am = test_auth_manager();
         let result = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
             .await
@@ -624,11 +630,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_force_true_has_same_write_semantics() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_force_true_has_same_write_semantics",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let bundle = sample_bundle();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
+            let proxy_base_url = front.front(&proxy_base_url);
         let am = test_auth_manager();
         let normal = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
             .await
@@ -642,6 +654,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_http_failure_surfaces_error() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_http_failure_surfaces_error",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let (proxy_base_url, _seen_headers, server) = start_bundle_server(
@@ -649,6 +666,7 @@ mod tests {
             serde_json::json!({"error": "unauthorized"}),
         )
         .await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let am = test_auth_manager();
         let error = sync_bundle_to_root(&root, &proxy_base_url, Some(&am), None, None, false)
             .await
@@ -870,11 +888,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_with_skills_reports_skills_count() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_with_skills_reports_skills_count",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
+            let proxy_base_url = front.front(&proxy_base_url);
         let result = sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -937,6 +961,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_with_archive_endpoint_extracts_and_reports_counts() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_with_archive_endpoint_extracts_and_reports_counts",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let archive = make_test_archive(&[
@@ -949,6 +978,7 @@ mod tests {
             ("skills/commit/SKILL.md", b"# Commit skill"),
         ]);
         let (proxy_base_url, server) = start_archive_bundle_server(archive).await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let result = sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -971,11 +1001,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     #[serial]
     async fn sync_falls_back_to_legacy_when_archive_unavailable() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::sync_falls_back_to_legacy_when_archive_unavailable",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let bundle = sample_bundle_with_skills();
         let (proxy_base_url, _seen_headers, server) =
             start_bundle_server(StatusCode::OK, serde_json::to_value(&bundle).unwrap()).await;
+            let proxy_base_url = front.front(&proxy_base_url);
         let result = sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -1059,6 +1095,11 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn maybe_sync_runs_when_cache_is_stale() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::maybe_sync_runs_when_cache_is_stale",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         bundle::write_bundle_to_cache(&root, &sample_bundle()).unwrap();
@@ -1068,6 +1109,7 @@ mod tests {
             serde_json::to_value(sample_bundle()).unwrap(),
         )
         .await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -1086,6 +1128,11 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn maybe_sync_force_bypasses_ttl() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::maybe_sync_force_bypasses_ttl",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         bundle::write_bundle_to_cache(&root, &sample_bundle()).unwrap();
@@ -1094,6 +1141,7 @@ mod tests {
             serde_json::to_value(sample_bundle()).unwrap(),
         )
         .await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,
@@ -1112,6 +1160,11 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn maybe_sync_runs_when_no_manifest_exists() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "extensions::bundle::tests::maybe_sync_runs_when_no_manifest_exists",
+        ) else {
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("bundled");
         let (proxy_base_url, seen_headers, server) = start_bundle_server(
@@ -1119,6 +1172,7 @@ mod tests {
             serde_json::to_value(sample_bundle()).unwrap(),
         )
         .await;
+        let proxy_base_url = front.front(&proxy_base_url);
         let outcome = maybe_sync_bundle_to_root(
             &root,
             &proxy_base_url,

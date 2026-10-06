@@ -36,7 +36,7 @@ pub mod util;
 pub mod versions;
 
 pub use attribution::{
-    Auth401AttributionCallback, BEARER_SUFFIX_LEN, SharedAttributionCallback, ToolConsumer,
+    Auth401AttributionCallback, BearerFingerprint, SharedAttributionCallback, ToolConsumer,
 };
 pub use implementations::fuigo_build::is_task_tool_id;
 pub use implementations::{SEARCH_TOOL_NAME, USE_TOOL_NAME};

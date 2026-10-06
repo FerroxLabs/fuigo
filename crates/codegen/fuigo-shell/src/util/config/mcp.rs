@@ -24,7 +24,7 @@ pub use fuigo_config_types::{
 pub use fuigo_config_types::{McpConfig, RelaySyncConfig};
 
 /// TUI/CLI settings. Composed from typed section configs defined in `agent::config`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct Config {
     pub cli: crate::agent::config::CliConfig,
     pub models: crate::agent::config::ModelsConfig,
@@ -50,6 +50,47 @@ pub struct Config {
     pub telemetry: TelemetryPersistConfig,
     /// `[features]`: only the key the pager persists round-trips.
     pub features: FeaturesPersistConfig,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            cli,
+            models,
+            ui,
+            harness,
+            skills,
+            compat,
+            management_api_key,
+            permission,
+            diagnostics,
+            session,
+            ask_user_question,
+            privacy,
+            consent,
+            telemetry,
+            features,
+        } = self;
+        f.debug_struct("Config")
+            .field("cli", cli)
+            .field("models", models)
+            .field("ui", ui)
+            .field("harness", harness)
+            .field("skills", skills)
+            .field("compat", compat)
+            .field("management_api_key", &management_api_key.as_ref().map(|_| "<redacted>"))
+            .field("permission", permission)
+            .field("diagnostics", diagnostics)
+            .field("session", session)
+            .field("ask_user_question", ask_user_question)
+            .field("privacy", privacy)
+            .field("consent", consent)
+            .field("telemetry", telemetry)
+            .field("features", features)
+            .finish()
+    }
 }
 
 /// The `[telemetry]` slice the pager is allowed to write back.
@@ -181,10 +222,12 @@ pub(crate) fn load_mcp_servers_with_oauth(
             }
         };
         config.expand_strings(sub);
-        if let Some(oauth) = config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
-        }
-        if let Some(acp_server) = config.to_acp_mcp_server(name) {
+        // P136 (Astra r3 #2): OAuth settings only for a definition that is itself started (enabled, set up). A disabled
+        // one gives no evidence of where its secret may go, so a same-named server elsewhere must not find them.
+        if let Some(acp_server) = config.to_acp_mcp_server(name.clone()) {
+            if let Some(oauth) = config.oauth_config() {
+                oauth_configs.insert(name, oauth);
+            }
             acp_servers.push(acp_server);
         }
     }
@@ -262,6 +305,53 @@ pub(crate) fn reload_mcp_servers_merged(
     cwd: &std::path::Path,
     compat: &CompatConfig,
 ) -> Vec<acp::McpServer> {
+    materialize_merged_mcp_configs(merged_mcp_server_configs(global_config, cwd, compat))
+        .into_iter()
+        .map(|(server, _trusted)| server)
+        .collect()
+}
+
+/// [`load_mcp_servers`], with each server's provenance (P136): `true` when its definition came from a source that may
+/// name the saved API key (the user's own config, `~/.claude.json`, `~/.cursor/mcp.json`; not marked
+/// `untrusted_source`). These are the definitions a client (the pager) forwards in `session/new` / `session/load`.
+pub(crate) fn load_mcp_servers_with_provenance(
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> Vec<(acp::McpServer, bool)> {
+    let global_config = crate::config::load_effective_config()
+        .unwrap_or_else(|_| TomlValue::Table(toml::map::Map::new()));
+    materialize_merged_mcp_configs(merged_mcp_server_configs(&global_config, cwd, compat))
+}
+
+/// Resolve setup, expand strings and convert each merged definition, with whether it is trusted (not marked
+/// `untrusted_source`).
+fn materialize_merged_mcp_configs(servers: IndexMap<String, McpServerConfig>) -> Vec<(acp::McpServer, bool)> {
+    let preferences = load_mcp_preferences().file();
+    let sub = &crate::config::expand_env_vars_in_string;
+    servers
+        .into_iter()
+        .filter_map(|(name, config)| {
+            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
+                McpSetupResolution::Resolved(config) => config,
+                McpSetupResolution::Required(_) => return None,
+                McpSetupResolution::Invalid(reason) => {
+                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
+                    return None;
+                }
+            };
+            config.expand_strings(sub);
+            let trusted = !config.untrusted_source;
+            config.to_acp_mcp_server(name).map(|server| (server, trusted))
+        })
+        .collect()
+}
+
+/// The definitions [`reload_mcp_servers_merged`] starts from, by name, in merge priority.
+fn merged_mcp_server_configs(
+    global_config: &TomlValue,
+    cwd: &std::path::Path,
+    compat: &CompatConfig,
+) -> IndexMap<String, McpServerConfig> {
     let mut servers: IndexMap<String, McpServerConfig> = IndexMap::new();
 
     for (name, config) in parse_mcp_servers_from_toml(global_config) {
@@ -313,24 +403,7 @@ pub(crate) fn reload_mcp_servers_merged(
     for (name, config) in mcp_json_servers {
         servers.entry(name).or_insert(config);
     }
-
-    let preferences = load_mcp_preferences().file();
-    let sub = &crate::config::expand_env_vars_in_string;
     servers
-        .into_iter()
-        .filter_map(|(name, config)| {
-            let mut config = match config.resolve_setup(preferences.servers.get(&name)) {
-                McpSetupResolution::Resolved(config) => config,
-                McpSetupResolution::Required(_) => return None,
-                McpSetupResolution::Invalid(reason) => {
-                    tracing::warn!(server = %name, error = %reason, "MCP setup config is invalid");
-                    return None;
-                }
-            };
-            config.expand_strings(sub);
-            config.to_acp_mcp_server(name)
-        })
-        .collect()
 }
 
 /// Load `.mcp.json` servers from repo root to `cwd` (closest wins on name conflict).
@@ -422,42 +495,59 @@ pub(crate) fn load_mcp_preferences_from(path: &std::path::Path) -> McpPreference
     }
 }
 
-pub(crate) async fn save_mcp_preferences(prefs: &McpPreferencesFile) -> Result<()> {
-    save_mcp_preferences_to(&mcp_preferences_path(), prefs).await
+/// Read-modify-write `~/.fuigo/mcp_preferences.json`: `f` edits the file as
+/// it is on disk NOW (under the file's lock), so a concurrent change to
+/// another server's entry -- by another task or another Fuigo -- is kept.
+/// Returns what `f` returned. `f` may run more than once.
+pub(crate) async fn update_mcp_preferences<T: Send + 'static>(
+    f: impl FnMut(&mut McpPreferencesFile) -> T + Send + 'static,
+) -> Result<T> {
+    update_mcp_preferences_at(&mcp_preferences_path(), f).await
 }
 
+#[cfg(test)]
 pub(crate) async fn save_mcp_preferences_to(
     path: &std::path::Path,
     prefs: &McpPreferencesFile,
 ) -> Result<()> {
-    if matches!(load_mcp_preferences_from(path), McpPreferencesLoad::Corrupt) {
-        anyhow::bail!(
-            "refusing to overwrite unreadable MCP preferences at {}",
-            path.display()
-        );
-    }
-    let json = serde_json::to_string_pretty(prefs)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let tmp = path.with_extension(format!(
-        "json.tmp.{}{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
-    tokio::fs::write(&tmp, &json).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to set mcp preferences permissions: {e}"))?;
-    }
-    tokio::fs::rename(&tmp, path).await?;
-    Ok(())
+    let prefs = prefs.clone();
+    update_mcp_preferences_at(path, move |current| *current = prefs.clone()).await
+}
+
+/// [`update_mcp_preferences`] at an explicit path. An unreadable or
+/// unparseable file is refused, never replaced; a missing one starts empty.
+/// The file is written `0600` (it may hold setup values), through the shared
+/// helper: process-local and cross-process locks, temp synced outside the
+/// file lock, rename only over the version `f` saw, temp removed on failure.
+pub(crate) async fn update_mcp_preferences_at<T: Send + 'static>(
+    path: &std::path::Path,
+    mut f: impl FnMut(&mut McpPreferencesFile) -> T + Send + 'static,
+) -> Result<T> {
+    use fuigo_config::fs_atomic::Edit;
+    let shown = path.to_path_buf();
+    super::persist::edit_config_file_with(
+        path,
+        |path, bytes| fuigo_config::fs_atomic::stage_atomically(path, bytes, Some(0o600)),
+        move |current| {
+            let refuse = || {
+                anyhow::anyhow!(
+                    "refusing to overwrite unreadable MCP preferences at {}",
+                    shown.display()
+                )
+            };
+            let mut prefs = match super::persist::current_str(current) {
+                Ok(None) => McpPreferencesFile::default(),
+                Ok(Some(content)) => serde_json::from_str(content).map_err(|_| refuse())?,
+                Err(_) => return Err(refuse()),
+            };
+            let value = f(&mut prefs);
+            Ok(Edit::Replace {
+                contents: serde_json::to_string_pretty(&prefs)?.into_bytes(),
+                value,
+            })
+        },
+    )
+    .await
 }
 
 /// Restore a single server key after a failed setup (best-effort).
@@ -465,20 +555,19 @@ pub(crate) async fn restore_mcp_preference_server(
     server_name: &str,
     previous: Option<McpServerPreferences>,
 ) -> Result<()> {
-    let load = load_mcp_preferences();
-    if !load.is_writable() {
+    if !load_mcp_preferences().is_writable() {
         return Ok(());
     }
-    let mut prefs = load.file();
-    match previous {
+    let server_name = server_name.to_owned();
+    update_mcp_preferences(move |prefs| match previous.clone() {
         Some(entry) => {
-            prefs.servers.insert(server_name.to_string(), entry);
+            prefs.servers.insert(server_name.clone(), entry);
         }
         None => {
-            prefs.servers.remove(server_name);
+            prefs.servers.remove(&server_name);
         }
-    }
-    save_mcp_preferences(&prefs).await
+    })
+    .await
 }
 
 /// Unresolved MCP config that declares a `setup` schema, collected for the `/mcps` list and auth.
@@ -604,6 +693,42 @@ pub(crate) fn collect_mcp_setup_configs(
 
 pub const MANAGED_GATEWAY_DISABLED_CONNECTORS_KEY: &str = "__managed_gateway_connectors";
 
+
+/// The current table in `current` (the bytes of `path` an edit was handed),
+/// for a writer that will replace the whole file.
+///
+/// Only a missing file is empty. An unreadable or unparseable file is an error:
+/// treating it as empty (as these writers once did) rewrote the user's whole
+/// config down to the one entry being saved.
+fn config_for_rewrite(
+    path: &std::path::Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> Result<TomlValue> {
+    let original = match super::persist::current_str(current) {
+        Ok(s) => s.unwrap_or_default(),
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "refusing to overwrite {}: it could not be read ({e})",
+                path.display()
+            ));
+        }
+    };
+    super::persist::parse_existing_config_toml(original).map_err(|parse_err| {
+        anyhow::anyhow!(
+            "refusing to overwrite unparseable {}: {parse_err}; fix the syntax before retrying",
+            path.display()
+        )
+    })
+}
+
+/// Replace the file with `root`, serialized.
+fn replace_with(root: &TomlValue) -> Result<fuigo_config::fs_atomic::Edit<()>> {
+    Ok(fuigo_config::fs_atomic::Edit::Replace {
+        contents: toml::to_string_pretty(root)?.into_bytes(),
+        value: (),
+    })
+}
+
 /// Persist `disabled_tools` for a server under `[disabled_mcp_tools]` in config.toml.
 ///
 /// Uses a dedicated top-level section (not `[mcp_servers]`) to avoid creating incomplete server entries that fail to deserialize for managed servers.
@@ -612,41 +737,36 @@ pub(crate) async fn save_mcp_disabled_tools(
     disabled_tools: &[String],
 ) -> Result<()> {
     let path = config_path();
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => toml::from_str(&s).unwrap_or(TomlValue::Table(TomlMap::new())),
-        Err(_) => TomlValue::Table(TomlMap::new()),
-    };
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
+    let shown = path.clone();
+    let server_name = server_name.to_owned();
+    let disabled_tools = disabled_tools.to_vec();
+    super::persist::edit_config_file(&path, move |current| {
+        let mut root = config_for_rewrite(&shown, current)?;
+        let table = root
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
 
-    let section = table
-        .entry("disabled_mcp_tools")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("disabled_mcp_tools is not a table"))?;
+        let section = table
+            .entry("disabled_mcp_tools")
+            .or_insert_with(|| TomlValue::Table(TomlMap::new()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("disabled_mcp_tools is not a table"))?;
 
-    if disabled_tools.is_empty() {
-        section.remove(server_name);
-        if section.is_empty() {
-            table.remove("disabled_mcp_tools");
+        if disabled_tools.is_empty() {
+            section.remove(&server_name);
+            if section.is_empty() {
+                table.remove("disabled_mcp_tools");
+            }
+        } else {
+            let arr = disabled_tools
+                .iter()
+                .map(|s| TomlValue::String(s.clone()))
+                .collect();
+            section.insert(server_name.clone(), TomlValue::Array(arr));
         }
-    } else {
-        let arr = disabled_tools
-            .iter()
-            .map(|s| TomlValue::String(s.clone()))
-            .collect();
-        section.insert(server_name.to_string(), TomlValue::Array(arr));
-    }
-
-    let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
+        replace_with(&root)
+    })
+    .await
 }
 
 /// Like [`save_mcp_server_enabled`], with explicit cwd for project config walks.
@@ -661,8 +781,9 @@ pub async fn save_mcp_server_enabled_in(
     let mut modified = Vec::new();
 
     let user_path = config_path();
-    if write_toml_table_if_changed(&user_path, |table| {
-        apply_mcp_server_enabled(table, server_name, enabled);
+    let name = server_name.to_owned();
+    if write_toml_table_if_changed(&user_path, move |table| {
+        apply_mcp_server_enabled(table, &name, enabled);
     })
     .await?
     {
@@ -697,8 +818,9 @@ pub async fn save_mcp_server_enabled_in(
 ///
 /// Use after delete (or similar) when the toggle path dirtied `disabled_mcp_servers` but shared project configs must stay untouched.
 pub(crate) async fn save_user_mcp_server_enabled(server_name: &str, enabled: bool) -> Result<()> {
-    write_toml_table_if_changed(&config_path(), |table| {
-        apply_mcp_server_enabled(table, server_name, enabled);
+    let name = server_name.to_owned();
+    write_toml_table_if_changed(&config_path(), move |table| {
+        apply_mcp_server_enabled(table, &name, enabled);
     })
     .await
     .map(|_| ())
@@ -737,136 +859,123 @@ fn nearest_project_mcp_definition(cwd: &std::path::Path, server_name: &str) -> O
 /// Apply `f`, write only if the serialized table changed. Returns whether written.
 ///
 /// Aligns with [`super::persist::save_config`] safety: refuse unparseable files (no wipe-to-empty).
-/// Writes go through [`super::persist::atomic_write_string`] (unique tmp, mode preserved).
-///
-/// For the user config both locks are held across the read and the write: the
-/// process-local one and the cross-process file lock every other writer of that
-/// file takes. The process-local lock alone left this racing the CLI and a
-/// second pager. A project-scoped path takes neither, because nothing else in
-/// the workspace writes it.
+/// The read-modify-write goes through [`super::persist::edit_config_file`]: the
+/// process-local lock, the cross-process lock every writer of `path` takes
+/// (`config.toml.lock` beside the user config; for a project file, one under
+/// `~/.fuigo/locks/`, so nothing is dropped into the repository), and the shared
+/// atomic commit (mode kept, temp removed on failure). `f` may run more than
+/// once (the file changed under it), so it must only edit the table.
 async fn write_toml_table_if_changed(
     path: &std::path::Path,
-    f: impl FnOnce(&mut TomlMap<String, TomlValue>),
+    mut f: impl FnMut(&mut TomlMap<String, TomlValue>) + Send + 'static,
 ) -> Result<bool> {
+    use fuigo_config::fs_atomic::Edit;
     let is_user = path == config_path().as_path();
-    let _guards = if is_user {
-        Some(super::persist::lock_user_config_writes(path).await?)
-    } else {
-        None
-    };
+    let shown = path.to_path_buf();
+    super::persist::edit_config_file(path, move |current| {
+        let original = match current {
+            Ok(None) if is_user => String::new(),
+            Ok(None) => return Ok(Edit::Keep(false)),
+            other => match super::persist::current_str(other) {
+                Ok(s) => s.unwrap_or_default().to_owned(),
+                Err(e) => {
+                    return Err(anyhow::anyhow!("failed to read {}: {e}", shown.display()));
+                }
+            },
+        };
+        let mut root = match super::persist::parse_existing_config_toml(&original) {
+            Ok(v) => v,
+            Err(parse_err) => {
+                return Err(anyhow::anyhow!(
+                    "refusing to overwrite unparseable {}: {}; fix the syntax before retrying",
+                    shown.display(),
+                    parse_err
+                ));
+            }
+        };
+        let before = toml::to_string_pretty(&root)?;
+        let table = root
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
+        f(table);
+        let toml_str = toml::to_string_pretty(&root)?;
+        if before == toml_str {
+            return Ok(Edit::Keep(false));
+        }
+        Ok(Edit::Replace {
+            contents: toml_str.into_bytes(),
+            value: true,
+        })
+    })
+    .await
+}
 
-    let original = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound && is_user => String::new(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(anyhow::anyhow!("failed to read {}: {e}", path.display()));
+/// Flip sticky project `enabled = from` to `!from` on `server_name` with
+/// toml_edit (comments kept), through [`super::persist::edit_config_file`].
+/// Returns whether the file was written.
+async fn flip_sticky_project_enabled_at(
+    path: &std::path::Path,
+    server_name: &str,
+    from: bool,
+) -> Result<bool> {
+    use fuigo_config::fs_atomic::Edit;
+    let shown = path.to_path_buf();
+    let server_name = server_name.to_owned();
+    super::persist::edit_config_file(path, move |current| {
+        let original = match current {
+            Ok(None) => return Ok(Edit::Keep(false)),
+            other => match super::persist::current_str(other) {
+                Ok(s) => s.unwrap_or_default(),
+                Err(e) => {
+                    return Err(anyhow::anyhow!("failed to read {}: {e}", shown.display()));
+                }
+            },
+        };
+        let mut doc: toml_edit::DocumentMut = original.parse().map_err(|e| {
+            anyhow::anyhow!("refusing to rewrite unparseable {}: {e}", shown.display())
+        })?;
+
+        let Some(servers) = doc
+            .get_mut("mcp_servers")
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            return Ok(Edit::Keep(false));
+        };
+        let Some(entry) = servers.get_mut(&server_name) else {
+            return Ok(Edit::Keep(false));
+        };
+        let Some(server_table) = entry.as_table_like_mut() else {
+            return Ok(Edit::Keep(false));
+        };
+        if server_table.get("enabled").and_then(|v| v.as_bool()) != Some(from) {
+            return Ok(Edit::Keep(false));
         }
-    };
-    let mut root = match super::persist::parse_existing_config_toml(&original) {
-        Ok(v) => v,
-        Err(parse_err) => {
-            return Err(anyhow::anyhow!(
-                "refusing to overwrite unparseable {}: {}; fix the syntax before retrying",
-                path.display(),
-                parse_err
-            ));
+        server_table.insert("enabled", toml_edit::value(!from));
+
+        let updated = doc.to_string();
+        if updated == original {
+            return Ok(Edit::Keep(false));
         }
-    };
-    let before = toml::to_string_pretty(&root)?;
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
-    f(table);
-    let toml_str = toml::to_string_pretty(&root)?;
-    if before == toml_str {
-        return Ok(false);
-    }
-    super::persist::atomic_write_string(path, &toml_str)
-        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
-    Ok(true)
+        Ok(Edit::Replace {
+            contents: updated.into_bytes(),
+            value: true,
+        })
+    })
+    .await
 }
 
 /// Flip sticky project `enabled = false` to true with toml_edit (comments kept).
-async fn clear_sticky_project_disabled_at(
+pub(crate) async fn clear_sticky_project_disabled_at(
     path: &std::path::Path,
     server_name: &str,
 ) -> Result<bool> {
-    let original = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(anyhow::anyhow!("failed to read {}: {e}", path.display()));
-        }
-    };
-    let mut doc: toml_edit::DocumentMut = original
-        .parse()
-        .map_err(|e| anyhow::anyhow!("refusing to rewrite unparseable {}: {e}", path.display()))?;
-
-    let Some(servers) = doc
-        .get_mut("mcp_servers")
-        .and_then(|item| item.as_table_like_mut())
-    else {
-        return Ok(false);
-    };
-    let Some(entry) = servers.get_mut(server_name) else {
-        return Ok(false);
-    };
-    let Some(server_table) = entry.as_table_like_mut() else {
-        return Ok(false);
-    };
-    if server_table.get("enabled").and_then(|v| v.as_bool()) != Some(false) {
-        return Ok(false);
-    }
-    server_table.insert("enabled", toml_edit::value(true));
-
-    let updated = doc.to_string();
-    if updated == original {
-        return Ok(false);
-    }
-    super::persist::atomic_write_string(path, &updated)
-        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
-    Ok(true)
+    flip_sticky_project_enabled_at(path, server_name, false).await
 }
 
 /// Flip sticky project `enabled = true` to false with toml_edit (comments kept).
 /// Inverse of [`clear_sticky_project_disabled_at`].
 async fn set_sticky_project_disabled_at(path: &std::path::Path, server_name: &str) -> Result<bool> {
-    let original = match tokio::fs::read_to_string(path).await {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => {
-            return Err(anyhow::anyhow!("failed to read {}: {e}", path.display()));
-        }
-    };
-    let mut doc: toml_edit::DocumentMut = original
-        .parse()
-        .map_err(|e| anyhow::anyhow!("refusing to rewrite unparseable {}: {e}", path.display()))?;
-
-    let Some(servers) = doc
-        .get_mut("mcp_servers")
-        .and_then(|item| item.as_table_like_mut())
-    else {
-        return Ok(false);
-    };
-    let Some(entry) = servers.get_mut(server_name) else {
-        return Ok(false);
-    };
-    let Some(server_table) = entry.as_table_like_mut() else {
-        return Ok(false);
-    };
-    if server_table.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
-        return Ok(false);
-    }
-    server_table.insert("enabled", toml_edit::value(false));
-
-    let updated = doc.to_string();
-    if updated == original {
-        return Ok(false);
-    }
-    super::persist::atomic_write_string(path, &updated)
-        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
-    Ok(true)
+    flip_sticky_project_enabled_at(path, server_name, true).await
 }
 
 /// Update user `disabled_mcp_servers` and, if present, per-server `enabled`.
@@ -934,43 +1043,36 @@ pub async fn save_mcp_server_config_at(
     server_name: &str,
     config: &McpServerConfig,
 ) -> Result<()> {
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => toml::from_str(&s).unwrap_or(TomlValue::Table(TomlMap::new())),
-        Err(_) => TomlValue::Table(TomlMap::new()),
-    };
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
-
-    let servers = table
-        .entry("mcp_servers")
-        .or_insert_with(|| TomlValue::Table(TomlMap::new()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
-
     let serialized = toml::Value::try_from(config)
         .map_err(|e| anyhow::anyhow!("failed to serialize MCP server config: {e}"))?;
-    servers.insert(server_name.to_string(), serialized);
+    let shown = path.to_path_buf();
+    let server_name = server_name.to_owned();
+    super::persist::edit_config_file(path, move |current| {
+        let mut root = config_for_rewrite(&shown, current)?;
+        let table = root
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
 
-    // Ensure the server isn't in the disabled list.
-    if let Some(arr) = table
-        .get_mut("disabled_mcp_servers")
-        .and_then(|v| v.as_array_mut())
-    {
-        arr.retain(|v| v.as_str() != Some(server_name));
-        if arr.is_empty() {
-            table.remove("disabled_mcp_servers");
+        let servers = table
+            .entry("mcp_servers")
+            .or_insert_with(|| TomlValue::Table(TomlMap::new()))
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("mcp_servers is not a table"))?;
+        servers.insert(server_name.clone(), serialized.clone());
+
+        // Ensure the server isn't in the disabled list.
+        if let Some(arr) = table
+            .get_mut("disabled_mcp_servers")
+            .and_then(|v| v.as_array_mut())
+        {
+            arr.retain(|v| v.as_str() != Some(server_name.as_str()));
+            if arr.is_empty() {
+                table.remove("disabled_mcp_servers");
+            }
         }
-    }
-
-    let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
-    Ok(())
+        replace_with(&root)
+    })
+    .await
 }
 
 /// Delete an MCP server entry from `~/.fuigo/config.toml`.
@@ -990,62 +1092,72 @@ pub async fn delete_mcp_server_config_at(
     path: &std::path::Path,
     server_name: &str,
 ) -> Result<bool> {
-    let mut root: TomlValue = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => toml::from_str(&s).unwrap_or(TomlValue::Table(TomlMap::new())),
-        Err(_) => return Ok(false),
-    };
-    let table = root
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
+    use fuigo_config::fs_atomic::Edit;
+    let name = server_name.to_owned();
+    let shown = path.to_path_buf();
+    let existed = super::persist::edit_config_file(path, move |current| {
+        // A missing file has nothing to delete. One that cannot be read or
+        // parsed is REFUSED, as by every other writer of this file (P72): it
+        // was read as holding no entry, so a delete of a server that is in
+        // it said "not found" instead of naming the real problem.
+        if matches!(current, Ok(None)) {
+            return Ok(Edit::Keep(false));
+        }
+        let mut root = config_for_rewrite(&shown, current)?;
+        let table = root
+            .as_table_mut()
+            .ok_or_else(|| anyhow::anyhow!("config root is not a table"))?;
 
-    let existed = table
-        .get_mut("mcp_servers")
-        .and_then(|v| v.as_table_mut())
-        .and_then(|servers| servers.remove(server_name))
-        .is_some();
+        let existed = table
+            .get_mut("mcp_servers")
+            .and_then(|v| v.as_table_mut())
+            .and_then(|servers| servers.remove(&name))
+            .is_some();
 
+        if !existed {
+            return Ok(Edit::Keep(false));
+        }
+
+        // Clean up empty mcp_servers table.
+        if table
+            .get("mcp_servers")
+            .and_then(|v| v.as_table())
+            .is_some_and(|t| t.is_empty())
+        {
+            table.remove("mcp_servers");
+        }
+
+        // Remove from disabled_mcp_servers list.
+        if let Some(arr) = table
+            .get_mut("disabled_mcp_servers")
+            .and_then(|v| v.as_array_mut())
+        {
+            arr.retain(|v| v.as_str() != Some(name.as_str()));
+            if arr.is_empty() {
+                table.remove("disabled_mcp_servers");
+            }
+        }
+
+        // Remove disabled_mcp_tools entry.
+        if let Some(section) = table
+            .get_mut("disabled_mcp_tools")
+            .and_then(|v| v.as_table_mut())
+        {
+            section.remove(&name);
+            if section.is_empty() {
+                table.remove("disabled_mcp_tools");
+            }
+        }
+
+        Ok(Edit::Replace {
+            contents: toml::to_string_pretty(&root)?.into_bytes(),
+            value: true,
+        })
+    })
+    .await?;
     if !existed {
         return Ok(false);
     }
-
-    // Clean up empty mcp_servers table.
-    if table
-        .get("mcp_servers")
-        .and_then(|v| v.as_table())
-        .is_some_and(|t| t.is_empty())
-    {
-        table.remove("mcp_servers");
-    }
-
-    // Remove from disabled_mcp_servers list.
-    if let Some(arr) = table
-        .get_mut("disabled_mcp_servers")
-        .and_then(|v| v.as_array_mut())
-    {
-        arr.retain(|v| v.as_str() != Some(server_name));
-        if arr.is_empty() {
-            table.remove("disabled_mcp_servers");
-        }
-    }
-
-    // Remove disabled_mcp_tools entry.
-    if let Some(section) = table
-        .get_mut("disabled_mcp_tools")
-        .and_then(|v| v.as_table_mut())
-    {
-        section.remove(server_name);
-        if section.is_empty() {
-            table.remove("disabled_mcp_tools");
-        }
-    }
-
-    let toml_str = toml::to_string_pretty(&root)?;
-    let tmp = path.with_extension("toml.tmp");
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    tokio::fs::write(&tmp, &toml_str).await?;
-    tokio::fs::rename(&tmp, &path).await?;
 
     // Clean up OAuth credentials for the deleted server.
     if let Ok(mut cred_store) = fuigo_mcp::credentials::McpCredentialStore::load_default() {
@@ -1093,7 +1205,10 @@ fn deserialize_mcp_server_config(
     let unknown_fields = value.as_table().map_or_else(Vec::new, |table| {
         table
             .keys()
-            .filter(|field| !KNOWN_MCP_SERVER_FIELDS.contains(&field.as_str()))
+            .filter(|field| {
+                field.as_str() != fuigo_config::key_naming::UNTRUSTED_SOURCE_MARKER
+                    && !KNOWN_MCP_SERVER_FIELDS.contains(&field.as_str())
+            })
             .cloned()
             .collect()
     });
@@ -1149,6 +1264,9 @@ pub(crate) fn parse_mcp_servers_with_problems(root: &TomlValue) -> ParsedMcpServ
     for (name, value) in entries {
         match deserialize_mcp_server_config(value) {
             Ok((config, unknown_fields)) => {
+                // P113 (E2): a token variable this server names is denied to children from parse on, before any
+                // server (this one or another) is built or spawned, enabled or not.
+                config.deny_credential_env_vars_to_children();
                 for field in unknown_fields {
                     problems.push(McpServerConfigProblem {
                         server: name.clone(),
@@ -1262,6 +1380,8 @@ pub(crate) fn parse_mcp_config_with_oauth(
     let mut servers = Vec::new();
     let mut oauth_configs = McpOAuthConfigMap::new();
     for (name, server_config) in &config.mcp_servers {
+        // P113 (E2): before the setup gate, so a server still awaiting setup cannot leave its token inheritable.
+        server_config.deny_credential_env_vars_to_children();
         let mut server_config = match server_config.resolve_setup(preferences.servers.get(name)) {
             McpSetupResolution::Resolved(config) => config,
             McpSetupResolution::Required(_) => continue,
@@ -1276,10 +1396,11 @@ pub(crate) fn parse_mcp_config_with_oauth(
             }
         };
         server_config.expand_strings(sub);
-        if let Some(oauth) = server_config.oauth_config() {
-            oauth_configs.insert(name.clone(), oauth);
-        }
         if let Some(server) = server_config.to_acp_mcp_server(name.clone()) {
+            // P136: OAuth settings only for a definition that is itself started (see `load_mcp_servers_with_oauth`).
+            if let Some(oauth) = server_config.oauth_config() {
+                oauth_configs.insert(name.clone(), oauth);
+            }
             servers.push(server);
         } else {
             tracing::warn!(
@@ -1559,6 +1680,8 @@ fn mcp_config_from_json_value(value: &serde_json::Value) -> McpConfig {
         for (name, entry) in entries {
             match serde_json::from_value::<McpServerConfig>(entry.clone()) {
                 Ok(config) => {
+                    // P113 (E2): as for `[mcp_servers.*]`, at parse, enabled or awaiting setup.
+                    config.deny_credential_env_vars_to_children();
                     mcp_servers.insert(name.clone(), config);
                 }
                 Err(error) => tracing::warn!(
@@ -1592,16 +1715,27 @@ fn claude_json_mcp_from_value(value: &serde_json::Value) -> ClaudeJsonMcp {
 
 /// Returns `None` on I/O or top-level parse errors (logged); individual bad `mcpServers` entries are skipped, not fatal.
 pub(crate) fn read_mcp_json(path: &std::path::Path) -> Option<McpConfig> {
+    read_mcp_json_as(path, fuigo_config::key_naming::source_may_name_saved_key(path))
+}
+
+/// [`read_mcp_json`] with the tier decided by the caller: a plugin's MCP file may not name the saved key wherever the
+/// plugin sits on disk (`--plugin-dir` under `$FUIGO_HOME`, say).
+pub(crate) fn read_mcp_json_as(path: &std::path::Path, may_name_saved_key: bool) -> Option<McpConfig> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| {
             tracing::warn!(error = %e, "failed to read MCP JSON");
         })
         .ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content)
+    let mut value: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| {
             tracing::warn!(error = %e, "failed to parse MCP JSON");
         })
         .ok()?;
+    // P118 (backlog row P103): a project `.mcp.json` or a plugin's file may not name the saved API key.
+    if !may_name_saved_key {
+        let refused = fuigo_config::key_naming::refuse_json_source(&mut value, &path.display().to_string());
+        fuigo_config::key_naming::report_refusals(&refused);
+    }
     Some(mcp_config_from_json_value(&value))
 }
 
@@ -1892,6 +2026,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn load_cli_plugin_registry_includes_project_config_path_plugins() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let home = tempfile::tempdir().unwrap();
         let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
 
@@ -2848,3 +2985,15 @@ enabled = false
 
     // === merge_section tests ===
 }
+
+#[cfg(test)]
+#[path = "mcp_write_tests.rs"]
+mod write_tests;
+
+#[cfg(test)]
+#[path = "mcp_p113_tests.rs"]
+mod p113_tests;
+
+#[cfg(test)]
+#[path = "mcp_p118_tests.rs"]
+mod p118_tests;

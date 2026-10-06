@@ -902,7 +902,7 @@ pub struct RemoteSettings {
     #[serde(default)]
     pub remember_tool_approvals: Option<bool>,
     /// Remote settings tier of the crash-handler install gate.
-    /// It has the lowest precedence in `resolve_crash_handler_enabled`; default off. `Some(false)` is a kill-switch.
+    /// It has the lowest precedence in `resolve_crash_handler_enabled`; default on (reports stay local). `Some(false)` is a kill-switch.
     #[serde(default)]
     pub crash_handler_enabled: Option<bool>,
     /// Whether the TUI shows agent thinking/reasoning blocks in scrollback.

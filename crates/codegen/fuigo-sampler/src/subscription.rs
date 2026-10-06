@@ -131,7 +131,7 @@ fn authorize_request(
     let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", bearer.token))
         .map_err(|_| SamplingError::InvalidConfiguration("invalid subscription credential"))?;
     auth.set_sensitive(true);
-    // Rebuild the header set rather than forwarding first-party/auxiliary headers.
+    // Rebuild the header set rather than forwarding Fuigo identity, correlation or auxiliary headers.
     *request.headers_mut() = reqwest::header::HeaderMap::new();
     request
         .headers_mut()
@@ -197,6 +197,7 @@ pub(crate) async fn dispatch(
         resolver.resolve().await?
     };
     authorize_request(&mut request, bearer, kind)?;
+    crate::sent_credentials::record_request(&request, &[]);
     crate::request_accounting::clamp_deadline(&mut request)?;
     let client = SubscriptionClient::new(kind.recipient())
         .map_err(|_| SamplingError::InvalidConfiguration("subscription HTTP client unavailable"))?;
@@ -214,22 +215,82 @@ pub(crate) async fn dispatch(
         let response = fuigo_extra_ca::dispatch::execute(&client, request)
             .await
             .unwrap();
-        return classify(response);
+        return classify(response).await;
     }
     crate::request_accounting::dispatched();
     let response = client.execute(request).await.map_err(|_| {
         SamplingError::InvalidConfiguration("subscription transport failed; no API-key fallback")
     })?;
-    classify(response)
+    classify(response).await
 }
-fn classify(response: Response) -> Result<Response> {
-    if !response.status().is_success() {
-        return Err(SamplingError::Api {
-            status: response.status(), message: "Subscription request rejected; check login, model access and subscription limits. No API-key fallback was attempted.".into(),
-            model_metadata: None, retry_after_secs: None, should_retry: Some(false), error_code: None,
-        });
+/// Bytes of a non-2xx subscription error body read before the rest is discarded.
+/// Same cap the token-exchange reader uses (`fuigo-shell` `auth::subscription::flow`).
+/// Oversized bodies are TRUNCATED rather than rejected; a truncated envelope stops
+/// parsing as JSON, so `user_facing_api_error_message` falls back to its status copy
+/// instead of surfacing a half-read one.
+const MAX_ERROR_BODY_BYTES: usize = 65_536;
+
+/// A hung error-body read must not outlive the turn. The old code returned without
+/// reading at all, so any wait here is new; whatever arrived by the deadline is used.
+const ERROR_BODY_READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The one fact the provider's own body can never carry, kept as an ADDITION to it.
+const NO_API_KEY_FALLBACK_ADVICE: &str =
+    "Check login, model access and subscription limits. No API-key fallback was attempted.";
+
+/// Turn a subscription response into the same error envelope the API-key transport builds.
+///
+/// Before 1.0.21 this path hardcoded `should_retry: Some(false)`, which
+/// [`SamplingError::is_retry_vetoed`] reads as "the server says the request content caused
+/// this" — a shared veto that made every transient subscription 503 lose the turn, while an
+/// API-key user on the identical status backed off and retried. The veto is now reserved for
+/// what the header actually means, and retryability comes from the status, through the same
+/// `is_retryable_api_status` every other caller uses: 429 and 5xx retry, 4xx does not, 401
+/// stays fatal via `is_auth_error`.
+///
+/// Retrying here cannot double-charge. `classify` only ever sees a response HEAD: a non-2xx
+/// status line is the provider refusing before any completion was produced, which is a
+/// different thing from P14's ambiguous exchange (a read that failed *after* a 2xx, where the
+/// reply may have been generated and lost). Nothing in this function can reach a 2xx body.
+async fn classify(mut response: Response) -> Result<Response> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
     }
-    Ok(response)
+    // Read the headers before the body: `chunk()` borrows the response mutably.
+    let retry_after_secs = crate::client::extract_retry_after(status, response.headers());
+    let should_retry = crate::client::extract_should_retry(response.headers());
+    let model_metadata = crate::client::extract_model_metadata(response.headers());
+    let body = read_bounded_error_body(&mut response).await;
+    // Only structured JSON envelopes survive `user_facing_api_error_message`; HTML edge pages
+    // and plain-text dumps become status copy, so a raw body can never reach a log or the user.
+    let provider = fuigo_sampling_types::user_facing_api_error_message(status, &body);
+    Err(SamplingError::Api {
+        status,
+        message: format!("{provider} {NO_API_KEY_FALLBACK_ADVICE}"),
+        model_metadata,
+        retry_after_secs,
+        should_retry,
+        error_code: fuigo_sampling_types::parse_error_code(&body),
+    })
+}
+
+/// Bounded, best-effort read of an error body. A read that fails or times out partway yields
+/// what arrived: the status already decided retryability, and a failed read of an error body
+/// is not evidence the request was never delivered — the provider had already answered.
+async fn read_bounded_error_body(response: &mut Response) -> Vec<u8> {
+    let mut body = Vec::new();
+    let _ = tokio::time::timeout(ERROR_BODY_READ_BUDGET, async {
+        while let Ok(Some(chunk)) = response.chunk().await {
+            let room = MAX_ERROR_BODY_BYTES.saturating_sub(body.len());
+            if room == 0 {
+                break;
+            }
+            body.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        }
+    })
+    .await;
+    body
 }
 
 /// Reasoning siblings precede the assistant item carrying their emitting model.

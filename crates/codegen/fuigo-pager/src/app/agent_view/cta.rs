@@ -862,6 +862,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_installing_shows_label_spinner_and_no_buttons() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Installing {
@@ -885,6 +886,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_awaiting_phases_show_setting_up_with_spinner_and_no_buttons() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         for phase in [
             CtaPhase::AwaitingReload {
@@ -913,6 +915,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_installed_shows_checkmark_and_no_buttons() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Installed {
@@ -931,6 +934,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_matched_shows_install_copy_and_colored_name() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -963,6 +967,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_matched_hovered_connect_highlights() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -1020,6 +1025,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_error_shows_retry_and_dismiss_rects() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Error {
@@ -1041,6 +1047,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_matched_shows_keyboard_hint() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -1059,6 +1066,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_matched_drops_hint_when_narrow_but_keeps_buttons() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -1079,6 +1087,7 @@ mod plugin_cta_notify_tests {
 
     #[test]
     fn draw_matched_hint_yields_to_message_at_intermediate_width() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::agent_view::CtaPhase;
         let mut agent = make_agent();
         agent.plugin_cta.phase = CtaPhase::Matched {
@@ -1136,5 +1145,42 @@ mod plugin_cta_notify_tests {
         agent.handle_input(&ev, &registry);
         assert_eq!(agent.plugin_cta.phase, CtaPhase::Hidden);
         assert!(agent.pending_effects.is_empty());
+    }
+
+    /// P49 (P17-F1's open MEDIUM): clicking the CTA's `[x]` must not write
+    /// `config.toml` on the input thread, where the write could wait up to the
+    /// lock timeout. The click hides the CTA at once and hands the write to an
+    /// effect.
+    #[test]
+    fn dismissing_the_cta_defers_the_config_write_to_an_effect() {
+        let _theme = crate::theme::cache::pin_theme();
+        use crate::app::actions::Action;
+        use crate::app::agent_view::CtaPhase;
+        use crate::app::app_view::InputOutcome;
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        let mut agent = make_agent();
+        agent.plugin_cta.phase = CtaPhase::Matched {
+            plugin_relative_path: "plugins/figma".into(),
+            name: "figma".into(),
+        };
+        let area = ratatui::layout::Rect::new(0, 0, 60, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        agent.draw_plugin_cta(&mut buf, area, &crate::theme::Theme::current());
+        let rect = agent.plugin_cta.hit_dismiss.rect.expect("[x] rendered");
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: rect.x,
+            row: rect.y,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(
+            matches!(
+                &outcome,
+                InputOutcome::Action(Action::PersistPluginCtaDismissal(id)) if id == "figma"
+            ),
+            "the write must be an effect, not done inline"
+        );
+        assert!(agent.plugin_cta.dismissed.contains("figma"));
+        assert!(matches!(agent.plugin_cta.phase, CtaPhase::Hidden));
     }
 }

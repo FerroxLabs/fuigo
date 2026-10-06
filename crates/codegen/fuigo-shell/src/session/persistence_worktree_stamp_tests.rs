@@ -18,6 +18,9 @@ fn worktree_cwd_under(home: &std::path::Path) -> String {
 #[test]
 #[serial]
 fn summary_new_stamps_kind_label_and_source_for_worktree_cwd() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let cwd = worktree_cwd_under(home.path());
@@ -40,6 +43,9 @@ fn summary_new_stamps_kind_label_and_source_for_worktree_cwd() {
 #[test]
 #[serial]
 fn summary_new_leaves_worktree_fields_unset_for_plain_cwd() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let plain_cwd = home.path().join("project");
@@ -62,6 +68,9 @@ fn summary_new_leaves_worktree_fields_unset_for_plain_cwd() {
 #[tokio::test]
 #[serial]
 async fn new_with_explicit_dir_overrides_worktree_stamp_so_subagent_stays_hidden() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = tempfile::TempDir::new().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
     let cwd = worktree_cwd_under(home.path());

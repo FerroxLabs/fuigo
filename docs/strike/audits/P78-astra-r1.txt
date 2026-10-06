@@ -1,0 +1,23 @@
+# P78 Astra round 1 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..65d7401a
+# Full transcript was 8330 lines of tool output; this is the final report, verbatim.
+
+Audited `37a5b9d4..65d7401a` using git and file reads only. No builds, tests, or file changes.
+
+1. **MEDIUM — Reader guard checks token presence, not lock lifetime.** [theme_pin_guard_tests.rs:528](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:528)  
+   An uncalled nested function or closure containing `pin_theme()`, a pin acquired after assertions, or `drop(pin_theme())` all satisfy the scanner while leaving assertions unprotected. Bare `test_lock()` also passes without acquiring anything. Existing scanner tests catch none of these. Same-name functions are checked individually, so a pinned sibling cannot conceal a parsed unpinned test; however, module identity and conditional compilation are not distinguished. The four currently listed readers genuinely hold their guards.
+
+2. **MEDIUM — The Python probe can hang indefinitely or leak its child on failure.** [tests.rs:2331](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2331)  
+   The 120-second deadline covers only arrival at `writing`; `child.wait()` has no deadline. A writer stuck after release never finishes the test. If creating `go` fails, Rust panics while Python remains in its polling loop; dropping `Child` does not terminate or reap it. Existing tests exercise successful completion only. Use bounded exit observation and an unconditional kill/reap guard.
+
+3. **LOW — Matcher freshness is not guaranteed by every new predicate.** [prompt.rs:3146](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs:3146), [history_search.rs:664](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/views/history_search.rs:664)  
+   With the daemon unscheduled, the dispatch test’s initial `result_count() == 0` succeeds on the default snapshot without processing `"third"`. This weakness already existed; the final `"third prompt"` assertion still requires real output. Likewise, reactivation with identical history can satisfy the opening-list predicate using the previous activation’s snapshot; a subsequent generation-only query wait could then consume the pending reset rather than its query answer. Current helper callers use fresh states, so that second scenario is presently unexercised. Existing regression tests do not establish request-specific freshness.
+
+Claims that hold:
+
+- **History root cause:** supported. Silent exhaustion explains `0 != 5`; current unit-test callers now wait for actual opening content, including eagerly captured answers. Coalescing does not invalidate their subsequent generation wait. No assertions were loosened.
+- **Remaining waits:** no remaining silent matcher waits found. The 500-iteration helpers in `app/agent_view/prompt.rs:1402` and `prompt_stash.rs:195` explicitly panic on exhaustion.
+- **Gutter:** holding the shared pin fixes the concurrent-mutator race. It pins TrueColor and FuigoNight, but does not reset terminal-native lock or `AUTO_MODE`; inspected pager writers restore the native lock, and auto mode does not drive this render. Appearance is local/default and markdown content is freshly constructed under the pin. The `!has_color()` return is now redundant.
+- **Atomic dump:** correct imports, `HERE`, monkeypatch lookup, flush/close and sibling-file replacement. The probe would detect the original direct-write implementation. `pulls.txt` closes before the acknowledged rejection; marker files convey existence only. No new platform-specific incompatibility identified.
+- **General:** all changes are test-only; neither protected test was touched. No source-level visibility/import/compiler issue identified, but compilation and Clippy remain unverified. The 50-ms panic case has an impossible predicate; the 600-ms delay introduces no narrow success window, though it is not deterministic proof against the old polling implementation under every scheduling pattern.
+
+LAND-WITH-FOLLOWUPS

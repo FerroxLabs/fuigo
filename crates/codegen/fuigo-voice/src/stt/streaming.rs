@@ -52,11 +52,7 @@ impl StreamingSttSession {
         // Billing itself follows the `Authorization` bearer (per-user for OAuth, BYOK key owner otherwise); these only enrich attribution
         // They are skipped when empty (e.g. the probe binary and tests) or when a value isn't a valid header.
         // A skip is never fatal: the connection is fully authorized without them
-        insert_optional_header(
-            &mut request,
-            "x-fuigo-client-identifier",
-            &config.client_identifier,
-        );
+        insert_attribution_header(&mut request, &url, config);
         insert_optional_header(&mut request, "User-Agent", &config.user_agent);
 
         // The default connector never sees the shared trust config.
@@ -233,6 +229,16 @@ fn insert_optional_header(request: &mut WsRequest, name: &'static str, value: &s
     }
 }
 
+/// P43: `x-fuigo-client-identifier` is identity-class, so only a FluxRouter-operated handshake
+/// (`wss` to the compiled host) carries it.
+fn insert_attribution_header(request: &mut WsRequest, url: &Url, config: &VoiceConfig) {
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(url.as_str())
+        .is_permitted()
+    {
+        insert_optional_header(request, "x-fuigo-client-identifier", &config.client_identifier);
+    }
+}
+
 fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
     // Resolve `auto` and aliases here so the wire value is always a concrete catalog code (the STT API does not accept `auto`, unlike TTS)
     let language = crate::language_for_api(&config.language);
@@ -251,6 +257,33 @@ fn build_stt_ws_url(config: &VoiceConfig) -> Result<Url, VoiceError> {
 
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: a streaming STT handshake to a host that is not FluxRouter-operated gets no
+    /// client identifier; `wss` to FluxRouter still does.
+    #[test]
+    fn streaming_attribution_goes_only_to_fluxrouter() {
+        let config = VoiceConfig {
+            client_identifier: "fuigo-shell".into(),
+            ..VoiceConfig::default()
+        };
+        let handshake = |url: &str| {
+            let url = Url::parse(url).unwrap();
+            let mut req = url.as_str().into_client_request().unwrap();
+            insert_attribution_header(&mut req, &url, &config);
+            req
+        };
+        let req = handshake("wss://api.fluxrouter.ai/v1/realtime/stt");
+        assert_eq!(req.headers()["x-fuigo-client-identifier"], "fuigo-shell");
+        for url in [
+            "wss://api.x.ai/v1/realtime/stt",
+            "wss://stt.example/v1/realtime/stt",
+            "ws://api.fluxrouter.ai/v1/realtime/stt",
+        ] {
+            assert!(
+                !handshake(url).headers().contains_key("x-fuigo-client-identifier"),
+                "{url} got the client identifier"
+            );
+        }
+    }
     use super::*;
 
     #[tokio::test]

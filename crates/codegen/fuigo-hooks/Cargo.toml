@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Runtime hook system for Fuigo — file-based discovery, command execution, and policy enforcement"
 
 [dependencies]
+fuigo-auth = { workspace = true }
 fastrand = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
@@ -20,12 +21,16 @@ toml = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 fuigo-config = { workspace = true }
+# P118: a key late-bound into a hook child is recorded for the sent-credential scrub.
+fuigo-secrets = { workspace = true }
 # Child-network restriction on hook command spawns; enforce is feature-unified
 # from the binary crate, matching the other consumers.
 fuigo-sandbox = { path = "../fuigo-sandbox", default-features = false }
 fuigo-tools = { workspace = true }
 
 [dev-dependencies]
+# Fault seams for the P61 error-path tests of the disabled-hooks writer.
+fuigo-config = { workspace = true, features = ["test-seams"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 

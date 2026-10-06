@@ -49,20 +49,45 @@ pub(super) fn spawn(manager: Arc<AuthManager>, auth: FuigoAuth) {
         };
         run_user_info_enrichment(&manager, auth).await;
         exit_guard.disarm();
+        #[cfg(test)]
+        manager
+            .enrichments_finished
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     });
 }
 
-async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> Option<UserInfo> {
+async fn fetch_user_info(manager: &AuthManager, auth: &FuigoAuth, log_label: &str) -> Option<UserInfo> {
     let user_url = format!("{}/user", manager.proxy_base_url);
+    // P47: a session credential goes only where the service-endpoint trust class admits `/user` (a static
+    // `AuthMode::ApiKey` keeps its own rules). A refusal is logged (with its remedy) and enrichment is skipped.
+    if crate::auth::session_delivery::service_session_gate(
+        auth,
+        &user_url,
+        Some(&manager.proxy_base_url),
+        "auth_enrichment",
+    )
+    .is_err()
+    {
+        fuigo_telemetry::unified_log::warn(
+            &format!("{log_label} skipped"),
+            None,
+            Some(serde_json::json!({ "reason": "destination_refused" })),
+        );
+        return None;
+    }
     let token_header = &manager.fuigo_com_config.token_header;
     let started = std::time::Instant::now();
     let http_client = crate::http::shared_client();
     let response = http_client
         .get(&user_url)
         .timeout(USER_FETCH_TIMEOUT)
-        .header("Authorization", format!("Bearer {}", key))
+        .header("Authorization", format!("Bearer {}", auth.key))
         .header("X-XAI-Token-Auth", token_header.as_str())
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity-class header, FluxRouter-operated destinations only.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&user_url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -126,7 +151,7 @@ async fn fetch_user_info(manager: &AuthManager, key: &str, log_label: &str) -> O
 
 /// Blocking enrichment at login: merges `/user` fields into `auth` before the first save.
 pub(super) async fn enrich_inline(manager: &AuthManager, auth: &mut FuigoAuth) {
-    let Some(ui) = fetch_user_info(manager, &auth.key, "auth login enrichment").await else {
+    let Some(ui) = fetch_user_info(manager, auth, "auth login enrichment").await else {
         return;
     };
     apply_user_info_enrichment(auth, ui);
@@ -134,11 +159,13 @@ pub(super) async fn enrich_inline(manager: &AuthManager, auth: &mut FuigoAuth) {
 
 async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
     let started = std::time::Instant::now();
-    let Some(user_info) = fetch_user_info(manager, &auth.key, "auth update enrichment").await
+    let Some(user_info) = fetch_user_info(manager, &auth, "auth update enrichment").await
     else {
         return;
     };
     let user_elapsed_ms = started.elapsed().as_millis() as u64;
+    #[cfg(test)]
+    EnrichmentGate::pass(manager, GatePoint::BeforeMerge);
 
     // Read-modify-write under the file lock. On timeout, skip the write rather than proceed unlocked.
     // An unlocked read-modify-write can silently revert a freshly rotated access or refresh token on disk
@@ -161,6 +188,9 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
         return;
     };
 
+    // The file lock orders processes (every auth.json writer takes it); the auth-state lock pairs this merge's disk write
+    // with its in-memory write (see `auth_state_lock`). Held from the read through the in-memory write below.
+    let _state = crate::auth::storage::auth_state_lock();
     let Ok(mut map) = read_auth_json(&manager.path) else {
         fuigo_telemetry::unified_log::warn(
             "auth update enrichment skipped",
@@ -187,12 +217,27 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
             None,
             Some(serde_json::json!({
                 "reason": "sibling_rotated",
-                "written_key_prefix": fuigo_auth::bearer_suffix(&auth.key),
-                "disk_key_prefix": fuigo_auth::bearer_suffix(&disk.key),
+                "written_key_prefix": fuigo_auth::bearer_fingerprint(&auth.key),
+                "disk_key_prefix": fuigo_auth::bearer_fingerprint(&disk.key),
             })),
         );
         return;
     }
+    // The same test against memory: a logout, a cleared session, or a newer credential that reached memory but not disk
+    // (an `update` whose write failed keeps it in memory) must not be replaced by this older credential's merge.
+    let memory_moved = manager.with_inner_read(|current| {
+        current.is_none_or(|c| c.key != auth.key || c.refresh_token != auth.refresh_token)
+    });
+    if memory_moved {
+        fuigo_telemetry::unified_log::info(
+            "auth update enrichment skipped",
+            None,
+            Some(serde_json::json!({ "reason": "superseded_in_memory" })),
+        );
+        return;
+    }
+    #[cfg(test)]
+    EnrichmentGate::pass(manager, GatePoint::BeforeWrite);
 
     apply_user_info_enrichment(&mut disk, user_info);
 
@@ -222,6 +267,51 @@ async fn run_user_info_enrichment(manager: &AuthManager, auth: FuigoAuth) {
             "total_ms": started.elapsed().as_millis() as u64,
         })),
     );
+}
+
+/// Where a test parks an enrichment: after its `/user` fetch, before it takes any lock; or inside the merge, after
+/// every staleness check passed and before it writes (holding the file lock and the auth-state lock).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GatePoint {
+    BeforeMerge,
+    BeforeWrite,
+}
+
+/// Test-only: the next enrichment to reach `point` reports arrival on `arrived` and blocks its worker thread until
+/// `release` fires (or is dropped). One-shot. Lets a test force an interleaving instead of hoping load produces it.
+#[cfg(test)]
+pub(crate) struct EnrichmentGate {
+    pub(crate) point: GatePoint,
+    pub(crate) arrived: std::sync::mpsc::Sender<()>,
+    pub(crate) release: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg(test)]
+impl EnrichmentGate {
+    fn pass(manager: &AuthManager, point: GatePoint) {
+        let gate = {
+            let mut slot = manager.enrichment_gate.lock();
+            if slot.as_ref().is_some_and(|g| g.point == point) {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            manager
+                .enrichment_parked
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let _ = gate.arrived.send(());
+            // Bounded so a test that never releases fails on its own wait instead of hanging this worker forever.
+            let _ = gate
+                .release
+                .recv_timeout(std::time::Duration::from_secs(120));
+            manager
+                .enrichment_parked
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 }
 
 /// Merge enrichment fields into disk auth. Does not touch token fields.
@@ -257,5 +347,30 @@ pub(super) fn apply_user_info_enrichment(disk: &mut FuigoAuth, user_info: UserIn
         && !email.is_empty()
     {
         disk.email = user_info.email;
+    }
+}
+
+#[cfg(test)]
+mod p43_identity_tests {
+    /// P43 hostile: the `/user` enrichment fetch to a proxy that is not FluxRouter-operated
+    /// carries no client version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_enrichment_sends_no_identity_to_a_non_fluxrouter_proxy() {
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let dir = tempfile::tempdir().unwrap();
+        let manager =
+            super::AuthManager::new(dir.path(), crate::auth::FuigoComConfig::default())
+                .with_proxy_base_url(&base);
+        // A static API key: P47's service-endpoint gate leaves it alone, so the request reaches the loopback mock
+        // and this test still observes what P43 decides about identity.
+        let auth = crate::auth::FuigoAuth {
+            key: "token".into(),
+            auth_mode: crate::auth::AuthMode::ApiKey,
+            ..crate::auth::FuigoAuth::test_default()
+        };
+        let _ = super::fetch_user_info(&manager, &auth, "p43").await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "auth_enrichment");
     }
 }

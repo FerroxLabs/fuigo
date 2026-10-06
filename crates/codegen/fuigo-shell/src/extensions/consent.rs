@@ -45,6 +45,8 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             agent.auth_manager.clone(),
             None,
             None,
+            Some(proxy_url.clone()),
+            "consent",
         ),
     );
     let client = crate::http::with_auth_retry(crate::http::shared_client(), provider);
@@ -52,13 +54,18 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let resp = client
         .post(&url)
         .timeout(RECORD_TIMEOUT)
-        // The server re-runs the same targeting rules, and those read this header.
-        .header(
-            "x-fuigo-client-identifier",
-            crate::http::process_client_identifier(),
+        // The server re-runs the same targeting rules, and those read the client identifier.
+        // P43: identity only to a FluxRouter-operated destination.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&url).header_map([
+                (
+                    "x-fuigo-client-identifier",
+                    crate::http::process_client_identifier().as_str(),
+                ),
+                ("x-fuigo-client-version", fuigo_version::VERSION),
+            ]),
         )
         .header("X-XAI-Token-Auth", &token_header)
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -69,7 +76,12 @@ async fn handle_record(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }))
         .send()
         .await
-        .map_err(|e| crate::acp_error::internal_error(format!("HTTP request failed: {e}")))?;
+        .map_err(|e| {
+            crate::acp_error::internal_error(
+                crate::auth::session_delivery::bearer_refusal_text(&e)
+                    .unwrap_or_else(|| format!("HTTP request failed: {e}")),
+            )
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();

@@ -22,6 +22,9 @@
 //! 3. The session (backend) survives an OOM and can run another command after
 //! 4. Background tasks are also killed on OOM
 //! 5. A gradual allocator that slowly ramps up past the limit
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::HashMap;
 use std::path::PathBuf;

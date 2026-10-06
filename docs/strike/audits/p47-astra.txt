@@ -1,0 +1,411 @@
+=================== P47 Astra round 1 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-1.txt) ===================
+Reviewed `2c24358e..15279388` read-only. Worktree remains clean. Findings below are source-level; I did not run tests.
+
+1. **HIGH — Static storage clients still bypass the predicate.**  
+   [storage_client.rs:475](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:475) and [gcs.rs:37](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/gcs.rs:37) wrap raw `user_token` credentials with `BearerDestination::Unrestricted`. `StorageClient::new("http://127.0.0.1:PORT", session_token)` therefore still stamps and sends the session bearer. The comment assuming prior validation by shell does not cover this public constructor or bare `TraceExportConfig` callers.  
+   **Fix:** install a checked service predicate for static user tokens; retain unrestricted delivery only for explicitly classified non-session credentials. Test these file-utils entry points directly.
+
+2. **HIGH — Destination authorization can classify a different credential from the one being sent.**  
+   [retry_middleware.rs:119](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:119) captures token **S**, then calls `bearer_may_reach()`. [credential_provider.rs:134](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/credential_provider.rs:134) independently rereads the manager to determine whether the credential is an exempt API key. If an auth-mode switch lands between these reads, the check can exempt key **K** while the middleware stamps session token **S** onto a refused destination. The retry stamp and [OTLP provider:422](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/credential_provider.rs:422) have the same separation.  
+   **Fix:** authorize the exact captured credential—carry its classification in the snapshot or pass its token to a value-based check. Add a deterministic interleaving regression test.
+
+3. **HIGH — Upload refusals still enter retry loops, and their type is erased before queue classification.**  
+   The new terminal check at [queue.rs:2021](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/queue.rs:2021) cannot recognize refusals returned by ordinary `upload()` / `upload_file()`: [storage_client.rs:1244](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1244) and [storage_client.rs:1368](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1368) first retry every middleware error as a network failure, then stringify it. The queue consequently classifies the resulting error as retryable. No request escapes the middleware, but refusal is not terminal.  
+   **Fix:** detect refusal before storage retries and preserve the typed error through `anyhow::Context`. Replace or supplement [queue_tests.rs:1801](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/queue_tests.rs:1801), which manually constructs an error chain those upload methods do not preserve, with an actual upload-through-queue test.
+
+4. **MEDIUM — Settings refusal is treated as credential rejection, and several clients discard the remedy.**  
+   [remote/client.rs:678](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client.rs:678) discards the refusal and returns `SettingsFetch::Rejected`. Its caller at [agent_ops.rs:1564](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:1564) interprets that as 401, invokes auth recovery, and can fetch again. Enrichment and subscription checks also discard the error. Their claimed “logged with remedy” behavior is absent: [session_delivery.rs:96](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/session_delivery.rs:96) logs only origin and reason, never the refusal’s remedy text.  
+   **Fix:** preserve a distinct terminal destination-refusal outcome, bypass auth recovery, and surface/log the complete sanitized refusal.
+
+5. **MEDIUM — The promised `AuthMode::ApiKey` exemption is incomplete.**  
+   [agent/config.rs:497](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/config.rs:497) treats every supplied `auth_token` as a session token. The pager trace caller passes `auth.key` without retaining its mode, so a static API key is now dropped for a previously usable local/HTTP proxy. Similarly, [leader/server.rs:1095](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:1095) applies the session-only gate before resolving the leader’s credential, including API-key credentials. These contradict the documented exemption.  
+   **Fix:** retain credential kind through these paths and apply the predicate only to session credentials; test static-key controls alongside session refusals.
+
+6. **MEDIUM — Some acceptance tests now pass without exercising their claimed behavior.**  
+   The new enrichment gate makes [manager_tests.rs:2580](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2580) vacuous: it still targets HTTP loopback, so enrichment never starts and the “user changes mid-flight” assertions pass without exercising the race. The relay test at [app.rs:1547](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/app.rs:1547) saves task handles but never checks completion; zero accepted WebSockets followed by cancellation does not prove refusal stopped the reconnect loop.  
+   **Fix:** front the remaining enrichment fixture and synchronize on handler entry; assert relay tasks terminate before cancellation, with connection-attempt instrumentation.
+
+The predicate itself handles the requested scheme, userinfo, IPv4/IPv6/mapped-loopback, localhost-subdomain, and effective-port checks correctly by inspection. The compiled FluxRouter arm is restricted to HTTPS/default port.
+
+Most new wire tests have meaningful positive controls, and `observed()` drains observations between controls. `fronted_child` verifies that the intended child test actually ran. Leader hub overrides are checked against independently configured `[hub].url`; standalone [hub_auth:353](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:353) instead treats its CLI-supplied hub URL itself as operator configuration, so it has no independent origin allowlist.
+
+DO-NOT-LAND
+
+=================== P47 Astra round 2 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-2.txt) ===================
+Reviewed `2c24358e..146064ec`, including the round-1 fixes in `15279388..146064ec`. Worktree remains clean. Findings are source-level; tests were inspected, not executed.
+
+1. **MEDIUM — Middleware checks userinfo after reqwest has removed it.**  
+   [retry_middleware.rs:121](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:121) checks `req.url()`. The pinned reqwest implementation strips username/password during request construction ([request.rs:176](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.24/src/async_impl/request.rs:176)). Consequently, `StorageClient::new("https://user:pass@api.fluxrouter.ai/v1", session_token)` reaches the predicate as a clean FluxRouter URL and can send the session bearer. The required userinfo refusal never occurs. Feedback and other middleware clients have the same boundary problem.  
+   **Fix:** validate the original destination before reqwest constructs the request, retaining the middleware check for each stamp. Add a wire test with userinfo on the compiled FluxRouter origin.
+
+2. **MEDIUM — M5 remains unresolved: static API-key classification does not survive the complete upload path, and leader exposure still gates API keys.**  
+   [config.rs:524](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/config.rs:524) returns the API key as an unclassified `UploadMethod::Proxy.user_token`. Pager passes that through a bare `TraceExportConfig`; [gcs.rs:41](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/gcs.rs:41) then classifies it as a session token and refuses HTTP/loopback uploads. The new [test:605](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:605) stops at method resolution, before this failure. Pager’s outer retry also retries the refusal.
+
+   Separately, [leader/server.rs:1095](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:1095) still unconditionally applies the session gate before resolving credentials. The documentation now describes that restriction as deliberate, but it does not satisfy the original API-key exemption.  
+   **Fix:** preserve credential kind through actual upload dispatch and hub connect/reconnect. Add end-to-end API-key positive controls alongside session refusals.
+
+3. **MEDIUM — H3’s terminal-refusal fix remains incomplete for multipart uploads.**  
+   [storage_client.rs:2117](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:2117) preserves a part’s typed refusal, but [collect_upload_results:1797](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1797) immediately stringifies part errors. This loses both the refusal type and its underlying remedy. [queue.rs:2021](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/queue.rs:2021) therefore misses it and falls through to retryable.
+
+   A concrete trigger is an exempt API key admitting multipart initialization at a local proxy, followed by an auth switch to a session credential before proxy-part upload.  
+   **Fix:** preserve a typed refusal through aggregation and stop the upload cycle. Test refusal after successful multipart initialization.
+
+4. **MEDIUM — The H1 fix makes an existing redirect-security test vacuous.**  
+   [gcs.rs:735](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/gcs.rs:735), `proxy_fallback_rejects_cross_origin_redirect`, still supplies a static session token to an HTTP-loopback source. The new guard rejects the initial request. Its assertions—an error and zero destination hits—now pass without receiving or evaluating a redirect.  
+   **Fix:** use an explicitly exempt deployment-key fixture or an admitted TLS source. Assert that the source received the request, the failure identifies redirect rejection, and the destination received nothing.
+
+5. **MEDIUM — Malformed OTLP endpoint refusals log the complete input.**  
+   [otel_layer/mod.rs:255](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:255) interpolates the raw endpoint into a refusal and logs it. An invalid-port URL containing userinfo or `?token=...` exposes those values; it also omits the prescribed remedy.  
+   **Fix:** use the sanitized `RefusedServiceDestination` unparseable response. Test malformed endpoints containing fake secrets and assert those secrets never appear.
+
+Round-1 disposition:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-2 read-only audit completed. Acceptance failures remain. |
+| H1: unchecked static storage | ✅ Done | Checked destination installed at [storage_client.rs:499](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:499) and `gcs.rs:41`. Separate userinfo integration gap above. |
+| H2: credential/check race | ✅ Done | Exact captured value checked at middleware lines 121/146; value-based exemptions at [credential_provider.rs:136](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/credential_provider.rs:136) and :427. Deterministic interleaving test added. |
+| H3: upload retry/type loss | ⬜ Pending | Ordinary upload paths fixed at storage-client lines 1295/1425; multipart aggregation remains unresolved. |
+| M4: settings recovery/remedy | ✅ Done | Distinct refusal at [remote/client.rs:690](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client.rs:690) bypasses 401 recovery; full sanitized message logged at [session_delivery.rs:100](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/session_delivery.rs:100). |
+| M5: API-key exemption | ⬜ Pending | Both remaining failures described above. |
+| M6: enrichment/relay test vacuity | ✅ Done | Handler-entry synchronization at [manager_tests.rs:2622](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2622); relay termination before cancellation at [app.rs:1554](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/app.rs:1554). Separate redirect-test regression above. |
+
+The predicate itself correctly handles the requested scheme, loopback variants, userinfo, effective-port matching, and compiled FluxRouter restriction by inspection. The service wire tests generally have meaningful positive controls, and `fronted_child` verifies child execution. Leader/workspace/OTLP rule tests establish narrower evidence than actual transport tests.
+
+DO-NOT-LAND
+
+=================== P47 Astra round 3 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-3.txt) ===================
+Reviewed `2c24358e..2b755526`, including all round-2 changes. **Two MEDIUM findings and one LOW remain; no BLOCKER or HIGH found.** Read-only source review: tests were inspected, not executed. `git diff --check` passed; worktree remains clean.
+
+1. **MEDIUM — Userinfo protection is lost between the first stamp and retry.**  
+   [retry_middleware.rs:139](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:139) replaces the `Basic` header—the new userinfo marker—with the first bearer. Line 142 then clones that modified request. The retry check at line 163 consequently sees neither URL userinfo nor its marker.
+
+   Concrete trigger: an exempt API key sends to `https://u:p@api.fluxrouter.ai/...`; the manager switches to session auth while that request is outstanding; successful 401 recovery supplies a session bearer. The retry admits the cleaned FluxRouter URL and sends the session token despite the original userinfo.
+
+   **Fix:** capture the original destination/userinfo marker before stamping and reuse it for every retry check. Add a deterministic API-key → session retry test asserting one initial request and zero session-bearing retries. The new [userinfo test:398](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:398) covers only initial refusal.
+
+2. **MEDIUM — Leader hub refusal still sends a request and can continue reconnecting.**  
+   [server.rs:304](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:304) converts refusal into an empty bearer. The SDK’s [reconnect path:1871](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection.rs:1871) passes that credential to `open_socket`, which [connects at line 1115](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection.rs:1115).
+
+   After an API-key → session switch on a refused hub, the session token is withheld, but the handshake still leaves the machine. A 401/403 stops the SDK; other transport failures enter its reconnect loop. A hub accepting the empty credential can proceed to the workspace handshake. This violates the original no-request requirement. The documentation’s “SDK owns the reconnect” explanation does not resolve that violation.
+
+   **Fix:** propagate destination refusal as a terminal connection error before `open_socket`, preserving the origin/remedy. Replace the [empty-bearer assertion:5016](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server_tests.rs:5016) with a reconnect transport test proving no additional connection attempt and terminal completion.
+
+3. **LOW — The workspace exception has an incorrect factual rationale.**  
+   [destination-trust-policy.md:151](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/docs/destination-trust-policy.md:151) says workspace upload/tool bearers are “always the OIDC session.” Leader-backed workspaces can receive an API key: [server.rs:278](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:278) expressly admits it, and [handle.rs:4415](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/handle.rs:4415) shares that provider with auxiliary services.
+
+   The stricter treatment is explicitly deliberate, so I am **not** treating it as an API-key exemption defect.  
+   **Fix:** document the actual rationale: workspace bearer providers lack credential-kind information and conservatively apply session rules, including to leader-supplied API keys.
+
+Round-2 disposition:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-3 read-only audit completed; two acceptance failures remain. |
+| Middleware userinfo | ⬜ Pending | Initial refusal fixed at `retry_middleware.rs:100`; retry loses the marker, finding 1. |
+| API-key classification through trace upload and hub | ✅ Done | Trace classification survives through [ClassifiedProxyUpload:48](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/upload/gcs.rs:48) and [pager dispatch:509](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-pager/src/trace_cmd.rs:509); retries exclude refusals at line 651. Hub classifies by value at `server.rs:278`; separate refusal defect above. |
+| Typed multipart refusal | ✅ Done | [storage_client.rs:1799](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1799) preserves the typed refusal before string aggregation; queue terminal classification remains at `queue.rs:2021`. |
+| Vacuous redirect test | ✅ Done | [gcs.rs:738](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/gcs.rs:738) uses a deployment key; assertions require one source hit and zero destination hits. |
+| Raw OTLP endpoint logging | ✅ Done | [otel_layer/mod.rs:256](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:256) uses sanitized refusal text; malformed-secret assertions are at line 509. |
+
+The broader review found no additional unguarded session-token send in the scoped paths. The [predicate:163](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-extra-ca/src/service_trust.rs:163) correctly checks scheme, userinfo, loopback variants, effective ports and the compiled FluxRouter arm by inspection. Inspected service bases originate in configuration; the standalone hub CLI supplies operator configuration, while the leader checks command overrides against its independently configured hub.
+
+The raw-token fallback is justified by missing classification. Relay’s session-only constructor supports its rationale. Skills intentionally applies the conservative rule to primary and alternate stored credentials; those alternates are not necessarily session-mode credentials.
+
+Service and managed-config wire tests have meaningful positive controls. `fronted_child` preserves the original behavioral assertions and verifies actual child entry. Relay termination is checked before cancellation. Workspace and OTLP tests provide narrower rule/configuration evidence; the leader test currently codifies the incorrect empty-bearer behavior.
+
+DO-NOT-LAND
+
+=================== P47 Astra round 4 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-4.txt) ===================
+Reviewed `2c24358e..c84eca3c`, including the round-3 fixes and integration fixture commit. **Two MEDIUM findings remain; no BLOCKER or HIGH found.** Source review only: tests were inspected, not executed. Worktree remains clean.
+
+1. **MEDIUM — Leader fix reintroduces the API-key exemption regression.**  
+   [server.rs:1113](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:1113) now applies the session-only rule before resolving credentials. Consequently, an `AuthMode::ApiKey` leader cannot use a previously permitted loopback `ws://` hub or off-configured-origin hub.
+
+   This eliminates the empty-bearer connection, but violates the original brief’s explicit API-key exemption. The replacement [test at server_tests.rs:4976](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server_tests.rs:4976) now asserts that regression. Documenting it as deliberate does not satisfy the original acceptance criterion.
+
+   **Fix:** preserve credential classification and perform a fallible check on the exact credential before **every** initial connection/reconnection. A session refusal must terminate before `open_socket`; an exempt API key must retain its previous behavior. Restore the API-key positive control and add a key→session reconnect test proving terminal refusal with no additional connection.
+
+2. **MEDIUM — Integration fixture commit breaks Windows test compilation.**  
+   In [tests/common/mod.rs:3](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/common/mod.rs:3), the existing `#[cfg(unix)]` now attaches to `front`, leaving `leader` ungated. That module imports the Unix-only `fuigo_test_support::leader` at line 12. Meanwhile, the cross-platform `start_seeded_mock` unconditionally references the now-Unix-only `front` at [line 316](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/common/mod.rs:316).
+
+   The five `test_startup_prefetch_*` targets include `common` without a Unix restriction. On Windows, both references are unresolved. This is a source-established compilation defect; I did not run a Windows build.
+
+   **Fix:** restore `#[cfg(unix)]` immediately above `pub mod leader`, and expose the portable TLS-front module on Windows. Compile the five startup-prefetch test targets with `test-support` on Windows.
+
+Round-3 disposition:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-4 read-only audit completed; two MEDIUM findings remain. |
+| Retry loses userinfo marker | ✅ Done | [retry_middleware.rs:139](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:139) captures the destination before stamping; line 166 reuses it for retries. The [regression test:435](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:435) requires one API-key request and zero session retries. |
+| Leader refusal still connects | ⬜ Pending | Empty-bearer connection removed, but the replacement violates the API-key exemption—finding 1. |
+| Workspace rationale | ✅ Done | [policy:152](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/docs/destination-trust-policy.md:152) correctly explains missing credential-kind information and possible leader-supplied API keys. |
+
+The whole-diff review found no additional unguarded session-token send in the requested service paths. Inspected service bases originate in configuration; leader command overrides are checked against the independently configured hub. Standalone workspace hub configuration comes from its operator-supplied URL.
+
+The [shared predicate:161](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-extra-ca/src/service_trust.rs:161) correctly applies userinfo, secure-scheme, loopback—including mapped IPv6 and localhost subdomains—and effective-port checks before admission. The compiled FluxRouter arm remains HTTPS/default-port only. Middleware checks the captured bearer value; static storage fallbacks are checked, and deployment-key exemptions remain intact outside finding 1.
+
+Refusal handling remains sound in storage, settings, relay and OTLP by inspection:
+
+- [Multipart aggregation:1797](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1797) preserves typed refusals; [queue.rs:2021](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/queue.rs:2021) treats them as terminal.
+- [Settings:684](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client.rs:684) returns a distinct refusal, bypassing 401 recovery.
+- [Relay:250](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/relay.rs:250) exits before reconnecting.
+- [OTLP:325](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:325) returns before export; retry credentials are checked again.
+
+Service and managed-config wire tests have meaningful positive controls. `fronted_child` preserves behavioral assertions and verifies actual child entry. Relay tests prove termination before cancellation. Workspace and OTLP tests provide narrower predicate/configuration evidence. The leader positive control reaches the auth wait; it does not prove a successful transport connection.
+
+`git diff --check` reports one cosmetic issue: an extra blank line at [front.rs:216](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/common/front.rs:216).
+
+DO-NOT-LAND
+
+=================== P47 Astra round 5 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-5.txt) ===================
+Reviewed **`2c24358e..a0927139`** on `strike/p47`, including the round-4 fixes. **No BLOCKER, HIGH, MEDIUM or LOW findings remain.** Read-only review; worktree is clean. Tests were inspected, not executed.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-5 whole-diff audit completed against the original brief. |
+| R4: leader API-key exemption and per-connect refusal | ✅ Done | [HubDestinationGuard:273](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:273) classifies the exact bearer by value and preserves the held static-key exemption. SDK checks precede both [initial socket opening:660](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection.rs:660) and [reconnect socket opening:1891](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection.rs:1891). [DestinationRefused:1733](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection.rs:1733) terminates reconnecting and evicts the matching pool entry. |
+| R4: misplaced Unix module gate | ✅ Done | [common/mod.rs:4](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/common/mod.rs:4) exposes the portable front unconditionally; `#[cfg(unix)]` immediately precedes `leader` at line 6. Windows compilation was not executed. |
+
+The full-scope checks found:
+
+- **Delivery paths and endpoint provenance:** No additional unguarded session-token send in the requested service clients. Inspected production callers derive service bases from configuration/environment. The leader checks command overrides against the independently configured hub at [server.rs:1140](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:1140). Standalone workspace treats its operator-supplied hub URL as configuration at [hub_auth/mod.rs:349](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:349); no server-returned URL was found promoted into a service base.
+
+- **Predicate and HTTP stamping:** [service_trust.rs:161](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-extra-ca/src/service_trust.rs:161) rejects userinfo, insecure schemes and loopback before admission, including mapped IPv6 and localhost subdomains. Origin matching includes effective ports; the compiled FluxRouter arm remains HTTPS/default-port only. [retry_middleware.rs:139](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-auth/src/retry_middleware.rs:139) preserves the userinfo marker and checks the captured bearer before both stamps. Static user-token fallbacks are checked; deployment and classified API keys retain their exemptions.
+
+- **SDK pool reuse:** A [pool hit:190](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/pool.rs:190) opens no socket and sends no replacement credential. The connection retains its original provider for reconnects. P47’s workspace path creates a [fresh private pool:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/hub.rs:214) with the guarded provider, so it cannot inherit a permissive pre-existing connection.
+
+- **Refusal handling:** Typed refusals survive [multipart aggregation:1797](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/storage_client.rs:1797) and receive [terminal queue classification:2021](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-file-utils/src/queue.rs:2021). [Settings:690](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client.rs:690) distinguishes refusal from 401 recovery; [relay:250](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/relay.rs:250) exits before connecting; [OTLP:324](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:324) skips export and rechecks refreshed credentials. Refusal text names the sanitized origin and remedy without the bearer.
+
+- **Test quality and regressions:** Service wire tests assert zero requests and positive token delivery. The [SDK reconnect test:3237](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs:3237) requires successful initial connection, autonomous shutdown on refusal, and no second TCP connection. The [leader guard test:5004](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server_tests.rs:5004) covers API-key admission followed by session refusal. `fronted_child` retains behavioral assertions and verifies child execution. No additional undocumented regression found.
+
+Evidence limits: leader command-level positive controls stop at the auth wait; workspace and OTLP checks are primarily predicate/configuration tests. This review establishes source correctness, not runtime or Windows qualification. `git diff --check` passes.
+
+LAND
+
+=================== P47 Astra round 6 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-6.txt) ===================
+Round 6 audited **`47d386f6` on `90c5a4af`**. The branch moved to `456b6eb5` during inspection; that later commit is outside this verdict. Findings below use `47d386f6` line numbers.
+
+- **HIGH — Shell tests cannot compile: stale enrichment caller.** [enrichment.rs:363](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs:363) passes `"token"` to `fetch_user_info`, whose second parameter is now `&FuigoAuth`. Update the P43 fixture to supply a classified credential.
+
+- **HIGH — Shell tests cannot compile: stale bundle-header callers.** [client_tests.rs:429](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:429), also line 440, supplies five arguments to the now six-argument `add_bundle_fetch_headers` and calls `.build()` on its returned `Result`. Supply the configured service base and handle the result; the cleartext case must expect refusal.
+
+- **MEDIUM — P43 identity fixtures conflict with P47’s delivery gate.** The tests send session credentials to HTTP loopback mocks, then require a received request. P47 correctly refuses those requests. Affected locations under `crates/codegen/fuigo-shell/src/`:
+  - `remote/agent.rs:220`
+  - `remote/conversations_client.rs:282`
+  - `remote/workspaces_client.rs:172`
+  - `remote/chat_models_client.rs:180`
+  - `remote/skills_client.rs:760`
+  - `remote/client_tests.rs:453`
+  - `agent/subscription_check.rs:199`
+  - `agent/feedback_client.rs:865`
+  - `agent/mvp_agent/tests.rs:3681`
+
+  Use a configured **HTTPS, non-FluxRouter** fixture and retain the request-arrival and identity-absence assertions.
+
+- **MEDIUM — Bundle success fixture now expects the wrong identity behavior.** [client_tests.rs:389](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:389) fronts the request as `https://api.fluxrouter.ai`, but lines 414–419 expect identity headers to be absent. P43 correctly includes them for that origin. Use a non-FluxRouter HTTPS service front to preserve this test’s intended assertion.
+
+- **MEDIUM — Relay identity test unwraps intentional refusals.** [relay.rs:749](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/relay.rs:749) expects successful request construction for cleartext `ws://` destinations with an OIDC credential. P47 rejects these. Keep the admitted `wss://` identity checks and assert refusal for the cleartext cases.
+
+No BLOCKER or LOW findings.
+
+The production rebase comparison is otherwise sound: **64 files in both patches; 62 have identical added/deleted lines**. The remaining differences are the enrichment-test adaptation and preservation of P43’s documentation section. No P47 gate or existing test function was lost; the four remote conflict resolutions retain both delivery and identity checks. The rewritten enrichment tests retain their synchronization and assertions, including credential-clear protection. No uncovered session-token send introduced by the upstream delta was found.
+
+`git diff --check` passes. Findings are from static inspection; builds and runtime tests were not executed in this read-only audit. No files were changed.
+
+**DO-NOT-LAND**
+
+=================== P47 Astra round 7 (gpt-6-astra, read-only; full transcript: Fuigo/p47-audit-astra-7.txt) ===================
+Round 7 audited **`3834c71c` against `90c5a4af`**, plus the test-only follow-up **`58cc9c3b`** that arrived during inspection.
+
+**Open findings: BLOCKER 0 · HIGH 0 · MEDIUM 0 · LOW 0.**
+
+All five Round 6 findings are closed:
+
+1. **HIGH — Stale enrichment caller:** [enrichment.rs:365](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/manager/enrichment.rs:365) constructs a classified `FuigoAuth` and passes `&auth`. Using an API key preserves this P43 identity test’s purpose; the separate [P47 enrichment test:130](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:130) covers session refusal and delivery.
+
+2. **HIGH — Stale bundle-header callers:** [client_tests.rs:430](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:430) and line 452 supply the service base and unwrap the returned `Result`. Line 440 explicitly expects `SessionDestinationRefused` for cleartext.
+
+3. **MEDIUM — P43 fixtures blocked by P47:** The converted fixtures use `front_service` at `remote/agent.rs:230`, `conversations_client.rs:292`, `workspaces_client.rs:182`, `chat_models_client.rs:190`, `skills_client.rs:770`, `client_tests.rs:475`, `agent/feedback_client.rs:874`, and `agent/mvp_agent/tests.rs:3690`. The [front:288](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/test_support/session_wire.rs:288), certificate SAN at line 301 and CONNECT routing at line 335 consistently use the non-FluxRouter service origin. Request-arrival and identity-absence assertions remain intact; child execution is checked rather than silently skipped.
+
+   **Subscription clarification:** [subscription_check.rs:204](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/subscription_check.rs:204) calls the inner helper below the gate. That unchanged fixture is valid. The gate in `single_check` is separately covered by [p47_service_wire_tests.rs:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:110).
+
+4. **MEDIUM — Bundle success identity mismatch:** [client_tests.rs:390](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:390) now uses the service front. Bundle-content, exact bearer, token-routing and identity-absence assertions remain.
+
+5. **MEDIUM — Relay unwraps refusals:** [relay.rs:745](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/relay.rs:745) expects refusal for cleartext destinations while retaining admitted `wss` identity checks.
+
+The full P47 diff preserves the original requirement: auxiliary session-token sends decide through `session_may_reach_service`; refusals prevent dispatch and retain a clear reason/remedy. I found no uncovered send, lost P43 gate, weakened security assertion or new regression. The follow-up adds initial hub-connect refusal coverage and makes the reconnect test discoverable by the P47 filter.
+
+`git diff --check` passes for both audited commits. **Static audit only:** compilation and runtime tests were not executed in this read-only sandbox. No files changed.
+
+**LAND**
+
+
+=================== P47 Astra round 8 — integration onto ae592509 (full transcript: Fuigo/p47-audit-astra-8.txt) ===================
+Audited **`9f185d3a` + `0e208bd4` on `ae592509`**, using the requested range-diff and cumulative patch comparison against **`48ea4ced` on `90c5a4af`**.
+
+**Security/integration findings: BLOCKER 0 · HIGH 0 · MEDIUM 0 · LOW 0.**
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-8 read-only integration audit complete. |
+| P47 preservation | ✅ Done | 62 files retain identical added/deleted patch lines. The four differing files match the documented resolutions. All 36 `p47_` function names survive; no gate or mutant-sensitive assertion was lost. |
+| P65 fixture resolution | ✅ Done | Both P65 fixture files remain byte-for-byte unchanged from the stacked tip. [common/mod.rs:323](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/common/mod.rs:323) retains the single-use HTTPS front, configuration loading and trust assertions. Dropping P47’s duplicate front loses no required coverage. |
+| P55 IPv6 behavior | ✅ Done | [server.rs:2722](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server.rs:2722) retains the parsed-host transport exemption and its [IPv6 test:5104](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/leader/server_tests.rs:5104). Standalone workspace refusal remains before credential reading; [hub_auth/mod.rs:885](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:885) explicitly covers both IPv6 schemes. |
+| Enrichment and lock/registration behavior | ✅ Done | [manager_tests.rs:2733](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/manager_tests.rs:2733) retains the event-driven gate, completion wait and preservation assertions. `fronted_child` supplies process isolation. P56/P64 implementation and race tests remain unchanged; workspace lock and unsaved-persist tests survive. |
+| P44 | ✅ Done | No P44 source or test file is changed by P47. |
+| Upstream session-token sends | ✅ Done | No uncovered send introduced between `90c5a4af` and `ae592509` was found across the four requested crates. File-utils and telemetry have no upstream delta. |
+| R059 settings disclosure | ✅ Done | Closed by source inspection: [client.rs:697](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client.rs:697) returns `DestinationRefused` before request construction or dispatch. Startup reaches this function through [fetch.rs:70](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/models/fetch.rs:70). The retained [wire test:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:153) requires zero hostile requests, distinct refusal and positive bearer delivery. |
+
+**Evidence limits:** static audit only; compilation, runtime tests and mutants were not rerun. Source `git diff --check` passes. The full check flags only inherited whitespace in the unchanged audit transcript and receipt. Worktree remains clean; no files changed.
+
+**LAND**
+
+=================== P47 Astra round 9 — s12 drain regression fix 5db96cbb (full transcript: Fuigo/p47-audit-astra-9.txt) ===================
+**BLOCKER: 0 · HIGH: 0 · MEDIUM: 0 · LOW: 0**
+
+Audited `5db96cbb35105cd0a3db9c8b850820b76d8c05f4` on `strike/p47`, read-only.
+
+- **Diagnosis is correct.** `UnreachableSource` supplies an empty token and loopback URL (`handle_tests.rs:2134`); `spawn_test_queue` expects transport failure followed by backoff (`handle_tests.rs:2148`). The middleware checks `Some("")` (`retry_middleware.rs:145`). Previously that produced a bearer refusal, classified as terminal (`queue.rs:2021`), which removed the artifact and decremented pending work (`queue.rs:1987`, `queue.rs:1993`). That explains both drain-count failures.
+
+- **The fix is correct and safe for the affected paths.** At `storage_client.rs:399`, only absent/empty user tokens gain the exemption; non-empty tokens still reach `service_session_destination`. `StaticFuigoAuth::apply` adds only the selected bearer and the constant `X-XAI-Token-Auth: xai-grok-cli` marker (`storage_client.rs:416`). It cannot resolve another session credential. The storage middleware actually stamps the immutable provider snapshot directly; the static provider cannot refresh into a real token (`auth_provider.rs:165`).
+
+- **Production credential wiring remains protected.** A supplied live provider replaces the static fallback entirely (`gcs.rs:37`). Thus an empty inline token alongside a real live session does **not** select the new exemption. Shell uploads retain their provider’s destination check (`upload/gcs.rs:108`, `auth/credential_provider.rs:143`). The shared upload client installs neither credential defaults nor a cookie store (`fuigo-http/src/lib.rs:341`). I found no affected production caller placing a session credential elsewhere on the empty-token request.
+
+- **This is the right layer.** The mistake is classifying an empty static value as a session credential. Correcting that classification preserves both the credential-less fixture’s intended transport failure and terminal handling for genuine security refusals. Changing the drain tests would conceal the classification regression.
+
+- **The new test is non-vacuous.** Its empty-token assertion at `storage_client.rs:2542` fails under the old condition, and its non-empty control at `:2550` rejects an overly broad exemption. The constructor check at `:2553` verifies absence of a typed refusal. Its limitation: it accepts any other error, so it does **not independently prove socket dispatch or specifically connection refusal**.
+
+No tests were rerun in this read-only audit; the reported 3/3 comparison is supplied evidence, not a fresh result.
+
+**LAND**
+
+
+===== ROUND 10 (s15 integration audit of the rebase onto strike/p69-s15 0d89295d; tip a1f11e3c) =====
+Transcript: Fuigo/p47-audit-astra-10.txt sha256 ce013318368fb31d7ef9026effa58b3c7bf0e3187b5665a502000d75d42c90ec
+
+**BLOCKER: 0 · HIGH: 0 · MEDIUM: 0 · LOW: 0**
+
+Audited `strike/p47` at `a1f11e3c`, including `e158ef6a` against `0d89295d` and the requested range-diff. No integration defect found.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Read-only rebase integration audit completed. |
+| Patch preservation | ✅ Done | 60 of 61 source files retain identical cumulative added/deleted patch lines. Only OTLP differs. All 37 `p47_` checks survive. |
+| OTLP conflict | ✅ Done | Exact-token refusal, pre-dispatch return, refresh re-check and P54 identity withholding remain intact. |
+| Added-base credential paths | ✅ Done | No new session-token bypass or P47-induced regression found in the specified paths. |
+| Provider/classification review | ✅ Done | Reviewed all 11 implementations: four production providers and seven test providers. |
+
+The supporting conclusions:
+
+- **OTLP resolution is correct.** [otel_layer/mod.rs:361](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:361) checks the resolved token and blanks it upon refusal. The [return at line 419](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:419) precedes export; [line 450](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:450) checks the refreshed token. P54 resource/span withholding remains applied. `IdentityCredentials` and its merged assertions correctly cover refused endpoints and the FluxRouter positive control.
+
+- **Provider decisions remain appropriate.** Shell and OTLP providers exempt only exact matching held static/deployment keys; other values receive the service predicate. `StaticAuthCredentialProvider` applies its constructor-supplied rule. [HubAuthCredentialProvider:177](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/upload/mod.rs:177) retains the documented conservative session rule because hub bearers lack credential-kind metadata.
+
+- **Runtime-key classification has an important distinction.** [is_held_static_key:118](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/session_delivery.rs:118) does **not** recognize a memory-only P08 key merely because it exists in the runtime store. Its callers consume manager-derived credentials, however; runtime keys instead follow the static-key resolver through [auth_method.rs:91](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/auth_method.rs:91). Persisted keys, including `fuigo/setApiKey`, are written with [AuthMode::ApiKey:451](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/storage.rs:451). I found neither a runtime-key refusal caused by this distinction nor a distinct session token incorrectly exempted.
+
+- **Added-base behavior survives.** P08’s sampler header resolver supplies explicit static keys. Registry requests retain P54 pseudonymization and pass through the [P47 provider wiring:196](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/session_registry_client.rs:196). The telemetry→crash-handler dependency supplies [panic classification:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/sentry.rs:275), introducing no session-credential transport.
+
+Source `git diff --check` passes; the worktree remains clean. Builds, runtime tests and mutants were not rerun.
+
+**LAND**
+[2mtokens used[0m
+183,930
+**BLOCKER: 0 · HIGH: 0 · MEDIUM: 0 · LOW: 0**
+
+Audited `strike/p47` at `a1f11e3c`, including `e158ef6a` against `0d89295d` and the requested range-diff. No integration defect found.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Read-only rebase integration audit completed. |
+| Patch preservation | ✅ Done | 60 of 61 source files retain identical cumulative added/deleted patch lines. Only OTLP differs. All 37 `p47_` checks survive. |
+| OTLP conflict | ✅ Done | Exact-token refusal, pre-dispatch return, refresh re-check and P54 identity withholding remain intact. |
+| Added-base credential paths | ✅ Done | No new session-token bypass or P47-induced regression found in the specified paths. |
+| Provider/classification review | ✅ Done | Reviewed all 11 implementations: four production providers and seven test providers. |
+
+The supporting conclusions:
+
+- **OTLP resolution is correct.** [otel_layer/mod.rs:361](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:361) checks the resolved token and blanks it upon refusal. The [return at line 419](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:419) precedes export; [line 450](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:450) checks the refreshed token. P54 resource/span withholding remains applied. `IdentityCredentials` and its merged assertions correctly cover refused endpoints and the FluxRouter positive control.
+
+- **Provider decisions remain appropriate.** Shell and OTLP providers exempt only exact matching held static/deployment keys; other values receive the service predicate. `StaticAuthCredentialProvider` applies its constructor-supplied rule. [HubAuthCredentialProvider:177](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-workspace/src/upload/mod.rs:177) retains the documented conservative session rule because hub bearers lack credential-kind metadata.
+
+- **Runtime-key classification has an important distinction.** [is_held_static_key:118](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/session_delivery.rs:118) does **not** recognize a memory-only P08 key merely because it exists in the runtime store. Its callers consume manager-derived credentials, however; runtime keys instead follow the static-key resolver through [auth_method.rs:91](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/auth_method.rs:91). Persisted keys, including `fuigo/setApiKey`, are written with [AuthMode::ApiKey:451](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/storage.rs:451). I found neither a runtime-key refusal caused by this distinction nor a distinct session token incorrectly exempted.
+
+- **Added-base behavior survives.** P08’s sampler header resolver supplies explicit static keys. Registry requests retain P54 pseudonymization and pass through the [P47 provider wiring:196](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/agent/session_registry_client.rs:196). The telemetry→crash-handler dependency supplies [panic classification:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-telemetry/src/sentry.rs:275), introducing no session-credential transport.
+
+Source `git diff --check` passes; the worktree remains clean. Builds, runtime tests and mutants were not rerun.
+
+**LAND**
+
+
+===== ROUND 10b (test-only delta a1f11e3c..726143f2 after the s15 focused runs) =====
+Transcript: Fuigo/p47-audit-astra-10b.txt sha256 82cc418548381663c6eb58c672d94881e1d61b98791585d3fd759184592ecb25
+
+No **BLOCKER, HIGH or MEDIUM** findings in `a1f11e3c..726143f2 -- crates`.
+
+**LOW — inaccurate sibling count:** [identity_body_guard.rs:188](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:188) says “7 siblings.” There are **six existing unified-log records**; the seventh baseline hit is the `user_id` parameter declaration. The new total of **8 is correct**. This is comment accuracy only.
+
+The test migration is correct. At [client_tests.rs:1370](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:1370), `front_service` supplies `https://service.example.test`, preserving the non-FluxRouter classification. The test still exercises production `upsert_session`, requires an actual captured body, rejects the raw machine ID, and checks the pseudonym against the fronted origin. The child runner checks both successful completion and an execution marker, so the parent’s early return does not silently skip coverage. This fixture uses **OIDC session authentication**; HTTP refusal is intentional P47 behavior. Static API-key exemptions remain separate.
+
+The four re-pins are justified:
+
+| Classification | Assessment |
+|---|---|
+| `subscription_check.rs` **7→8** | Correct count and classification as a local log writer, with the qualification below. |
+| [p47_service_wire_tests.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:49) **new 1** | Synthetic `FuigoAuth.user_id` fixture in a `#[cfg(test)]` module. |
+| [connection_tests.rs:3282](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs:3282) **9→10** | Synthetic identity in a mock hub’s reply. |
+| [murage_conformance_acp.rs:1787](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:1787) **1→3** | Empty `user_id` and null `email` in the on-disk fixture. Verified `1fe6498c` introduced both; `0d89295d` already contains three hits against a pin of one. |
+
+**“Local-only, never sent anywhere” would be incorrect.** The new subscription record writes locally and returns before the refused request. However, [trace.rs:884](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/upload/trace.rs:884) snapshots the full unified log for auth-diagnostics upload. P54 explicitly records this existing concern as deferred upload work in [R063:23](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/docs/strike/receipts/R063-p54.md:23). The re-pin does not resolve—or newly introduce—that upload mechanism.
+
+No other defects found in the delta. Read-only source review and scanner-equivalent count verification completed; Rust tests were not rerun.
+
+**LAND**
+[2mtokens used[0m
+95,485
+No **BLOCKER, HIGH or MEDIUM** findings in `a1f11e3c..726143f2 -- crates`.
+
+**LOW — inaccurate sibling count:** [identity_body_guard.rs:188](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:188) says “7 siblings.” There are **six existing unified-log records**; the seventh baseline hit is the `user_id` parameter declaration. The new total of **8 is correct**. This is comment accuracy only.
+
+The test migration is correct. At [client_tests.rs:1370](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/remote/client_tests.rs:1370), `front_service` supplies `https://service.example.test`, preserving the non-FluxRouter classification. The test still exercises production `upsert_session`, requires an actual captured body, rejects the raw machine ID, and checks the pseudonym against the fronted origin. The child runner checks both successful completion and an execution marker, so the parent’s early return does not silently skip coverage. This fixture uses **OIDC session authentication**; HTTP refusal is intentional P47 behavior. Static API-key exemptions remain separate.
+
+The four re-pins are justified:
+
+| Classification | Assessment |
+|---|---|
+| `subscription_check.rs` **7→8** | Correct count and classification as a local log writer, with the qualification below. |
+| [p47_service_wire_tests.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/auth/p47_service_wire_tests.rs:49) **new 1** | Synthetic `FuigoAuth.user_id` fixture in a `#[cfg(test)]` module. |
+| [connection_tests.rs:3282](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs:3282) **9→10** | Synthetic identity in a mock hub’s reply. |
+| [murage_conformance_acp.rs:1787](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:1787) **1→3** | Empty `user_id` and null `email` in the on-disk fixture. Verified `1fe6498c` introduced both; `0d89295d` already contains three hits against a pin of one. |
+
+**“Local-only, never sent anywhere” would be incorrect.** The new subscription record writes locally and returns before the refused request. However, [trace.rs:884](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/crates/codegen/fuigo-shell/src/upload/trace.rs:884) snapshots the full unified log for auth-diagnostics upload. P54 explicitly records this existing concern as deferred upload work in [R063:23](/Volumes/Mando/WaylandBots/Fuigo/wt-p47/docs/strike/receipts/R063-p54.md:23). The re-pin does not resolve—or newly introduce—that upload mechanism.
+
+No other defects found in the delta. Read-only source review and scanner-equivalent count verification completed; Rust tests were not rerun.
+
+**LAND**
+
+
+===== ROUND 10c (final delta 726143f2..09438a8f) =====
+Transcript: Fuigo/p47-audit-astra-10c.txt sha256 90d8060b379851518a72a694a036884d9fcca6d19c99b79460cb81dc297ea565
+
+No BLOCKER, HIGH, MEDIUM, or LOW findings in `git diff 726143f2 09438a8f -- crates`.
+
+- **Diagnosis is plausible.** `session_wire.rs:275–282` increments `route_generation` when the backend address changes; `:353–356` closes existing tunnels on that notification. The shared blocking client retains a connection pool (`fuigo-http/src/lib.rs:581–596`). A transport error with one attempt therefore becomes `Retry` (`remote/client.rs:765–772`). This explains the observed 401 case without requiring an incorrect status mapping.
+- **The fix preserves all six cases.** `remote/client_tests.rs:213–214` creates one server and configures the route once. Each iteration updates the reply before starting its request (`:216–219`); the handler clones both status and body under the mutex (`:187`). The blocking call completes before the next swap (`:221–222`), so no previous handler can acquire the next case’s reply. The valid JSON, 401, 403, 429, 500, and malformed JSON cases remain meaningful.
+- **The refusal record removes the intended identity.** `agent/subscription_check.rs:99–104` retains the event and refusal kind without `user_id`. The unified-log emitter does not inject it back. The guard pin at `identity_body_guard.rs:188` matches the independently recounted **7** tokens.
+
+Read-only source assessment against `09438a8f`; no tests executed or load-flake reproduction claimed.
+
+**LAND**
+[2mtokens used[0m
+52,467
+No BLOCKER, HIGH, MEDIUM, or LOW findings in `git diff 726143f2 09438a8f -- crates`.
+
+- **Diagnosis is plausible.** `session_wire.rs:275–282` increments `route_generation` when the backend address changes; `:353–356` closes existing tunnels on that notification. The shared blocking client retains a connection pool (`fuigo-http/src/lib.rs:581–596`). A transport error with one attempt therefore becomes `Retry` (`remote/client.rs:765–772`). This explains the observed 401 case without requiring an incorrect status mapping.
+- **The fix preserves all six cases.** `remote/client_tests.rs:213–214` creates one server and configures the route once. Each iteration updates the reply before starting its request (`:216–219`); the handler clones both status and body under the mutex (`:187`). The blocking call completes before the next swap (`:221–222`), so no previous handler can acquire the next case’s reply. The valid JSON, 401, 403, 429, 500, and malformed JSON cases remain meaningful.
+- **The refusal record removes the intended identity.** `agent/subscription_check.rs:99–104` retains the event and refusal kind without `user_id`. The unified-log emitter does not inject it back. The guard pin at `identity_body_guard.rs:188` matches the independently recounted **7** tokens.
+
+Read-only source assessment against `09438a8f`; no tests executed or load-flake reproduction claimed.
+
+**LAND**

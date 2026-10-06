@@ -8,6 +8,7 @@ mod lifecycle;
 mod load;
 mod modal;
 mod optimistic_home;
+mod relay_refusal;
 mod take_deferred;
 
 fn content_hit(id: &str) -> fuigo_shell::extensions::session_search::SearchSessionHit {

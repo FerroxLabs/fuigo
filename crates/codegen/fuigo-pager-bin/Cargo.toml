@@ -90,6 +90,10 @@ fuigo-tty-utils = { workspace = true, features = ["testing"] }
 # `clap::Parser` trait in scope).
 clap = { workspace = true, features = ["derive"] }
 tempfile = { workspace = true }
+# `headless_denial_process`: spawns this very binary against a scripted mock inference server. Its path is
+# `option_env!("CARGO_BIN_EXE_fuigo-pager")`, a COMPILE-time constant cargo sets for integration tests of the
+# package that owns the bin (not a runtime variable), handed to `run_headless_in_sandbox`.
+fuigo-test-support = { workspace = true }
 
 [features]
 default = [
@@ -99,12 +103,13 @@ default = [
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
-    "local-workspace",
     ]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc-ctl"]
 # fuigo-workspace no longer enables sandbox-enforce by default, so enable it here.
 sandbox-enforce = ["fuigo-pager/sandbox-enforce", "fuigo-workspace/sandbox-enforce"]
-local-workspace = ["fuigo-pager/local-workspace"]
 release-dist = [
     "fuigo-pager/release-dist",
     ]
+
+[lints]
+workspace = true

@@ -5,7 +5,7 @@ use super::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
 use crate::sampling::ApiBackend;
 use fuigo_sampler::config::AuthScheme;
 
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 #[serde(default)]
 pub struct ModelProviderConfig {
     pub base_url: Option<String>,
@@ -28,6 +28,57 @@ pub struct ModelProviderConfig {
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
     pub context_window: Option<u64>,
+    /// Ceiling on generated tokens for models routed through this provider,
+    /// inherited by every `[model.<id>]` that sets none of its own.
+    ///
+    /// A separate quantity from [`Self::context_window`], not a share of it:
+    /// on the Anthropic Messages API `max_tokens` is a hard per-model limit and
+    /// a request above it is rejected outright, while the context window says
+    /// how much history fits. Deriving one from the other conflates them.
+    ///
+    /// Without this field the only places a `max_tokens` could be set were
+    /// `[model.<id>]` and the global `[models]` table -- neither reachable from
+    /// the `/provider` flow that writes the provider entry, so an Anthropic
+    /// entry written the documented way had no key that could correct the
+    /// sampler's default.
+    pub max_completion_tokens: Option<u32>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ModelProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            base_url,
+            api_base_url,
+            env_key,
+            api_key,
+            api_backend,
+            auth_scheme,
+            extra_headers,
+            query_params,
+            env_http_headers,
+            auth_provider,
+            auth,
+            context_window,
+            max_completion_tokens,
+        } = self;
+        f.debug_struct("ModelProviderConfig")
+            .field("base_url", &base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("env_key", env_key)
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("api_backend", api_backend)
+            .field("auth_scheme", auth_scheme)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("env_http_headers", env_http_headers)
+            .field("auth_provider", auth_provider)
+            .field("auth", auth)
+            .field("context_window", context_window)
+            .field("max_completion_tokens", max_completion_tokens)
+            .finish()
+    }
 }
 
 pub(crate) fn model_provider_auth_name(provider_id: &str) -> String {
@@ -294,6 +345,7 @@ impl ConfigModelOverride {
             auth_provider,
             auth,
             context_window,
+            max_completion_tokens,
         } = provider;
 
         let mut merged = self.clone();
@@ -303,6 +355,9 @@ impl ConfigModelOverride {
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.auth_scheme = merged.auth_scheme.or(*auth_scheme);
         merged.context_window = merged.context_window.or(*context_window);
+        // Same shape as `context_window` above, and deliberately independent of
+        // it: an output ceiling is not computed from a context window.
+        merged.max_completion_tokens = merged.max_completion_tokens.or(*max_completion_tokens);
         // Inherited wholesale only when the model sets none of its own.
         if merged.extra_headers.is_empty() {
             merged.extra_headers = extra_headers.clone();
@@ -376,6 +431,103 @@ mod tests {
             resolve_credentials(model, Some("session-jwt")).api_key,
             None,
             "the session token must not leak to the provider's custom endpoint"
+        );
+    }
+
+    /// P13: `[model_providers.<id>].max_completion_tokens` had no field to land
+    /// in, so the only places a token budget could be stated were
+    /// `[model.<id>]` and the global `[models]` table -- neither of which the
+    /// `/provider` flow writes or mentions. An Anthropic entry created the
+    /// documented way therefore had no key that could correct the sampler's
+    /// default, whatever that default was.
+    #[test]
+    fn model_inherits_provider_max_completion_tokens() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.anthropic]
+            base_url = "https://api.anthropic.com/v1"
+            api_backend = "messages"
+            auth_scheme = "x_api_key"
+            max_completion_tokens = 32000
+
+            [model.claude]
+            model = "claude-opus-4-1"
+            model_provider = "anthropic"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("claude").expect("model should exist");
+        assert_eq!(model.info.max_completion_tokens, Some(32_000));
+    }
+
+    /// Inheritance, not imposition: the model's own value wins, as it does for
+    /// every other inherited connection default.
+    #[test]
+    fn model_max_completion_tokens_overrides_the_providers() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.anthropic]
+            base_url = "https://api.anthropic.com/v1"
+            api_backend = "messages"
+            max_completion_tokens = 32000
+
+            [model.claude]
+            model = "claude-opus-5"
+            model_provider = "anthropic"
+            max_completion_tokens = 128000
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("claude").expect("model should exist");
+        assert_eq!(model.info.max_completion_tokens, Some(128_000));
+    }
+
+    /// §3.1: the two quantities stay separate. A provider that states only a
+    /// context window must not acquire an output ceiling from it, and vice
+    /// versa -- that conflation is the bug this packet exists not to rebuild.
+    #[test]
+    fn context_window_and_max_completion_tokens_do_not_imply_each_other() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model_providers.cw_only]
+            base_url = "https://cw.example/v1"
+            context_window = 200000
+
+            [model_providers.max_only]
+            base_url = "https://max.example/v1"
+            max_completion_tokens = 4096
+
+            [model.a]
+            model = "m"
+            model_provider = "cw_only"
+
+            [model.b]
+            model = "m"
+            model_provider = "max_only"
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let a = resolved.get("a").expect("model a");
+        assert_eq!(a.info.context_window.get(), 200_000);
+        assert_eq!(
+            a.info.max_completion_tokens, None,
+            "a context window must not produce an output ceiling"
+        );
+        let b = resolved.get("b").expect("model b");
+        assert_eq!(b.info.max_completion_tokens, Some(4096));
+        assert_ne!(
+            b.info.context_window.get(),
+            4096,
+            "an output ceiling must not become the context window"
         );
     }
 
@@ -1213,5 +1365,98 @@ model_provider = "anthropic"
             Some("session-bearer"),
             "the session bearer must never be sent to a third-party provider"
         );
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    /// P70: the shell's config types that carry model credentials and endpoint secrets.
+    #[test]
+    fn shell_credential_configs_debug_redact() {
+        let provider = ModelProviderConfig {
+            api_key: Some("p70pk-FAKE-3a4b5c6d".into()),
+            extra_headers: [("x-api-key".to_owned(), "p70ph-FAKE-7e8f9a0b".to_owned())].into_iter().collect(),
+            query_params: [("key".to_owned(), "p70pq-FAKE-1c2d3e4f".to_owned())].into_iter().collect(),
+            ..ModelProviderConfig::default()
+        };
+        assert_redacted(&provider, &["p70pk-FAKE-3a4b5c6d", "p70ph-FAKE-7e8f9a0b", "p70pq-FAKE-1c2d3e4f"]);
+        let over = crate::agent::config::ConfigModelOverride {
+            api_key: Some("p70ok-FAKE-5a6b7c8d".into()),
+            extra_headers: [("authorization".to_owned(), "Bearer p70oh-FAKE-9e0f1a2b".to_owned())].into_iter().collect(),
+            ..Default::default()
+        };
+        assert_redacted(&over, &["p70ok-FAKE-5a6b7c8d", "p70oh-FAKE-9e0f1a2b"]);
+        let endpoints = crate::agent::config::EndpointsConfig {
+            alpha_test_key: Some("p70ea-FAKE-3c4d5e6f".into()),
+            deployment_key: Some("p70ed-FAKE-7a8b9c0d".into()),
+            management_api_key: Some("p70em-FAKE-1e2f3a4b".into()),
+            otel_exporter_otlp_headers: Some("authorization=Bearer p70eo-FAKE-5c6d7e8f".into()),
+            trace_upload_credentials: Some("p70et-FAKE-9a0b1c2d".into()),
+            gcs_service_account_key: Some("p70eg-FAKE-3e4f5a6b".into()),
+            fuigo_internal_otlp_headers: Some("x=p70ei-FAKE-7c8d9e0f".into()),
+            models_base_url: Some("https://p70u:p70eu-FAKE-2d3e4f5a@p70.invalid/v1?k=p70eq-FAKE-6b7c8d9e".into()),
+            ..Default::default()
+        };
+        assert_redacted(
+            &endpoints,
+            &[
+                "p70ea-FAKE-3c4d5e6f",
+                "p70ed-FAKE-7a8b9c0d",
+                "p70em-FAKE-1e2f3a4b",
+                "p70eo-FAKE-5c6d7e8f",
+                "p70et-FAKE-9a0b1c2d",
+                "p70eg-FAKE-3e4f5a6b",
+                "p70ei-FAKE-7c8d9e0f",
+                "p70eu-FAKE-2d3e4f5a",
+                "p70eq-FAKE-6b7c8d9e",
+            ],
+        );
+        let server = crate::agent::server::ServerConfig {
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            secret: "p70sr-FAKE-1a2b3c4d".into(),
+        };
+        assert_redacted(&server, &["p70sr-FAKE-1a2b3c4d"]);
+        let helper = crate::auth::AuthProviderConfig {
+            command: "p70-helper --token p70hc-FAKE-5b6c7d8e".into(),
+            args: Some(vec!["p70ha-FAKE-9f0a1b2c".into()]),
+            ..Default::default()
+        };
+        assert_redacted(&helper, &["p70hc-FAKE-5b6c7d8e", "p70ha-FAKE-9f0a1b2c"]);
+        let outcome = crate::auth::refresh::RefreshOutcome::PermanentFailure {
+            error: crate::auth::error::RefreshTokenFailedReason::RefreshTokenRejected.into(),
+            tried_key: Some("p70tk-FAKE-3d4e5f6a".into()),
+            tried_refresh_token: Some("p70tr-FAKE-7b8c9d0e".into()),
+        };
+        assert_redacted(&outcome, &["p70tk-FAKE-3d4e5f6a", "p70tr-FAKE-7b8c9d0e"]);
+        // P70a (Astra r1): a pre-signed download URL is a bearer capability.
+        let download: crate::agent::session_registry_client::DownloadResponse = serde_json::from_value(serde_json::json!({
+            "downloadUrl": "https://storage.p70.invalid/o?X-Goog-Signature=p70dl-FAKE-9a0b1c2d",
+            "file": "p70.jsonl",
+            "turn": 1,
+        }))
+        .expect("download response");
+        assert_redacted(&download, &["p70dl-FAKE-9a0b1c2d", "storage.p70.invalid"]);
+        let base = crate::agent::config::ConfigModelOverride {
+            base_url: Some("https://p70.invalid/v1?key=p70bq-FAKE-1e2f3a4b".into()),
+            api_key: Some("p70bk-FAKE-5c6d7e8f".into()),
+            ..Default::default()
+        };
+        assert_redacted(&base, &["p70bq-FAKE-1e2f3a4b", "p70bk-FAKE-5c6d7e8f"]);
     }
 }

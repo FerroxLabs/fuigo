@@ -175,9 +175,7 @@ async fn generic_tool_completion_chokepoint_has_exact_active_message_cardinality
                 )
                 .expect("bind_local_session must succeed");
             actor
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_handle()
                 .update_resource(SubagentDepthCounter(0))
                 .await;
 
@@ -225,9 +223,7 @@ async fn generic_tool_completion_chokepoint_has_exact_active_message_cardinality
                 ),
             ] {
                 actor
-                    .agent
-                    .borrow()
-                    .tool_bridge()
+                    .tool_bridge_handle()
                     .update_resource(SubagentBackendResource(std::sync::Arc::new(
                         FixedActiveMessageBackend { outcome },
                     )))

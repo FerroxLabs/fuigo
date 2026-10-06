@@ -22,6 +22,24 @@ those as the source of truth when re-vendoring.
 | [`ordered_hashmap`](./ordered_hashmap/) | 0.0.3 | Apache-2.0 | [r3alst/ordered-hashmap](https://github.com/r3alst/ordered-hashmap) | [`LICENCE`](./ordered_hashmap/LICENCE) |
 | [`nfsserve`](./nfsserve/) | 0.11.0 | BSD-3-Clause | [huggingface/nfsserve](https://github.com/huggingface/nfsserve) | [`LICENSE`](./nfsserve/LICENSE) |
 
+## Print-free patches (R077)
+
+Release builds are `panic = "abort"`, and `println!` / `eprintln!` / `dbg!` panic when the stream
+is a dead pipe or a full disk. These crates.io crates are vendored only to drop such prints from
+paths fuigo reaches; the change is listed in each crate's `Cargo.toml` footer.
+
+| Crate | Version | License | Change |
+|-------|---------|---------|--------|
+| [`tiff`](./tiff-0.11.3/) | 0.11.3 | MIT | `dbg!` around `LimitsExceeded` in `decoder/ifd.rs` removed |
+| [`usvg`](./usvg-0.47.0/) | 0.47.0 | Apache-2.0 OR MIT | two COLR `println!` warnings -> `log::warn!` |
+
+Both are wired through `[patch.crates-io]` in the root `Cargo.toml` and are workspace members (so the
+print deny lints them). A patch only replaces the version it declares: when `cargo update` moves
+either crate, re-vendor the new version (or drop the copy if upstream no longer prints).
+`fuigo-tools/tests/tiff_dead_stderr.rs` fails if `Cargo.lock` resolves either one to a registry
+source. `tiff`'s own unit tests and doctests are off: their image fixtures are not in the crates.io
+package.
+
 Dependency shape:
 
 ```text

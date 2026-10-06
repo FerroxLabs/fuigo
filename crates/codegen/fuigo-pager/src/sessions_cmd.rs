@@ -98,11 +98,11 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     )
                     .await
                     .unwrap_or_else(|_| {
-                        eprintln!("warning: remote session search timed out");
+                        fuigo_tty_utils::cli_eprintln!("warning: remote session search timed out");
                         Ok(Vec::new())
                     })
                     .unwrap_or_else(|e| {
-                        eprintln!("warning: remote session search failed: {e}");
+                        fuigo_tty_utils::cli_eprintln!("warning: remote session search failed: {e}");
                         Vec::new()
                     })
                 }
@@ -110,7 +110,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
 
             let resp = local_resp?;
             if let Some(by) = search.off_reason() {
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "warning: local session search is off ({by}); searched remote sessions only."
                 );
             }
@@ -130,7 +130,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                             .to_string()
                     })
                     .unwrap_or_default();
-                println!(
+                fuigo_tty_utils::cli_println!(
                     "{} (score: {:.2})  {}\n  {}\n  {}",
                     hit.session_id,
                     hit.score,
@@ -168,14 +168,14 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     .chars()
                     .take(80)
                     .collect();
-                println!(
+                fuigo_tty_utils::cli_println!(
                     "{} (remote)  {}\n  {}\n  {}",
                     r.session_id, time, title, snippet
                 );
                 remote_shown += 1;
             }
 
-            println!("\nTotal: {}", resp.results.len() + remote_shown);
+            fuigo_tty_utils::cli_println!("\nTotal: {}", resp.results.len() + remote_shown);
         }
         SessionsCommand::Delete { id } => {
             // Always attempt the remote delete when authenticated and not ZDR; `list` and `search` likewise query remote unconditionally
@@ -197,9 +197,9 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             .await?;
 
             if deletion.any_removed() {
-                println!("Deleted session {id}");
+                fuigo_tty_utils::cli_println!("Deleted session {id}");
             } else {
-                println!("No session found with id {id}.");
+                fuigo_tty_utils::cli_println!("No session found with id {id}.");
             }
         }
     }
@@ -210,7 +210,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
 /// Print sessions grouped by worktree label, preserving the original table format with a `Label: <label>` header before each group.
 fn print_sessions_grouped(sessions: &[MergedSession]) {
     if sessions.is_empty() {
-        println!("No sessions found.");
+        fuigo_tty_utils::cli_println!("No sessions found.");
         return;
     }
 
@@ -232,8 +232,8 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
     // Labeled groups first (alphabetical), then unlabeled last.
     let none_group = groups.remove(&None);
     let print_group = |label_line: &str, members: &[&MergedSession]| {
-        println!("\n{label_line}");
-        println!("{header}");
+        fuigo_tty_utils::cli_println!("\n{label_line}");
+        fuigo_tty_utils::cli_println!("{header}");
         for s in members {
             let first_line;
             let summary: &str = if !s.summary.is_empty() {
@@ -249,7 +249,7 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
             let truncated: String = summary.chars().take(50).collect();
             let created = &s.created_at[..s.created_at.len().min(10)];
             let updated = &s.updated_at[..s.updated_at.len().min(10)];
-            println!(
+            fuigo_tty_utils::cli_println!(
                 "{}  {}  {}  {}  {}",
                 s.session_id, created, updated, s.source, truncated
             );

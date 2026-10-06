@@ -26,6 +26,7 @@ fuigo-tools = { workspace = true }
 fuigo-tty-utils = { workspace = true }
 
 [dev-dependencies]
+fuigo-test-support = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -52,6 +53,10 @@ arboard = { workspace = true, features = ["wayland-data-control"] }
 # data-control probe in clipboard.rs (`is_primary_selection_supported`).
 [target.'cfg(target_os = "linux")'.dependencies]
 wl-clipboard-rs = { workspace = true }
+# Not used directly: its `log` feature routes wayland-backend's connection and protocol errors
+# through `log` instead of raw `eprintln!` (which panics on a dead or full stderr; SIGABRT under
+# `panic = "abort"`, R077). The client the data-control probe and arboard open is this crate.
+wayland-backend = { workspace = true, features = ["log"] }
 
 [lints]
 workspace = true

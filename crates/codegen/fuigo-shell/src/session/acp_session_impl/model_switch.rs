@@ -106,6 +106,8 @@ impl SessionActor {
                 }
             }
             self.chat_state_handle.replace_conversation(conversation);
+            self.note_history_not_rewritten("the new model's instructions")
+                .await;
         } else if !apply_prompt_override {
             tracing::info!(
                 session_id = %self.session_info.id.0,
@@ -242,6 +244,22 @@ impl SessionActor {
         new_prompt_context.normalize_for_persistence();
         self.abort_and_clear_prefire().await;
         *self.agent.borrow_mut() = new_agent;
+        // The agent's own inline hooks belong to the definition: swap them with it, and tell an open hooks view
+        self.replace_agent_inline_hooks();
+        {
+            let hooks = crate::extensions::hooks::current_hook_infos(
+                self.hook_registry.borrow().as_deref(),
+            );
+            let load_errors = self.hook_load_errors.borrow().clone();
+            let project_trusted =
+                Self::session_hook_trust(std::path::Path::new(&self.session_info.cwd), None);
+            self.send_fuigo_notification(FuigoSessionUpdate::HooksChanged {
+                hooks,
+                project_trusted,
+                load_errors,
+            })
+            .await;
+        }
         *self.active_agent_type.lock() = Some(new_agent_name.clone());
         self.emit_resolved_tool_overrides();
         self.queue_exit_reminder_on_approved_exit.store(
@@ -273,6 +291,8 @@ impl SessionActor {
             bridge
                 .update_resource(fuigo_tools::types::resources::PlanFilePath(plan_path))
                 .await;
+            // P148 (B19): the rebuilt agent's `ask_user_question` follows the attached client, not the spawn hints.
+            self.sync_ask_user_question_attachment().await;
             if let Some(display_cwd) = self.display_cwd.get() {
                 bridge
                     .set_display_cwd(std::path::PathBuf::from(display_cwd))
@@ -352,6 +372,8 @@ impl SessionActor {
         save_system_prompt(&self.session_info, &new_system_prompt);
         let snapshot = self.chat_state_handle.get_conversation().await;
         persist_chat_history_jsonl_sync(&self.session_info, &snapshot);
+        self.note_history_not_rewritten("the new agent's instructions")
+            .await;
         self.mcp_reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.send_available_commands_update().await;
@@ -392,6 +414,7 @@ impl SessionActor {
                 prompt_len = system_prompt.len(),
                 "handle_replace_system_prompt: client override applied"
             );
+            self.note_history_not_rewritten("the client's system prompt override").await;
         } else {
             tracing::debug!(
                 session_id = %self.session_info.id.0,

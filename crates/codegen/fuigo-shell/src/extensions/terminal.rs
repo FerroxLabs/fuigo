@@ -8,14 +8,29 @@ use std::collections::HashMap;
 
 type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvVar {
     pub name: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for EnvVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            value,
+        } = self;
+        f.debug_struct("EnvVar")
+            .field("name", name)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTerminalRequest {
     pub session_id: String,
@@ -26,6 +41,29 @@ pub struct CreateTerminalRequest {
     pub env: Vec<EnvVar>,
     pub cwd: Option<String>,
     pub output_byte_limit: Option<usize>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for CreateTerminalRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            session_id,
+            command,
+            args,
+            env,
+            cwd,
+            output_byte_limit,
+        } = self;
+        f.debug_struct("CreateTerminalRequest")
+            .field("session_id", session_id)
+            .field("command", command)
+            .field("args", &format_args!("<{} args redacted>", args.len()))
+            .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+            .field("cwd", cwd)
+            .field("output_byte_limit", output_byte_limit)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,7 +80,7 @@ pub struct CreateTerminalResponse {
     pub terminal_id: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PtyCreateRequest {
     pub shell: Option<String>,
@@ -56,6 +94,33 @@ pub(crate) struct PtyCreateRequest {
     pub name: Option<String>,
     #[serde(default, rename = "_meta")]
     pub meta: Option<RequestMeta>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for PtyCreateRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            shell,
+            cwd,
+            session_id,
+            env,
+            rows,
+            cols,
+            name,
+            meta,
+        } = self;
+        f.debug_struct("PtyCreateRequest")
+            .field("shell", shell)
+            .field("cwd", cwd)
+            .field("session_id", session_id)
+            .field("env", &env.iter().map(|v| (&v.name, "<redacted>")).collect::<Vec<_>>())
+            .field("rows", rows)
+            .field("cols", cols)
+            .field("name", name)
+            .field("meta", meta)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

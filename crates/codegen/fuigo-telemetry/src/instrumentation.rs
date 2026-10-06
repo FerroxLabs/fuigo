@@ -199,6 +199,31 @@ fn resolve_log_path() -> Option<PathBuf> {
     resolve_output_path(InstrumentationMode::Log)
 }
 
+/// A trace file whose write and flush failures are dropped, never returned.
+///
+/// The chrome layer's worker (`tracing-chrome` 0.7) `unwrap`s every write and its final flush, and
+/// `tracing-appender`'s worker reports a failed flush with a raw `eprintln!`; under
+/// `panic = "abort"` either one turns a full disk, a quota, or a trace path pointed at `/dev/full`
+/// or a dead `/dev/stderr` into a SIGABRT of the whole CLI. Instrumentation is diagnostic: losing
+/// trace bytes must not take the process down, so the writer reports success and keeps going.
+struct BestEffortFile<W = std::fs::File>(W);
+
+impl<W: std::io::Write> std::io::Write for BestEffortFile<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // `Interrupted` is retried by `write_all`; anything else drops the rest of this buffer.
+        match std::io::Write::write(&mut self.0, buf) {
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Err(e),
+            Ok(0) | Err(_) => Ok(buf.len()),
+            Ok(n) => Ok(n),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::Write::flush(&mut self.0);
+        Ok(())
+    }
+}
+
 fn build_writer(path: Option<PathBuf>) -> BoxMakeWriter {
     let Some(path) = path else {
         return BoxMakeWriter::new(std::io::sink);
@@ -207,9 +232,10 @@ fn build_writer(path: Option<PathBuf>) -> BoxMakeWriter {
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Failed to create instrumentation log directory {:?}: {}",
-            parent, err
+            parent,
+            err
         );
         return BoxMakeWriter::new(std::io::sink);
     }
@@ -221,15 +247,16 @@ fn build_writer(path: Option<PathBuf>) -> BoxMakeWriter {
     {
         Ok(file) => file,
         Err(err) => {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "Failed to open instrumentation log file {:?}: {}",
-                path, err
+                path,
+                err
             );
             return BoxMakeWriter::new(std::io::sink);
         }
     };
 
-    let (non_blocking, guard) = tracing_appender::non_blocking(file);
+    let (non_blocking, guard) = crate::appender::scrubbed_non_blocking(BestEffortFile(file));
     let guard_slot = LOG_GUARD.get_or_init(|| Mutex::new(None));
     if let Ok(mut slot) = guard_slot.lock() {
         *slot = Some(guard);
@@ -272,9 +299,10 @@ where
     if let Some(parent) = path.parent()
         && let Err(err) = std::fs::create_dir_all(parent)
     {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Failed to create chrome trace directory {:?}: {}",
-            parent, err
+            parent,
+            err
         );
         return build_log_layer(InstrumentationMode::Disabled);
     }
@@ -287,13 +315,13 @@ where
     {
         Ok(file) => file,
         Err(err) => {
-            eprintln!("Failed to open chrome trace file {:?}: {}", path, err);
+            fuigo_tty_utils::cli_eprintln!("Failed to open chrome trace file {:?}: {}", path, err);
             return build_log_layer(InstrumentationMode::Disabled);
         }
     };
 
     let (layer, guard) = ChromeLayerBuilder::<S>::new()
-        .writer(file)
+        .writer(BestEffortFile(file))
         .include_args(true)
         .trace_style(TraceStyle::Async)
         .build();
@@ -668,4 +696,67 @@ impl Drop for InstrumentationTimer {
 
 pub fn timer(name: &'static str) -> InstrumentationTimer {
     InstrumentationTimer::new(name)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod best_effort_file_tests {
+    use super::BestEffortFile;
+    use std::io::Write;
+
+    /// `/dev/full` fails every write with ENOSPC; the trace writer must swallow it, because the
+    /// chrome worker `unwrap`s the result (a SIGABRT under `panic = "abort"`).
+    #[test]
+    fn a_full_disk_is_swallowed_not_returned() {
+        let full = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .expect("/dev/full");
+        let mut w = BestEffortFile(full);
+        w.write_all(b"[\n{\"ph\":\"B\"}")
+            .expect("write_all must not fail");
+        w.flush().expect("flush must not fail");
+    }
+
+    /// A writer that refuses every write and flush with ENOSPC, counting the attempts.
+    struct Refusing(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+    impl Write for Refusing {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(std::io::ErrorKind::StorageFull.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::ErrorKind::StorageFull.into())
+        }
+    }
+
+    /// The log layer's real path: `tracing-appender`'s worker thread writes each line and
+    /// reports a failed flush with a raw `eprintln!`. Behind `BestEffortFile` the worker must
+    /// survive every failed write: it attempts all 64 lines (a worker that died on the first one
+    /// would stop at 1), and the non-lossy channel means no line is dropped before it gets there.
+    #[test]
+    fn the_appender_worker_survives_every_failed_write() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (mut writer, guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .lossy(false)
+            .finish(BestEffortFile(Refusing(attempts.clone())));
+        for i in 0..64 {
+            // One `write` call per line: `writeln!` may split a line across several sends.
+            writer
+                .write_all(format!("{{\"line\":{i}}}\n").as_bytes())
+                .expect("non-blocking write");
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while attempts.load(std::sync::atomic::Ordering::SeqCst) < 64
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            64,
+            "the worker must attempt every queued line; fewer means it died on a failed write"
+        );
+        drop(guard);
+    }
 }

@@ -6,15 +6,56 @@ use std::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 use fuigo_sampling_types::{ConversationItem, SamplingConfig};
 
-/// Canonical marker for an injected memory-context block. Shared by the
-/// emitter in `fuigo-shell` and the upsert/detection here — a drift would
-/// silently break dedup and let blocks accumulate in the prompt prefix.
-/// Detection assumes the literal never appears in a system prompt except as
-/// an injected block.
+/// The bare, UN-nonced memory-context tag. Fuigo no longer emits it: anyone can
+/// write this literal (a repo's AGENTS.md, a file name, a tool result), so it is
+/// never treated as the boundary of a Fuigo-inserted block. Blocks Fuigo inserts
+/// carry a nonce in both tags; see [`memory_context_open_tag`].
 pub const MEMORY_CONTEXT_OPEN_TAG: &str = "<memory-context>";
 
-/// Closing tag paired with [`MEMORY_CONTEXT_OPEN_TAG`].
+/// Bare closing tag paired with [`MEMORY_CONTEXT_OPEN_TAG`]; untrusted as well.
 pub const MEMORY_CONTEXT_CLOSE_TAG: &str = "</memory-context>";
+
+const MEMORY_CONTEXT_NONCED_OPEN_PREFIX: &str = "<memory-context nonce=\"";
+
+/// Opening tag of a memory-context block that Fuigo inserted. The nonce is a
+/// random value private to this Fuigo installation, so text that was written
+/// before the session (a repo's rule files) cannot produce a matching pair.
+/// Shared by the emitter in `fuigo-shell` and the upsert here.
+pub fn memory_context_open_tag(nonce: &str) -> String {
+    format!("{MEMORY_CONTEXT_NONCED_OPEN_PREFIX}{nonce}\">")
+}
+
+/// Closing tag paired with [`memory_context_open_tag`] for the same nonce.
+pub fn memory_context_close_tag(nonce: &str) -> String {
+    format!("</memory-context nonce=\"{nonce}\">")
+}
+
+/// The nonce of a block that STARTS with a nonced opening tag, if any.
+pub fn memory_context_block_nonce(block: &str) -> Option<&str> {
+    let rest = block.strip_prefix(MEMORY_CONTEXT_NONCED_OPEN_PREFIX)?;
+    let end = rest.find("\">")?;
+    let nonce = &rest[..end];
+    (!nonce.is_empty() && nonce.bytes().all(|b| b.is_ascii_alphanumeric())).then_some(nonce)
+}
+
+/// Byte range of the first complete block with this nonce at or after `from`:
+/// a closing tag and the LAST opening tag before it (so a stray, unclosed opening
+/// tag earlier in the text is never paired with a later block's close and the
+/// text between them is never part of the range). `None` when there is no
+/// opening tag followed by a closing tag; callers must then keep the text
+/// unchanged, never cut it at an opening tag.
+pub fn find_memory_context_block(
+    text: &str,
+    nonce: &str,
+    from: usize,
+) -> Option<std::ops::Range<usize>> {
+    let open = memory_context_open_tag(nonce);
+    let close = memory_context_close_tag(nonce);
+    let first_open = from + text.get(from..)?.find(&open)?;
+    let close_at = first_open + text[first_open..].find(&close)?;
+    let start = first_open + text[first_open..close_at].rfind(&open)?;
+    Some(start..close_at + close.len())
+}
 
 /// Configuration for the ChatStateActor at spawn time.
 #[derive(Debug, Clone)]
@@ -114,7 +155,7 @@ pub enum AuthType {
 /// These are fields from the shell's full `Config` that aren't part of
 /// `fuigo_sampling_types::SamplingConfig` (which is secret-free).
 /// The actor just stores and returns them — it never interprets them.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Credentials {
     /// API key for authentication.
     pub api_key: Option<String>,
@@ -125,6 +166,25 @@ pub struct Credentials {
     pub alpha_test_key: Option<String>,
     /// Client version string.
     pub client_version: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            api_key,
+            auth_type,
+            alpha_test_key,
+            client_version,
+        } = self;
+        f.debug_struct("Credentials")
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("auth_type", auth_type)
+            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
+            .field("client_version", client_version)
+            .finish()
+    }
 }
 
 /// The messages captured during a single conversation turn.
@@ -266,5 +326,34 @@ mod tests {
         assert_eq!(deserialized.stream_start_ms, Some(1234567890));
         assert_eq!(deserialized.turn_start_ms, Some(1234567800));
         assert_eq!(deserialized.last_compaction_prompt_index, Some(2));
+    }
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn credentials_debug_redacts_keys() {
+        let creds = Credentials {
+            api_key: Some("p70ak-FAKE-77aa88bb".into()),
+            alpha_test_key: Some("p70at-FAKE-66cc55dd".into()),
+            ..Credentials::default()
+        };
+        assert_redacted(&creds, &["p70ak-FAKE-77aa88bb", "p70at-FAKE-66cc55dd"]);
     }
 }

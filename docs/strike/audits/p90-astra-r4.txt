@@ -1,0 +1,49 @@
+Astra round 4 (codex 0.160.0 project-local, model gpt-6-astra, --sandbox read-only, run from the Mac worktree), audited fc3ccb94..672f9573.
+Brief: docs/strike/audits/p90-astra-brief-r4.txt. Raw transcript (10053 lines) not committed; sha256 ff8955d70f88272b7090fd8ea3cf4e72567e6f6119f0f407ab6a45eccd5e896e; copy at hetzner-dsm:/root/fuigo-builds/p90-audits/p90-astra-r4.raw.txt
+
+**Three HIGH defects remain in F6.** Audited `fc3ccb94..672f9573` and all six commit messages. No builds, Cargo, tests, or file modifications were performed.
+
+1. **HIGH — Summary helpers bypass the off-catalog guard.**  
+   [agent_ops.rs:197](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:197)
+
+   During a ChatGPT subscription session, configure `session_summary = "private-summary"` without a corresponding catalog entry, while a deployment key or `FUIGO_API_KEY` remains available. The resolver returns a gateway configuration using that key. Because the choice is explicit, stamping preserves it, and session content goes to the gateway.
+
+   `build_summary_client` never calls `explicit_helper_route`. The documented exception permits fallback to the **active session model**; this instead selects another route and credential.
+
+   **Test coverage:** Not caught. `explicit_helper_off_the_catalog_is_unusable_in_a_subscription_session` calls the guard directly; the summary fallback test calls only `summary_fallback_config`. Neither exercises this production decision. Apply the catalog guard before the summary’s `Some`/`None` match, preserving the approved fallback.
+
+2. **HIGH — A cached classifier bypasses subscription routing after a model switch.**  
+   [sampler_turn.rs:908](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:908), [sampler_turn.rs:944](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:944)
+
+   Start an API session with Auto enabled and a remote-settings default classifier that resolves using a paid key. Switch the session to ChatGPT subscription. The worker continues cloning its previously constructed classifier client; it never reapplies the subscription/default rule. Subsequent classifications—including subagent requests—still use the paid route.
+
+   Likewise, an explicit off-catalog classifier resolved through gateway fallback before the switch remains usable afterwards. The new per-request refusal runs only in the `None` branch. Model switching does not rebuild the classifier.
+
+   **Test coverage:** Not caught. The new tests exercise stamping and refusal predicates with fixed configurations, without wiring a classifier and switching the session model. Revalidate the route against the active session before each classification, or invalidate the cached client when that context changes.
+
+3. **HIGH — Settings refresh leaves image routing on stale helper provenance.**  
+   [agent_ops.rs:1163](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:1163), [prompt_build.rs:964](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/prompt_build.rs:964)
+
+   Suppose the user configures a local image helper, and a remote campaign temporarily overrides it. When settings refresh withdraws that campaign, `reapply_config_after_settings_refresh` correctly restores the explicit local helper in `self.cfg`. However, `ModelsManager` was updated **before** this re-resolution and is not updated afterwards.
+
+   Image transcription now reads its slug and provenance from `ModelsManager`, so it still sees the campaign helper as a default and sends images through the subscription. No config-file edit occurs in this scenario to trigger a corrective models reload.
+
+   **Test coverage:** Not caught. `settings_refresh_pairs_helper_provenance_with_the_same_read` checks the config object; `image_description_helper_pairs_slug_and_choice_from_one_snapshot` manually applies a manager update. Neither checks the production publication sequence. Publish the resolved configuration to the manager after reapplication.
+
+The remaining audit results are:
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Read-only Round 4 audit complete; three HIGH findings. |
+| F2 / F3 | ✅ Done | No additional defect identified. Production-path socket tests cover ignored junk, concurrency, deadlines, dual-stack binding and injected bind failures. These should detect corresponding behavioral reversions. |
+| F5 | ✅ Done | Lock spans refresh and deletion; cleanup remains scoped and local-only. Refresh-race, stash, orphan-cleanup and actual CLI-process tests exercise the relevant production paths. |
+| Round 3 provenance fix | ✅ Done | Registry collision/eviction mechanism removed; same-read pairing is correct. Publication gap remains in finding 3. |
+| Round 3 routing fixes | ✅ Done | Off-catalog and unavailable-classifier guards work where applied; findings 1–2 leave bypasses. Call-site regressions are missing. |
+| Round 3 fragment fix | ✅ Done | Raw `#` is rejected, with a production callback regression. Raw `\|` and `{` remain permitted as requested. |
+
+These are static conclusions; test execution and platform qualification remain unverified.
+
+**DO-NOT-LAND**
+
+
+exit=0

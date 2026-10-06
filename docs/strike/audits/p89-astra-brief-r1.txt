@@ -1,0 +1,45 @@
+You are an independent adversarial code auditor. Read-only: do not build, run tests or modify files.
+Repository: the git worktree in the current directory (Rust workspace). Audit the range 84569ea8..HEAD
+(branch strike/p89). Use `git diff 84569ea8..HEAD` and read the surrounding code as needed.
+
+CONTEXT. A `/goal` (an autonomous multi-turn objective) runs its turns under ONE durable execution record,
+keyed by blake3(session_id \0 goal_id) (crates/codegen/fuigo-shell/src/session/execution_state.rs). The record
+mirrors limits: a model-call cap (from FUIGO_MAX_MODEL_CALLS), a deadline (FUIGO_MAX_RUNTIME_SECS), a goal
+token budget, an output-token budget, `--max-turns` tool rounds. Before this change, any goal turn that did not
+end EndTurn (user Esc, provider error, max-tokens cut, refusal) wrote phase Terminal to that record;
+`/goal resume` keeps the goal id, so every later turn of the goal failed before reaching the model, forever.
+An earlier packet (P03, commit 2cbcbd36) deliberately does NOT reopen a crash-poisoned Terminal record (one
+whose receipt lists unresolved attempts/tool calls from a crash) and only clears its `abandoned` set.
+
+THE CHANGE. (1) The turn now tells the record HOW it ended (`TurnEnd::{Succeeded, Interrupted, Stopped}`,
+turn.rs `turn_end_of`, turn_end.rs for the dropped-future cancel path); the record stores `reopenable` when it
+issues the receipt (`issue_terminal`). (2) A goal turn opens with `Execution::open_goal`, which reopens a
+Terminal record (`Change::Reopen`) only if `may_reopen` (reopenable, or for pre-change records the
+`legacy_reopenable` rule, AND no limit is spent per `exhaustion`). Reopen keeps counters, archives the receipt
+in `earlier_receipts`, settles the interrupted turn's pending attempts/tool calls into that receipt. Otherwise
+the open is refused with the budget's typed denial or `GoalExecutionEnded`. (3) `/goal resume` (goal.rs
+`resume_goal`) refuses with the reason + remedy when the record cannot continue. (4) L-2: an execution that
+never reaches `terminal()` gives its process-budget completion reservation back on Drop (ownership tracked in
+`RESERVATION_OWNERS`), and `make_room` drops closed sessions' and the session's displaced execution before a
+new one reserves.
+
+WHAT TO LOOK FOR (report BLOCKER / HIGH / MEDIUM / LOW with file:line and a concrete scenario):
+- Can any path reopen a record whose budget is genuinely spent, or otherwise turn a limit into a no-op (call
+  cap, deadline, token budgets, unknown-usage fail-closed, --max-turns, process working capacity)? Can a
+  Stopped turn be misclassified as Interrupted (turn_end_of / turn_end_of_error, the emit_turn_completed path
+  where --max-turns maps to Cancelled)?
+- Does reopening ever re-run or double-count work, lose the record of what was unresolved, or let a stale
+  in-flight attempt/child settle into the reopened turn incorrectly? Is not setting `unknown_usage` for the
+  settled-away attempts acceptable, given the goal tracker's own token accounting (observed_total)?
+- Does it contradict P03's guarantees (crash-poisoned records stay terminal, receipts byte-identical, pending
+  preserved for crash recovery)? Is `legacy_reopenable` safe for records written before this change?
+- Reservation accounting: double release, release of a slot another instance holds, a reservation leaked on an
+  error path (reserve then a failed Change), Drop running under a lock (deadlock), `make_room` evicting an
+  execution still in use (same session, concurrent side call / background child / recap), races between
+  reopen and emit_turn_completed's release.
+- Behaviour changes a user would notice; error kinds/wire shapes clients branch on (execution_budget_denied,
+  execution_incomplete, session_storage); serde compatibility of the on-disk Snapshot both directions.
+- Test quality: do the new tests (acp_session_tests/turn/goal_latch_tests.rs, the P89 tests in
+  execution_state.rs) exercise production paths, and would they fail if the fix were reverted? Name any mutant
+  of the fix that would survive them.
+Be concrete and terse. End with a one-line verdict: whether any BLOCKER/HIGH remains.

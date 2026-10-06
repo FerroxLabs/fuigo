@@ -1,0 +1,40 @@
+# P6063 Astra round 1 (gpt-6-astra, codex exec --sandbox read-only < /dev/null), audited 917a2cb3..8d8a4423, 2026-10-02
+# Transcript trimmed to the brief and the final report (full transcript 12798 lines, sha256 8df8bb06c76f1b4b8666667a130db4023319d4c94d35e2810a991475672d1d38).
+
+## Brief
+You are auditing packet P6063 in the git repo at the current directory (Fuigo, Rust). Read-only review.
+Diff under audit: `git diff 917a2cb3..8d8a4423` (3 commits on branch strike/p6063). It re-applies, onto integration 917a2cb3, the still-needed parts of two older packets (strike/p63 9fabb124 and strike/p60 28d8fba4), which were built on 90c5a4af.
+Focus, in priority order:
+1. PRODUCT fix crates/codegen/fuigo-tools/src/implementations/lsp/{documents.rs,client.rs}: Documents::begin_send/commit/abandon_send/push_version_cap. Is the publishDiagnostics version credit now correct under the race (push processed between send and commit)? Any lock-ordering, leak (sending entry never cleared), regression for versioned/unversioned pushes, or Windows/poison issues? Are the unit tests discriminating?
+2. PRODUCT fix crates/codegen/fuigo-workspace/src/session/git_gate.rs invalidate(): slot-recognised roots and the invalidate-all fallback seeding epoch 0 for slot roots. Is the in-flight walk now always retired? Any case where a targeted invalidate is now wrongly treated, or invalidate-all misses a root? Are the three new tests in git_gate_tests.rs (own-process, ROOT_CACHE cleared) discriminating and non-flaky (permits, deadlines)?
+3. Test changes: are any of them non-hermetic, load-sensitive, vacuous, or do they weaken a regression boundary vs 917a2cb3? Especially: hub_auth proactive failed_refresh split, bind_mcp_discovery_is_concurrent, cpu-profile shutdown gated engine, scheduler MUST_ARRIVE, pager-render bidi per-thread pin + text_selection, quote_bar/agent pin_theme, config pure cores, watcher debounce, workflow spawn_of!, sandbox devbox /data branch.
+4. Completeness of the reconcile: compare against `git diff 90c5a4af 9fabb124 -- crates/` and `git diff 90c5a4af af9d2b19 -- crates/`. For hunks NOT re-applied, the claim is they are covered by packets landed in 917a2cb3 (P58 own-process workspace env/timing, P66 voice pin, P67 mermaid pin, P68 user.rs/bg_task/text_selection pins + skills home_env serial) or by queued P73 (branch strike/p73-s17: dashboard serial keys + guard, announcements pins, diagram_emits pin). Flag any hunk that is still needed and was dropped.
+Report findings with severity BLOCKER/HIGH/MEDIUM/LOW, file:line, and end with exactly one line: `VERDICT: PASS` or `VERDICT: FAIL` followed by a short reason. PASS means no BLOCKER/HIGH.
+
+## Final report
+[2mtokens used[0m
+146,812
+No BLOCKER/HIGH found. Five non-blocking findings remain:
+
+1. **MEDIUM — GitGate fixtures retain a retry race under load.** [git_gate_tests.rs:497](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/session/git_gate_tests.rs:497), also lines 560 and 624. The gate’s waiter timeout is 5 seconds, while observation allows 30 seconds. After invalidation, if the second caller’s root discovery stalls, the first caller can time out, retry at the new epoch, and start another **held** walk. The second caller then joins that walk and fails despite correct invalidation. Two permits prevent permit starvation but not this retry race. Keep the first waiter from retrying, or make its timeout exceed the fixture’s observation deadline.
+
+2. **MEDIUM — The omitted Windows ageing fix is still needed.** [recovery.rs:854](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/recovery.rs:854). P58 supplies deterministic directory mtimes only on Unix. Windows still sleeps 300 ms and considers a directory stale after 150 ms; descheduling between creating `fresh` and sweeping can delete both directories. The omitted `af9d2b19` helper uses Windows backup semantics and write-attributes access to set directory mtimes. This hunk is not fully superseded.
+
+3. **MEDIUM — P58 does not preserve P60’s complete MCP deadline assertion.** [handle_tests.rs:6830](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/handle_tests.rs:6830). The retained bounded test checks an upper elapsed bound and the failed server’s name. An immediate discovery error also satisfies those assertions. The omitted P60 test additionally required elapsed time to reach the configured deadline and checked the recorded timeout cause. Restore that distinction. The new two-server overlap test itself is discriminating: sequential discovery cannot successfully register both gated servers.
+
+4. **LOW — Watcher debounce remains load-sensitive.** [watcher.rs:1510](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-shell/src/config/watcher.rs:1510). Measuring the burst only improves diagnostics. A pause exceeding the 3-second window between writes legitimately creates multiple bursts, which can violate `count <= 3`. The larger window reduces frequency without establishing the required precondition. The longer collection period and final drain do improve detection of extra events.
+
+5. **LOW — New LSP tests do not discriminate successful-send cleanup.** [documents.rs:248](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-tools/src/implementations/lsp/documents.rs:248). After committing version 2, the cap is 2 whether `sending` was cleared or leaked. The tests distinguish pre-commit credit and abandonment, but do not assert successful cleanup or drive a named/unversioned report through `record_push`. Add an empty-`sending` assertion and a focused diagnostics-credit test.
+
+The two product fixes look correct for the reported races:
+
+- **LSP:** reading in-flight state before committed state covers a commit between reads. Guards do not overlap, avoiding lock-order inversion. The synchronous `&mut self` send path has no cancellation point; success commits and errors abandon. Poison recovery matches the existing policy, with no new Windows-specific path. Named pushes retain their version cap; unversioned pushes retain approximate arrival-order attribution, now beginning at send initiation.
+- **GitGate:** slot recognition preserves targeted invalidation after cache clearing. Seeding missing epochs retires every currently tracked slot root during invalidate-all. Retirement makes walks stale rather than cancelling them; the existing bounded-retry policy remains unchanged. Own-process execution is non-vacuous because the helper verifies child entry.
+
+The other reviewed changes preserve their relevant assertions: proactive refresh splitting, gated profiler shutdown, scheduler `MUST_ARRIVE`, workflow `spawn_of!`, bidi/thread and theme pins, and config pure cores. The sandbox branch correctly accommodates absent `/data`, but that host does not exercise genuine re-exec.
+
+Reconciliation confirms P66 voice, P67 mermaid, P68 theme/skills protection, and P58 environment/metric isolation replacements. P73 contains the claimed dashboard serialization/guard, announcement pins, and `diagram_emits` pin; these remain queued, not present in P6063.
+
+Read-only source review completed; checkout unchanged and `git diff --check` passed. No build, runtime tests, or native-platform qualification performed.
+
+VERDICT: PASS — no BLOCKER/HIGH found; non-blocking test and reconciliation gaps remain.

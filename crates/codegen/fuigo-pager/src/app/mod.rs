@@ -54,6 +54,7 @@ mod foreign_sessions;
 mod inline_edit;
 #[cfg(all(test, unix))]
 mod leader_cluster;
+pub(crate) mod leader_outage;
 mod modals;
 pub(crate) mod mode_switch;
 mod mouse;
@@ -184,11 +185,54 @@ pub(crate) fn mouse_reporting_toggle_enabled() -> bool {
 /// Written only by [`crate::app::app_view::AppView::apply_voice_mode_enabled`].
 pub(crate) static VOICE_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) fn voice_mode_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(on) = VOICE_MODE_OVERRIDE.with(std::cell::Cell::get) {
+        return on;
+    }
     VOICE_MODE_ENABLED.load(Ordering::Acquire)
 }
 /// Test helper for the process-global voice gate.
+///
+/// Process-global: a unit test that needs a fixed gate should use `pin_voice_mode_for_test` instead,
+/// because any concurrent test that calls `apply_voice_mode_enabled` rewrites this value mid-test.
 pub fn set_voice_mode_enabled_for_test(on: bool) {
     VOICE_MODE_ENABLED.store(on, Ordering::Release);
+}
+#[cfg(test)]
+thread_local! {
+    /// Per-test-thread view of the voice gate; `Some` shadows [`VOICE_MODE_ENABLED`] for reads on this thread only.
+    static VOICE_MODE_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+/// Scoped per-thread voice gate for unit tests; restores the previous override on drop.
+#[cfg(test)]
+#[must_use = "the override ends when the guard drops"]
+pub(crate) struct VoiceModePin {
+    prev: Option<bool>,
+    /// The override is per-thread, so the guard must stay on the thread that created it.
+    _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+#[cfg(test)]
+impl VoiceModePin {
+    /// Flip the pinned gate for the rest of the guard's life.
+    pub(crate) fn set(&self, on: bool) {
+        VOICE_MODE_OVERRIDE.with(|c| c.set(Some(on)));
+    }
+}
+#[cfg(test)]
+impl Drop for VoiceModePin {
+    fn drop(&mut self) {
+        VOICE_MODE_OVERRIDE.with(|c| c.set(self.prev));
+    }
+}
+/// Pin [`voice_mode_enabled`] to `on` for the calling test thread without touching the process-global gate.
+/// Reads on this thread ignore concurrent writers of [`VOICE_MODE_ENABLED`], so the test is hermetic.
+#[cfg(test)]
+pub(crate) fn pin_voice_mode_for_test(on: bool) -> VoiceModePin {
+    let prev = VOICE_MODE_OVERRIDE.with(|c| c.replace(Some(on)));
+    VoiceModePin {
+        prev,
+        _not_send: std::marker::PhantomData,
+    }
 }
 /// Process-global gate for the Ctrl+Space / F8 voice chord, for key-routing and view code without an `AppView` (`resolve_action`, the cheatsheet).
 /// Defaults ON; seeded at startup from `[ui].voice_keybind_enabled` and updated live by the settings setter.
@@ -718,19 +762,6 @@ pub async fn run(
     {
         anyhow::bail!("{err}");
     }
-    #[cfg(feature = "local-workspace")]
-    {
-        let lw = session_startup::resolve_local_workspace_config(
-            args.chat(),
-            args.local_workspace(),
-            args.local_workspace_attach(),
-            args.local_workspace_cwd(),
-        )?;
-        if let Some(ref cfg) = lw {
-            session_startup::emit_local_workspace_startup_ux(cfg)?;
-        }
-        session_startup::set_active_local_workspace(lw)?;
-    }
     let intent = args
         .session_startup_intent()
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1064,7 +1095,14 @@ pub async fn run(
         exit_timeout::hold_teardown_for_test();
     }
     crate::unified_log::flush_blocking().await;
+    // Config writes the user made just before quitting (CTA dismissal, agents
+    // modal, `/provider`) run off the input thread; let them land.
+    let config_writes = crate::config_write_queue::drain(std::time::Duration::from_secs(3)).await;
     let restore_result = restore_terminal(terminal, writer_thread, current_screen_mode());
+    // After the restore, so the user sees it on the normal screen.
+    for line in config_writes.messages() {
+        fuigo_tty_utils::cli_eprintln!("{line}");
+    }
     drop(agent_guard);
     fuigo_telemetry::session_ctx::drain_at_process_exit().await;
     fuigo_tty_utils::global_process_scope().kill_all();
@@ -1697,6 +1735,31 @@ fn restore_terminal_with(
     fuigo_tty_utils::restore_native_stderr();
     drain_result
 }
+/// P142: leader notices (`fuigo/leader/notice`) the TUI received but never showed, because no quiet session was on
+/// screen before it quit. The leader counts them as delivered, so the TUI prints them after the terminal is restored.
+static UNSHOWN_LEADER_NOTICES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// P142: keep `notices` for [`take_unshown_leader_notices`] (the run's exit funnel).
+pub(crate) fn keep_unshown_leader_notices(notices: Vec<String>) {
+    if let Ok(mut kept) = UNSHOWN_LEADER_NOTICES.lock() {
+        kept.extend(notices);
+    }
+}
+/// P142: hand the kept leader notices to `sink` once the terminal restore joined its writer; after a timed-out join
+/// they stay kept and nothing is written (the terminal is not reading, and the write would block).
+pub(crate) fn print_unshown_leader_notices(
+    joined: &io::Result<crate::render::draw::WriterJoin>,
+    mut sink: impl FnMut(&str),
+) {
+    if matches!(joined, Ok(crate::render::draw::WriterJoin::Joined)) {
+        for line in take_unshown_leader_notices() {
+            sink(&line);
+        }
+    }
+}
+/// P142: the leader notices to print after the restore, each once.
+pub(crate) fn take_unshown_leader_notices() -> Vec<String> {
+    UNSHOWN_LEADER_NOTICES.lock().map(|mut kept| std::mem::take(&mut *kept)).unwrap_or_default()
+}
 /// The `WriterJoin` tells the caller whether the terminal is still reading: after a `TimedOut`
 /// join every further stderr write blocks until the exit watchdog fires.
 fn restore_terminal(
@@ -1704,13 +1767,34 @@ fn restore_terminal(
     writer_thread: crate::render::draw::WriterThread,
     mode: ScreenMode,
 ) -> io::Result<crate::render::draw::WriterJoin> {
-    restore_terminal_with(
+    let joined = restore_terminal_with(
         terminal,
         writer_thread,
         mode,
         drain_writer_thread_before_teardown,
         emit_terminal_teardown_sequences,
-    )
+    );
+    // P71: a "files were NOT uploaded" notice printed while the TUI owned the terminal went to the
+    // redirected fd 2 (`redirect_native_stderr`, Unix) and was seen by nobody. fd 2 is the terminal
+    // again now, so say it. (Elsewhere fd 2 was never redirected and the notice was already printed.)
+    #[cfg(unix)]
+    if terminal_still_reads(&joined) {
+        fuigo_file_utils::destination_gate::replay_notices_since_last_replay(
+            crate::best_effort_stderr::eprint_line,
+        );
+    }
+    // P142: leader notices no session on screen showed (kept by the run's exit funnels, error exits included), on
+    // every platform, and only while the terminal is still reading: after a timed-out writer join a stderr write would
+    // block teardown (an update or relaunch exit arms no watchdog).
+    print_unshown_leader_notices(&joined, crate::best_effort_stderr::eprint_line);
+    joined
+}
+/// Whether a line may still be written to the terminal after a restore: only when the writer thread
+/// joined. After a timed-out join (or a failed drain) the terminal is not reading, and a stderr write
+/// would block until the exit watchdog fires.
+#[cfg(unix)]
+fn terminal_still_reads(joined: &io::Result<crate::render::draw::WriterJoin>) -> bool {
+    matches!(joined, Ok(crate::render::draw::WriterJoin::Joined))
 }
 pub(crate) fn set_terminal_title(title: &str) {
     let full = terminal_title_string(title);
@@ -1782,6 +1866,15 @@ fn set_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P71: the withheld-upload notice is replayed after a restore only to a terminal that is still reading.
+    #[cfg(unix)]
+    #[test]
+    fn withheld_notices_are_replayed_only_to_a_reading_terminal() {
+        use crate::render::draw::WriterJoin;
+        assert!(terminal_still_reads(&Ok(WriterJoin::Joined)));
+        assert!(!terminal_still_reads(&Ok(WriterJoin::TimedOut)));
+        assert!(!terminal_still_reads(&Err(io::Error::other("drain failed"))));
+    }
     /// The loop-top gboom keyboard-layer sync runs on the event-loop thread: its push/pop
     /// escapes must ride the writer queue, not an inline stderr write.
     #[cfg(not(windows))]
@@ -2285,47 +2378,6 @@ mod tests {
     #[test]
     fn cli_chat_flag_rejected_without_feature() {
         assert!(try_parse_pager(&["fuigo-pager", "--chat"]).is_err());
-    }
-    #[cfg(feature = "local-workspace")]
-    #[test]
-    fn cli_local_workspace_attach_requires_chat() {
-        assert!(
-            try_parse_pager(&["fuigo-pager", "--local-workspace-attach=srv"]).is_err(),
-            "attach without --chat must clap-error"
-        );
-        let args =
-            try_parse_pager(&["fuigo-pager", "--chat", "--local-workspace-attach=srv"]).unwrap();
-        assert_eq!(args.local_workspace_attach(), Some("srv"));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[test]
-    fn cli_local_workspace_own_conflicts_with_attach() {
-        assert!(
-            try_parse_pager(&[
-                "fuigo-pager",
-                "--chat",
-                "--local-workspace=/tmp/a",
-                "--local-workspace-attach=srv",
-            ])
-            .is_err(),
-            "own + attach must clap-conflict"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[test]
-    fn cli_local_workspace_cwd_requires_chat() {
-        assert!(try_parse_pager(&["fuigo-pager", "--local-workspace-cwd=/tmp/a"]).is_err());
-        let args = try_parse_pager(&[
-            "fuigo-pager",
-            "--chat",
-            "--local-workspace-attach=srv",
-            "--local-workspace-cwd=/tmp/repo",
-        ])
-        .unwrap();
-        assert_eq!(
-            args.local_workspace_cwd(),
-            Some(std::path::Path::new("/tmp/repo"))
-        );
     }
     #[test]
     fn cli_local_workspace_flags_rejected_without_feature() {

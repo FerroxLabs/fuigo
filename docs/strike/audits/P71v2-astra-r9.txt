@@ -1,0 +1,20 @@
+P71v2 Astra audit, round 9 (delta; cleaned: the brief as sent and the auditor's final report; the tool transcript between them is omitted).
+Command: codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+Raw transcript: 4867 lines, sha256 b6f060f24999830e887e5a4322d55f3c7107525361ec25bddb4df3853f33e3b3; tokens used 41,715.
+
+===== BRIEF =====
+You are an independent security/code auditor. Repository: the current directory (a git worktree, branch strike/p71v2-s19). Read-only: do not run cargo, do not modify files.
+
+THIS IS ROUND 9, a delta audit. Round 8 (docs/strike/audits/P71v2-astra-r8.txt) returned LAND on commit 266e1150 (tree 5e7c712e). The branch tip is now 70187e5e (parent integration 01115e18). The ONLY difference between the audited tree and the tip is in `crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs`: the helper `relative(path)` no longer calls `std::fs::canonicalize` (a workspace-disallowed method that the gate's clippy run reported as one new warning); it now strips `repo_root()` as written. Verify with `git diff 266e1150 70187e5e --stat` and `git diff 266e1150 70187e5e` that this is the whole difference.
+
+Questions: (1) Is the new `relative` correct for every path the test passes to it (paths are produced by walking `repo_root().join("crates")` / `("prod")`, by `repo_root().join(<const>)`, and for manifests `repo_root().join("Cargo.toml")` plus the walk)? `repo_root()` is `Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..")`, not normalised. Can `strip_prefix` fail, or produce a relative path that no longer equals the constants the pins compare against (e.g. `crates/codegen/fuigo-file-utils/src/gcs.rs`), on Linux, macOS or Windows? (2) Does the change weaken any pin (for example a symlinked or duplicated path that canonicalisation used to collapse)? (3) Anything else in that diff.
+
+Report defects only: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, concrete scenario, whether a test catches it. End with exactly one verdict line: LAND, LAND-WITH-FOLLOWUPS, or DO-NOT-LAND.
+
+===== REPORT =====
+No reportable defects in `266e1150..70187e5e`. Confirmed the only difference is the `relative` helper and its comment.
+
+No Cargo or tests run; no files modified.
+
+LAND
+codex_exit=0

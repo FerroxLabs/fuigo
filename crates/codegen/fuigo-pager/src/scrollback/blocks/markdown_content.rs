@@ -15,7 +15,7 @@ use super::quote_bar::QuoteBarStrip;
 
 pub(crate) const MARKDOWN_BODY_RANGE: u16 = 0;
 use crate::syntax::get_syntect;
-use crate::theme::{ThemeKind, cache as theme_cache, md_style};
+use crate::theme::{cache as theme_cache, md_style};
 use fuigo_markdown::StreamingMarkdownRenderer;
 
 /// Mutable rendering state behind a single `RefCell`.
@@ -28,7 +28,7 @@ struct RenderState {
     /// Cached word-wrap result keyed on `(width, generation, theme)`.
     cache_width: usize,
     cache_generation: u64,
-    cache_theme: ThemeKind,
+    cache_theme: theme_cache::RenderKey,
     cache_lines: Vec<Line<'static>>,
     cache_joiners: Vec<Option<String>>,
     /// Number of pre-wrap (renderer output) lines that were frozen at the time we last wrapped.
@@ -102,7 +102,7 @@ impl MarkdownContent {
                 renderer,
                 cache_width: 0,
                 cache_generation: 0,
-                cache_theme: theme_cache::current_kind(),
+                cache_theme: theme_cache::render_key(),
                 cache_lines: Vec::new(),
                 cache_joiners: Vec::new(),
                 frozen_pre_wrap_count: 0,
@@ -120,7 +120,7 @@ impl MarkdownContent {
                 renderer: StreamingMarkdownRenderer::new(md_style::style(), true),
                 cache_width: 0,
                 cache_generation: 0,
-                cache_theme: theme_cache::current_kind(),
+                cache_theme: theme_cache::render_key(),
                 cache_lines: Vec::new(),
                 cache_joiners: Vec::new(),
                 frozen_pre_wrap_count: 0,
@@ -289,7 +289,7 @@ impl MarkdownContent {
     /// This turns streaming from O(N^2) total wrapping to ~O(N).
     fn ensure_wrapped(&self, width: usize) {
         let mut state = self.state.borrow_mut();
-        let current_theme = theme_cache::current_kind();
+        let current_theme = theme_cache::render_key();
 
         // If the theme changed, update the renderer's style so the re-render below picks up the new colors
         // Resetting cache_generation forces the cache to rebuild even if width and content haven't changed
@@ -454,6 +454,48 @@ pub(super) fn compute_subsequent_indent_width(line: &Line<'_>) -> usize {
 mod tests {
     use super::*;
     use crate::scrollback::types::Selectable;
+
+    fn md_fingerprint(md: &MarkdownContent) -> String {
+        md.output(80)
+            .lines
+            .iter()
+            .map(|l| format!("{:?}", l.content))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Same defect as the entry cache: `current_kind()` is a nominal `FuigoNight` under the terminal-native lock, so a wrap cache keyed on it
+    /// kept the pre-switch colours across a live `/minimal` and `/fullscreen` switch.
+    #[test]
+    fn wrap_cache_misses_when_the_terminal_native_lock_toggles() {
+        struct Unlock;
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                theme_cache::set_terminal_native_lock(false);
+            }
+        }
+        let _theme = theme_cache::pin_theme();
+        theme_cache::set_terminal_native_lock(false);
+        let _unlock = Unlock;
+        let text = "# Heading\n\nsome **bold** text and `code`\n";
+
+        let live = MarkdownContent::new(text);
+        let full_before = md_fingerprint(&live);
+
+        theme_cache::set_terminal_native_lock(true);
+        let fresh_locked = md_fingerprint(&MarkdownContent::new(text));
+        assert_ne!(
+            full_before, fresh_locked,
+            "premise: the locked palette must paint markdown differently, or this test proves nothing"
+        );
+        assert_eq!(
+            md_fingerprint(&live),
+            fresh_locked,
+            "a block rendered before the lock must repaint under it"
+        );
+        theme_cache::set_terminal_native_lock(false);
+        assert_eq!(md_fingerprint(&live), full_before);
+    }
 
     #[test]
     fn cache_hit_on_same_width() {

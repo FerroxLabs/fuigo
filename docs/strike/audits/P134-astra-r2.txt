@@ -1,0 +1,22 @@
+Audited `15c21ddf..e6c9cb31` on `strike/p134`, with `v1.0.20` comparison.
+
+- **Round-1 MEDIUM 1: FIXED** — [servers.rs:2332](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2332). Discovery failure with a stored refreshable login now reaches the anonymous probe. An accepted POST returns `NoOauthSupport` before deferral is considered. Regression test: [servers_tests.rs:4816](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers_tests.rs:4816).
+- **Round-1 MEDIUM 2: FIXED** — [servers.rs:2325](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2325), [servers.rs:2341](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2341). In noninteractive mode, discovery errors and timeouts converge on `Inconclusive`. A subsequent auth challenge returns retryable `Unreachable` when `stored_login_awaits_metadata()` is true. Regression test: [servers_tests.rs:4827](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers_tests.rs:4827).
+
+No new BLOCKER/HIGH/MEDIUM/LOW findings identified in the scoped changes against either baseline. Missing login still yields `NeedsInteractiveLogin`; an unreachable probe stays `Unreachable`. Item 1’s session-file implementations are unchanged since round 1.
+
+Source and tests inspected; Cargo and runtime tests **not run**. Diff whitespace check passed; worktree remains clean.
+
+LAND-OK
+tokens used
+70,076
+Audited `15c21ddf..e6c9cb31` on `strike/p134`, with `v1.0.20` comparison.
+
+- **Round-1 MEDIUM 1: FIXED** — [servers.rs:2332](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2332). Discovery failure with a stored refreshable login now reaches the anonymous probe. An accepted POST returns `NoOauthSupport` before deferral is considered. Regression test: [servers_tests.rs:4816](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers_tests.rs:4816).
+- **Round-1 MEDIUM 2: FIXED** — [servers.rs:2325](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2325), [servers.rs:2341](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers.rs:2341). In noninteractive mode, discovery errors and timeouts converge on `Inconclusive`. A subsequent auth challenge returns retryable `Unreachable` when `stored_login_awaits_metadata()` is true. Regression test: [servers_tests.rs:4827](/Volumes/Mando/WaylandBots/Fuigo/wt-p134/crates/codegen/fuigo-mcp/src/servers_tests.rs:4827).
+
+No new BLOCKER/HIGH/MEDIUM/LOW findings identified in the scoped changes against either baseline. Missing login still yields `NeedsInteractiveLogin`; an unreachable probe stays `Unreachable`. Item 1’s session-file implementations are unchanged since round 1.
+
+Source and tests inspected; Cargo and runtime tests **not run**. Diff whitespace check passed; worktree remains clean.
+
+LAND-OK

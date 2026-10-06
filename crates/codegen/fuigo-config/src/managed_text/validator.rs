@@ -209,7 +209,7 @@ mod tests {
         std::fs::write(&path, "body").unwrap();
         let validator = SyntaxValidator {
             program: "/bin/sh".into(),
-            args: vec!["-c".into(), "sleep 5".into()],
+            args: vec!["-c".into(), "sleep 60".into()],
             timeout: Duration::from_millis(20),
         };
         let ops = InjectedOps {
@@ -220,7 +220,13 @@ mod tests {
         let started = Instant::now();
         assert!(validate_with_ops(&validator, &path, &ops).is_err());
         assert!(ops.teardown_called.load(Ordering::SeqCst));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        // Bounded = cut off, not waited out: the validator would run 60 s (a 2 s bound against a
+        // 5 s sleep was a load-sensitive margin, not the property).
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "validator was not cut off: {elapsed:?}"
+        );
     }
 
     #[cfg(unix)]

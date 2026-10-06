@@ -240,30 +240,54 @@ impl ShellKind {
             Self::Bash => DUMP_BASH_STATE_SCRIPT,
             Self::Zsh => DUMP_ZSH_STATE_SCRIPT,
         };
-        let patterns = crate::util::shell_env_policy::PROVIDER_CREDENTIAL_NAMES
-            .iter()
+        // Scrub inside the capture subshell, before serialization. This handles
+        // mixed-case names and multiline values without parsing shell source.
+        script.replace(
+            "__FUIGO_CREDENTIAL_SCRUB__",
+            &self.credential_scrub("builtin exit 1"),
+        )
+    }
+
+    /// Shell code that unsets every exported credential variable on the denylist, running
+    /// `on_unset_failure` if an unset fails.
+    fn credential_scrub(&self, on_unset_failure: &str) -> String {
+        // Configured names come from user config and are spliced into a shell `case` pattern: an
+        // ASCII letter becomes a case-insensitive class, an ASCII digit or `_` stays as is, and
+        // every other character is quoted, so any name (zsh accepts non-ASCII ones) is matched
+        // literally and none can inject shell syntax.
+        let patterns = crate::util::shell_env_policy::credential_env_names()
+            .into_iter()
             .map(|name| {
                 name.chars()
                     .map(|c| {
                         if c.is_ascii_alphabetic() {
-                            format!("[{}{}]", c.to_ascii_lowercase(), c)
-                        } else {
+                            format!("[{}{}]", c.to_ascii_lowercase(), c.to_ascii_uppercase())
+                        } else if c.is_ascii_digit() || c == '_' {
                             c.to_string()
+                        } else if c == '\'' {
+                            "\\'".to_string()
+                        } else {
+                            format!("'{c}'")
                         }
                     })
                     .collect::<String>()
             })
             .collect::<Vec<_>>()
             .join("|");
+        // Bash splits `compgen -e` on IFS, which an rc file can change (`IFS=:` would turn the
+        // whole list into one word that matches nothing); this runs in the capture subshell, so
+        // resetting IFS here does not touch the user's shell. Zsh does not word-split arrays.
         let names = match self {
             Self::Bash => "$(builtin compgen -e)",
             Self::Zsh => "${(k)parameters}",
         };
-        // Scrub inside the capture subshell, before serialization. This handles
-        // mixed-case names and multiline values without parsing shell source.
-        script.replace("__FUIGO_CREDENTIAL_SCRUB__", &format!(
-            "for __fuigo_env_name in {names}; do case \"$__fuigo_env_name\" in {patterns}) builtin unset \"$__fuigo_env_name\" 2>/dev/null || builtin exit 1;; esac; done"
-        ))
+        let reset_ifs = match self {
+            Self::Bash => "IFS=$' \\t\\n'; ",
+            Self::Zsh => "",
+        };
+        format!(
+            "{reset_ifs}for __fuigo_env_name in {names}; do case \"$__fuigo_env_name\" in {patterns}) builtin unset \"$__fuigo_env_name\" 2>/dev/null || {on_unset_failure};; esac; done"
+        )
     }
 
     fn dump_function_name(&self) -> &str {
@@ -543,6 +567,16 @@ impl ShellState {
 
     /// Update this state from a raw dump string (read from fd 4).
     /// Returns `true` if the state was successfully updated.
+    /// Take only the directory from a dump (P86: the rest of a dump taken under an older
+    /// credential denylist is discarded, but the shell keeps the directory the command left).
+    pub fn update_cwd_from_dump(&mut self, raw: &str) {
+        if let Some((new_cwd, _)) = parse_dump(self.shell, raw)
+            && new_cwd.is_absolute()
+        {
+            self.cwd = new_cwd;
+        }
+    }
+
     pub fn update_from_dump(&mut self, raw: &str) -> bool {
         match parse_dump(self.shell, raw) {
             Some((new_cwd, new_snapshot)) => {
@@ -752,6 +786,73 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P86: any configured credential name is spliced into the scrub as a literal pattern, so a
+    /// hostile `env_key` cannot inject shell syntax and a non-ASCII (zsh-valid) name is still
+    /// matched; built-in and plain registered names are scrubbed case-insensitively.
+    #[cfg(unix)]
+    #[test]
+    fn p86_configured_names_reach_the_scrub_as_literal_patterns() {
+        // Registered names are upper-cased, so the payloads use no letters: unquoted, each would
+        // create a file named by its digit in the working directory.
+        let hostile = ["P86_$(:>9)", "P86_`:>8`", "P86_) :>7;; *(", "P86_'; :>6; '"];
+        crate::util::shell_env_policy::register_credential_env_names(hostile);
+        crate::util::shell_env_policy::register_credential_env_names([
+            "P86_SCRUB_CORP_KEY",
+            "P86_\u{e9}",
+        ]);
+        for shell in [ShellKind::Bash, ShellKind::Zsh] {
+            let script = shell.credential_scrub("exit 1");
+            assert!(script.contains("[pP]86_[sS][cC][rR][uU][bB]_[cC][oO][rR][pP]_[kK][eE][yY]"));
+            assert!(script.contains("[fF][lL][uU][xX]_[aA][pP][iI]_[kK][eE][yY]"));
+            assert!(script.contains("[pP]86_'\u{e9}'"), "{script}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let scrub = ShellKind::Bash.credential_scrub("exit 1");
+        let output = std::process::Command::new("bash")
+            .current_dir(dir.path())
+            .args([
+                "-c",
+                &format!(
+                    "export P86_SCRUB_CORP_KEY=x p86_scrub_corp_key=y KEEP=1; ({scrub}; test -z \"${{P86_SCRUB_CORP_KEY+x}}${{p86_scrub_corp_key+x}}\" && test \"$KEEP\" = 1 && printf ok)"
+                ),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "ok",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for digit in ["6", "7", "8", "9"] {
+            assert!(
+                !dir.path().join(digit).exists(),
+                "a registered name ran shell code ({digit})"
+            );
+        }
+        // Still denied to children: only the shell splice quotes it.
+        for name in hostile {
+            assert!(crate::util::shell_env_policy::is_provider_credential(name));
+        }
+    }
+
+    /// P86 (Astra r2 #4): the bash scrub still finds a credential when the shell's IFS was
+    /// changed (an rc file's `IFS=:` would otherwise make `compgen -e` one word).
+    #[cfg(unix)]
+    #[test]
+    fn p86_bash_scrub_ignores_a_changed_ifs() {
+        let scrub = ShellKind::Bash.credential_scrub("exit 1");
+        let script = format!(
+            "export IFS=: GROQ_API_KEY=fake-p86 P86_SCRUB_KEEP=kept; ({scrub}; test -z \"${{GROQ_API_KEY+x}}\" && test \"$P86_SCRUB_KEEP\" = kept && printf scrubbed)"
+        );
+        let output = std::process::Command::new("bash")
+            .args(["-c", &script])
+            .env_remove("GROQ_API_KEY")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "scrubbed");
+    }
 
     #[test]
     fn shell_env_overrides_marks_agent_terminal() {

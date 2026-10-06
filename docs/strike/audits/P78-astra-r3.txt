@@ -1,0 +1,20 @@
+# P78 Astra round 3 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..61f328cd
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `37a5b9d4..61f328cd` using git and file reads only. No builds, tests, or edits.
+
+1. **MEDIUM — NEW: reader guard proves acquisition, not lifetime.** [theme_pin_guard_tests.rs:559](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:559)  
+   A test beginning with `let _theme = pin_theme();`, followed on another line by `drop(_theme);` and color assertions, passes the scanner while leaving those assertions unprotected. **Existing self-tests do not catch this:** `pin_dropped_explicitly` checks `drop(pin_theme())`, not dropping an accepted binding afterward. All four currently listed readers retain their guards correctly.
+
+2. **LOW — STILL OPEN: the dispatch test’s initial wait can succeed before matching.** [prompt.rs:3146](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs:3146)  
+   If the daemon has not run, the default snapshot already satisfies `result_count() == 0`; the test proceeds without establishing that `"third"` was processed against the original history. **Existing tests do not detect this missing intermediate observation.** The final `"third prompt"` assertion still requires genuine matcher output, so the whole test cannot pass vacuously. This weakness predates P78.
+
+The two round-2 scanner cases are fixed; no false rejection or same-name concealment was found among the four actual readers.
+
+The embedded-mode root cause is supported. Existing flag-setting tests render/read on their own thread; no cross-thread or earlier-test initialization dependency was found. Production retains the same relaxed atomic operations. The new handshake distinguishes the old atomic behavior without a timing window or theme-lock cycle; its channel waits and join are unbounded, but no reachable deadlock was identified.
+
+External test binaries retain the production global; inspected minimal/integration/bin paths reveal no competing same-process flag writers. Sibling mode globals remain a follow-up concern, not a defect introduced by this diff.
+
+Matcher, gutter, and atomic-dump fixes remain supported; no additional silent matcher waits, weakened assertions, protected-test changes, or source-level compilation/Clippy problems were identified. Compilation and runtime remain unverified.
+
+LAND-WITH-FOLLOWUPS

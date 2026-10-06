@@ -282,6 +282,10 @@ mod tests {
 
     #[test]
     fn mermaid_treatment_row_shown_in_auto_not_off_not_raw() {
+        // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+        // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+        // switch suppresses the affordance rows under us.
+        let _modes = crate::theme::cache::pin_theme();
         let non_selectable = |o: &BlockOutput| {
             o.lines
                 .iter()
@@ -312,6 +316,10 @@ mod tests {
 
     #[test]
     fn mermaid_treatment_row_preserves_hyperlink_line_mapping() {
+        // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+        // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+        // switch suppresses the affordance rows under us.
+        let _modes = crate::theme::cache::pin_theme();
         // The inserted treatment row (caption or affordance) is a joiner-continuation line, so it must NOT add a logical (pre-wrap) line
         // Otherwise the hyperlink overlay walk desyncs for the paragraph after the diagram
         let md = "before\n\n```mermaid\nA-->B\n```\n\n[link](https://example.com) trailing\n";
@@ -375,6 +383,10 @@ mod tests {
         /// Rendering is lazy, so no path/state is tracked on the row.
         #[test]
         fn diagram_exposes_affordance_carrying_source_and_keeps_source_block() {
+            // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+            // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+            // switch suppresses the affordance rows under us.
+            let _modes = crate::theme::cache::pin_theme();
             crate::appearance::cache::set_render_mermaid(RenderMermaid::On);
             let block = AgentMessageBlock::new("intro\n\n```mermaid\nA-->B\n```\n\nbye\n");
 
@@ -397,6 +409,10 @@ mod tests {
 
         #[test]
         fn raw_mode_suppresses_affordances_and_shows_source() {
+            // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+            // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+            // switch suppresses the affordance rows under us.
+            let _modes = crate::theme::cache::pin_theme();
             crate::appearance::cache::set_render_mermaid(RenderMermaid::On);
             let block = AgentMessageBlock::new("```mermaid\nA-->B\n```\n");
 
@@ -412,6 +428,10 @@ mod tests {
 
         #[test]
         fn off_setting_shows_source_with_no_affordances() {
+            // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+            // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+            // switch suppresses the affordance rows under us.
+            let _modes = crate::theme::cache::pin_theme();
             crate::appearance::cache::set_render_mermaid(RenderMermaid::Off);
             let block = AgentMessageBlock::new("```mermaid\nA-->B\n```\n");
             assert!(block.diagram_affordances(&ctx(60, false)).is_empty());
@@ -420,6 +440,10 @@ mod tests {
 
         #[test]
         fn copy_over_diagram_yields_fence_body() {
+            // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+            // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+            // switch suppresses the affordance rows under us.
+            let _modes = crate::theme::cache::pin_theme();
             use crate::scrollback::block::RenderBlock;
             crate::appearance::cache::set_render_mermaid(RenderMermaid::On);
             // Drive the real whole-block copy path (`copy_visible_text_in_state`, then `plain_text_from_output`)
@@ -439,6 +463,10 @@ mod tests {
         /// Each row carries that diagram's own source.
         #[test]
         fn two_diagrams_each_anchor_at_their_own_row() {
+            // `AgentMessageBlock` reads the process-wide `INLINE_OVERLAY_FORCE_OFF`, which the mode-switch tests
+            // flip (to Minimal and back) while holding the theme test lock; hold it too, or a concurrent
+            // switch suppresses the affordance rows under us.
+            let _modes = crate::theme::cache::pin_theme();
             crate::appearance::cache::set_render_mermaid(RenderMermaid::On);
             let md = "intro line\n\n```mermaid\nAAA-->BBB\n```\n\nmid line\n\n```mermaid\nCCC-->DDD\n```\n\nbye line\n";
             let block = AgentMessageBlock::new(md);

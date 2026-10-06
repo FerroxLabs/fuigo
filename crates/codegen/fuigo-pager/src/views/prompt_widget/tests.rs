@@ -657,6 +657,7 @@
     /// active permission flag.
     #[test]
     fn mode_flags_show_plan_and_permission_together() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::app::actions::PermissionLabel;
         let theme = Theme::current();
         let cases = [
@@ -1221,6 +1222,7 @@
 
     #[test]
     fn paste_preview_hint_on_chip_mentions_enter() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut pw = PromptWidget::new();
         pw.handle_paste("line1\nline2\nline3\nline4");
         pw.textarea.set_cursor(0);
@@ -1236,6 +1238,7 @@
 
     #[test]
     fn paste_preview_hint_right_adjacent_never_mentions_enter() {
+        let _theme = crate::theme::cache::pin_theme();
         // At the post-paste position Enter submits, so the hint must not advertise it; what the user can actually do there is paste again
         let mut pw = PromptWidget::new();
         pw.handle_paste("line1\nline2\nline3\nline4");
@@ -3821,6 +3824,7 @@
 
     #[test]
     fn ghost_text_renders_at_cursor_when_at_end() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut pw = PromptWidget::new();
         pw.textarea.insert_str("hello");
         pw.set_ghost_text(Some(" world".into()));
@@ -4423,6 +4427,7 @@
     #[test]
     #[serial_test::serial]
     fn teal_highlighting_on_second_line() {
+        let _theme = crate::theme::cache::pin_theme();
         // Asserts the full-TUI accent color
         // The slash highlight reads the global `embedded` flag (monochrome when set)
         // Pin it off and serialize against the modal_window embedded test that toggles it
@@ -4488,6 +4493,7 @@
 
     #[test]
     fn title_renders_on_top_border_with_corners_intact() {
+        let _theme = crate::theme::cache::pin_theme();
         let buf = draw_bordered(40, &title_test_style(Some("my session")));
 
         // ` my session ` is 12 cols, right-aligned ending 2 cells before ╮: label at x 25..=36, dashes at 37..=38, corner at 39
@@ -4561,6 +4567,7 @@
     /// Uses a sentinel panel color so the test holds under terminal-default, where every palette entry quantizes to `Color::Reset`.
     #[test]
     fn panel_bg_repaints_paste_chip_to_panel_bg() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let panel = ratatui::style::Color::Rgb(12, 34, 56);
         assert_ne!(theme.paste_bg, panel, "fixture: sentinel must differ");

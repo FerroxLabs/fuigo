@@ -107,6 +107,7 @@ pub(super) fn spawn_persistence_stub_observing(
                 }
                 PersistenceMsg::PresentationHints { respond_to, .. }
                 | PersistenceMsg::ReplaceChatHistoryForStripAndAck { respond_to, .. }
+                | PersistenceMsg::ReplaceChatHistoryAndAck { respond_to, .. }
                 | PersistenceMsg::DeleteGoalModeState { respond_to }
                 | PersistenceMsg::WorkflowRunStateAndAck { respond_to, .. }
                 | PersistenceMsg::ProbeWritable { respond_to } => {
@@ -160,6 +161,28 @@ pub(super) async fn actor_with_mock_sampler(
     max_turns: Option<usize>,
     permission_gateway: Option<fuigo_acp_lib::AcpAgentGatewaySender>,
 ) -> Arc<SessionActor> {
+    actor_with_mock_sampler_configured(
+        server,
+        session_id,
+        persistence_tx,
+        gateway_tx,
+        max_turns,
+        permission_gateway,
+        |_| {},
+    )
+    .await
+}
+
+/// [`actor_with_mock_sampler`], with `configure` applied to the actor before it is shared.
+pub(super) async fn actor_with_mock_sampler_configured(
+    server: &MockInferenceServer,
+    session_id: &str,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
+    max_turns: Option<usize>,
+    permission_gateway: Option<fuigo_acp_lib::AcpAgentGatewaySender>,
+    configure: impl FnOnce(&mut SessionActor),
+) -> Arc<SessionActor> {
     let sampling_cfg = fuigo_sampler::SamplerConfig {
         api_key: Some("test-key".to_string()),
         base_url: server.url(),
@@ -186,6 +209,7 @@ pub(super) async fn actor_with_mock_sampler(
     actor.session_info.id = acp::SessionId::new(session_id);
     actor.sampler_handle = sampler_handle;
     actor.max_turns = max_turns;
+    configure(&mut actor);
     if let Some(gateway) = permission_gateway {
         *actor.agent.borrow_mut() = test_agent_with_tools(read_and_edit_toolset()).await;
         install_permission_manager(&mut actor, /* yolo */ false, gateway);

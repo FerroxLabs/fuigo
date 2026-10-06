@@ -13,7 +13,7 @@ use crate::session::helpers::compaction_context::CompactionInputs;
 use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
     COMPACT_FAILED_PREFIX, CompactOutput, CompactionOutcome, build_two_pass_compaction_prompt,
-    generate_session_compact, is_context_length_error,
+    generate_session_compact, is_context_length_error, retain_session_asset_files,
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::session::two_pass::{
@@ -187,6 +187,11 @@ impl SessionActor {
     /// Per-turn prefire decision: usage has reached `threshold - lead` (so there is still runway before the hard auto-compact line at `threshold`).
     pub(crate) async fn should_prefire_two_pass(&self) -> bool {
         if self.compaction.is_suppressed() {
+            return false;
+        }
+        // The compaction this request prepares would be refused while a load-time repair owes its backup (P123). Only a
+        // look: the copy is retried by the compaction attempt, not by every turn's prefire decision.
+        if crate::session::storage::jsonl::load_repair::backup_is_owed(&self.session_info) {
             return false;
         }
         let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
@@ -495,6 +500,16 @@ impl SessionActor {
             None
         }
     }
+    /// Why a compaction cannot run now, when a load-time repair of this session still owes its `.pre-repair` backup: the
+    /// compaction's rewrite of `chat_history.jsonl` would be refused (P96). Asking retries the backup. Every caller asks
+    /// BEFORE it sends anything to the model (the memory-save request, the prefire pass, the summary), so nothing is
+    /// spent on a compaction that will be refused (P123, K14).
+    fn compaction_refusal(&self) -> Option<String> {
+        crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
+            &self.session_info,
+            "compact the conversation",
+        )
+    }
     /// Increment the compaction counter and launch a pre-compaction memory flush.
     ///
     /// The counter is incremented before the flush check so the once-per-cycle guard does not suppress the first eligible flush.
@@ -575,17 +590,25 @@ impl SessionActor {
             .as_ref()
             .map(|c| c.context_window.get())
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
-            .await;
-        if let Err(e) = self
-            .run_compact_inner(
-                user_context,
-                None,
-                fuigo_telemetry::events::CompactionTrigger::Manual,
-                false,
-            )
-            .await
-        {
+        // A refused compaction sends the model nothing first: no memory-save request (P123).
+        let compacted = match self.compaction_refusal() {
+            Some(refusal) => {
+                tracing::warn!(session_id = %self.session_info.id, error = %refusal, "compaction refused");
+                Err(crate::acp_error::compaction(refusal))
+            }
+            None => {
+                self.maybe_pre_compaction_flush(total_tokens, context_window, "pre_compaction")
+                    .await;
+                self.run_compact_inner(
+                    user_context,
+                    None,
+                    fuigo_telemetry::events::CompactionTrigger::Manual,
+                    false,
+                )
+                .await
+            }
+        };
+        if let Err(e) = compacted {
             let span = tracing::Span::current();
             span.record("success", false);
             span.record("error", crate::sampling::error::acp_error_text(&e).as_str());
@@ -765,13 +788,14 @@ impl SessionActor {
             "auto-compact auth failure: aborting turn for re-auth",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
-                "message": crate::util::truncate(&message, 300),
+                "message": fuigo_telemetry::sent_credentials::truncate_chars(&message, 300).0,
             })),
         );
         self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Failed {
                 error_type: "auth".to_string(),
                 message: message.clone(),
+                verdicts: None,
             },
         ))
         .await;
@@ -911,6 +935,16 @@ impl SessionActor {
         trigger: fuigo_telemetry::events::CompactionTrigger,
         lossy_input: bool,
     ) -> Result<(), acp::Error> {
+        // A compaction's rewrite of chat_history.jsonl is not acknowledged. While a load-time repair still owes its
+        // backup that rewrite is refused, and memory and the checkpoint would move on while the file did not (P96).
+        // Refuse before any request is made or anything changes.
+        if let Some(error) = crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
+            &self.session_info,
+            "compact the conversation",
+        ) {
+            tracing::warn!(session_id = %self.session_info.id, %error, "compaction refused");
+            return Err(crate::acp_error::compaction(error));
+        }
         let (cancel, _cancel_scope) = self.compaction.cancel.enter();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
         tracing::Span::current().record("compaction_tokens_before", tokens_before as i64);
@@ -1331,17 +1365,18 @@ impl SessionActor {
         let generate_session_compact = compact_output.content.clone();
         let user_message_prefix = self.build_user_message_prefix().await;
         let conversation = input_conversation;
-        let (discovered_agents_md, all_skills_for_compaction, _agent_edited_paths, state_context) =
+        let (discovered_agents_md, all_skills_for_compaction, _edited_paths, mut state_context) =
             if use_short_prompt {
                 let empty_edited: std::collections::BTreeSet<String> = Default::default();
                 let ctx =
                     CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
                 (Vec::<std::path::PathBuf>::new(), vec![], empty_edited, ctx)
             } else {
-                let agents_md: Vec<std::path::PathBuf> = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
+                // Never hold `self.agent.borrow()` across `.await`: a zero-turn harness rebuild
+                // (`/model` to an incompatible agent type) takes `borrow_mut` on the same
+                // `RefCell`, and a `Ref` parked at a suspension point would make that panic.
+                let bridge = self.tool_bridge_handle();
+                let agents_md: Vec<std::path::PathBuf> = bridge
                     .agents_md_reminded_paths()
                     .await
                     .into_iter()
@@ -1349,29 +1384,17 @@ impl SessionActor {
                 let skills = self.slash_skills_for_resolve().await;
                 let edited_paths = self.chat_state_handle.get_agent_edited_paths().await;
                 let ctx = {
-                    let bridge_tasks = self
-                        .agent
-                        .borrow()
-                        .tool_bridge()
-                        .list_background_tasks()
-                        .await;
+                    let bridge_tasks = bridge.list_background_tasks().await;
                     let pending_tasks: Vec<_> =
                         bridge_tasks.into_iter().filter(|t| !t.completed).collect();
                     let (execute_tool_name, monitor_tool_name) = if pending_tasks.is_empty() {
                         (None, None)
                     } else {
-                        let agent_ref = self.agent.borrow();
-                        let bridge = agent_ref.tool_bridge();
-                        let empty = serde_json::json!({});
-                        let execute = bridge
-                            .render_prompt("${{ tools.by_kind.execute }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        let monitor = bridge
-                            .render_prompt("${{ tools.by_kind.monitor }}", &empty)
-                            .await
-                            .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                        (execute, monitor)
+                        self.tool_names_by_kind(
+                            "${{ tools.by_kind.execute }}",
+                            "${{ tools.by_kind.monitor }}",
+                        )
+                        .await
                     };
                     let running_tasks: Vec<_> = pending_tasks
                         .into_iter()
@@ -1512,9 +1535,7 @@ impl SessionActor {
                         None
                     } else {
                         use fuigo_tools::types::tool::ToolKind;
-                        self.agent
-                            .borrow()
-                            .tool_bridge()
+                        self.tool_bridge_handle()
                             .tool_for_kind(ToolKind::Workflow)
                             .await
                             .filter(|s| !s.is_empty())
@@ -1537,22 +1558,51 @@ impl SessionActor {
                 };
                 (agents_md, skills, edited_paths, ctx)
             };
+        // Upstream resets the image context for the Cursor harness. Fuigo compiles only the
+        // constant-`false` twin of `is_cursor_harness`, so that harness never reaches here and the
+        // guard is omitted rather than carried as dead code.
+        let harvested_paths: Vec<String> =
+            std::mem::take(&mut state_context.images.attached_paths);
+        let (kept, dropped_paths) = if harvested_paths.is_empty() {
+            (Vec::new(), 0)
+        } else {
+            match crate::session::persistence::ensure_owner_only_session_dir(&self.session_info) {
+                // `<sessions_root>/<cwd-dir>/<session-id>`: any session's assets qualify, so a fork keeps the
+                // images its inherited transcript names in the parent's `assets/`.
+                Ok(session_dir) => match session_dir.parent().and_then(std::path::Path::parent) {
+                    Some(sessions_root) => {
+                        retain_session_asset_files(harvested_paths, sessions_root).await
+                    }
+                    None => (Vec::new(), harvested_paths.len()),
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "compaction: session dir unavailable; attached image paths dropped"
+                    );
+                    (Vec::new(), harvested_paths.len())
+                }
+            }
+        };
+        state_context.images.attached_paths = kept;
+        if dropped_paths > 0 {
+            tracing::debug!(
+                session_id = %self.session_info.id.0,
+                dropped_paths,
+                "compaction: dropped attached image paths that are not session asset files"
+            );
+        }
         use crate::session::helpers::compaction_context::SubagentToolNames;
         let subagent_tool_names: Option<SubagentToolNames> =
             if use_short_prompt || state_context.running_subagents.is_empty() {
                 None
             } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
-                let empty = serde_json::json!({});
-                let poll_name = bridge
-                    .render_prompt("${{ tools.by_kind.background_task_action }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                let cancel_name = bridge
-                    .render_prompt("${{ tools.by_kind.kill_task_action }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                let (poll_name, cancel_name) = self
+                    .tool_names_by_kind(
+                        "${{ tools.by_kind.background_task_action }}",
+                        "${{ tools.by_kind.kill_task_action }}",
+                    )
+                    .await;
                 match (poll_name, cancel_name) {
                     (Some(poll), Some(cancel)) => Some(SubagentToolNames { poll, cancel }),
                     (poll, cancel) => {
@@ -1572,17 +1622,9 @@ impl SessionActor {
             if use_short_prompt || state_context.connected_mcp_servers.is_empty() {
                 None
             } else {
-                let agent_ref = self.agent.borrow();
-                let bridge = agent_ref.tool_bridge();
-                let empty = serde_json::json!({});
-                let search_name = bridge
-                    .render_prompt("${{ tools.by_kind.search_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
-                let call_name = bridge
-                    .render_prompt("${{ tools.by_kind.use_tool }}", &empty)
-                    .await
-                    .filter(|s| !s.is_empty() && !s.contains("by_kind"));
+                let (search_name, call_name) = self
+                    .tool_names_by_kind("${{ tools.by_kind.search_tool }}", "${{ tools.by_kind.use_tool }}")
+                    .await;
                 match (search_name, call_name) {
                     (Some(search), Some(call)) => Some(McpToolNames { search, call }),
                     _ => None,
@@ -1693,6 +1735,16 @@ impl SessionActor {
         let agents_md_reminder = self.agent.borrow().agents_md_user_reminder();
         let compaction_context = state_context.for_compaction();
         let compaction_state_context: &CompactionStateContext = &compaction_context;
+        tracing::debug!(
+            session_id = %self.session_info.id.0,
+            has_last_user_query = compaction_state_context.last_user_query.is_some(),
+            last_turn_image_parts = compaction_state_context.images.last_turn_image_parts.len(),
+            has_last_turn_image_files = compaction_state_context
+                .images
+                .last_turn_image_files
+                .is_some(),
+            "compaction: last-turn image context"
+        );
         let transcript_hint = self.transcript_hint();
         let summary_count = self
             .compaction
@@ -1839,16 +1891,11 @@ impl SessionActor {
             .send(PersistenceMsg::PlanState(
                 crate::tools::todo::TodoState::default(),
             ));
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .on_agents_md_compaction()
-            .await;
-        self.agent
-            .borrow()
-            .tool_bridge()
-            .on_skill_discovery_compaction()
-            .await;
+        // Bridge handle first: no `Ref<Agent>` may be parked at these awaits (see
+        // `tool_names_by_kind`).
+        let bridge = self.tool_bridge_handle();
+        bridge.on_agents_md_compaction().await;
+        bridge.on_skill_discovery_compaction().await;
         self.rearm_failed_server_announcements().await;
         self.plan_mode.lock().reset_after_compaction();
         self.persist_plan_mode_state();
@@ -2135,6 +2182,21 @@ impl SessionActor {
         lossy_input: bool,
     ) -> Result<(), acp::Error> {
         use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
+        // While a load-time repair owes its backup the compaction would be refused, so nothing is started: no "started"
+        // note, no memory-save request, no summary request. The first refusal since the backup became owed says why; the
+        // later ones return the same refusal quietly until the backup can be made (P123, K14).
+        if let Err(refused) =
+            crate::session::storage::jsonl::load_repair::refused_auto_compaction(&self.session_info)
+        {
+            if let Some(note) = refused.note {
+                tracing::warn!(session_id = %self.session_info.id, error = %refused.refusal, "auto-compaction refused");
+                self.send_fuigo_notification(FuigoSessionUpdate::AutoCompactFailed { error: note })
+                    .await;
+            } else {
+                tracing::debug!(session_id = %self.session_info.id, "auto-compaction refused again (backup still owed)");
+            }
+            return Err(crate::acp_error::compaction(refused.refusal));
+        }
         let (_cancel, _cancel_scope) = self.compaction.cancel.enter();
         self.record_compaction_variant();
         let tokens_before = self.chat_state_handle.get_total_tokens().await;
@@ -2245,6 +2307,9 @@ impl SessionActor {
             "detailed"
         };
         let error_str = error.map(compaction_artifact_error_text);
+        // P70b: `compaction_requests/*.json` is a persisted sink. (The line above is pinned verbatim by
+        // `error_data_guard_tests`; the scrub is a separate statement.)
+        let error_str = error_str.map(fuigo_telemetry::sent_credentials::scrub_owned);
         let artifact = CompactionRequestFile {
             schema_version: 2,
             request_id,
@@ -2384,3 +2449,27 @@ mod artifact_error_text_tests {
 #[cfg(test)]
 #[path = "compaction_inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
+
+impl SessionActor {
+    /// Resolve two `${{ tools.by_kind.* }}` templates to tool names for a compaction summary.
+    ///
+    /// Takes the bridge handle first ([`Self::tool_bridge_handle`]) so no `RefCell::Ref<Agent>`
+    /// is alive while `render_prompt` waits on the toolset's resource lock: the zero-turn harness
+    /// rebuild (`/model` to an incompatible agent type) replaces the agent with `borrow_mut`, and a
+    /// manual `/compact` runs as its own task, so the two can interleave at that await.
+    /// An unresolved template (empty, or echoed back) is `None`.
+    pub(super) async fn tool_names_by_kind(
+        &self,
+        first: &str,
+        second: &str,
+    ) -> (Option<String>, Option<String>) {
+        let bridge = self.tool_bridge_handle();
+        let empty = serde_json::json!({});
+        let resolve = |rendered: Option<String>| {
+            rendered.filter(|s| !s.is_empty() && !s.contains("by_kind"))
+        };
+        let first = resolve(bridge.render_prompt(first, &empty).await);
+        let second = resolve(bridge.render_prompt(second, &empty).await);
+        (first, second)
+    }
+}

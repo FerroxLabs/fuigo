@@ -730,7 +730,7 @@ mod fallback_gate_tests {
             create_timeout: Duration::from_millis(80),
             ..Default::default()
         };
-        let copy_before = crate::grove_wt_create_count("copy");
+        let copy_before = crate::metrics::test_thread::count("copy");
         let plan = WorktreePlan {
             source: repo,
             dest: dest.clone(),
@@ -757,7 +757,7 @@ mod fallback_gate_tests {
             "dispatch must not copy-fallback after NFS adopt"
         );
         assert_eq!(creates.load(Ordering::SeqCst), 1);
-        assert_eq!(crate::grove_wt_create_count("copy"), copy_before);
+        assert_eq!(crate::metrics::test_thread::count("copy"), copy_before);
     }
     #[cfg(target_os = "linux")]
     #[test]
@@ -955,7 +955,7 @@ mod fallback_gate_tests {
             create_timeout: Duration::from_millis(80),
             ..Default::default()
         };
-        let copy_before = crate::grove_wt_create_count("copy");
+        let copy_before = crate::metrics::test_thread::count("copy");
         let plan = WorktreePlan {
             source: repo,
             dest: dest.clone(),
@@ -980,6 +980,6 @@ mod fallback_gate_tests {
             !dest.join("marker.txt").exists(),
             "linked Grove decline must not file-copy the source"
         );
-        assert_eq!(crate::grove_wt_create_count("copy"), copy_before);
+        assert_eq!(crate::metrics::test_thread::count("copy"), copy_before);
     }
 }

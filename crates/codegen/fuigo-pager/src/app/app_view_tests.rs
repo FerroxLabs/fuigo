@@ -120,6 +120,10 @@ pub(crate) fn test_app() -> AppView {
         active_announcements: vec![],
         hidden_announcement_ids: Default::default(),
         announcements_last_gen: 0,
+        relay_refusal: None,
+        relay_refusal_noted: Default::default(),
+        relay_sync_refusals: Default::default(),
+        leader_notices: Vec::new(),
         announcement: None,
         changelog_markdown: None,
         changelog_bullets: Vec::new(),
@@ -138,16 +142,6 @@ pub(crate) fn test_app() -> AppView {
         subagents: false,
         ask_user: false,
         chat_mode: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
-        #[cfg(feature = "local-workspace")]
-        local_workspace_startup_locked: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_session_local_workspace: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_local_workspace_ack_pending: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_history_load_as_build: false,
         mouse_captured: true,
         new_worktree_dialog: None,
         contextual_hints: Default::default(),
@@ -239,10 +233,6 @@ pub(crate) fn test_app() -> AppView {
         welcome_privacy_banner_opt_out_rect: None,
         welcome_privacy_banner_terms_rect: None,
         welcome_privacy_banner_policy_rect: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode_rects: Default::default(),
-        #[cfg(feature = "local-workspace")]
-        welcome_on_workspace_mode: false,
         welcome_toast: None,
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
@@ -629,24 +619,26 @@ fn needs_animation_gates_prompt_history_tick_delivery() {
         let agent = app.agents.get_mut(&id).unwrap();
         agent.session.prompt_history = vec!["first prompt".into(), "second prompt".into()];
         let history = agent.combined_prompt_history();
-        assert!(agent.prompt.history_search.activate(&history, ""));
+        // Open empty, then hand over the entries: `activate` takes an eager snapshot, and a matcher that answered before it would leave nothing for `tick()` to deliver.
+        // Sent after the snapshot, the two results can only arrive through a later poll.
+        assert!(agent.prompt.history_search.activate(&[], ""));
+        agent.prompt.history_search.refresh_items(&history);
     }
     assert!(
         app.needs_animation(),
         "an open prompt history overlay must request animation ticks"
     );
-    let mut delivered = false;
-    for _ in 0..1000 {
-        if app.tick() && app.agents[&id].prompt.history_search.result_count() == 2 {
-            delivered = true;
-            break;
-        }
+    // `tick()` is what delivers, so it is what this loop drives; it ends on the delivery itself.
+    // A count of ticks is a guess at the matcher thread's scheduling: 1000 one-millisecond ticks ran out on a loaded host (P78).
+    // The deadline only turns a matcher that never answers into a failure.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !(app.tick() && app.agents[&id].prompt.history_search.result_count() == 2) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tick() must poll the history daemon and deliver results"
+        );
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(
-        delivered,
-        "tick() must poll the history daemon and deliver results"
-    );
     app.agents
         .get_mut(&id)
         .unwrap()
@@ -1462,6 +1454,7 @@ fn needs_animation_gates_pending_turn_end_reconcile() {
             cancellation_category: None,
             cancellation_context: None,
             error_kind: None,
+            verdicts: None,
             received_at: std::time::Instant::now()
                 - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
         });
@@ -4778,6 +4771,7 @@ fn dashboard_stale_clears_skip_attached_popup_agent() {
 }
 #[test]
 fn dashboard_too_small_popup_clears_shared_overlay_slot() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
     let _guard = set_protocol_for_test(GraphicsProtocol::Kitty);
     crate::terminal::overlay::reset_owner();
@@ -6698,185 +6692,6 @@ fn welcome_picker_f_cycle_disabled_under_chat_mode() {
         outcome,
         InputOutcome::Action(Action::CycleSessionSourceFilter)
     ));
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_ctrl_e_cycles_workspace_mode() {
-    use crate::views::welcome::WelcomeWorkspaceMode;
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
-    let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-    let outcome = app.handle_input(&key);
-    assert!(matches!(outcome, InputOutcome::Changed));
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::LocalWorkspace
-    );
-    let _ = app.handle_input(&key);
-    assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_ack_cancel_clears_history_bypass() {
-    use crate::views::welcome::WelcomeWorkspaceMode;
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    app.welcome_local_workspace_ack_pending = true;
-    app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
-    app.welcome_history_load_as_build = true;
-    app.deferred_startup.worktree = true;
-    app.deferred_startup.history_load_as_build = true;
-    let outcome = app.handle_input(&key_event(KeyCode::Char('n'), KeyModifiers::NONE));
-    assert!(matches!(outcome, InputOutcome::Changed));
-    assert!(!app.welcome_local_workspace_ack_pending);
-    assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
-    assert!(
-        !app.welcome_history_load_as_build,
-        "ACK cancel must drop history bypass"
-    );
-    assert!(!app.deferred_startup.history_load_as_build);
-    assert!(!app.deferred_startup.worktree);
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_workspace_click_selects_mode() {
-    use crate::views::welcome::{WelcomeWorkspaceMode, WorkspaceModeHitRects};
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    app.welcome_workspace_mode_rects = WorkspaceModeHitRects {
-        options: [
-            Some(ratatui::layout::Rect::new(10, 5, 9, 1)),
-            Some(ratatui::layout::Rect::new(20, 5, 17, 1)),
-        ],
-        row: Some(ratatui::layout::Rect::new(0, 5, 80, 1)),
-    };
-    let click = Event::Mouse(crossterm::event::MouseEvent {
-        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        column: 25,
-        row: 5,
-        modifiers: KeyModifiers::NONE,
-    });
-    let outcome = app.handle_input(&click);
-    assert!(matches!(outcome, InputOutcome::Changed));
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::LocalWorkspace
-    );
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_workspace_locked_ignores_cycle_and_click() {
-    use crate::views::welcome::{WelcomeWorkspaceMode, WorkspaceModeHitRects};
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    app.local_workspace_startup_locked = true;
-    app.welcome_workspace_mode = WelcomeWorkspaceMode::LocalWorkspace;
-    app.welcome_workspace_mode_rects = WorkspaceModeHitRects {
-        options: [
-            Some(ratatui::layout::Rect::new(10, 5, 9, 1)),
-            Some(ratatui::layout::Rect::new(20, 5, 17, 1)),
-        ],
-        row: Some(ratatui::layout::Rect::new(0, 5, 80, 1)),
-    };
-    let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-    assert!(matches!(
-        app.handle_input(&key),
-        InputOutcome::Unchanged | InputOutcome::Changed
-    ));
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::LocalWorkspace
-    );
-    let click = Event::Mouse(crossterm::event::MouseEvent {
-        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
-        column: 12,
-        row: 5,
-        modifiers: KeyModifiers::NONE,
-    });
-    let _ = app.handle_input(&click);
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::LocalWorkspace,
-        "locked picker must not change selection"
-    );
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_ctrl_e_ignored_while_history_picker_open() {
-    use crate::views::welcome::WelcomeWorkspaceMode;
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    app.session_picker_entries = Some(vec![]);
-    app.session_picker_state.set_query("keep-me");
-    let before = app.welcome_workspace_mode;
-    let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-    let outcome = app.handle_input(&key);
-    assert_eq!(app.welcome_workspace_mode, before);
-    assert!(
-        !matches!(outcome, InputOutcome::Action(Action::ForceDeepSearch)),
-        "history open: Ctrl+E must not cycle or soft-refresh: {outcome:?}"
-    );
-    assert_eq!(app.session_picker_state.query(), "keep-me");
-    let _ = WelcomeWorkspaceMode::Sandbox;
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_ctrl_e_ignored_while_authenticating() {
-    use crate::views::welcome::WelcomeWorkspaceMode;
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Authenticating {
-        request_seq: 1,
-        handle: None,
-        auth_url: None,
-        mode: AuthMode::Command,
-    };
-    app.trust_state = TrustState::Done;
-    assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
-    let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-    let _ = app.handle_input(&key);
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::Sandbox,
-        "Ctrl+E must not cycle mode before auth is Done"
-    );
-}
-#[cfg(feature = "local-workspace")]
-#[test]
-fn welcome_ctrl_e_ignored_when_zdr_blocked() {
-    use crate::views::welcome::WelcomeWorkspaceMode;
-    let mut app = test_app();
-    app.chat_mode = true;
-    app.active_view = ActiveView::Welcome;
-    app.auth_state = AuthState::Done;
-    app.trust_state = TrustState::Done;
-    app.is_zdr = true;
-    app.zdr_access_enabled = false;
-    assert_eq!(app.welcome_workspace_mode, WelcomeWorkspaceMode::Sandbox);
-    let key = Event::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
-    let _ = app.handle_input(&key);
-    assert_eq!(
-        app.welcome_workspace_mode,
-        WelcomeWorkspaceMode::Sandbox,
-        "Ctrl+E must not cycle mode on ZDR-blocked welcome"
-    );
 }
 
 // --- Access gate: what the removed competitor-subscription funnel left behind ---

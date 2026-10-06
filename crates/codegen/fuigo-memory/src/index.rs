@@ -370,7 +370,7 @@ impl MemoryIndex {
             }
         };
 
-        if !super::safety::is_safe_memory(&content) {
+        if content.trim().is_empty() || !super::safety::is_safe_memory(&content) {
             let removed = self.delete_path(path)?;
             return Ok(ReindexResult {
                 removed,
@@ -1448,3 +1448,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "index_p91_tests.rs"]
+mod p91_tests;

@@ -236,6 +236,7 @@ mod tests {
     /// Items area past buffer bottom must not panic on resize races.
     #[test]
     fn render_dropdown_past_buffer_bottom_does_not_panic() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

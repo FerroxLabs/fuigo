@@ -1,0 +1,62 @@
+Astra round 2 (codex 0.160.0, model gpt-6-astra, read-only) on dbf192cf..ccb7e389 -- final report only.
+Raw transcript (4996 lines) not committed; sha256 b9c96c68039e9ff0a235e13293424850cef1ccdc4def46e79ae725d58f1b1cd6; copy at hetzner-dsm:/root/fuigo-builds/p83/audits/p83-astra-r2.raw.txt
+
+Audited `dbf192cf..ccb7e389` on clean branch `strike/p83`, HEAD `ccb7e389`. Read-only; no builds or tests run. **Three HIGH findings and one MEDIUM finding remain.**
+
+1. **HIGH — R1 HIGH 1 stands: the move check detects some violations after dereferencing may already have occurred.**  
+   [local_ref.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:49), [local_ref.rs:80](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:80)
+
+   Concrete scenario: initialize an agent in a `Box`, move its contents into another allocation, release the original allocation, then yield to the LocalSet. The announcement task can dereference the old address before another `spawn_bound` or agent destruction checks `home`. Aborting later cannot repair that use-after-free.
+
+   This is a **retained defect**, and I found no production owner performing that relocation: ACP installs its handler in an `Rc` before requests; server and pager likewise establish stable ownership before bound work starts. Nevertheless, the public safe by-value API permits the scenario. The old documentation’s invariant and the new diagnostic do not enforce address stability. [Rust’s pinning contract](https://doc.rust-lang.org/std/pin/index.html)
+
+   **Tests:** The child-process test proves detection at the next spawn, plus successful re-homing after completion. Its futures never dereference `_agent_ref`; it does not exercise the dangerous interval.
+
+   **Minimal complete fix:** make the pointer target permanently stable before bound work is possible. A movable public handle containing private, stable heap storage can preserve by-value constructor signatures. Alternatively, expose an enforced pinned ownership API with a `!Unpin` agent and prevent unpinned construction/use. **Returning plain `Rc<MvpAgent>` alone is insufficient:** safe `Rc::try_unwrap` can extract the agent when only one strong reference remains, even with weak references present. [Rust `Rc` documentation](https://doc.rust-lang.org/std/rc/struct.Rc.html#method.try_unwrap)
+
+2. **HIGH — R1 HIGH 2 is only partially fixed: discarding a second panic payload can abandon the drain.**  
+   [local_ref.rs:159](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:159)
+
+   `first_panic.get_or_insert(panic)` drops the supplied payload when `first_panic` is already populated. That drop occurs **outside** `catch_unwind`.
+
+   Concrete scenario: register futures A, B and C. A’s destructor panics with an ordinary string. B’s destructor uses `panic_any(Payload)`, whose own destructor panics. A’s payload is retained; discarding B’s payload at line 159 starts an uncaught unwind. C remains in its driver because the registry vector was already removed. The agent’s remaining fields are destroyed, and C can subsequently poll or drop with dangling agent references. Rust explicitly documents that dropping a caught panic payload can panic. [Rust `catch_unwind` documentation](https://doc.rust-lang.org/std/panic/fn.catch_unwind.html)
+
+   **Tests:** Not caught. The added test has one ordinary panic payload and one non-panicking probe.
+
+   **Correction:** ensure secondary payload disposal cannot unwind before draining completes—for example, retain the first payload and deliberately forget secondary payloads, or abort safely on the unsupported secondary-panic path.
+
+3. **HIGH — A panicking wake also abandons remaining bound futures.**  
+   [local_ref.rs:163](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:163)
+
+   `waker.wake()` runs outside the catch boundary, between draining successive slots.
+
+   This is reachable even though `Driver` receives a Tokio task waker. In locked Tokio **1.52.3**, waking a local task while its LocalSet is not being polled forwards to the LocalSet’s registered outer waker; `AtomicWaker::wake` lets that callback’s panic propagate.
+
+   Concrete scenario: an embedder polls `LocalSet::run_until` with a custom waker, parks two bound tasks, then drops the agent outside the LocalSet poll. Waking the first emptied driver invokes the outer callback, which panics. The second slot remains populated while the agent’s fields unwind. Catching that panic and subsequently running or destroying the surviving driver recreates the lifetime violation. I found no ordinary production waker exhibiting this behavior; it is an uncovered soundness path.
+
+   **Tests:** Not caught; the handle-completion test uses ordinary `block_on` scheduling.
+
+   **Correction:** finish dropping **all** bound futures before invoking wake callbacks, or catch each wake with the same panic-safe payload handling as destruction. The drain must not be interruptible by a wake.
+
+4. **MEDIUM — Three teardown tests themselves permit relocation and can abort before testing their intended assertion.**  
+   [p83_teardown_tests.rs:177](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:177), [line 221](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:221), [line 248](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:248)
+
+   These tests spawn against a by-value local and then pass that agent by value to `drop`. The panic test additionally moves it into the `catch_unwind` closure. Those ownership transfers permit physical relocation; keeping an agent “in a local” does not guarantee its address.
+
+   Consequently, `check_home` can abort while work remains pending, before the probe, wake, or destructor-panic assertion establishes its intended result. Whether a particular compiler/build elides those moves is not a portable test guarantee. This is a source-level finding, **not a claim that I observed these tests fail**.
+
+   **Correction:** allocate the test agent behind an `Rc` before spawning, then drop that owning handle. Keep relocation testing in the dedicated subprocess case. The existing `finished` subprocess correctly covers moving after the bound future has completed.
+
+The other requested checks produced these conclusions:
+
+- **Normal wake behavior is corrected.** The driver records its waker after `Pending`; teardown removes the future and wakes the driver. The oneshot handshake establishes that the test future reached its pending poll before teardown, subject to finding 4.
+- **Ordinary re-entrancy is handled coherently.** Nested spawning uses the separate registry; teardown releases registry and slot borrows before dropping futures. `closed` prevents destructor-spawned futures from becoming new live bound tasks. Dropping the agent during an actively borrowed slot takes the explicit abort path.
+- **Ordinary poll panics do not independently reopen the original hole.** The slot borrow unwinds before Tokio destroys the driver. A destructor panic during an existing unwind can abort the process; that is fail-stop behavior, rather than a surviving dangling task.
+- **Completed work permits re-homing.** The new slot is registered after `check_home`, and completed slots have `future == None`. I found no false-abort path for genuinely completed work, nor a production relocation after bound spawning.
+- **Every converted call site remains confined:** initialize announcements; settings reapply and post-auth settings; periodic announcements; heap monitoring; tier recheck; session supervision; deferred recovery; coordinator; synthetic-trace receiver and individual traces. Coordinator run/validate/describe futures remain owned by its collections. Detached worker/presentation/upload work receives owned snapshots. No escaped `LocalRef` was found, although the factory signature still relies on that internal convention.
+- **The tests establish narrower claims than full soundness.** The ACP reproducer exercises real initialization and teardown, and its subprocess helper verifies actual test entry. It does not synchronize specifically on a live `LeaderGuard`. The weak-field probes discriminate synchronous draining but deliberately never dereference the agent. The panic test covers one ordinary destructor panic, not findings 2–3.
+
+The move disposition is useful mitigation but does **not** close R1 HIGH 1. The draining changes fix the ordinary single-panic case but still allow outstanding futures to survive agent destruction.
+
+**DO-NOT-LAND**
+exit=0

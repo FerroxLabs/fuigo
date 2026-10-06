@@ -469,6 +469,7 @@ pub(super) fn handle_prompt_complete(notif: &acp::ExtNotification, app: &mut App
             cancellation_category: payload.cancellation_category(),
             cancellation_context: payload.cancellation_context(),
             error_kind: payload.error_kind(),
+            verdicts: None,
         },
     );
     super::super::turn_completion::apply_terminal_outcome(outcome, app, id, is_active)

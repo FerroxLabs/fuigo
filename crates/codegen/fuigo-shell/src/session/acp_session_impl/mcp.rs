@@ -41,6 +41,158 @@ mod oauth_lock_tests {
             .await;
     }
 }
+#[cfg(test)]
+mod stale_generation_init_tests {
+    use super::super::support::create_test_actor;
+    use agent_client_protocol as acp;
+
+    /// Drain the gateway channel and return the ext-notification methods seen.
+    async fn ext_methods(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
+    ) -> Vec<String> {
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let mut out = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = msg {
+                out.push(args.request.method.to_string());
+            }
+        }
+        out
+    }
+
+    /// A registration that outlives a config change must not announce completion for the newer generation.
+    /// Observed: `fuigo/mcp_initialized` (clears the pager's "Connecting MCPs" progress) and `mcp_handshakes_done` (releases prefix and rebuild waits).
+    #[tokio::test]
+    async fn stale_generation_completion_neither_notifies_nor_wakes_waiters() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let generation = {
+                    let mut st = actor.mcp_state.lock().await;
+                    assert!(st.try_start_init());
+                    st.generation()
+                };
+                let notified = actor.mcp_handshakes_done.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let _ = ext_methods(&mut gateway_rx).await;
+
+                // The stale caller: its generation is not the current one
+                let finished = actor.complete_empty_mcp_init(generation.wrapping_sub(1)).await;
+                assert!(!finished, "a stale generation must not finish init");
+                let methods = ext_methods(&mut gateway_rx).await;
+                assert!(
+                    !methods.iter().any(|m| m == "fuigo/mcp_initialized"),
+                    "stale completion emitted fuigo/mcp_initialized: {methods:?}"
+                );
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(100), notified.as_mut())
+                        .await
+                        .is_err(),
+                    "stale completion woke mcp_handshakes_done waiters"
+                );
+                let st = actor.mcp_state.lock().await;
+                assert!(
+                    st.is_initializing() && !st.has_finished_init(),
+                    "the newer init's progress must be left alone"
+                );
+            })
+            .await;
+    }
+
+    /// The window AFTER the first generation check: the snapshot refresh awaits, a newer init starts meanwhile, and the older completion
+    /// must then neither announce nor wake waiters.
+    /// The refresh is suspended deterministically by holding the managed-MCP state lock it takes first.
+    #[tokio::test]
+    async fn completion_superseded_during_the_snapshot_refresh_neither_notifies_nor_wakes_waiters() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let generation = {
+                    let mut st = actor.mcp_state.lock().await;
+                    assert!(st.try_start_init());
+                    st.generation()
+                };
+                let notified = actor.mcp_handshakes_done.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let _ = ext_methods(&mut gateway_rx).await;
+
+                let refresh_gate = actor.managed_mcp_handle.lock().await;
+                let completion = actor.complete_empty_mcp_init(generation);
+                tokio::pin!(completion);
+                assert!(
+                    futures::poll!(completion.as_mut()).is_pending(),
+                    "premise: the completion must be parked in the snapshot refresh, past the first generation check"
+                );
+
+                // The newer init: a config change bumps the generation and resets init progress
+                let changed = actor.mcp_state.lock().await.update_configs(vec![
+                    acp::McpServer::Http(
+                        acp::McpServerHttp::new(
+                            "newer".to_string(),
+                            "https://example.test/newer".to_string(),
+                        )
+                        .headers(vec![]),
+                    ),
+                ]);
+                assert!(changed, "premise: the config change must advance the generation");
+                drop(refresh_gate);
+
+                assert!(!completion.await, "a completion superseded mid-refresh must not report finished");
+                let methods = ext_methods(&mut gateway_rx).await;
+                assert!(
+                    !methods.iter().any(|m| m == "fuigo/mcp_initialized"),
+                    "superseded completion emitted fuigo/mcp_initialized: {methods:?}"
+                );
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(100), notified.as_mut())
+                        .await
+                        .is_err(),
+                    "superseded completion woke mcp_handshakes_done waiters"
+                );
+            })
+            .await;
+    }
+
+    /// Positive control for the test above: the current generation does finish, notify and wake.
+    #[tokio::test]
+    async fn current_generation_completion_notifies_and_wakes_waiters() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let generation = {
+                    let mut st = actor.mcp_state.lock().await;
+                    assert!(st.try_start_init());
+                    st.generation()
+                };
+                let notified = actor.mcp_handshakes_done.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let _ = ext_methods(&mut gateway_rx).await;
+
+                assert!(actor.complete_empty_mcp_init(generation).await);
+                let methods = ext_methods(&mut gateway_rx).await;
+                assert!(
+                    methods.iter().any(|m| m == "fuigo/mcp_initialized"),
+                    "current generation must emit fuigo/mcp_initialized: {methods:?}"
+                );
+                tokio::time::timeout(std::time::Duration::from_secs(2), notified.as_mut())
+                    .await
+                    .expect("current generation must wake waiters");
+                assert!(actor.mcp_state.lock().await.has_finished_init());
+            })
+            .await;
+    }
+}
 impl SessionActor {
     /// If initialization is in progress by another task, this polls until complete.
     pub(super) async fn wait_for_mcp_initialized(&self) {
@@ -168,9 +320,7 @@ impl SessionActor {
         }
         if reg.model_visible {
             if let Err(e) = self
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_handle()
                 .register_mcp_tools(reg.name, reg.tool, Some(reg.input_schema))
                 .await
             {
@@ -238,10 +388,10 @@ impl SessionActor {
                     .await?
             }
         };
-        if !client.force_reauth(true).await {
+        // P151: the editor/TUI gets the reason (a refused token endpoint, a refused redirect, ...), not only the log.
+        if let Err(reason) = client.force_reauth_with_reason(true).await {
             return Err(format!(
-                "Authentication failed for MCP server '{}'",
-                server_name
+                "Authentication failed for MCP server '{server_name}': {reason}"
             ));
         }
         let mcp_state_arc = self.mcp_state.clone();
@@ -295,8 +445,13 @@ impl SessionActor {
         };
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let session_id = self.session_info.id.0.as_ref();
-        let (_, oauth_config_map) =
+        let (disk_servers, mut oauth_config_map) =
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
+        crate::session::managed_mcp::retain_oauth_for_same_destination(
+            &mut oauth_config_map,
+            &disk_servers,
+            std::slice::from_ref(&server_config),
+        );
         let byo_config = oauth_config_map.get(server_name).cloned();
         let event_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
@@ -306,6 +461,11 @@ impl SessionActor {
             self.tool_context.process_scope.as_ref(),
         )
         .with_oauth_discovery(discovery);
+        let server_url = match &server_config {
+            acp::McpServer::Http(http) => Some(http.url.clone()),
+            acp::McpServer::Sse(sse) => Some(sse.url.clone()),
+            _ => None,
+        };
         let new_client = crate::session::mcp_servers::start_mcp_server(
             server_config,
             Some(cwd),
@@ -316,7 +476,19 @@ impl SessionActor {
         .await
         .map_err(|e| format!("Failed to prepare OAuth for '{}': {}", server_name, e))?;
         if !new_client.has_auth() {
+            // P151: discovery that was refused (an issuer mismatch, ...) or could not be fetched is said so, instead
+            // of "does not support OAuth".
+            let refused = match (&discovery, &server_url) {
+                (McpOauthDiscovery::Network, Some(url)) => {
+                    fuigo_mcp::servers::explain_missing_oauth(url).await
+                }
+                _ => None,
+            };
             return Err(match discovery {
+                McpOauthDiscovery::Network if refused.is_some() => format!(
+                    "MCP server '{server_name}' cannot sign in with OAuth: {}",
+                    refused.unwrap_or_default()
+                ),
                 McpOauthDiscovery::Network => {
                     format!(
                         "MCP server '{}' does not support OAuth (discovery found no authorization support)",
@@ -438,12 +610,26 @@ impl SessionActor {
     pub(super) fn spawn_oauth_config_map(
         &self,
         cwd: &std::path::Path,
+        active: &[acp::McpServer],
     ) -> crate::util::config::McpOAuthConfigMap {
-        let (_, mut oauth_config_map) =
+        let (disk_servers, mut oauth_config_map) =
             crate::util::config::load_mcp_servers_with_oauth(cwd, &self.rebuild_spec.compat);
+        // P133: a setting configured for one destination is not handed to a same-named server elsewhere.
+        crate::session::managed_mcp::retain_oauth_for_same_destination(
+            &mut oauth_config_map,
+            &disk_servers,
+            active,
+        );
         let plugin_registry_snapshot = self.plugin_registry.borrow().clone();
-        let plugin_oauth = crate::session::managed_mcp::collect_plugin_oauth_configs(
-            plugin_registry_snapshot.as_deref(),
+        let (plugin_servers, mut plugin_oauth) =
+            crate::session::managed_mcp::collect_plugin_servers_and_oauth_configs(
+                plugin_registry_snapshot.as_deref(),
+            );
+        // P136: a plugin's setting, too, goes only to the definition it was configured with.
+        crate::session::managed_mcp::retain_oauth_for_same_destination(
+            &mut plugin_oauth,
+            &plugin_servers,
+            active,
         );
         let toml_mcp_names = crate::util::config::all_toml_mcp_server_names(cwd);
         crate::session::managed_mcp::merge_plugin_oauth_into(
@@ -485,7 +671,7 @@ impl SessionActor {
             "Retrying spawn of unreachable MCP servers"
         );
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let oauth_config_map = self.spawn_oauth_config_map(cwd);
+        let oauth_config_map = self.spawn_oauth_config_map(cwd, &configs);
         let spawn_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             self.session_info.id.0.as_ref(),
@@ -666,8 +852,9 @@ impl SessionActor {
         >,
     ) {
         let mcp_initialized = self.mcp_state.lock().await.is_initialized();
+        let bridge = self.tool_bridge_handle();
         refresh_mcp_snapshot_and_schedule_reminder_with(
-            self.agent.borrow().tool_bridge().clone(),
+            bridge,
             Arc::clone(&self.mcp_state),
             self.managed_mcp_handle.clone(),
             self.tool_metadata_snapshot.clone(),
@@ -1087,6 +1274,39 @@ impl SessionActor {
         }
         Ok(())
     }
+    /// Hold the turn until an inherited MCP pool's tools are registered, so the server reminder is decided deterministically.
+    ///
+    /// A child that inherits its parent's connected pool and declares no servers of its own has no handshake to wait on.
+    /// Its only MCP latency is registering the shared clients' tools (one `tools/list` each).
+    /// Without this wait, whether the child was told "MCP server connected" depended on whether that registration beat the turn's first
+    /// reminder injection: the notice arrived at turn start, mid-turn, or never.
+    /// With it, the notice is always in the first request.
+    /// The wait is bounded so a hung inherited server cannot stall the child; the notice then arrives mid-turn when registration finishes.
+    pub(super) async fn await_inherited_mcp_registration(&self) {
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(10);
+        let observe = async {
+            loop {
+                {
+                    let st = self.mcp_state.lock().await;
+                    if st.is_initialized() || st.shared_clients.is_empty() || !st.configs.is_empty()
+                    {
+                        return;
+                    }
+                }
+                tokio::time::sleep(POLL).await;
+            }
+        };
+        // Observe only: init is owned by the session's startup task (`run_loop`), never started or dropped from here.
+        // A turn cancel or the bound dropping this future therefore cannot strand init half-started
+        if tokio::time::timeout(BOUND, observe).await.is_err() {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                bound_ms = BOUND.as_millis() as u64,
+                "inherited MCP registration still pending; starting turn without it"
+            );
+        }
+    }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {
         if self.mcp_connecting_reminder_injected.get() {
             return;
@@ -1134,6 +1354,81 @@ impl SessionActor {
             "apply_attach_policy: updated per-attachment policy from session request startupHints"
         );
     }
+    /// P148 (B19): `ask_user_question`'s no-operator policy follows the attached client, as MCP init does: an app that
+    /// attaches non-interactively to a session an interactive client started gets the no-operator reply within 30
+    /// seconds (and an interactive client attaching back gets its configured wait). The tool reads the policy from its
+    /// `Params` at each call; the agent builder stamps it from the spawn-time hints, so it is re-stamped here after an
+    /// attachment changes it and after every agent rebuild. A session whose agent has no `ask_user_question` is left
+    /// alone.
+    pub(super) async fn sync_ask_user_question_attachment(&self) {
+        use fuigo_tools::implementations::fuigo_build::ask_user_question::AskUserQuestionParams;
+        use fuigo_tools::types::resources::Params;
+        let non_interactive = self.attach_non_interactive.get();
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let resources = bridge.shared_resources().await;
+        let mut res = resources.lock().await;
+        let Some(current) = res.get::<Params<AskUserQuestionParams>>().map(|p| p.0) else {
+            return;
+        };
+        if current.is_non_interactive() != non_interactive {
+            res.insert(Params(AskUserQuestionParams {
+                non_interactive: Some(non_interactive),
+                ..current
+            }));
+        }
+    }
+    /// Finish an init that has no handshakes to run: register the inherited pool's tools, then mark init finished.
+    ///
+    /// Registration comes BEFORE `finish_init`, which flips `is_initialized()`.
+    /// The other order left a window where the session read as ready while the inherited tools (and the server reminder built from them) did not exist yet.
+    /// Whether the model was told about the servers then raced the `tools/list` round trip.
+    ///
+    /// The registration can outlast a config change.
+    /// A stale `generation` means a newer init owns the state, the snapshot, the progress notification and the waiters:
+    /// this returns without finishing or cancelling init, without `fuigo/mcp_initialized`, and without waking `mcp_handshakes_done`.
+    /// (A config change already reset init progress when it bumped the generation, so there is nothing to cancel either.)
+    ///
+    /// One write does happen before the check, deliberately: `register_shared_client_tools` ends with a snapshot refresh.
+    /// That refresh recomputes the model-visible snapshot from the session's CURRENT tool bridge and clients, and the shared (inherited) clients it registers are not generation-scoped (a config change clears owned clients only).
+    /// A stale caller therefore writes the same snapshot the newer init would, never an old one.
+    /// That refresh is also what marks the reminder dirty before `finish_init`, which the deterministic child notice relies on.
+    /// Returns whether this call finished init.
+    pub(super) async fn complete_empty_mcp_init(&self, generation: u64) -> bool {
+        self.register_shared_client_tools().await;
+        {
+            let mut mcp_state = self.mcp_state.lock().await;
+            if mcp_state.generation() != generation {
+                self.events
+                    .emit(fuigo_session_events::Event::McpInitCancelled {
+                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
+                    });
+                return false;
+            }
+            mcp_state.finish_init();
+        }
+        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        // The refresh awaits; a config change during it supersedes this completion, so announce only if the generation still holds,
+        // and hold the state lock across the (synchronous) notification and wake so no change can slip between check and announce
+        let mcp_state = self.mcp_state.lock().await;
+        if mcp_state.generation() != generation {
+            return false;
+        }
+        if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": self.session_info.id.0.as_ref(),
+            "mcpToolCount": 0_u32,
+            "elapsedMs": 0_u64,
+        })) {
+            self.notifications
+                .gateway
+                .forward_fire_and_forget(acp::ExtNotification::new(
+                    "fuigo/mcp_initialized",
+                    params.into(),
+                ));
+        }
+        self.mcp_handshakes_done.notify_waiters();
+        drop(mcp_state);
+        true
+    }
     /// Ensure MCP tools are initialized (spawns processes and performs handshakes on first call)
     pub(super) async fn ensure_mcp_tools_initialized(&self) {
         let (mcp_server_configs, meta_config_map, generation, existing_client_names, has_acp) = {
@@ -1173,32 +1468,7 @@ impl SessionActor {
             )
         };
         if mcp_server_configs.is_empty() && !has_acp {
-            let mut mcp_state = self.mcp_state.lock().await;
-            if mcp_state.generation() == generation {
-                mcp_state.finish_init();
-            } else {
-                mcp_state.cancel_init();
-                self.events
-                    .emit(fuigo_session_events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
-            }
-            drop(mcp_state);
-            self.register_shared_client_tools().await;
-            self.refresh_mcp_snapshot_and_schedule_reminder().await;
-            if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
-                "sessionId": self.session_info.id.0.as_ref(),
-                "mcpToolCount": 0_u32,
-                "elapsedMs": 0_u64,
-            })) {
-                self.notifications
-                    .gateway
-                    .forward_fire_and_forget(acp::ExtNotification::new(
-                        "fuigo/mcp_initialized",
-                        params.into(),
-                    ));
-            }
-            self.mcp_handshakes_done.notify_waiters();
+            self.complete_empty_mcp_init(generation).await;
             return;
         }
         {
@@ -1245,32 +1515,7 @@ impl SessionActor {
                 ));
         }
         if configs_to_start.is_empty() && acp_pending_names.is_empty() {
-            let mut mcp_state = self.mcp_state.lock().await;
-            if mcp_state.generation() == generation {
-                mcp_state.finish_init();
-            } else {
-                mcp_state.cancel_init();
-                self.events
-                    .emit(fuigo_session_events::Event::McpInitCancelled {
-                        reason: MCP_INIT_CANCELLED_CONFIG_CHANGED.to_string(),
-                    });
-            }
-            drop(mcp_state);
-            self.register_shared_client_tools().await;
-            self.refresh_mcp_snapshot_and_schedule_reminder().await;
-            if let Ok(params) = serde_json::value::to_raw_value(&serde_json::json!({
-                "sessionId": self.session_info.id.0.as_ref(),
-                "mcpToolCount": 0_u32,
-                "elapsedMs": 0_u64,
-            })) {
-                self.notifications
-                    .gateway
-                    .forward_fire_and_forget(acp::ExtNotification::new(
-                        "fuigo/mcp_initialized",
-                        params.into(),
-                    ));
-            }
-            self.mcp_handshakes_done.notify_waiters();
+            self.complete_empty_mcp_init(generation).await;
             return;
         }
         let mut timer = crate::instrumentation_timer!("session.mcp_init");
@@ -1285,7 +1530,7 @@ impl SessionActor {
         let session_id = self.session_info.id.0.as_ref();
         tokio::task::yield_now().await;
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let oauth_config_map = self.spawn_oauth_config_map(cwd);
+        let oauth_config_map = self.spawn_oauth_config_map(cwd, &configs_to_start);
         let spawn_writer = self.events.writer();
         let ctx = crate::session::mcp_servers::McpSpawnCtx::for_session(
             session_id,
@@ -1305,6 +1550,8 @@ impl SessionActor {
         tokio::task::yield_now().await;
         let mut spawn_auth_failures: Vec<String> = Vec::new();
         let mut spawn_unreachable_failures: Vec<(String, String)> = Vec::new();
+        // P152: every other spawn failure keeps its cause too, so `/mcps` can say why the server is unavailable.
+        let mut spawn_other_failures: Vec<(String, String)> = Vec::new();
         let mcp_clients: Vec<_> = mcp_results
             .into_iter()
             .filter_map(|result| match result {
@@ -1319,6 +1566,11 @@ impl SessionActor {
                         spawn_auth_failures.push(sname.clone());
                     } else if e.is_unreachable() && sname != "unknown" {
                         spawn_unreachable_failures.push((sname.clone(), e.to_string()));
+                    } else if sname != "unknown" {
+                        spawn_other_failures.push((
+                            sname.clone(),
+                            fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200).into_owned(),
+                        ));
                     }
                     let cfg = mcp_server_configs
                         .iter()
@@ -1367,6 +1619,10 @@ impl SessionActor {
                     spawn_unreachable_failures.iter().find(|(n, _)| n == name)
                 {
                     mcp_state.record_unreachable_failure(name, detail.clone());
+                } else if let Some((_, detail)) =
+                    spawn_other_failures.iter().find(|(n, _)| n == name)
+                {
+                    mcp_state.record_init_failure(name, false, Some(detail.clone()));
                 }
                 mcp_state.mark_server_ready(name);
             }
@@ -1475,10 +1731,7 @@ impl SessionActor {
                             }
                             Err(e) => {
                                 // Login can only rebuild HTTP clients; other transports keep init_failed.
-                                let needs_auth = client.has_auth()
-                                    || (client.is_http()
-                                        && !client.has_configured_auth_header()
-                                        && e.is_auth_rejection());
+                                let needs_auth = client.init_failure_needs_auth(&e);
                                 tracing::warn!(
                                     server = server_name.as_str(),
                                     elapsed_ms = server_start.elapsed().as_millis() as u64,

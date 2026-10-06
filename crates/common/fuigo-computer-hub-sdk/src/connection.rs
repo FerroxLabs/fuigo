@@ -657,6 +657,9 @@ impl HubConnection {
         let (sink, stream, ack) = loop {
             attempt += 1;
             let cred = config.credential.current();
+            if let Err(reason) = config.credential.destination_permits(&config.url, &cred) {
+                return Err(ClientError::DestinationRefused(reason));
+            }
             let attempt_result = match tokio::time::timeout(budget, async {
                 let ws = open_socket(
                     &config.url,
@@ -1727,6 +1730,23 @@ async fn run_reader_actor(
                             }
                             break 'actor;
                         }
+                        Err(ClientError::DestinationRefused(reason)) => {
+                            warn!(
+                                attempt,
+                                %reason,
+                                "reconnect refused by the credential provider (destination); no socket opened, stopping"
+                            );
+                            crate::metrics::reconnect_failed("destination_refused");
+                            inner.demux.drain_waiters_with(|| {
+                                ClientError::DestinationRefused(reason.clone())
+                            });
+                            inner.demux.drain_progress();
+                            if let Some(pool) = inner.on_fatal.as_ref().and_then(Weak::upgrade) {
+                                let own_id = Arc::as_ptr(&inner) as *const () as usize;
+                                pool.forget_if(&inner.key, move |conn| conn.actor_id() == own_id);
+                            }
+                            break 'actor;
+                        }
                         Err(err) => {
                             crate::metrics::reconnect_failed("transport");
                             warn!(
@@ -1869,6 +1889,10 @@ async fn reconnect_and_replay(
     backoff_total: Duration,
 ) -> Result<(SplitSink<WsStream, Message>, SplitStream<WsStream>), ClientError> {
     let fresh_cred = inner.credential.current();
+    inner
+        .credential
+        .destination_permits(url, &fresh_cred)
+        .map_err(ClientError::DestinationRefused)?;
     let ws = open_socket(
         url,
         &fresh_cred,

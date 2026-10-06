@@ -51,7 +51,7 @@ pub enum EditHlOutcome {
     Ready {
         by_new_line: Arc<HashMap<usize, EditLineStyles>>,
         /// Theme the styles were baked under (paint skips a mismatched map).
-        theme: crate::theme::ThemeKind,
+        theme: crate::theme::cache::RenderKey,
     },
     /// Cap, I/O, non-UTF8, mismatch, or missing syntax: stay hunk-only.
     Failed,
@@ -154,8 +154,13 @@ fn run_job(job: &EditHlJob) -> EditHlOutcome {
 
     let path = std::path::Path::new(&job.path);
     // Read the theme beside the syntect walk so the result is labeled with the kind its foregrounds were baked under
-    let theme = crate::theme::cache::current_kind();
-    match compute_file_scoped_styles(path, &file_text, &job.hunks) {
+    let stamp = crate::theme::cache::render_stamp();
+    let theme = stamp.0;
+    let computed = compute_file_scoped_styles(path, &file_text, &job.hunks);
+    // The foregrounds above were converted through process-global theme state; a theme or lock change that landed mid-walk
+    // may have mixed palettes into the map, so a result is only labelled with a key that held for the whole walk
+    let computed = stable_under(stamp, crate::theme::cache::render_stamp(), computed);
+    match computed {
         Some(by_new_line) => EditHlOutcome::Ready {
             by_new_line: Arc::new(by_new_line),
             theme,
@@ -169,6 +174,15 @@ fn run_job(job: &EditHlJob) -> EditHlOutcome {
             EditHlOutcome::Failed
         }
     }
+}
+
+/// Keep `styles` only if the render key did not change between `before` and `after` the computation.
+fn stable_under<T>(
+    before: (crate::theme::cache::RenderKey, u64),
+    after: (crate::theme::cache::RenderKey, u64),
+    styles: Option<T>,
+) -> Option<T> {
+    if before == after { styles } else { None }
 }
 
 /// Read at most `max_bytes`; reject oversized, non-UTF8, or missing files.
@@ -207,6 +221,29 @@ impl AgentView {
     /// Poll worker results and attach FileScoped styles. Returns true when a redraw is needed.
     pub fn edit_hl_tick(&mut self) -> bool {
         self.poll_edit_hl_results()
+    }
+
+    /// Block until no edit-HL job is outstanding, applying each result as it arrives.
+    /// No deadline: the single worker always answers the latest job per entry, so this ends when that result lands, or when the worker dies and the runtime is abandoned.
+    /// Replaces a wall-clock poll whose budget a cold syntect load under host load could exceed.
+    #[cfg(test)]
+    pub(crate) fn edit_hl_wait_settled_for_test(&mut self) {
+        while self.edit_hl_needs_tick() {
+            let next = self
+                .edit_hl
+                .as_ref()
+                .expect("a pending job implies a runtime")
+                .rx
+                .recv();
+            match next {
+                Ok(result) => {
+                    self.apply_edit_hl_results(vec![result], false);
+                }
+                Err(_) => {
+                    self.apply_edit_hl_results(Vec::new(), true);
+                }
+            }
+        }
     }
 
     fn ensure_edit_hl_runtime(&mut self) -> &mut EditHlRuntime {
@@ -296,6 +333,12 @@ impl AgentView {
             }
         }
 
+        self.apply_edit_hl_results(results, disconnected)
+    }
+
+    /// Apply drained worker results; `disconnected` means the result channel closed.
+    /// Split from the poll so a test can feed it a result it blocked on instead of spinning against a deadline.
+    fn apply_edit_hl_results(&mut self, results: Vec<EditHlResult>, disconnected: bool) -> bool {
         let mut redraw = false;
         for result in results {
             if let Some(rt) = self.edit_hl.as_mut() {
@@ -456,6 +499,17 @@ mod tests {
     }
 
     #[test]
+    fn styles_computed_across_a_theme_or_lock_change_are_dropped() {
+        use crate::theme::ThemeKind;
+        let night = ((ThemeKind::FuigoNight, false), 7);
+        assert_eq!(stable_under(night, night, Some(1)), Some(1));
+        assert_eq!(stable_under(night, ((ThemeKind::FuigoNight, true), 8), Some(1)), None);
+        assert_eq!(stable_under(night, ((ThemeKind::FuigoDay, false), 8), Some(1)), None);
+        // A -> B -> A: same key at both ends, but palette writes happened in between
+        assert_eq!(stable_under(night, ((ThemeKind::FuigoNight, false), 9), Some(1)), None);
+    }
+
+    #[test]
     fn run_job_fails_on_missing_file() {
         let job = EditHlJob {
             job_id: 1,
@@ -469,6 +523,8 @@ mod tests {
 
     #[test]
     fn run_job_succeeds_on_temp_file() {
+        // the process-global theme is mutated by concurrent set_theme tests; hold the shared lock so every read in this test sees one theme
+        let _theme = crate::theme::cache::pin_theme();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("probe.py");
         let body = "x = 1\ny = 2\n";
@@ -483,7 +539,7 @@ mod tests {
         match run_job(&job) {
             EditHlOutcome::Ready { by_new_line, theme } => {
                 assert!(by_new_line.contains_key(&1));
-                assert_eq!(theme, crate::theme::cache::current_kind());
+                assert_eq!(theme, crate::theme::cache::render_key());
             }
             EditHlOutcome::Failed => panic!("expected Ready for temp python file"),
         }
@@ -511,6 +567,7 @@ mod tests {
 
     #[test]
     fn poll_drops_stale_job_id() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::blocks::tool::EditToolCallBlock;
 
         let mut agent = crate::app::agent_view::test_agent_view(
@@ -543,7 +600,7 @@ mod tests {
                 path: "probe.py".into(),
                 outcome: EditHlOutcome::Ready {
                     by_new_line: Arc::new(HashMap::new()),
-                    theme: crate::theme::cache::current_kind(),
+                    theme: crate::theme::cache::render_key(),
                 },
             })
             .unwrap();
@@ -610,6 +667,11 @@ mod tests {
     #[test]
     fn double_submit_prunes_pending_after_latest() {
         use crate::scrollback::blocks::tool::EditToolCallBlock;
+        // The worker's first job builds the process-wide syntect set (`OnceLock`), which in a debug build takes longer than any fixed wait
+        // once the host is loaded, and it reads the process-global theme that concurrent `set_theme` tests mutate.
+        // Pin the theme and build that set here, outside the wait, so the wait below measures only the coalescing under test.
+        let _theme = crate::theme::cache::pin_theme();
+        let _ = crate::syntax::get_syntect();
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("probe.py");
@@ -634,18 +696,20 @@ mod tests {
             assert_eq!(rt.pending[0].1, entry_id);
         }
 
-        // Pump until it settles (the worker has no waker)
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while agent.edit_hl_needs_tick() {
-            agent.edit_hl_tick();
-            if std::time::Instant::now() > deadline {
-                panic!("edit HL did not settle");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        // Block on the worker's own results until the latest job lands; no wall-clock budget.
+        agent.edit_hl_wait_settled_for_test();
         assert!(
             !agent.edit_hl_needs_tick(),
             "pending must be empty after latest result"
+        );
+        let entry = agent.scrollback.get_by_id(entry_id).expect("entry");
+        let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
+            panic!("edit block")
+        };
+        assert!(
+            !matches!(edit.highlight, EditHighlightPhase::Pending { .. }),
+            "the latest result must resolve the entry out of Pending, got {:?}",
+            edit.highlight
         );
     }
 }

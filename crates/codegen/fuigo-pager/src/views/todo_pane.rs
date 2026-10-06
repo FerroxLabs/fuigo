@@ -131,7 +131,6 @@ use ratatui::layout::Rect;
 use ratatui::widgets::StatefulWidget;
 
 use crate::appearance::LayoutConfig;
-use crate::theme::ThemeKind;
 
 use super::list_pane::{ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, WrapMode};
 use super::overlay::OverlayState;
@@ -192,7 +191,7 @@ pub struct TodoPane {
     /// Shared visibility and focus state.
     pub overlay: OverlayState,
     /// Last theme kind seen; used to detect theme switches and restyle.
-    last_theme: ThemeKind,
+    last_theme: crate::theme::cache::RenderKey,
 }
 
 impl Default for TodoPane {
@@ -223,7 +222,7 @@ impl TodoPane {
             list_style: ListPaneStyle::default(),
             show_done: true,
             overlay: OverlayState::hidden(),
-            last_theme: crate::theme::Theme::current_kind(),
+            last_theme: crate::theme::cache::render_key(),
         }
     }
 
@@ -403,7 +402,7 @@ impl TodoPane {
         layout_cfg: &LayoutConfig,
     ) {
         // Detect a theme switch and refresh styles before rebuilding entries
-        let current_theme = crate::theme::Theme::current_kind();
+        let current_theme = crate::theme::cache::render_key();
         if current_theme != self.last_theme {
             self.last_theme = current_theme;
             self.style = TodoPaneStyle::default();
@@ -443,6 +442,31 @@ mod tests {
             completed,
             cancelled,
             ..TodoCounts::default()
+        }
+    }
+
+    /// Same contract as the queue pane: the lock is part of the style-refresh key.
+    #[test]
+    fn style_refreshes_when_the_terminal_native_lock_toggles() {
+        struct Unlock;
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                crate::theme::cache::set_terminal_native_lock(false);
+            }
+        }
+        let _theme = crate::theme::cache::pin_theme();
+        crate::theme::cache::set_terminal_native_lock(false);
+        let _unlock = Unlock;
+        let mut pane = TodoPane::new();
+        assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+        let area = Rect::new(0, 0, 40, 6);
+        for locked in [true, false] {
+            pane.list_style.selection_bg = ratatui::style::Color::Rgb(1, 2, 3);
+            crate::theme::cache::set_terminal_native_lock(locked);
+            let mut buf = Buffer::empty(area);
+            pane.render(area, &mut buf, false, &LayoutConfig::default());
+            assert_eq!(pane.last_theme, crate::theme::cache::render_key());
+            assert_ne!(pane.list_style.selection_bg, ratatui::style::Color::Rgb(1, 2, 3), "lock={locked}: list style not refreshed");
         }
     }
 

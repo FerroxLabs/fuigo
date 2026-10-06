@@ -1,0 +1,140 @@
+P71v2 Astra audit, round 1 (cleaned: the brief as sent and the auditor's final report; the tool transcript between them is omitted).
+Command: codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null
+Raw transcript: 11410 lines, sha256 c0405db37b178d2ebf18b452947414020cb96b003dce9fc2915bfc471c429a18; tokens used 302,232.
+
+===== BRIEF =====
+You are an independent security/code auditor. Repository: the current directory (a git worktree, branch strike/p71v2). Read-only: do not run cargo, do not modify files. Audit the diff `git diff 67a0a7fe..HEAD` (packet P71v2), reading whatever surrounding code you need.
+
+DESIGN (accepted by the owner; do not re-litigate the design, audit the implementation against it):
+Fuigo uploads session archives, traces, diagnostics, share bundles, heap profiles, review-comment records and a workspace environment record to "storage". The upload destination is one of three classes, decided by DESTINATION, never by content:
+ 1. a FluxRouter-operated storage proxy (decided ONLY by the existing P43/P54 helper `fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url).is_permitted()`): receives files unchanged;
+ 2. the operator's own bucket (`UploadMethod::Direct` GCS, `UploadMethod::S3`): receives files unchanged;
+ 3. ANY other storage proxy (including any URL that cannot be classified): receives NO file content at all (no connection, no request, no header carrying an object path). Local files untouched; the user is told once per process on stderr. The one-shot feedback archive has no bucket alternative, so ITS notice must not promise a bucket.
+The workspace environment record additionally keeps a field rule: for class 3 its identity fields are nulled before it is even enqueued.
+Uploads spilled to disk earlier and re-sent by startup recovery must be decided on the destination at SEND time.
+
+CLAIMS to verify or refute:
+ C1. The gate (`crates/codegen/fuigo-file-utils/src/destination_gate.rs`) runs before any I/O at the chokepoint: `fuigo_file_utils::gcs::{upload_bytes, upload_file, upload_stream}` gate at their top; `upload_bytes_signed` reaches either `upload_bytes` or `upload_bytes_via_signed_url`, which gates on the proxy URL. There is no code path in `crates/` or `prod/` (production, non-test code) that moves file content to a storage proxy without passing one of these gates: look for direct `StorageClient` use, direct `reqwest` to `/storage` routes, S3/GCS clients, other upload helpers, re-exports, the upload queue worker, inline fallbacks, zstd streaming, startup recovery, share, feedback, review comments, heap profile, auth diagnostics, subagent metadata, tool definitions, per-turn artifacts, `fuigo trace` in the pager.
+ C2. A withheld upload is terminal in the upload queue (never retried, never parked), and `fuigo trace` does not retry it.
+ C3. The test seam (`cfg(any(test, feature = "test-loopback-operator"))`, hosts `127.0.0.1` / `[::1]` classified as FluxRouter) cannot be active in a shipped build: the feature is enabled only from `[dev-dependencies]` (workspace resolver = "2"), and `crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs` pins that.
+ C4. The guard test `upload_gate_guard.rs` fails when a new upload call site or a direct storage-client upload appears outside the pinned set. Find ways a new bypass could be written that the guard would NOT notice, and say how likely each is.
+ C5. The tests assert on what a recording mock endpoint RECEIVED (`gate_testkit.rs`), with a positive control for each path; find vacuous or flaky tests (timing assumptions, host assumptions such as 127.0.0.2 being bindable, process-global `Once`/notice state shared between tests in one test binary, tests that would pass with the gate removed).
+ C6. `WorkspaceEnvironment::for_method` (fuigo-workspace/src/upload/environment.rs) and its call in handle.rs: class 3 record carries no account id, team id, host, server id, cwd, repo root, remote URL, sandbox id/profile; classes 1 and 2 unchanged.
+ C7. Cargo changes are minimal: fuigo-file-utils gains dependency `fuigo-tty-utils` (stderr notice helper) and feature `test-loopback-operator = ["tokio/net"]`; fuigo-shell, fuigo-pager, fuigo-workspace gain a dev-dependency on fuigo-file-utils with that feature; Cargo.lock gains one line.
+ C8. No regression for class 1 and class 2 destinations, and no behaviour change other than the one described (e.g. error handling, logging, metrics, panics, the `fuigo/feedback/upload-trace` and `fuigo/review/*` handlers after the small refactor in fuigo-shell/src/extensions/feedback.rs).
+
+Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a concrete scenario (inputs, config, what leaves the machine or what breaks), and whether an existing test catches it. Also list every upload/egress path you examined and the gate it passes through. End with exactly one verdict line: LAND, LAND-WITH-FOLLOWUPS, or DO-NOT-LAND.
+
+===== REPORT =====
+Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands or file modifications. I found no current production storage-upload bypass under the checked release configuration. The defects are in release-seam enforcement, test coverage, portability, and notice frequency.
+
+1. **MEDIUM — C3’s “cannot be active in a shipped build” guarantee is not enforced.**  
+   [destination_gate.rs:60](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:60), [upload_gate_guard.rs:306](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:306).
+
+   A non-test release build that selects `fuigo-file-utils` with `--all-features`, or explicitly enables `fuigo-file-utils/test-loopback-operator`, admits `http://127.0.0.1:PORT` as FluxRouter. A local storage gateway can then receive archives and their object-path headers, contrary to the production predicate. Resolver 2 isolates unused dev-dependencies; it does not prohibit explicit feature activation. [Cargo feature rules](https://doc.rust-lang.org/cargo/reference/features.html#command-line-feature-options).
+
+   **Existing tests:** do not catch this. The guard scans manifests beneath `crates/` and `prod/`, excluding root workspace dependency declarations and build commands. The current [release workflow:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/.github/workflows/release.yml:214) uses an ordinary package release build, so I found no evidence that the present release command activates it. This is a conditional release-hardening defect, not evidence of a shipped leak.
+
+2. **MEDIUM — C4’s guard misses ordinary ways to add callers or bypass the gate.**  
+   [upload_gate_guard.rs:46](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:46), [upload_gate_guard.rs:160](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:160), [upload_gate_guard.rs:235](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:235).
+
+   The guard recognizes literal text, not resolved calls. An in-memory reproduction of its matching rules confirmed zero matches for the following examples:
+
+   | Undetected addition | Concrete consequence | Likelihood |
+   |---|---|---|
+   | `http.post(format!("{base}/storage")).header("X-Storage-Path", path).body(bytes).send()` | Sends content and object path to a class-3 proxy without the gate | Moderate: a straightforward new HTTP helper |
+   | `StorageClient::upload(&client, path, bytes, ct)` using an existing client factory | Associated-function syntax bypasses the `.upload(` search | Low–moderate |
+   | `client.upload_stream::<R>(...)` | Explicit generic syntax bypasses `.upload_stream(` | Moderate |
+   | `gcs::upload_bytes::<Config>(...)` | Still gated, but new caller is absent from the pinned inventory | Moderate |
+   | `let send = gcs::upload_bytes; send(...)` | Still gated, but caller inventory misses it | Low |
+   | `gcs::upload_bytes_via_signed_url(...)` | Public, gated helper is omitted from `DISPATCHERS` | Moderate |
+   | New upload code inside an exempt `storage_client*` file | Entire file escapes caller/client scanning | Moderate |
+   | Production module named `*_tests.rs` or `*_testkit.rs` | Filename exclusion hides it regardless of how it is compiled | Low |
+
+   The gate-position test also counts strings; moving a gate below I/O without changing its text preserves that assertion.
+
+   **Existing tests:** do not catch these forms. I found no such production bypass currently present.
+
+3. **MEDIUM — Signed-upload positive controls never verify delivery of the payload.**  
+   [gate_testkit.rs:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:45), [gcs.rs:1170](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1170), [p71_gate_tests.rs:92](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:92).
+
+   The recording endpoint always returns an ordinary `UploadResponse`, not a `SignedUploadUrlResponse`. Consequently, the class-1 signed flow contacts `/storage/signed-upload-url`, fails response deserialization, and never performs the payload PUT. Both positive controls nevertheless pass: one checks request count; the share test checks `share/`, which occurs in the object-path header.
+
+   **Scenario:** a regression that prevents every permitted share-bundle PUT remains undetected.  
+   **Existing tests:** these tests accept that failure. They need a valid signed-URL response plus a recording PUT endpoint asserting the actual bundle bytes and successful completion.
+
+4. **MEDIUM — The recording fixtures require an unconfigured loopback alias on macOS.**  
+   [gate_testkit.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:49).
+
+   Class-3 tests repeatedly bind `127.0.0.2` and panic if binding fails. On macOS without that address configured, this is not equivalent to binding `127.0.0.1`: XNU checks for an assigned interface address and returns `EADDRNOTAVAIL` when absent. [Apple’s bind implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/in_pcb.c).
+
+   **Scenario:** running the affected tests on a stock Mac fails before exercising the gate. This host’s `lo0` lists only `127.0.0.1` for IPv4. My socket probe was denied for **all** addresses by the sandbox, so it provides no runtime confirmation of the address-specific failure.
+
+   **Existing tests:** fail during fixture setup; there is no portable fallback. A class-3 URL such as `localhost`, backed by a verified listener on an available loopback address, avoids requiring an alias.
+
+5. **LOW — The inline-fallback negative test can pass without executing its upload.**  
+   [queue_tests.rs:4786](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4786).
+
+   `enqueue_bytes_blocking` confirms scheduling of the detached fallback, not its completion. The test sleeps 500 ms and checks zero connections without awaiting the fallback or establishing that it reached the gate.
+
+   **Scenario:** a delayed fallback starts after the assertion—or is cancelled when the test runtime exits. Even with the relevant gate removed, this particular test can pass without observing the attempted egress.
+
+   **Existing tests:** this test has no completion acknowledgement or paired class-1 run. Other dispatcher tests provide coverage, but do not make this path-specific assertion reliable.
+
+6. **LOW — Notice tests can inherit another test’s success.**  
+   [gcs.rs:1125](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1125), [destination_gate.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
+
+   The notice test ignores upload results and inspects process-global history. Other tests invoke the same `Once` and populate that history.
+
+   **Scenario:** the tested upload path stops announcing, but an earlier test already recorded `WITHHELD_NOTICE`; the assertion still passes. Recording the message before invoking stderr also means this is not an assertion on what stderr received.
+
+   **Existing tests:** the separate sink test verifies `announce`, but does not establish that this upload caused the process notice. The synchronization itself appears sound; the defect is attribution of the assertion.
+
+7. **LOW — Pager retry detection depends on wall-clock scheduling.**  
+   [trace_cmd.rs:732](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-pager/src/trace_cmd.rs:732).
+
+   **Scenario:** the process is descheduled or suspended for two seconds between starting the measurement and checking elapsed time. The test reports “a withheld upload was retried” even though no retry occurred.
+
+   **Existing tests:** this assertion produces the false failure. Count attempts directly rather than inferring them from elapsed wall time.
+
+8. **LOW — Notice frequency is once per kind, not once per process.**  
+   [destination_gate.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
+
+   **Scenario:** a process first withholds a trace and later a feedback archive. Two independent `Once` values print two notices, exceeding the stated once-per-process rule. The feedback notice itself correctly avoids promising a bucket.
+
+   **Existing tests:** explicitly expect one notice of each kind, so they encode the discrepancy instead of catching it.
+
+The upload/egress paths examined were:
+
+| Path examined | Gate or disposition |
+|---|---|
+| `gcs::upload_bytes` | `gate_upload` at `gcs.rs:115`, before backend construction |
+| `gcs::upload_file`, including small streaming uploads and large multipart uploads | `gate_upload` at `gcs.rs:255`, before metadata/file reads and storage requests |
+| `gcs::upload_stream` | `gate_upload` at `gcs.rs:336`, before consuming the reader |
+| `gcs::upload_bytes_signed` | Direct/S3 → `upload_bytes`; proxy → `upload_bytes_via_signed_url` → `gate_proxy_url` at `gcs.rs:658` |
+| Queue worker, including session/archive and artifact items | `upload_file` → `gate_upload` |
+| Queue zstd path | `stream_compress_upload` → `upload_stream` → `gate_upload`; source file is opened before entering the dispatcher |
+| Four queue inline fallbacks: bytes, source path, blocking file, owned snapshot | `upload_bytes` or `upload_file` → `gate_upload` |
+| Startup spill recovery, workspace recovery and shell reconciliation | `enqueue_recovered` → worker → freshly resolved send-time destination → gate |
+| Shell tool definitions | `upload/trace.rs:40` → `upload_bytes` → gate |
+| Subagent metadata | `upload/trace.rs:404` → `upload_bytes` → gate |
+| Per-turn artifacts, session-state archives, metadata, images, prompts, plugin state, logs, permissions, turn results/messages and streaming partials | Shared artifact helpers → direct `upload_bytes` or queue → gate |
+| Workspace tool state and tool definitions | Queue → gated dispatcher |
+| Workspace environment | `for_method` before serialization/enqueue at `handle.rs:2601`; then queue → gate |
+| Auth diagnostics, including account-bearing object paths | `upload/gcs.rs:185` → `upload_bytes` → gate |
+| One-shot feedback archive / `fuigo/feedback/upload-trace` | Early `gate_upload_as(FeedbackArchive)` before packing, then `upload_bytes` gate |
+| Review-comment create and delete records | Both handlers → `upload_review_record` → `upload_bytes` gate |
+| Share storage bundle and share metadata | Bundle → signed dispatcher; metadata → artifact helper → `upload_bytes` |
+| Share backend fallback | Separate `BackendClient::share_session` request; not a storage-proxy upload or governed by this gate |
+| Heap profile and accompanying metadata | Two `upload_file` calls → gate; metadata skipped when heap upload fails |
+| Pager `fuigo trace` | `upload_bytes` → gate; retry predicate recognizes withholding |
+| Direct GCS SDK and S3 upload implementations | Reached through gated dispatchers; classified operator bucket and content unchanged |
+| `StorageClient` upload, streaming, multipart, signed PUT and batch APIs | Active production upload callers found beneath `gcs`; no external direct upload caller found |
+| Storage-client factories and pager restore consumers | No upload path found; current restore implementation is a stub |
+| Video-generation S3 presigning | Produces URLs for operator-configured output storage; does not upload local archive content |
+| Re-exports and direct `/storage` request construction across `crates/` and `prod/` | No additional active production storage-upload bypass found |
+
+Source inspection supports C2, C6 and C7. For C6, sensitive optional fields become `null`; `cwd` becomes the fixed `[identity-withheld]` string before enqueue. I found no additional class-1/class-2 regression or handler-refactor defect under C8. Those are source conclusions, not executed test results.
+
+LAND-WITH-FOLLOWUPS
+codex_exit=0

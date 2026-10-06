@@ -65,7 +65,7 @@ pub enum EditHighlightPhase {
     FileScoped {
         by_new_line: Arc<HashMap<usize, EditLineStyles>>,
         /// Theme the styles were baked under; paint falls back to hunk-only on mismatch so a runtime theme flip never mixes palettes.
-        theme: ThemeKind,
+        theme: crate::theme::cache::RenderKey,
     },
 }
 
@@ -1021,7 +1021,7 @@ impl EditToolCallBlock {
             EditHighlightPhase::FileScoped {
                 by_new_line,
                 theme: baked,
-            } if *baked == crate::theme::cache::current_kind() => render_diff_hunks_with_styles(
+            } if *baked == crate::theme::cache::render_key() => render_diff_hunks_with_styles(
                 &self.hunks,
                 path,
                 by_new_line.as_ref(),
@@ -1541,6 +1541,7 @@ mod tests {
 
     #[test]
     fn test_edit_block_header() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = EditToolCallBlock::new("src/main.rs", vec![]);
         let theme = Theme::current();
         let header = block.header_line(
@@ -1558,6 +1559,7 @@ mod tests {
 
     #[test]
     fn test_edit_block_header_multi_edit() {
+        let _theme = crate::theme::cache::pin_theme();
         // The "(N edits)" fallback is collapsed-only, like the diffstat.
         let block = EditToolCallBlock::new("src/main.rs", vec![]).with_edit_count(3);
         let theme = Theme::current();
@@ -1576,6 +1578,7 @@ mod tests {
 
     #[test]
     fn workflow_script_header_hides_rhai_path() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let block = EditToolCallBlock::new(".fuigo/workflows/cc-deep-research.rhai", vec![]);
         let header = block.header_line(
@@ -1621,6 +1624,7 @@ mod tests {
 
     #[test]
     fn header_diffstat_spans_use_diff_colors() {
+        let _theme = crate::theme::cache::pin_theme();
         let block = EditToolCallBlock::new("/Users/me/project/src/foo.rs", vec![make_hunk()]);
         let theme = Theme::current();
         let header = block.header_line(
@@ -1660,6 +1664,7 @@ mod tests {
 
     #[test]
     fn untrusted_summary_suppresses_diffstat() {
+        let _theme = crate::theme::cache::pin_theme();
         // Counts would only describe the first diff of a multi-file call, so the suffix falls back to "(N edits)" / nothing
         let block =
             EditToolCallBlock::new("src/foo.rs", vec![make_hunk()]).with_untrusted_summary();
@@ -1714,6 +1719,7 @@ mod tests {
 
     #[test]
     fn expanded_shows_relative_when_under_cwd_preamble_absolute() {
+        let _theme = crate::theme::cache::pin_theme();
         let abs = "/Users/me/project/src/foo.rs";
         let cwd = Path::new("/Users/me/project");
         let block = EditToolCallBlock::new(abs, vec![]);
@@ -1883,6 +1889,7 @@ mod tests {
 
     #[test]
     fn test_diff_line_exact_layout() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "old line\n".into(),
@@ -1912,6 +1919,7 @@ mod tests {
 
     #[test]
     fn test_diff_line_exact_layout_two_digit() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "context\n".into(),
@@ -1957,6 +1965,7 @@ mod tests {
 
     #[test]
     fn test_diff_gutter_bg_flag() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![DiffLine {
             text: "inserted\n".into(),
             lo: 0,
@@ -1986,6 +1995,7 @@ mod tests {
 
     #[test]
     fn test_diff_reflow_wrapping() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![DiffLine {
             text: "this is a very long line that should wrap when width is narrow\n".into(),
             lo: 1,
@@ -2053,6 +2063,7 @@ mod tests {
 
     #[test]
     fn test_diff_reflow_preserves_background() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![DiffLine {
             text: "this is a long inserted line that needs to wrap around\n".into(),
             lo: 0,
@@ -2268,6 +2279,7 @@ mod tests {
 
     #[test]
     fn test_diff_hunk_separator() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk1 = vec![DiffLine {
             text: "line1\n".into(),
             lo: 1,
@@ -2295,6 +2307,7 @@ mod tests {
 
     #[test]
     fn hunk_separator_singular_gap() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk1 = vec![DiffLine {
             text: "line1\n".into(),
             lo: 1,
@@ -2318,6 +2331,7 @@ mod tests {
 
     #[test]
     fn hunk_separator_bare_for_non_monotonic_or_adjacent() {
+        let _theme = crate::theme::cache::pin_theme();
         let mk = |ln: usize| {
             vec![DiffLine {
                 text: format!("line{ln}\n"),
@@ -2352,6 +2366,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_basic() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let config = DiffRenderConfig::default();
         let path = Path::new("test.txt");
@@ -2361,6 +2376,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_three_digit_lines() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "context before\n".into(),
@@ -2397,6 +2413,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_reflow() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "short line\n".into(),
@@ -2428,6 +2445,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_multiple_hunks() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk1 = vec![
             DiffLine {
                 text: "first hunk context\n".into(),
@@ -2466,6 +2484,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_merged_hunks_gap_markers() {
+        let _theme = crate::theme::cache::pin_theme();
         // Shape of a coalesced block: hunks from consecutive same-file edits appended in completion order, monotonically increasing
         // Every separator therefore carries a computable gap count
         let hunk1 = vec![
@@ -2539,6 +2558,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_basic_dual() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let config = dual_config();
         let path = Path::new("test.txt");
@@ -2548,6 +2568,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_three_digit_lines_dual() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "context before\n".into(),
@@ -2587,6 +2608,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_reflow_dual() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = vec![
             DiffLine {
                 text: "short line\n".into(),
@@ -2618,6 +2640,7 @@ mod tests {
 
     #[test]
     fn snapshot_diff_multiple_hunks_dual() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk1 = vec![
             DiffLine {
                 text: "first hunk context\n".into(),
@@ -2680,6 +2703,7 @@ mod tests {
 
     #[test]
     fn tabs_expanded_in_diff_lines() {
+        let _theme = crate::theme::cache::pin_theme();
         // Simulates creating a new file with tab-indented content (e.g. Go, Makefile).
         // All lines are Insert; tabs must be expanded to spaces so they're visible
         let hunk = go_tab_hunk();
@@ -2953,7 +2977,7 @@ class ProcessQueueItem(BaseModel):
         let mut block = EditToolCallBlock::new("queue_item.py", vec![hunk]);
         block.highlight = EditHighlightPhase::FileScoped {
             by_new_line: Arc::new(map),
-            theme: crate::theme::cache::current_kind(),
+            theme: crate::theme::cache::render_key(),
         };
         let out = block.output(&test_ctx());
         let joined: String = out
@@ -3009,7 +3033,7 @@ class ProcessQueueItem(BaseModel):
         // Positive control: under its baking theme the map must repaint the spilled field line, so the stale assert below cannot go vacuous
         block.highlight = EditHighlightPhase::FileScoped {
             by_new_line: Arc::clone(&by_new_line),
-            theme: crate::theme::cache::current_kind(),
+            theme: crate::theme::cache::render_key(),
         };
         let fresh_out = block.output(&test_ctx());
         assert_ne!(
@@ -3019,10 +3043,10 @@ class ProcessQueueItem(BaseModel):
         );
 
         // Stale: the same paintable map baked under another theme is skipped
-        let stale = ThemeKind::FuigoDay;
-        assert_ne!(stale, crate::theme::cache::current_kind());
+        let stale = (ThemeKind::FuigoDay, crate::theme::cache::terminal_native_locked());
+        assert_ne!(stale, crate::theme::cache::render_key());
         block.highlight = EditHighlightPhase::FileScoped {
-            by_new_line,
+            by_new_line: Arc::clone(&by_new_line),
             theme: stale,
         };
         let stale_out = block.output(&test_ctx());
@@ -3030,6 +3054,20 @@ class ProcessQueueItem(BaseModel):
             render(&hunk_only),
             render(&stale_out),
             "stale-theme FileScoped must paint exactly like hunk-only"
+        );
+
+        // Same theme kind, other terminal-native lock state: `current_kind()` is a nominal FuigoNight under the lock,
+        // so the kind alone cannot tell a baked map's palette from the live one across a /minimal <-> /fullscreen switch
+        let (kind, locked) = crate::theme::cache::render_key();
+        block.highlight = EditHighlightPhase::FileScoped {
+            by_new_line,
+            theme: (kind, !locked),
+        };
+        let flipped_out = block.output(&test_ctx());
+        assert_eq!(
+            render(&hunk_only),
+            render(&flipped_out),
+            "a map baked under the other lock state must paint exactly like hunk-only"
         );
     }
 
@@ -3062,6 +3100,7 @@ class ProcessQueueItem(BaseModel):
     /// FileScoped paint expands tabs like the cold path.
     #[test]
     fn tabs_expanded_in_file_scoped_paint() {
+        let _theme = crate::theme::cache::pin_theme();
         let hunk = go_tab_hunk();
         let file = "func main() {\n\tfmt.Println(\"hello\")\n}\n";
         let path = Path::new("main.go");

@@ -519,3 +519,95 @@ fn managed_config_gate_ignores_the_overlay_in_both_directions() {
     layers.env_overlay = Some(features_managed_config(false));
     assert_eq!(managed_config_enabled_from_layers(&layers), None);
 }
+
+/// P147 (e2e C1): the orphan clear at agent start deletes the user-tier policy files. A file Fuigo has no record of
+/// syncing (no sync marker) is not Fuigo's: it is moved aside with its content intact, never deleted. Fuigo's own synced
+/// copies (marker present) are still removed, as before.
+#[test]
+fn a_policy_file_fuigo_did_not_sync_is_moved_aside_not_deleted() {
+    let backups = |home: &std::path::Path, name: &str| -> Vec<String> {
+        std::fs::read_dir(home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|f| f.starts_with(&format!("{name}.user-")) && f.ends_with(".bak"))
+            .collect()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    std::fs::write(home.join("requirements.toml"), "# mine p147\n").unwrap();
+    std::fs::write(home.join("managed_config.toml"), "# my managed p147\n").unwrap();
+
+    remove_managed_config_files(home);
+
+    for (name, content) in [("requirements.toml", "# mine p147\n"), ("managed_config.toml", "# my managed p147\n")] {
+        assert!(!home.join(name).exists(), "{name} must stop applying");
+        let found = backups(home, name);
+        assert_eq!(found.len(), 1, "{name}: exactly one backup expected: {found:?}");
+        assert_eq!(std::fs::read_to_string(home.join(&found[0])).unwrap(), content, "{name}: backup content");
+    }
+
+    // Control: Fuigo's own synced copy (marker present) is removed without a backup.
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    std::fs::write(home.join("requirements.toml"), "[features]\n").unwrap();
+    std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), r#"{"had_requirements":true}"#).unwrap();
+    remove_managed_config_files(home);
+    assert!(!home.join("requirements.toml").exists());
+    assert!(backups(home, "requirements.toml").is_empty(), "a synced copy is Fuigo's and gets no backup");
+
+    // Astra r2: a marker whose sync did not serve the file, or a corrupt one, is no record of writing it.
+    for marker in [r#"{"had_managed_config":true,"had_requirements":false}"#, "not json"] {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(home.join("requirements.toml"), "# hand-made later p147\n").unwrap();
+        std::fs::write(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE), marker).unwrap();
+        remove_managed_config_files(home);
+        assert_eq!(backups(home, "requirements.toml").len(), 1, "marker {marker}: the hand-made file was not backed up");
+    }
+}
+
+/// P147: the first sync for a team does not overwrite a user's own file either: it is moved aside, then the served
+/// content is written.
+#[test]
+fn the_first_sync_moves_a_users_own_file_aside_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    std::fs::write(home.join("managed_config.toml"), "# hand-written p147\n").unwrap();
+    let body = ManagedConfigResponse {
+        deployment_id: None,
+        team_id: None,
+        managed_config: Some("[cli]\ntheme = \"dark\"\n".into()),
+        ..Default::default()
+    };
+    assert!(apply_managed_config(home, &body).unwrap());
+    assert_eq!(std::fs::read_to_string(home.join("managed_config.toml")).unwrap(), "[cli]\ntheme = \"dark\"\n");
+    let kept: Vec<_> = std::fs::read_dir(home)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("managed_config.toml.user-"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(kept, vec!["# hand-written p147\n".to_owned()]);
+}
+
+/// P147 (Astra r1): only a regular marker file is a record of a sync; a directory squatting at the marker path does
+/// not stop the backup. And the backup is a copy: when the served set withdraws the file, the apply still reports the
+/// removal as a change.
+#[test]
+fn a_squatting_marker_is_no_record_and_a_withdrawal_still_counts_as_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    std::fs::create_dir(home.join(fuigo_config::MANAGED_CONFIG_CACHE_FILE)).unwrap();
+    std::fs::write(home.join("requirements.toml"), "# mine p147 squat\n").unwrap();
+    let withdrawn = ManagedConfigResponse { deployment_id: None, team_id: None, ..Default::default() };
+    assert!(apply_managed_config(home, &withdrawn).unwrap(), "removing the active file is a change");
+    assert!(!home.join("requirements.toml").exists());
+    let backups: Vec<_> = std::fs::read_dir(home)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("requirements.toml.user-"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect();
+    assert_eq!(backups, vec!["# mine p147 squat\n".to_owned()]);
+}

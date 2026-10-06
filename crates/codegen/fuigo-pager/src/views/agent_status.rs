@@ -490,6 +490,7 @@ mod tests {
 
     #[test]
     fn goal_line_contains_pause_label_for_infra_paused() {
+        let _theme = crate::theme::cache::pin_theme();
         let g = make_goal(
             GoalDisplayStatus::InfraPaused,
             GoalDisplayPhase::Executing,
@@ -505,6 +506,7 @@ mod tests {
 
     #[test]
     fn status_chip_shows_verifying_completion_when_flag_set() {
+        let _theme = crate::theme::cache::pin_theme();
         // An Active goal with `verifying_completion = true` renders the "Verifying (n/m)" label instead of the regular phase label
         // The user can then see the classifier run
         let mut g = make_goal(
@@ -595,6 +597,7 @@ mod tests {
 
     #[test]
     fn status_chip_shows_planning_when_flag_set() {
+        let _theme = crate::theme::cache::pin_theme();
         // An Active goal with `planning = true` renders the "Planning" label instead of the regular phase label
         // The user can see the planner subagent run while it executes
         let mut g = make_goal(
@@ -663,6 +666,7 @@ mod tests {
 
     #[test]
     fn goal_line_paused_chip_uses_warning_background() {
+        let _theme = crate::theme::cache::pin_theme();
         // Paused chips render with the `theme.warning` background to visually warn the user
         // Pin the background colour on the label span so a regression that drops the chip-vs-modal colour alignment gets caught
         //
@@ -770,6 +774,7 @@ mod tests {
 
     #[test]
     fn goal_line_contains_expected_text() {
+        let _theme = crate::theme::cache::pin_theme();
         let g = make_goal(
             GoalDisplayStatus::Active,
             GoalDisplayPhase::Executing,
@@ -787,6 +792,7 @@ mod tests {
 
     #[test]
     fn goal_line_without_budget() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut g = make_goal(
             GoalDisplayStatus::Active,
             GoalDisplayPhase::Planning,
@@ -805,6 +811,7 @@ mod tests {
 
     #[test]
     fn goal_line_no_title_in_status_bar() {
+        let _theme = crate::theme::cache::pin_theme();
         let g = make_goal(
             GoalDisplayStatus::Active,
             GoalDisplayPhase::Executing,
@@ -822,6 +829,7 @@ mod tests {
 
     #[test]
     fn mcp_status_line_renders_compact_count() {
+        let _theme = crate::theme::cache::pin_theme();
         // total > 0 renders the compact `MCP (connected/total)` chip.
         let progress = McpInitProgress {
             total: 4,
@@ -858,6 +866,7 @@ mod tests {
 
     #[test]
     fn mcp_status_line_hidden_for_zero_total() {
+        let _theme = crate::theme::cache::pin_theme();
         // total == 0 (startup seed) renders nothing in the top bar; that state shows "Starting session…" above the prompt instead
         let progress = McpInitProgress {
             total: 0,
@@ -871,6 +880,7 @@ mod tests {
     /// Separators appear only *between* items, never before the first item or after the last (no leading/trailing divider).
     #[test]
     fn status_bar_separators_only_between_items() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let mut bar = AgentStatusBar::new(&theme);
         bar.push("a", Line::from("AA"));
@@ -900,6 +910,7 @@ mod tests {
     /// A single item renders with no separators at all (it is both first and last).
     #[test]
     fn status_bar_single_item_has_no_separators() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let mut bar = AgentStatusBar::new(&theme);
         bar.push("only", Line::from("XX"));

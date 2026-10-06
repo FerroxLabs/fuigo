@@ -21,6 +21,9 @@
 //! cargo bench -p fuigo-pager-pty-harness --bench paste_latency -- \
 //!   --binary ~/Downloads/fuigo-old --mode text --json /tmp/paste-old.json
 //! ```
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;

@@ -1304,6 +1304,15 @@ fn is_transport_error_message(message: &str) -> bool {
 /// An IdP error description can't spoof a `starts_with` match.
 /// `"Request failed"` means network; `"Failed to parse server response"` means non-OAuth 5xx/proxy bodies.
 /// `"Server returned error response: …"` does NOT match.
+/// A refresh the adapter refused (token endpoint off the authorization server's origin) is permanent until the
+/// metadata changes, so it is never "transient" whatever rmcp's opaque message says.
+pub(crate) fn mcp_refresh_failure_is_transient_unless_refused(
+    err: &rmcp::transport::auth::AuthError,
+    refusal: Option<&str>,
+) -> bool {
+    refusal.is_none() && mcp_refresh_failure_is_transient(err)
+}
+
 pub(crate) fn mcp_refresh_failure_is_transient(err: &rmcp::transport::auth::AuthError) -> bool {
     match err {
         rmcp::transport::auth::AuthError::TokenRefreshFailed(msg) => {
@@ -2122,11 +2131,12 @@ async fn discover_and_prepare_auth(
     let ready = crate::oauth::ensure_oauth_ready(server_name, &mut manager).await;
     if ready.hydrated {
         if mode == OauthInteractivity::NonInteractive
-            && let Err(e) = manager.get_access_token().await
+            && let (Err(e), refusal) =
+                crate::http_policy::capture_refusal(manager.get_access_token()).await
         {
             tracing::warn!(
                 server = server_name,
-                error = %e,
+                error = %crate::http_policy::explain_token_error(&e, refusal.as_deref()),
                 "Skipping OAuth MCP in non-interactive mode (stored credentials unusable); re-authenticate in TUI"
             );
             return OauthProbeOutcome::Resolved(HttpAuthDecision::NeedsInteractiveLogin);
@@ -2165,6 +2175,40 @@ async fn discover_and_prepare_auth(
             OauthProbeOutcome::on_probe_failure(mode)
         }
     }
+}
+
+/// Whether a stored login for this server holds an unexpired access token or a refresh token, so that only the
+/// validated metadata is missing (see [`decide_http_auth_over_network`]).
+async fn stored_login_awaits_metadata(server_name: &str, server_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(server_url) else {
+        return false;
+    };
+    let name = server_name.to_string();
+    tokio::task::spawn_blocking(move || {
+        use oauth2::TokenResponse as _;
+        let store = crate::credentials::McpCredentialStore::load_default().unwrap_or_default();
+        let Some(creds) = store.get(&name, &url) else {
+            return false;
+        };
+        let Some(token) = creds.token_response.as_ref() else {
+            return false;
+        };
+        if token.refresh_token().is_some() {
+            return true;
+        }
+        match (token.expires_in(), creds.token_received_at) {
+            (Some(lifetime), Some(received_at)) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                lifetime.as_secs().saturating_sub(now.saturating_sub(received_at)) > 0
+            }
+            _ => true,
+        }
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Whether an MCP server answers a request that carries no credentials.
@@ -2294,6 +2338,19 @@ async fn decide_http_auth_over_network(
                     );
                     ("accepted", HttpAuthDecision::NoOauthSupport)
                 }
+                AnonymousAccess::AuthChallenged
+                    if stored_login_awaits_metadata(server_name, url).await =>
+                {
+                    // P134: the login is not missing, its metadata is: the discovery failed or timed out, so no
+                    // refresh may be sent (rmcp would guess `{base}/token`) and the next attempt re-checks. A
+                    // retryable verdict, not a request to log in again. Decided AFTER the probe so a server that
+                    // accepts anonymous requests still connects plain.
+                    tracing::warn!(
+                        server = server_name,
+                        "Stored OAuth login cannot be used or refreshed until the authorization server metadata validates; will retry"
+                    );
+                    ("auth_challenged_login_awaiting_metadata", HttpAuthDecision::Unreachable)
+                }
                 AnonymousAccess::AuthChallenged => {
                     tracing::warn!(
                         server = server_name,
@@ -2400,11 +2457,14 @@ where
 
     /// Record a skipped, undecodable stdout line: a `warn!` log plus an `McpTransportDecodeError` event.
     /// The event carries the serde error and a truncated sample of the raw line (the diagnostic the untagged-enum serde error alone lacks).
+    /// P113 (CIE-01): the sample is the server's own output, which can hold a credential the server was handed (an
+    /// explicit `${FUIGO_API_KEY}` reference). The cap never cuts through a recorded credential (the cut moves past
+    /// it, so the whole value is there to match), and the log and `events.jsonl` sinks replace it.
     fn record_decode_error(&self, line: &[u8], err: &serde_json::Error) {
-        let sample: String = String::from_utf8_lossy(line)
-            .chars()
-            .take(DECODE_ERROR_SAMPLE_LEN)
-            .collect();
+        let text = String::from_utf8_lossy(line);
+        let (kept, _) =
+            fuigo_telemetry::sent_credentials::truncate_chars(&text, DECODE_ERROR_SAMPLE_LEN);
+        let sample = kept.to_owned();
         tracing::warn!(
             server = %self.server_name,
             error = %err,
@@ -3312,6 +3372,19 @@ impl McpClient {
         self.auth_manager.is_some()
     }
 
+    /// Whether a failed first handshake of this client should be reported as "sign in again" (`needs_auth`).
+    ///
+    /// Any failure of an OAuth client is, except [`McpError::Unreachable`]: the handshake returns that only when a saved
+    /// login exists and merely waits for authorization-server metadata that could not be fetched (P151, B33), which
+    /// is a connection problem to retry with the login kept.
+    pub fn init_failure_needs_auth(&self, error: &McpError) -> bool {
+        if error.is_unreachable() {
+            return false;
+        }
+        self.has_auth()
+            || (self.is_http() && !self.has_configured_auth_header() && error.is_auth_rejection())
+    }
+
     /// Try to recover tokens from disk or via refresh; no browser flow.
     ///
     /// Returns true if valid tokens were found (from another session/process writing to the credential store, or a successful token refresh).
@@ -3348,7 +3421,7 @@ impl McpClient {
 
         let refresh_ok = {
             let mgr = auth_mgr.lock().await;
-            mgr.refresh_token().await.is_ok()
+            crate::http_policy::refresh_logged(&mgr, &self.server_name).await
         };
 
         if refresh_ok {
@@ -3373,8 +3446,14 @@ impl McpClient {
     ///    Opening a browser tab / re-running DCR for a Wi-Fi blip right after wake-from-sleep is both useless and destructive.
     ///    Useless because the IdP is unreachable for the browser too; destructive because it discards a working credential.
     pub async fn force_reauth(&self, force: bool) -> bool {
+        self.force_reauth_with_reason(force).await.is_ok()
+    }
+
+    /// [`Self::force_reauth`] that says why it failed, for a client that asked to sign in (P151). The reason names
+    /// the refused step and addresses, never a credential.
+    pub async fn force_reauth_with_reason(&self, force: bool) -> Result<(), String> {
         let (Some(auth_mgr), Some(config)) = (&self.auth_manager, &self.http_config) else {
-            return false;
+            return Err("the server has no OAuth sign-in".to_string());
         };
 
         let ready = {
@@ -3395,15 +3474,15 @@ impl McpClient {
                     auth_manager: auth_mgr.clone(),
                 }))
                 .await;
-                return true;
+                return Ok(());
             }
             ready
         };
 
         if ready {
-            let refresh_result = {
+            let (refresh_result, refusal) = {
                 let mgr = auth_mgr.lock().await;
-                mgr.refresh_token().await
+                crate::http_policy::capture_refusal(mgr.refresh_token()).await
             };
 
             match refresh_result {
@@ -3417,20 +3496,27 @@ impl McpClient {
                         auth_manager: auth_mgr.clone(),
                     }))
                     .await;
-                    return true;
+                    return Ok(());
                 }
-                Err(ref e) if !force && mcp_refresh_failure_is_transient(e) => {
+                // A refused token endpoint is permanent until the metadata changes: not a network blip.
+                Err(ref e)
+                    if !force
+                        && mcp_refresh_failure_is_transient_unless_refused(e, refusal.as_deref()) =>
+                {
                     tracing::warn!(
                         server = self.server_name.as_str(),
                         error = %e,
                         "Token refresh failed transiently (network); skipping browser escalation"
                     );
-                    return false;
+                    return Err(
+                        "the token refresh could not reach the authorization server; try again later"
+                            .to_string(),
+                    );
                 }
                 Err(e) => {
                     tracing::info!(
                         server = self.server_name.as_str(),
-                        error = %e,
+                        error = %crate::http_policy::explain_token_error(&e, refusal.as_deref()),
                         "Token refresh failed terminally; falling back to browser auth"
                     );
                 }
@@ -3440,7 +3526,10 @@ impl McpClient {
                 server = self.server_name.as_str(),
                 "OAuth client not ready (hydration failed); retrying later instead of browser auth"
             );
-            return false;
+            return Err(
+                "the saved sign-in could not be loaded (the authorization server metadata did not validate); try again later"
+                    .to_string(),
+            );
         }
 
         // Full browser-based OAuth flow.
@@ -3449,21 +3538,23 @@ impl McpClient {
                 server = self.server_name.as_str(),
                 "Falling back to browser auth"
             );
-            if let Err(e) = crate::oauth::authenticate_mcp_server_dedup(
-                &self.server_name,
-                &config.url,
-                auth_mgr,
-                self.byo_oauth_config.as_ref(),
-                force,
+            let (result, trusted) = crate::http_policy::capture_trusted_refusal(
+                crate::oauth::authenticate_mcp_server_dedup(
+                    &self.server_name,
+                    &config.url,
+                    auth_mgr,
+                    self.byo_oauth_config.as_ref(),
+                    force,
+                ),
             )
-            .await
-            {
+            .await;
+            if let Err(e) = result {
                 tracing::warn!(
                     server = self.server_name.as_str(),
                     %e,
                     "Full re-authentication failed"
                 );
-                return false;
+                return Err(client_safe_reason(&e, trusted.as_deref()));
             }
         }
 
@@ -3472,7 +3563,7 @@ impl McpClient {
             auth_manager: auth_mgr.clone(),
         }))
         .await;
-        true
+        Ok(())
     }
 
     /// Reset the transport so the next `ensure_initialized` rebuilds it with a fresh connection.
@@ -3870,15 +3961,38 @@ impl McpClient {
                 );
                 // `None` = the refresh did not succeed, so the first attempt's error stands.
                 let refresh_and_retry = async {
-                    let refresh_ok = {
+                    // `Some(true)` refreshed; `Some(false)` not refreshed; `None` not even tried because the
+                    // authorization server metadata could not be fetched.
+                    let refreshed = {
                         let mut mgr = auth_mgr.lock().await;
-                        crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr)
-                            .await
-                            .hydrated
-                            && mgr.refresh_token().await.is_ok()
+                        let ready = crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr).await;
+                        if ready.hydrated {
+                            Some(crate::http_policy::refresh_logged(&mgr, &self.server_name).await)
+                        } else if ready
+                            .discovery
+                            .as_ref()
+                            .is_err_and(crate::oauth::metadata_unavailable)
+                        {
+                            None
+                        } else {
+                            Some(false)
+                        }
                     };
-                    if !refresh_ok {
-                        return None;
+                    match refreshed {
+                        Some(true) => {}
+                        Some(false) => return None,
+                        // P151 (B33): a saved login that only waits for metadata is a connection problem to retry,
+                        // not a request to sign in again. Nothing was refreshed and the login is kept.
+                        None if stored_login_awaits_metadata(&self.server_name, &config.url).await => {
+                            tracing::warn!(
+                                server = %self.server_name,
+                                "Saved OAuth login kept; the authorization server metadata could not be fetched, will retry"
+                            );
+                            return Some(Err(McpError::Unreachable {
+                                server: self.server_name.to_string(),
+                            }));
+                        }
+                        None => return None,
                     }
                     let retry_transport = PendingTransport::HttpAuth {
                         config: config.clone(),
@@ -5057,6 +5171,23 @@ fn drain_mcp_stderr_to_log(server_name: &str, mut stderr: tokio::process::ChildS
     });
 }
 
+/// A server's HTTP headers as they are sent: the saved key bound where a header's CONFIGURED text names it, THEN the
+/// session id substituted (P133). In this order the substituted text can never complete a reference: a session id is
+/// client-chosen (a fork's `newSessionId`), and `Bearer ${${session_id}}` with the id `FUIGO_API_KEY` would otherwise
+/// become `${FUIGO_API_KEY}` after the saved-key refusal had run, and be bound the key.
+fn http_headers_for_server(
+    mut headers: Vec<acp::HttpHeader>,
+    session_id: Option<&str>,
+    first_party_key: Option<&str>,
+) -> Vec<(String, String)> {
+    for header in headers.iter_mut() {
+        if let std::borrow::Cow::Owned(resolved) = send_first_party_key_references(&header.value, first_party_key) {
+            header.value = resolved;
+        }
+    }
+    expand_session_id_headers(headers, session_id)
+}
+
 fn expand_session_id_headers(
     headers: Vec<acp::HttpHeader>,
     session_id: Option<&str>,
@@ -5186,20 +5317,110 @@ fn parse_config_headers<'a>(
     headers
 }
 
+/// The first-party key as config that names it sees it now (the saved key, or an exported one): one read per MCP
+/// server construction.
+fn first_party_key_snapshot() -> Option<String> {
+    fuigo_config::resolve_credential_env_var(fuigo_config::FIRST_PARTY_KEY_ENV_VAR)
+}
+
+/// `text` with its first-party key references resolved from `first_party_key` (P70a late binding). When that hands
+/// this server the key, the key is also recorded as a credential actually sent (P70b), so a server, gateway or proxy
+/// that echoes it back has it replaced at the display and log sinks like any other sent credential. An escaped or
+/// absent reference records nothing.
+///
+/// P113 (Astra r2 #1): the key is recorded whenever the text handed to the server holds it, not only when a reference
+/// was resolved here: an exported `FUIGO_API_KEY` is expanded when the config is loaded, so the text arrives here
+/// already holding the key.
+fn send_first_party_key_references<'a>(text: &'a str, first_party_key: Option<&str>) -> std::borrow::Cow<'a, str> {
+    let resolved = fuigo_config::read_first_party_key_references(text, first_party_key);
+    if let Some(key) = first_party_key
+        && resolved.contains(key)
+    {
+        fuigo_telemetry::sent_credentials::record(key);
+    }
+    resolved
+}
+
 fn stdio_path_override(env: &[acp::EnvVariable]) -> Option<&str> {
     env.iter()
         .find(|e| e.name.eq_ignore_ascii_case("PATH"))
         .map(|e| e.value.as_str())
 }
 
-fn apply_stdio_env(cmd: &mut Command, env: &[acp::EnvVariable], session_id: Option<&str>) {
+/// The child's environment: the shell environment policy (which strips `FUIGO_API_KEY` by name), then the server's
+/// configured `env`. P70a: a `${FUIGO_API_KEY}` / `$FUIGO_API_KEY` written in a value is resolved here, at spawn, with
+/// `first_party_key` (the caller's one snapshot of the in-memory key store for this server, Astra f11), so the key
+/// reaches this child only and no record of the config holds it.
+fn apply_stdio_env(
+    cmd: &mut Command,
+    env: &[acp::EnvVariable],
+    session_id: Option<&str>,
+    first_party_key: Option<&str>,
+) {
     fuigo_tools::util::apply_shell_environment_policy(cmd, None);
     for env_variable in env {
-        cmd.env(&env_variable.name, &env_variable.value);
+        cmd.env(
+            &env_variable.name,
+            send_first_party_key_references(&env_variable.value, first_party_key).as_ref(),
+        );
     }
     if let Some(session_id) = session_id {
         cmd.env("FUIGO_SESSION_ID", session_id);
     }
+}
+
+/// `true` when `url` is an `http(s)` URL whose host is a loopback address
+/// (`127.0.0.0/8`, `::1`) or `localhost`: a process on this machine.
+pub(crate) fn is_loopback_http_url(url: &str) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
+/// Decide the agent-id header for one HTTP server and return whether it gets
+/// the first-party local-agent posture (no OAuth probe, no proxy, no redirects).
+///
+/// A caller-supplied [`GROK_AGENT_ID_HEADER`] is always removed: a config must
+/// not be able to impersonate a first-party endpoint. The header (carrying the
+/// session id) is added only when the spawn context designates the server
+/// first-party AND its URL is a loopback address. First-party status is decided
+/// by configured server name upstream; the loopback requirement means a name
+/// alone can never send the session id, or drop proxy/OAuth handling, for a
+/// server off this machine (P91 R5).
+fn apply_agent_id_header(
+    headers: &mut Vec<(String, String)>,
+    name: &str,
+    url: &str,
+    ctx: &McpSpawnCtx<'_>,
+) -> Result<bool, McpError> {
+    headers.retain(|(header, _)| !header.eq_ignore_ascii_case(GROK_AGENT_ID_HEADER));
+    if !ctx.send_grok_agent_id_header {
+        return Ok(false);
+    }
+    if !is_loopback_http_url(url) {
+        tracing::warn!(
+            server = %name,
+            "MCP server is designated first-party but is not on a loopback address; \
+             not sending {GROK_AGENT_ID_HEADER} and keeping the normal transport"
+        );
+        return Ok(false);
+    }
+    if let Some(session_id) = ctx.session_id {
+        reqwest::header::HeaderValue::try_from(session_id).map_err(|error| {
+            McpError::ClientError(format!("invalid {GROK_AGENT_ID_HEADER} value: {error}"))
+        })?;
+        headers.push((GROK_AGENT_ID_HEADER.to_owned(), session_id.to_owned()));
+    }
+    Ok(true)
 }
 
 /// Borrowed cross-cutting spawn context whose `scope`, when set, enrolls the stdio child for session-close reaping.
@@ -5284,6 +5505,13 @@ pub async fn start_mcp_server(
             let cmd = {
                 let _stdio_spawn_timer = fuigo_telemetry::instrumentation::timer("mcp_stdio_spawn");
                 let path_override = stdio_path_override(&env);
+                // P70a: an explicit `${FUIGO_API_KEY}` in `args` (and, below, `env`) is resolved here, for this child
+                // only, from ONE snapshot of the key store (a concurrent `setApiKey` cannot give one server two keys).
+                let first_party_key = first_party_key_snapshot();
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|arg| send_first_party_key_references(arg, first_party_key.as_deref()).into_owned())
+                    .collect();
                 let (program, spawn_args) =
                     plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
                         if let Some(path) = path_override
@@ -5296,7 +5524,7 @@ pub async fn start_mcp_server(
                     });
                 let mut cmd = Command::new(&program);
                 cmd.kill_on_drop(true).args(&spawn_args);
-                apply_stdio_env(&mut cmd, &env, ctx.session_id);
+                apply_stdio_env(&mut cmd, &env, ctx.session_id, first_party_key.as_deref());
                 fuigo_tools::util::detach_command(&mut cmd);
                 fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
                 cmd
@@ -5346,20 +5574,15 @@ pub async fn start_mcp_server(
                 tracing::info!(server = %name, %url, ?mc, "MCP http: meta config override");
             }
 
-            let mut headers = expand_session_id_headers(headers, ctx.session_id);
-            // Stripped unconditionally: the agent-id header identifies the
-            // session to first-party app endpoints, and a caller-supplied
-            // config must not be able to impersonate one (see
-            // [`GROK_AGENT_ID_HEADER`]). Re-added only from the spawn
-            // context, like `GROK_SESSION_ID` on stdio servers.
-            headers.retain(|(name, _)| !name.eq_ignore_ascii_case(GROK_AGENT_ID_HEADER));
-            let local_agent_endpoint = ctx.send_grok_agent_id_header;
-            if local_agent_endpoint && let Some(session_id) = ctx.session_id {
-                reqwest::header::HeaderValue::try_from(session_id).map_err(|error| {
-                    McpError::ClientError(format!("invalid {GROK_AGENT_ID_HEADER} value: {error}"))
-                })?;
-                headers.push((GROK_AGENT_ID_HEADER.to_owned(), session_id.to_owned()));
-            }
+            // P70a: an explicit `${FUIGO_API_KEY}` in a header value is resolved here, for this server's requests
+            // (and its anonymous OAuth probe) only; the configured value, shown and recorded elsewhere, keeps the
+            // reference. The URL is NOT resolved: it is an identifier that is logged, persisted and listed.
+            // One snapshot of the key store for all of this server's headers (Astra f11).
+            // The key, once sent, is recorded for P70b's scrub of echoed credentials.
+            let mut headers =
+                http_headers_for_server(headers, ctx.session_id, first_party_key_snapshot().as_deref());
+            let local_agent_endpoint =
+                apply_agent_id_header(&mut headers, name.as_str(), url.as_str(), ctx)?;
             let http_config = HttpConfig {
                 url: url.clone(),
                 headers,
@@ -5423,6 +5646,83 @@ pub async fn start_mcp_server(
         other => Err(McpError::ClientError(format!(
             "unsupported MCP server transport: {other:?}"
         ))),
+    }
+}
+
+/// Why OAuth sign-in is not available for `server_url`, for a user who asked to sign in (P151).
+///
+/// `None` when the server simply offers no OAuth (or its metadata now validates); otherwise a reason built from the
+/// classified error, naming only origins: never a query string, a provider's error text or a credential (Astra r1).
+pub async fn explain_missing_oauth(server_url: &str) -> Option<String> {
+    let Ok(manager) = crate::http_policy::auth_manager(server_url).await else {
+        return Some("its address is not allowed for OAuth sign-in by the network policy".to_string());
+    };
+    use rmcp::transport::auth::AuthError;
+    let error = match crate::oauth::discover_metadata_bounded(&manager).await {
+        Ok(_) | Err(AuthError::NoAuthorizationSupport) => return None,
+        Err(error) => error,
+    };
+    tracing::warn!(url = %origin_of(server_url), %error, "OAuth sign-in unavailable");
+    Some(match &error {
+        e if crate::oauth::metadata_unavailable(e) => format!(
+            "its OAuth metadata could not be fetched from {}; try again later",
+            origin_of(server_url)
+        ),
+        AuthError::AuthorizationServerMismatch {
+            expected_issuer,
+            received_issuer,
+        } => format!(
+            "its authorization server metadata was refused: it declares issuer {} where {} was expected (RFC 8414 requires them to match)",
+            origin_of(received_issuer),
+            origin_of(expected_issuer)
+        ),
+        AuthError::AuthorizationServerMissingIssuer { .. } => {
+            "its authorization server metadata was refused: it does not declare its issuer".to_string()
+        }
+        AuthError::MetadataError(message) if message.starts_with("OAuth metadata discovery failed for") => {
+            "its OAuth metadata discovery was refused (a redirect to another origin, too many redirects, or an address the network policy blocks)".to_string()
+        }
+        AuthError::MetadataError(message) if message.contains("resource") => {
+            "its protected resource metadata was refused: it names a different or invalid resource".to_string()
+        }
+        _ => "its OAuth metadata was refused as invalid; the details are in the Fuigo log".to_string(),
+    })
+}
+
+/// The origin of a URL (`scheme://host:port`) for a client-visible message, or a placeholder.
+fn origin_of(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .filter(|u| u.has_host())
+        .map(|u| u.origin().ascii_serialization())
+        .unwrap_or_else(|| "an invalid address".to_string())
+}
+
+/// The client-visible reason for a failed sign-in. Only a refusal Fuigo recorded on the trusted side channel
+/// ([`crate::http_policy::capture_trusted_refusal`]) is shown; the error text itself is never searched or echoed, since
+/// it can carry a provider's error_description (Astra r1, r2). The details stay in the log.
+fn client_safe_reason(raw: &str, trusted: Option<&str>) -> String {
+    if let Some(refusal) = trusted {
+        return bounded_reason(refusal);
+    }
+    if raw.starts_with("OAuth consent timed out") {
+        return "the sign-in in the browser was not completed in time; try again".to_string();
+    }
+    "the sign-in did not complete; the details are in the Fuigo log".to_string()
+}
+
+/// Keep a reason shown to a client to one readable line of bounded length.
+fn bounded_reason(text: &str) -> String {
+    const MAX: usize = 600;
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX {
+        flat
+    } else {
+        format!("{}...", flat.chars().take(MAX).collect::<String>())
     }
 }
 
@@ -5732,3 +6032,11 @@ impl ClientHandler for FuigoClientHandler {
 #[cfg(test)]
 #[path = "servers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "servers_p133_tests.rs"]
+mod p133_tests;
+
+#[cfg(test)]
+#[path = "servers_p91_tests.rs"]
+mod p91_tests;

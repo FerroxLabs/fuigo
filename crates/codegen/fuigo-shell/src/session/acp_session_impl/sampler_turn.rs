@@ -178,18 +178,25 @@ pub(super) fn is_auth_tool_error(err: &fuigo_tool_runtime::ToolError) -> bool {
         || lower.contains("invalid_token")
 }
 
+/// P42: turn error type for a 401 caused by withholding the session token from a destination that may not
+/// receive it. Deliberately not `auth`: the client raises its re-auth prompt off `auth`, and logging in again
+/// cannot fix a destination the session token may not go to.
+pub(crate) const SESSION_WITHHELD_ERROR_TYPE: &str =
+    crate::extensions::notification::AUTH_DESTINATION_REFUSED_ERROR_TYPE;
+
 /// Gate inputs bundled with the composed decision so the 401-recovery log can report the components.
 #[derive(Clone, Copy)]
 struct SessionTokenAuthGate {
     is_session_based: bool,
     model_byok: crate::agent::auth_method::ModelByok,
-    /// Whether the request targets a first-party host.
-    /// Lets an `Unknown` BYOK status still refresh against cli-chat-proxy / `*.x.ai` without risking a session-token leak to a third-party BYOK endpoint.
-    endpoint_is_first_party: bool,
+    /// Whether the destination may receive the session token at all.
+    /// P42: decided by `session_delivery::session_may_reach` (`AuthBackend::may_receive_session`), the one session-delivery predicate.
+    /// It bounds `NotByok` and `Unknown` alike; it used to be the broad host-only `is_fuigo_api_url`, which admits cleartext, any port and every loopback URL.
+    destination_may_receive_session: bool,
 }
 
 impl SessionTokenAuthGate {
-    /// Single place `is_session_based` / `endpoint_is_first_party` are derived, so all call sites assemble the gate identically.
+    /// Single place `is_session_based` / `destination_may_receive_session` are derived, so all call sites assemble the gate identically.
     fn new(
         auth_method_id: Option<&acp::AuthMethodId>,
         model_byok: crate::agent::auth_method::ModelByok,
@@ -200,7 +207,9 @@ impl SessionTokenAuthGate {
             is_session_based: auth_method_id
                 .is_some_and(crate::agent::auth_method::is_session_based_method),
             model_byok,
-            endpoint_is_first_party: crate::util::is_fuigo_api_url(base_url),
+            destination_may_receive_session: crate::auth::session_delivery::session_may_reach(
+                base_url,
+            ),
         }
     }
 
@@ -208,7 +217,7 @@ impl SessionTokenAuthGate {
         crate::agent::auth_method::session_token_auth_gate(
             self.is_session_based,
             self.model_byok,
-            self.endpoint_is_first_party,
+            self.destination_may_receive_session,
         )
     }
 }
@@ -642,7 +651,7 @@ impl SessionActor {
 
     /// Gate inputs for `model_id` routed to `base_url`.
     /// See [`crate::agent::auth_method::session_token_auth_gate`] for the rationale.
-    /// `base_url` keeps an `Unknown` BYOK status refreshable only against first-party Ferrox Labs hosts.
+    /// `base_url` bounds the session token, whatever the BYOK status, to destinations that may receive it.
     fn auth_gate(&self, model_id: &str, base_url: &str) -> SessionTokenAuthGate {
         let byok = self.model_auth_facts(model_id).byok;
         let auth_method = self.auth_method_id.load();
@@ -651,7 +660,7 @@ impl SessionActor {
 
     /// Emit a unified-log breadcrumb whenever the session-token refresh gate sees an **`Unknown`** per-model BYOK status on a session-based method.
     /// That condition used to silently demote live sessions to stale-token 401s.
-    /// The uploaded per-turn unified log then shows whether the first-party-endpoint fallback kept refresh active or withheld it.
+    /// The uploaded per-turn unified log then shows whether the destination check kept refresh active or withheld it.
     /// That is visible per session even when server-side metrics only show the aggregate 401.
     /// No-op for a definite `Byok`/`NotByok`, so steady-state turns stay quiet.
     /// A burst of these is itself the signal that `Unknown` is being hit in the field.
@@ -665,20 +674,22 @@ impl SessionActor {
             "site": site,
             "model_byok": gate.model_byok.as_str(),
             "is_session_based": gate.is_session_based,
-            "endpoint_is_first_party": gate.endpoint_is_first_party,
+            "destination_may_receive_session": gate.destination_may_receive_session,
+            // Kept for existing log queries; since P42 it carries the strict delivery predicate.
+            "endpoint_is_first_party": gate.destination_may_receive_session,
             "refresh_active": refresh_active,
             "base_url": base_url,
         });
         let sid = Some(self.session_info.id.0.as_ref());
         if refresh_active {
             fuigo_telemetry::unified_log::info(
-                "auth gate: Unknown BYOK on first-party endpoint — session-token refresh kept active",
+                "auth gate: Unknown BYOK on a destination that may receive the session — session-token refresh kept active",
                 sid,
                 Some(ctx),
             );
         } else {
             fuigo_telemetry::unified_log::warn(
-                "auth gate: Unknown BYOK on non-first-party endpoint — refresh withheld (may surface stale-token 401)",
+                "auth gate: Unknown BYOK on a destination that may not receive the session — refresh withheld (may surface 401)",
                 sid,
                 Some(ctx),
             );
@@ -732,8 +743,7 @@ impl SessionActor {
             selected_provider = None;
         }
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
-        // `cfg.base_url` keeps an `Unknown` BYOK status refreshable against first-party Ferrox Labs hosts
-        // That avoids leaking the session token to a third-party endpoint
+        // P42: `cfg.base_url` is checked with the one session-delivery predicate for every BYOK status
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
@@ -746,14 +756,23 @@ impl SessionActor {
         // Session path: only seed a wire-valid AT
         // Hard-expired keys must not land in default headers when the resolver has nothing to stamp
         let api_key = if use_bearer_resolver {
-            // `use_bearer_resolver` means the endpoint is a first-party Ferrox Labs URL.
+            // `use_bearer_resolver` means the destination may receive the session token.
             // A session from another authority must not seed the default headers either.
             self.auth_manager
                 .as_ref()
                 .filter(|_| ActiveAuthBackend::default().is_fuigo_authority())
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
         } else {
-            creds.api_key
+            // P42: the buffered key was resolved for whatever destination was current then.
+            // Re-check it against THIS request's destination: a session token buffered by an earlier turn
+            // (or substituted by the kill switch, or kept across a model override while the config was
+            // unparseable) must not ride along to a destination that may not receive it, expired or not.
+            crate::auth::session_delivery::withhold_session_bearer(
+                creds.api_key,
+                &cfg.base_url,
+                self.auth_manager.as_deref(),
+                "reconstruct_full_config",
+            )
         };
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
@@ -873,7 +892,8 @@ impl SessionActor {
         // Resolve the `[auto_mode]` config (local config, then remote, then the built-in default)
         // When auto mode is enabled and unconfigured, the classifier uses the current model at low reasoning effort (if the model supports it)
         // It uses the `just_command` prompt; local config and remote settings override these
-        let auto_cfg = crate::util::config::resolve_auto_mode_config_from_disk();
+        let (auto_cfg, explicit_classifier) =
+            crate::util::config::resolve_auto_mode_config_from_disk_with_provenance();
         let session_model = self
             .chat_state_handle
             .get_sampling_config()
@@ -882,10 +902,21 @@ impl SessionActor {
             .unwrap_or_default();
         // Route the classifier to a dedicated model when a slug is configured
         // A None or unresolvable slug falls back to the session client and model
-        let aux_classifier_sampler = match auto_cfg.classifier_model.as_deref() {
-            Some(slug) => self.resolve_auto_classifier_sampler(slug).await,
-            None => None,
+        let classifier_choice = auto_cfg.classifier_model.as_deref().map(|slug| {
+            crate::agent::config::HelperModelChoice::of(explicit_classifier.as_deref(), slug)
+        });
+        let aux_classifier_sampler = match (auto_cfg.classifier_model.as_deref(), classifier_choice) {
+            (Some(slug), Some(choice)) => self.resolve_auto_classifier_sampler(slug, choice).await,
+            _ => None,
         };
+        // P90 F6: an explicit classifier that cannot be used must not be replaced by the
+        // session's subscription model (checked per request: the session model can change).
+        let classifier_route = auto_cfg.classifier_model.clone().zip(classifier_choice);
+        let explicit_classifier_unusable = aux_classifier_sampler
+            .is_none()
+            .then(|| classifier_route.clone())
+            .flatten()
+            .filter(|(_, choice)| *choice == crate::agent::config::HelperModelChoice::Explicit);
         // Built-in defaults: the just_command prompt, and low effort if the model ACTUALLY used supports it
         // That model is the resolved aux model, else the session model we fall back to when the slug is unset/unresolvable
         // Explicit config overrides
@@ -907,18 +938,78 @@ impl SessionActor {
             >,
         )>();
         let session = Arc::clone(self);
+        // P121 (K6): the helper resolved above is kept only for as long as the model and the catalog
+        // it was resolved against stay as they are; a model switch or a catalog reload rebuilds it.
+        let mut helper_cache = crate::agent::helper_epoch::EpochCache::new();
+        let seeded_epoch = session.models_manager.helper_epoch();
+        let seeded = ClassifierHelper {
+            aux: aux_classifier_sampler,
+            unusable: explicit_classifier_unusable,
+            effort: classifier_reasoning_effort,
+        };
+        helper_cache.get_or_rebuild(seeded_epoch, || async { seeded }).await;
+        let rebuild_cfg = auto_cfg.clone();
         // One shared worker serializes parent and subagent classifier requests.
         tokio::task::spawn_local(async move {
             while let Some((messages, respond_to)) = rx.recv().await {
                 let request_span = region!("permission.classifier_request", Parent::Root);
                 let result = async {
-                    let (sampling_client, model, context_window) = match &aux_classifier_sampler {
+                    let epoch = session.models_manager.helper_epoch();
+                    let helper = helper_cache
+                        .get_or_rebuild(epoch, || session.build_classifier_helper(&classifier_route, &rebuild_cfg))
+                        .await;
+                    let aux_classifier_sampler = &helper.aux;
+                    let explicit_classifier_unusable = &helper.unusable;
+                    let classifier_reasoning_effort = helper.effort;
+                    // P90 F6: the session's model can change after this worker was wired, so
+                    // the cached classifier route is re-judged against it per request.
+                    let cached = match (&aux_classifier_sampler, &classifier_route) {
+                        (Some(aux), Some((slug, choice))) => {
+                            let current = session.reconstruct_full_config().await;
+                            match crate::agent::config::cached_helper_route(
+                                *choice,
+                                session.models_manager.model_in_catalog(slug),
+                                &current,
+                            ) {
+                                crate::agent::config::CachedHelperRoute::Keep => Some(aux),
+                                crate::agent::config::CachedHelperRoute::UseSession => None,
+                                crate::agent::config::CachedHelperRoute::Refuse => {
+                                    return Err(
+                                        fuigo_workspace::permission::ClassifierFailure::TransportError(
+                                            format!(
+                                                "the configured auto-mode classifier model \
+                                                 {slug:?} cannot be used; Fuigo will not classify \
+                                                 with the subscription model instead"
+                                            ),
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        (aux, _) => aux.as_ref(),
+                    };
+                    let (sampling_client, model, context_window) = match cached {
                         Some((client, model, context_window)) => {
                             (client.clone(), model.clone(), *context_window)
                         }
                         None => {
                             session.refresh_token_if_expired().await;
                             let config = session.reconstruct_full_config().await;
+                            if let Some((slug, choice)) = explicit_classifier_unusable
+                                && crate::agent::config::explicit_helper_fallback_refused(
+                                    None, &config, *choice,
+                                )
+                            {
+                                return Err(
+                                    fuigo_workspace::permission::ClassifierFailure::TransportError(
+                                        format!(
+                                            "the configured auto-mode classifier model {slug:?} \
+                                             cannot be used; Fuigo will not classify with the \
+                                             subscription model instead"
+                                        ),
+                                    ),
+                                );
+                            }
                             let context_window = config.context_window;
                             let model = config.model.clone();
                             let client =
@@ -1013,12 +1104,13 @@ impl SessionActor {
     pub(super) async fn resolve_aux_sampler_config(
         &self,
         slug: &str,
+        choice: crate::agent::config::HelperModelChoice,
     ) -> Option<fuigo_sampler::SamplerConfig> {
         let creds = self.chat_state_handle.get_credentials().await;
-        let session_key = self
+        let held = self
             .auth_manager
             .as_ref()
-            .and_then(|am| am.current_or_expired().map(|a| a.key.clone()));
+            .and_then(|am| am.current_or_expired());
         let models = self.models_manager.models();
         let endpoints = self.models_manager.endpoints();
         let disable_api_key_auth = self
@@ -1026,31 +1118,71 @@ impl SessionActor {
             .as_ref()
             .map(|am| am.fuigo_com_config().api_key_auth_disabled())
             .unwrap_or(false);
-        crate::agent::config::resolve_aux_model_sampling_config(
+        crate::agent::config::resolve_aux_model_sampling_config_for_held(
             slug,
             &models,
             &endpoints,
-            session_key.as_deref(),
+            held.as_ref(),
             disable_api_key_auth,
             creds.alpha_test_key.clone(),
             creds.client_version.clone(),
+            choice,
         )
     }
 
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`, stamping session-local auth/attribution like image-describe.
     /// Image-describe relies on the resolver, not a config override, for `base_url`/`api_backend` so credentials stay consistent.
     /// `None` means the caller falls back to the session client and model.
+    /// P121 (K6). Resolve the classifier's helper route against the model and catalog as they are now.
+    async fn build_classifier_helper(
+        &self,
+        route: &Option<(String, crate::agent::config::HelperModelChoice)>,
+        auto_cfg: &crate::agent::config::AutoModeConfig,
+    ) -> ClassifierHelper {
+        let aux = match route {
+            Some((slug, choice)) => self.resolve_auto_classifier_sampler(slug, *choice).await,
+            None => None,
+        };
+        let unusable = aux
+            .is_none()
+            .then(|| route.clone())
+            .flatten()
+            .filter(|(_, choice)| *choice == crate::agent::config::HelperModelChoice::Explicit);
+        let session_model = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.model)
+            .unwrap_or_default();
+        let models = self.models_manager.models();
+        let supports_re = crate::agent::config::effective_classifier_supports_re(
+            aux.as_ref().map(|(_, model, _)| model.as_str()),
+            &session_model,
+            &models,
+        );
+        let (_prompt_type, effort) =
+            crate::util::config::auto_mode_classifier_defaults(auto_cfg, supports_re);
+        ClassifierHelper { aux, unusable, effort }
+    }
+
     async fn resolve_auto_classifier_sampler(
         &self,
         slug: &str,
+        choice: crate::agent::config::HelperModelChoice,
     ) -> Option<(fuigo_sampler::SamplingClient, String, u64)> {
         let active_session_config = self.reconstruct_full_config().await;
-        let mut cfg = self.resolve_aux_sampler_config(slug).await?;
+        let mut cfg = crate::agent::config::explicit_helper_route(
+            self.resolve_aux_sampler_config(slug, choice).await,
+            self.models_manager.model_in_catalog(slug),
+            &active_session_config,
+            choice,
+        )?;
         crate::agent::config::stamp_session_local_sampler_fields(
             &mut cfg,
             &active_session_config,
             self.client_identifier.clone(),
             Some(self.max_retries),
+            choice,
         );
         let model = cfg.model.clone();
         let context_window = cfg.context_window;
@@ -1102,6 +1234,36 @@ impl SessionActor {
         self.sampler_handle.update_config(sampler_config);
     }
 
+    /// P42: whether `error` is a 401 on a request the session token was withheld from because its destination
+    /// may not receive it (`session_delivery::session_may_reach`). A request that carried a credential
+    /// (`SentCredential::Sent`: a BYOK key, `FUIGO_API_KEY`, a static key) is a real rejection, not this.
+    pub(super) fn session_withheld_401(
+        &self,
+        error: &fuigo_sampler::SamplingErrorInfo,
+        model_id: &str,
+        base_url: &str,
+    ) -> bool {
+        let is_401 = matches!(error.kind, fuigo_sampler::SamplingErrorKind::Auth)
+            || error.status_code == Some(401);
+        if !is_401
+            || error.credential == fuigo_sampling_types::SentCredential::Sent
+            || crate::auth::session_delivery::session_may_reach(base_url)
+        {
+            return false;
+        }
+        // The same endpoint-aware provider resolution `reconstruct_full_config` uses: a native subscription (or
+        // any auth provider) attaches its own credential at dispatch, after the sampler recorded `Missing`, so its
+        // 401 is a real rejection, not a withheld session.
+        if crate::auth::subscription::inference::selected_for_endpoint(model_id, base_url).is_some() {
+            return false;
+        }
+        let (facts, provider) = self.model_auth_state(model_id);
+        if provider.is_some() || facts.byok == crate::agent::auth_method::ModelByok::Byok {
+            return false;
+        }
+        self.auth_gate(model_id, base_url).is_session_based
+    }
+
     /// Fold an auth remedy into a turn failure: its advice becomes the tail of the message.
     /// Its `turn_error_type` becomes the classification the client keys its re-auth prompt off.
     fn apply_auth_remedy(
@@ -1141,6 +1303,7 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: kind.as_str().to_owned(),
                 message: message.clone(),
+                verdicts: None,
             },
         ))
         .await;
@@ -1164,6 +1327,7 @@ impl SessionActor {
             crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_owned(),
                 message: message.clone(),
+                verdicts: None,
             },
         ))
         .await;
@@ -1188,11 +1352,11 @@ impl SessionActor {
                 "status_code": status_code,
                 "reauthable": reauthable,
                 "auth_mode": auth.as_ref().map(|a| format!("{:?}", a.auth_mode)),
-                "key_prefix": auth.as_ref().map(|a| fuigo_auth::bearer_suffix(&a.key).to_owned()),
+                "key_prefix": auth.as_ref().map(|a| fuigo_auth::bearer_fingerprint(&a.key)),
                 "expires_at": auth
                     .as_ref()
                     .and_then(|a| a.expires_at.map(|e| e.to_rfc3339())),
-                "message": crate::util::truncate(message, 300),
+                "message": fuigo_telemetry::sent_credentials::truncate_chars(message, 300).0,
             })),
         );
     }
@@ -1244,6 +1408,31 @@ impl SessionActor {
         }
     }
 
+    /// The budget denial that refused the turn's current model request, if a budget refused it: the
+    /// one its admission recorded, else a refusal by the sampler's process limits named by `message`.
+    async fn turn_request_budget_denial(
+        &self,
+        message: &str,
+    ) -> Option<crate::acp_error::ExecutionBudgetDenial> {
+        let execution =
+            crate::session::execution_state::Execution::current(&self.session_info.id.to_string());
+        if let Some(denial) = execution
+            .as_ref()
+            .and_then(|execution| execution.take_turn_request_denial())
+        {
+            return Some(denial);
+        }
+        let rule = crate::session::execution_state::process_limit_rule(message)?;
+        let state = match execution {
+            Some(execution) => execution.snapshot().await.ok(),
+            None => None,
+        };
+        Some(state.map_or_else(
+            || crate::acp_error::ExecutionBudgetDenial::without_token_figures(rule),
+            |state| crate::session::execution_state::budget_denial(&state, rule),
+        ))
+    }
+
     /// Classify a terminal sampler failure and decide recovery.
     /// `transient`: turn-loop retry state (the loop owns the counters).
     /// `park`: already parked — a still-credential-less 401 re-parks without a recovery dispatch.
@@ -1256,6 +1445,32 @@ impl SessionActor {
         park: TurnParkState,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use fuigo_sampler::SamplingErrorKind;
+
+        // Contract D.4: a request the execution's token-budget guard refused is a DENIAL, reported
+        // through the same contract as a headless permission denial, not a provider failure. The
+        // sampler flattens every admission refusal to a status-less `InvalidConfiguration` (kind
+        // `api`), so the refusal itself is read from the failed request's own admission
+        // (`Execution::begin_turn_request`), which recorded it while it was still typed: a side
+        // call's refusal or an earlier request's can never be read here. Checked first: nothing
+        // below may retry, compact, or relabel a refusal, and nothing was dispatched, so there is
+        // no usage to account.
+        //
+        // P44: the same holds for the model-call and runtime limits. The durable execution's refusals
+        // are recorded like the token guard's; a refusal by the sampler's own process-wide counter or
+        // clock is read off this request's error (`process_limit_rule`), with the execution's token
+        // counters as its figures.
+        if error.kind == SamplingErrorKind::Api
+            && error.status_code.is_none()
+            && let Some(denial) = self.turn_request_budget_denial(&error.message).await
+        {
+            let err = denial.to_acp_error();
+            self.log_terminal_failure(
+                crate::acp_error::EXECUTION_BUDGET_DENIED_CODE,
+                None,
+                &denial.message(),
+            );
+            return Err(err);
+        }
 
         // On an in-flight salvage continuation, a max-tokens failure or a probable context overflow is not terminal
         // For an overflow, compact-and-resubmit would delete the continue reminder and split the report
@@ -1389,6 +1604,7 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "encrypted_content_mismatch".to_string(),
                     message: friendly.clone(),
+                    verdicts: None,
                 },
             ))
             .await;
@@ -1405,6 +1621,7 @@ impl SessionActor {
                     reason: detailed_message.clone(),
                     is_rate_limited: true,
                     error_type: Some(SamplingErrorKind::RateLimited.as_str().to_string()),
+                    verdicts: None,
                 },
             ))
             .await;
@@ -1431,6 +1648,12 @@ impl SessionActor {
             .map(|c| (c.model, c.base_url))
             .unwrap_or_default();
 
+        // P42: a 401 on a request that went out WITHOUT the session token because its destination may not
+        // receive it. No refresh or login can fix that; only configuration can. Decided here, from the same
+        // snapshot as arm 4, and reported terminally in arm 6 instead of as a self-healing blip.
+        let session_withheld =
+            self.session_withheld_401(&error, &failed_model_id, &failed_base_url);
+
         // Provider-backed models recover via arm 4c below
         // The provider is resolved before the eligibility check so its warnings stay quiet for a 401 that 4c handles
         let auth_provider =
@@ -1450,7 +1673,7 @@ impl SessionActor {
                     session_id = %self.session_info.id.0,
                     is_session_based = gate.is_session_based,
                     model_byok = gate.model_byok.as_str(),
-                    endpoint_is_first_party = gate.endpoint_is_first_party,
+                    destination_may_receive_session = gate.destination_may_receive_session,
                     "auth recovery: sampler 401 not refreshable (api-key auth) — surfacing 401",
                 );
                 fuigo_telemetry::unified_log::warn(
@@ -1461,7 +1684,8 @@ impl SessionActor {
                         "status_code": error.status_code,
                         "is_session_based": gate.is_session_based,
                         "model_byok": gate.model_byok.as_str(),
-                        "endpoint_is_first_party": gate.endpoint_is_first_party,
+                        "destination_may_receive_session": gate.destination_may_receive_session,
+                        "endpoint_is_first_party": gate.destination_may_receive_session,
                     })),
                 );
             }
@@ -1646,6 +1870,7 @@ impl SessionActor {
                 crate::extensions::notification::RetryState::Failed {
                     error_type: "legacy_auth".to_string(),
                     message: msg.clone(),
+                    verdicts: None,
                 },
             ))
             .await;
@@ -1661,7 +1886,9 @@ impl SessionActor {
         let is_auth_401 =
             error.status_code == Some(401) || matches!(error.kind, SamplingErrorKind::Auth);
 
-        let detailed_message = if is_model_404 || is_auth_401 {
+        // The diagnostics block alone (no leading newline), so a refused destination can compose its own message
+        // around it (arm 6) instead of trailing the sampler's status text.
+        let diagnostics = if is_model_404 || is_auth_401 {
             let current_model = self
                 .chat_state_handle
                 .get_sampling_config()
@@ -1676,8 +1903,7 @@ impl SessionActor {
                 .map(|m| m.model.clone())
                 .collect();
 
-            let mut msg = format!("{detailed_message}\n");
-            msg.push_str(&format!("\n  Model:     {current_model}"));
+            let mut msg = format!("  Model:     {current_model}");
             msg.push_str(&format!("\n  Auth:      {auth_mode_str}"));
             if let Some(ref provider) = auth_provider {
                 msg.push_str(&format!(
@@ -1700,9 +1926,13 @@ impl SessionActor {
                 msg.push_str("\n  Switch models with /model or start a new session.");
             }
 
-            msg
+            Some(msg)
         } else {
-            detailed_message
+            None
+        };
+        let detailed_message = match diagnostics.as_deref() {
+            Some(diagnostics) => format!("{detailed_message}\n\n{diagnostics}"),
+            None => detailed_message,
         };
 
         // 6. Generic terminal error. Tag context-window overflow distinctly so the
@@ -1720,6 +1950,16 @@ impl SessionActor {
             error.kind.as_str()
         };
         let (error_type, detailed_message) = match self.auth_manager.as_ref() {
+            // P42: the shell composes the whole message (remedy, one plain sentence, diagnostics). The sampler's
+            // "Unauthorized (401) from …" text is dropped and no status is sent (see below), so no client takes
+            // this for a sign-in failure.
+            _ if session_withheld => (
+                SESSION_WITHHELD_ERROR_TYPE,
+                crate::extensions::notification::auth_destination_refused_message(
+                    &failed_base_url,
+                    diagnostics.as_deref().unwrap_or_default(),
+                ),
+            ),
             Some(auth_manager) if error_type == "auth" => self.apply_auth_remedy(
                 &auth_manager.auth_remedy(),
                 detailed_message,
@@ -1743,15 +1983,29 @@ impl SessionActor {
                     reason: detailed_message.clone(),
                     is_rate_limited: false,
                     error_type: Some(error_type.to_string()),
+                    verdicts: None,
                 }
             }
             _ => crate::extensions::notification::RetryState::Failed {
                 error_type: error_type.to_string(),
                 message: detailed_message.clone(),
+                verdicts: None,
             },
         };
         self.send_fuigo_notification(FuigoSessionUpdate::RetryState(terminal_state))
             .await;
+        if session_withheld {
+            // P42: a refused destination carries no `http_status` (a client keys its re-auth prompt, and the prompt
+            // it stashes for a post-login resubmit, off a 401 status) and is not an `auth` kind: signing in again
+            // cannot fix a destination.
+            return Err(acp::Error::internal_error().data(crate::acp_error::typed_error_data(
+                Some(serde_json::json!({
+                    "message": detailed_message,
+                    crate::acp_error::ERROR_KIND_DATA_KEY: SESSION_WITHHELD_ERROR_TYPE,
+                })),
+                SESSION_WITHHELD_ERROR_TYPE,
+            )));
+        }
         Err(
             acp::Error::internal_error().data(crate::sampling::error::terminal_error_data(
                 detailed_message,
@@ -1831,7 +2085,7 @@ impl SessionActor {
                     };
                     self.notify_rate_limit_wait(attempt, budget, backoff).await;
                     // Esc cancels a turn by aborting its task, so this await point is itself the cancellation point; no select needed
-                    sleep(backoff).await;
+                    sleep(super::auth_retry::paced(backoff)).await;
                     // A token can expire across minutes of accumulated waits
                     // (parked turns skip it — see `run_turn_via_sampler`).
                     if !park.is_parked() {
@@ -2051,6 +2305,7 @@ impl SessionActor {
                     human_duration(announced)
                 ),
                 error_type: None,
+                verdicts: None,
             },
         ))
         .await;
@@ -2391,6 +2646,14 @@ fn resolve_configured_cutoff(
     }
 }
 
+/// P121 (K6). The classifier's resolved helper route, kept while the model and catalog it was
+/// resolved against stay as they are ([`crate::agent::helper_epoch::EpochCache`]).
+struct ClassifierHelper {
+    aux: Option<(fuigo_sampler::SamplingClient, String, u64)>,
+    unusable: Option<(String, crate::agent::config::HelperModelChoice)>,
+    effort: Option<fuigo_sampling_types::ReasoningEffort>,
+}
+
 #[cfg(test)]
 #[path = "sampler_turn_tests.rs"]
 mod tests;
@@ -2446,3 +2709,4 @@ mod stream_drain_tests {
         assert_eq!(result.status_code, None);
     }
 }
+

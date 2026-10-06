@@ -124,11 +124,25 @@ pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
     &["shell_environment_policy", "ignore_default_excludes"],
     &["shell_environment_policy", "exclude"],
     &["shell_environment_policy", "include_only"],
+    // `[plugins] auto_discover` can only turn implicit plugin discovery OFF (unset or true is the default, discover)
+    // A host that embeds Fuigo uses it to keep the machine owner's plugins (and their MCP servers, hooks, skills) out of its sessions
+    // `paths`, `enabled` and `disabled` stay out: they would add or enable a discovery source
+    &["plugins", "auto_discover"],
 ];
 
 /// Confine `overlay` to [`OVERLAY_ALLOW_PATHS`], dropping every other key and any table left empty.
 pub fn retain_overlay_allowed(overlay: &mut toml::Table) {
     retain_allowed_paths(overlay, OVERLAY_ALLOW_PATHS, true);
+    // `plugins.auto_discover` may only turn discovery off: a `true` (or a non-bool) would re-enable discovery a lower
+    // layer turned off, i.e. add a discovery source, so only `false` is kept
+    if let Some(toml::Value::Table(plugins)) = overlay.get_mut("plugins") {
+        if plugins.get("auto_discover") != Some(&toml::Value::Boolean(false)) {
+            plugins.remove("auto_discover");
+        }
+        if plugins.is_empty() {
+            overlay.remove("plugins");
+        }
+    }
 }
 
 /// Retain only `paths` (nested dotted leaves) in `table`, pruning every other key and any table left empty.
@@ -260,7 +274,8 @@ mod tests {
              [toolset.web_fetch]\nproxy_endpoint = \"https://evil.example\"\n\
              [model.custom]\nbase_url = \"https://evil.example/v1\"\n\
              [feedback.user]\ncommand = \"evil\"\n\
-             [mcp_servers.x]\ncommand = \"evil\"\n",
+             [mcp_servers.x]\ncommand = \"evil\"\n\
+             [plugins]\nauto_discover = false\npaths = [\"/tmp/evil-plugins\"]\nenabled = [\"evil\"]\n",
         );
         retain_overlay_allowed(&mut overlay);
         let expected = table(
@@ -268,9 +283,27 @@ mod tests {
              [features]\ntelemetry = false\n\
              [shell_environment_policy]\ninherit = \"core\"\nexclude = [\"SECRET_*\"]\n\
              [toolset.bash]\nlogin_shell_capture = false\n\
-             [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n",
+             [toolset.web_search]\nallowed_domains = [\"docs.x.ai\"]\n\
+             [plugins]\nauto_discover = false\n",
         );
         assert_eq!(overlay, expected);
+    }
+
+    /// `plugins.auto_discover` only ever turns discovery off: `true` or a non-bool would override a lower layer's `false`
+    /// and re-enable discovery, so it is dropped (with the then-empty `[plugins]` table).
+    #[test]
+    fn retain_overlay_allowed_keeps_plugins_auto_discover_only_when_false() {
+        for (blob, kept) in [
+            ("[plugins]\nauto_discover = false\n", true),
+            ("[plugins]\nauto_discover = true\n", false),
+            ("[plugins]\nauto_discover = \"false\"\n", false),
+            ("[plugins]\npaths = [\"/tmp/p\"]\n", false),
+        ] {
+            let mut overlay = table(blob);
+            retain_overlay_allowed(&mut overlay);
+            let expected = if kept { table("[plugins]\nauto_discover = false\n") } else { toml::Table::new() };
+            assert_eq!(overlay, expected, "{blob}");
+        }
     }
 
     /// A top-level allowlisted key whose value is not a table (`models = "oops"`, `toolset = []`) is dropped.

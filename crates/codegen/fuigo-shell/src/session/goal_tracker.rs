@@ -283,10 +283,9 @@ fn verify_owned_real_dir(path: &std::path::Path) -> std::io::Result<()> {
 /// `create_new` (O_EXCL) makes any pre-existing destination (symlink included) fail the copy instead of being written through.
 fn copy_no_follow(src: &std::path::Path, dest: &std::path::Path) -> std::io::Result<()> {
     let mut src_f = std::fs::File::open(src)?;
-    let mut dest_f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dest)?;
+    let mut dest_f =
+        fuigo_config::owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true))
+            .open(dest)?;
     std::io::copy(&mut src_f, &mut dest_f)?;
     Ok(())
 }
@@ -800,6 +799,10 @@ impl GoalTracker {
         let dest = goal_dir.join(name);
         let _ = std::fs::create_dir_all(&goal_dir);
         if std::fs::rename(&src, &dest).is_ok() || copy_no_follow(&src, &dest).is_ok() {
+            // A rename keeps the scratch file's mode: owner-only like the session files beside it (P150, S14).
+            if let Ok(file) = std::fs::OpenOptions::new().read(true).open(&dest) {
+                fuigo_config::tighten_file_owner_only(&file, &dest);
+            }
             append_skeptic_reports(&scratch_root, &dest);
             o.last_classifier_details_path = Some(dest.to_string_lossy().into_owned());
         }

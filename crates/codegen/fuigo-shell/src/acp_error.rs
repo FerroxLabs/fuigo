@@ -271,6 +271,248 @@ pub(crate) fn execution_receipt_error(
     ))
 }
 
+/// P144: the partial receipt of an execution a budget FINALIZED (the turn loop reserved the last model
+/// call for the final answer, or a token budget ran out mid-turn), typed as that budget's denial. The
+/// receipt's own fields (`partial`, `reason`, `pending_tool_calls`, ...) are kept, so a client that reads
+/// the receipt still finds it; `code`, `rule`, `remedy` and the token figures are added, so a client that
+/// matches `data.code` (the pager's headless mode: exit 3) sees which limit ended the run.
+pub(crate) fn execution_receipt_denial_error(
+    receipt: &crate::session::execution_state::TerminalReceipt,
+    denial: &ExecutionBudgetDenial,
+) -> acp::Error {
+    let mut fields = serde_json::to_value(receipt).unwrap_or_default();
+    if let (Some(map), Some(serde_json::Value::Object(denial_data))) =
+        (fields.as_object_mut(), denial.to_acp_error().data)
+    {
+        for (key, value) in denial_data {
+            if key != "message" && key != ERROR_KIND_DATA_KEY {
+                map.insert(key, value);
+            }
+        }
+    }
+    acp::Error::internal_error().data(error_data_with_fields(
+        AcpErrorKind::ExecutionIncomplete,
+        denial.message(),
+        fields,
+    ))
+}
+
+/// `data.code` of the error a turn ends with when a budget refused a model request: the durable
+/// execution's token-budget guard (Contract D.4), or the model-call or runtime limit (P44; the agent
+/// also answers a prompt refused by the runtime limit with it). Frozen wire format: a client branches on it.
+///
+/// The error is `-32603` with kind `execution_incomplete`, the kind already documented for "a budgeted
+/// execution stopped before its work finished", so a client that only knows the kind still reads it
+/// correctly. The `code` and the fields of [`ExecutionBudgetDenial`] are what make it a *denial* -- the
+/// same three facts a headless permission denial carries: what was refused, which rule refused it, and
+/// the remedy.
+pub const EXECUTION_BUDGET_DENIED_CODE: &str = "execution_budget_denied";
+
+/// Which budget refused the request. The wire ids are frozen; never localize them.
+///
+/// The three token rules are one variant per clause of the token guard in
+/// `session::execution_state::admit_attempt`, checked in the same order. The two limit rules (P44) are
+/// the process limits a private agent runs under, `FUIGO_MAX_MODEL_CALLS` and `FUIGO_MAX_RUNTIME_SECS`,
+/// whichever layer enforces them: the durable execution that mirrors them when it opens (its call cap,
+/// a child's share of it, its deadline) or the sampler's process-wide counter and clock. One rule per
+/// limit, so a consumer can always tell which limit stopped the run and what to raise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionBudgetRule {
+    /// The execution's total-token budget (a goal's `--budget`) is spent.
+    TotalTokensExhausted,
+    /// The execution's output-token budget (a workflow child's output grant) is spent.
+    OutputTokensExhausted,
+    /// A token budget is set but an earlier request reported no usage, so the guard cannot tell how
+    /// much is left and fails closed.
+    TokenUsageUnknown,
+    /// The model-call limit (`FUIGO_MAX_MODEL_CALLS`) has no call left for this request: the calls are
+    /// spent, or the one left is reserved for the execution's final answer.
+    ModelCallLimit,
+    /// The runtime limit (`FUIGO_MAX_RUNTIME_SECS`) has passed: the process's wall clock, or the
+    /// deadline the execution recorded from it when it opened.
+    RuntimeLimit,
+}
+
+impl ExecutionBudgetRule {
+    pub const ALL: [Self; 5] = [
+        Self::TotalTokensExhausted,
+        Self::OutputTokensExhausted,
+        Self::TokenUsageUnknown,
+        Self::ModelCallLimit,
+        Self::RuntimeLimit,
+    ];
+
+    /// Stable wire id (`data.rule`).
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::TotalTokensExhausted => "execution_token_budget_exhausted",
+            Self::OutputTokensExhausted => "execution_output_token_budget_exhausted",
+            Self::TokenUsageUnknown => "execution_token_usage_unknown",
+            Self::ModelCallLimit => "execution_model_call_limit",
+            Self::RuntimeLimit => "execution_runtime_limit",
+        }
+    }
+
+    /// Inverse of [`Self::id`]; `None` for an id this build does not know (a newer agent's rule).
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|rule| rule.id() == id)
+    }
+
+    /// What the operator would have to change for the run to proceed (`data.remedy`).
+    pub fn remedy(self) -> &'static str {
+        match self {
+            Self::TotalTokensExhausted => {
+                "raise the goal's token budget (`/goal <objective> --budget <tokens>`) or clear the \
+                 goal (`/goal clear`); tokens already spent are not refunded"
+            }
+            Self::OutputTokensExhausted => {
+                "raise the output-token budget granted to this workflow child \
+                 (`output_token_budget`); output tokens already spent are not refunded"
+            }
+            Self::TokenUsageUnknown => {
+                "the provider did not report token usage for an earlier request, so the token \
+                 budget cannot be enforced and fails closed; use a model that reports usage, or run \
+                 without a token budget"
+            }
+            Self::ModelCallLimit => {
+                "raise `FUIGO_MAX_MODEL_CALLS` for the next run; calls already made are not \
+                 refunded, and a goal keeps the call limit its execution opened with, so clear the \
+                 goal (`/goal clear`) to start a new one"
+            }
+            Self::RuntimeLimit => {
+                "raise `FUIGO_MAX_RUNTIME_SECS` for the next run; the limit counts from agent start \
+                 and cannot be extended in a running agent, and a goal keeps the deadline its \
+                 execution opened with, so clear the goal (`/goal clear`) to start a new one"
+            }
+        }
+    }
+}
+
+/// A model request refused by a budget, as data: the durable execution's token-budget guard (Contract
+/// D.4), or since P44 the model-call and runtime limits (`FUIGO_MAX_MODEL_CALLS`,
+/// `FUIGO_MAX_RUNTIME_SECS`). The token figures are the refusing execution's counters whatever the
+/// rule; [`Self::without_token_figures`] when no execution is at hand.
+///
+/// Built where the guard fires (`session::execution_state`), carried through the persistence actor as
+/// the payload of the `io::Error` the guard returns, latched on the execution, and turned into the
+/// turn's ACP error by [`Self::to_acp_error`]. [`Self::from_acp_error`] is the inverse for a client
+/// (the pager's headless mode) so nobody has to parse `data.message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecutionBudgetDenial {
+    pub rule: ExecutionBudgetRule,
+    pub total_token_limit: Option<u64>,
+    pub total_tokens_used: u64,
+    pub output_token_limit: Option<u64>,
+    pub output_tokens_used: u64,
+    pub unknown_usage: bool,
+}
+
+impl ExecutionBudgetDenial {
+    /// A denial by `rule` where no execution's token counters are at hand (the agent refusing a prompt
+    /// before any session runs it): no token limit, nothing counted as used.
+    pub fn without_token_figures(rule: ExecutionBudgetRule) -> Self {
+        Self {
+            rule,
+            total_token_limit: None,
+            total_tokens_used: 0,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        }
+    }
+
+    /// The English line: what stopped the run, then the remedy.
+    pub fn message(&self) -> String {
+        let what = match self.rule {
+            ExecutionBudgetRule::TotalTokensExhausted => format!(
+                "Execution token budget exhausted: {} of {} tokens used",
+                self.total_tokens_used,
+                self.total_token_limit.unwrap_or_default()
+            ),
+            ExecutionBudgetRule::OutputTokensExhausted => format!(
+                "Execution output-token budget exhausted: {} of {} output tokens used",
+                self.output_tokens_used,
+                self.output_token_limit.unwrap_or_default()
+            ),
+            ExecutionBudgetRule::TokenUsageUnknown => {
+                "Execution token usage is unknown, so the token budget refused the request".to_string()
+            }
+            ExecutionBudgetRule::ModelCallLimit => {
+                "Execution model-call limit reached: no model call is left for this request".to_string()
+            }
+            ExecutionBudgetRule::RuntimeLimit => {
+                "Execution runtime limit reached: the run's time is up".to_string()
+            }
+        };
+        format!(
+            "{what}. Denied by rule `{}`. Remedy: {}.",
+            self.rule.id(),
+            self.rule.remedy()
+        )
+    }
+
+    /// The turn's ACP error: `-32603`, kind `execution_incomplete`, `code`
+    /// [`EXECUTION_BUDGET_DENIED_CODE`], plus the rule, the remedy and the budget figures.
+    pub fn to_acp_error(&self) -> acp::Error {
+        acp::Error::internal_error().data(error_data_with_fields(
+            AcpErrorKind::ExecutionIncomplete,
+            self.message(),
+            serde_json::json!({
+                "code": EXECUTION_BUDGET_DENIED_CODE,
+                "rule": self.rule.id(),
+                "remedy": self.rule.remedy(),
+                "total_token_limit": self.total_token_limit,
+                "total_tokens_used": self.total_tokens_used,
+                "output_token_limit": self.output_token_limit,
+                "output_tokens_used": self.output_tokens_used,
+                "unknown_usage": self.unknown_usage,
+            }),
+        ))
+    }
+
+    /// Recover the denial from an ACP error, or `None` when the error is not one.
+    ///
+    /// Keyed on `data.code` alone: the kind, the JSON-RPC code and the message may all be reworded
+    /// without this changing. An unknown `data.rule` (a newer agent) is still a denial -- it is reported
+    /// as `None` here so the caller can fall back to the generic budget wording rather than guess.
+    pub fn from_acp_error(err: &acp::Error) -> Option<Self> {
+        let data = err.data.as_ref()?;
+        if data.get("code").and_then(serde_json::Value::as_str) != Some(EXECUTION_BUDGET_DENIED_CODE) {
+            return None;
+        }
+        let rule = ExecutionBudgetRule::from_id(data.get("rule")?.as_str()?)?;
+        let u64_at = |key: &str| data.get(key).and_then(serde_json::Value::as_u64);
+        Some(Self {
+            rule,
+            total_token_limit: u64_at("total_token_limit"),
+            total_tokens_used: u64_at("total_tokens_used").unwrap_or_default(),
+            output_token_limit: u64_at("output_token_limit"),
+            output_tokens_used: u64_at("output_tokens_used").unwrap_or_default(),
+            unknown_usage: data
+                .get("unknown_usage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Whether `err` carries [`EXECUTION_BUDGET_DENIED_CODE`], whatever its rule.
+    pub fn is_budget_denial(err: &acp::Error) -> bool {
+        err.data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str)
+            == Some(EXECUTION_BUDGET_DENIED_CODE)
+    }
+}
+
+impl std::fmt::Display for ExecutionBudgetDenial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for ExecutionBudgetDenial {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +653,58 @@ mod tests {
             ),
             serde_json::json!({ "code": "FS_OTHER", "message": "An I/O error", "error_kind": "internal" })
         );
+    }
+
+    /// Contract D.4: a budget denial reaches the client as data, not prose. Pins the frozen wire
+    /// shape -- class, kind, `code`, `rule`, `remedy` and the figures -- for every rule, and that a
+    /// client recovers exactly the denial that was sent without reading `message`.
+    #[test]
+    fn a_budget_denial_round_trips_through_its_acp_error_for_every_rule() {
+        for rule in ExecutionBudgetRule::ALL {
+            let denial = ExecutionBudgetDenial {
+                rule,
+                total_token_limit: Some(100),
+                total_tokens_used: 120,
+                output_token_limit: Some(40),
+                output_tokens_used: 41,
+                unknown_usage: rule == ExecutionBudgetRule::TokenUsageUnknown,
+            };
+            let err = denial.to_acp_error();
+            assert_eq!(i32::from(err.code), -32603, "{rule:?}");
+            let wire = serde_json::to_value(&err).expect("serialize");
+            let data = &wire["data"];
+            assert_eq!(data["error_kind"], "execution_incomplete", "{wire}");
+            assert_eq!(data["code"], EXECUTION_BUDGET_DENIED_CODE, "{wire}");
+            assert_eq!(data["rule"], rule.id(), "{wire}");
+            assert_eq!(data["remedy"], rule.remedy(), "{wire}");
+            assert_eq!(data["total_token_limit"], 100, "{wire}");
+            assert_eq!(data["output_tokens_used"], 41, "{wire}");
+            assert!(
+                data["message"].as_str().is_some_and(|m| m.contains(rule.id())),
+                "the human line names the rule: {wire}"
+            );
+            assert_eq!(ExecutionBudgetRule::from_id(rule.id()), Some(rule));
+            let back: acp::Error = serde_json::from_value(wire.clone()).expect("deserialize");
+            assert!(ExecutionBudgetDenial::is_budget_denial(&back));
+            assert_eq!(ExecutionBudgetDenial::from_acp_error(&back), Some(denial), "{wire}");
+        }
+        let ids: std::collections::BTreeSet<_> =
+            ExecutionBudgetRule::ALL.iter().map(|rule| rule.id()).collect();
+        assert_eq!(ids.len(), ExecutionBudgetRule::ALL.len(), "rule ids are distinct");
+    }
+
+    /// Nothing else is mistaken for a denial: not the kind it shares, not another `code`.
+    #[test]
+    fn only_the_budget_denial_code_reads_as_a_budget_denial() {
+        for err in [
+            execution_incomplete("Execution output-token budget exhausted"),
+            invalid_params_with_code("local_workspace_chat_only", "m"),
+            internal_error("execution admission denied or could not be persisted"),
+            acp::Error::internal_error(),
+        ] {
+            assert!(!ExecutionBudgetDenial::is_budget_denial(&err), "{err:?}");
+            assert_eq!(ExecutionBudgetDenial::from_acp_error(&err), None, "{err:?}");
+        }
     }
 
     #[test]

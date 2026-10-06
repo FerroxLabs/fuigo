@@ -49,7 +49,7 @@ fn mcp_merge_key(s: &acp::McpServer) -> String {
 }
 
 pub(crate) fn merge_managed_mcp_servers(
-    client_mcp_servers: Vec<acp::McpServer>,
+    client_mcp_servers: impl Into<ClientMcpSeed>,
     cwd: &std::path::Path,
     plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
     compat: &fuigo_tools::types::compat::CompatConfig,
@@ -69,7 +69,7 @@ pub(crate) fn merge_managed_mcp_servers(
 pub(crate) fn merge_and_send_managed_mcp_update(
     cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     cwd: &std::path::Path,
-    initial_client_mcp_servers: Vec<acp::McpServer>,
+    initial_client_mcp_servers: impl Into<ClientMcpSeed>,
     plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
     compat: &fuigo_tools::types::compat::CompatConfig,
 ) -> bool {
@@ -84,16 +84,216 @@ pub(crate) fn merge_and_send_managed_mcp_update(
         .is_ok()
 }
 
+/// [`merge_and_send_managed_mcp_update`] for a session that has not been told about refusals yet (P138 d-1): the
+/// refusals the merge records belong to this session (a [`fuigo_config::key_naming::NoticeScope`] around it) and are sent
+/// to it as config notices before the update. The folder-trust grant reloads through here: a project's servers load for
+/// the first time then, so a key reference in them is refused for the first time then.
+pub(crate) fn merge_and_send_managed_mcp_update_with_notices(
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    cwd: &std::path::Path,
+    initial_client_mcp_servers: impl Into<ClientMcpSeed>,
+    plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+) -> bool {
+    let scope = fuigo_config::key_naming::NoticeScope::new();
+    let merged = scope.run(|| merge_managed_mcp_servers(initial_client_mcp_servers, cwd, plugin_registry, compat));
+    // P148: only a note the session was not already told at its start (an untrusted folder's project config is read,
+    // and its reference refused and announced, before the grant), so the grant does not repeat it.
+    for notice in scope.notes() {
+        let _ = cmd_tx.send(crate::session::SessionCommand::NotifyConfigNoticeIfNew { notice });
+    }
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    cmd_tx
+        .send(crate::session::SessionCommand::UpdateMcpServers { mcp_servers: merged, respond_to: tx })
+        .is_ok()
+}
+
 /// Drop client-forwarded servers that match on-disk vendor MCP configs while that vendor's `mcps` kill switch is off.
 ///
 /// Call at session ingress before storing the hot-reload seed (`initial_client_mcp_servers`).
 /// Otherwise a later merge could re-admit a previously rejected server merely because its disk attribution vanished.
 /// Explicit later client updates re-run this with current disk, so a server that no longer matches a disabled vendor's config can be admitted.
+#[cfg(test)]
 pub(crate) fn admit_client_mcp_servers(
     client_mcp_servers: Vec<acp::McpServer>,
     cwd: &std::path::Path,
     compat: &fuigo_tools::types::compat::CompatConfig,
 ) -> Vec<acp::McpServer> {
+    let entries = client_mcp_servers.into_iter().map(|s| (s, None)).collect();
+    admit_client_mcp_servers_tracked(entries, &vendor_blocked_keys(cwd, compat), &disk_mcp_definitions(cwd, compat)).0
+}
+
+/// A session's hot-reload seed: the client's servers as admitted at ingress, each with the disk definition it is a
+/// forwarded copy of, if any (P141, Fable MEDIUM 1 on P138).
+///
+/// Every merge re-reads the disk, so a forwarded copy is not re-admitted from its stored content: a merge uses the
+/// CURRENT disk definition of the name it copied (an edit takes effect), and drops the copy once that name is gone from
+/// disk (a delete takes effect, for renamed and plugin-shadowing copies too). Nothing is pruned at ingress, so the
+/// decision never depends on which plugin registry the ingress happened to see: a copy keeps beating a same-named plugin
+/// server on every reload, as it did at startup. Only the ingress marks a copy ([`admit_client_mcp_servers_for_seed`]);
+/// a seed built from a plain list ([`From`]) has no copies, every server in it is client-supplied (untrusted).
+#[derive(Debug, Clone, Default)]
+pub struct ClientMcpSeed {
+    entries: Vec<(acp::McpServer, Option<String>)>,
+}
+
+impl ClientMcpSeed {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The seed's servers, as stored.
+    pub fn servers(&self) -> Vec<acp::McpServer> {
+        self.entries.iter().map(|(s, _)| s.clone()).collect()
+    }
+
+    /// The names of the seed's forwarded copies of disk definitions.
+    pub fn disk_copy_names(&self) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|(_, copy_of)| copy_of.is_some())
+            .map(|(s, _)| mcp_server_name(s).to_owned())
+            .collect()
+    }
+}
+
+impl From<Vec<acp::McpServer>> for ClientMcpSeed {
+    /// Servers the client supplied itself: none is a disk copy.
+    fn from(servers: Vec<acp::McpServer>) -> Self {
+        Self { entries: servers.into_iter().map(|s| (s, None)).collect() }
+    }
+}
+
+/// What a client's servers become at ingress: `seed` is what this and every later merge (hot reload) re-merges; `merged`
+/// is the session's server set now (the one merge of this ingress, P141 / Fable LOW 2 on P138).
+pub(crate) struct AdmittedClientServers {
+    pub(crate) seed: ClientMcpSeed,
+    pub(crate) merged: Vec<acp::McpServer>,
+}
+
+/// [`admit_client_mcp_servers`], kept as the session's hot-reload seed ([`ClientMcpSeed`]: forwarded copies of disk
+/// definitions marked), and merged with the local sources (`plugin_registry` included) once.
+pub(crate) fn admit_client_mcp_servers_for_seed(
+    client_mcp_servers: Vec<acp::McpServer>,
+    cwd: &std::path::Path,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+    plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
+) -> AdmittedClientServers {
+    let entries = client_mcp_servers.into_iter().map(|s| (s, None)).collect();
+    let (admitted, copies) = admit_client_mcp_servers_tracked(entries, &vendor_blocked_keys(cwd, compat), &disk_mcp_definitions(cwd, compat));
+    let seed = ClientMcpSeed { entries: admitted.into_iter().zip(copies).collect() };
+    let merged = merge_managed_mcp_servers(seed.clone(), cwd, plugin_registry, compat);
+    AdmittedClientServers { seed, merged }
+}
+
+/// The enabled definitions the local sources produce, by name, as a client (the pager) would forward them, each with
+/// whether it is trusted (from a source that may name the saved key). See [`admit_client_mcp_servers_tracked`].
+type DiskMcpDefinitions = HashMap<String, (acp::McpServer, bool)>;
+
+fn disk_mcp_definitions(
+    cwd: &std::path::Path,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+) -> DiskMcpDefinitions {
+    crate::util::config::load_mcp_servers_with_provenance(cwd, compat)
+        .into_iter()
+        .map(|(s, trusted)| (mcp_merge_key(&s), (s, trusted)))
+        .collect()
+}
+
+/// The TRUSTED disk definition named as `client` (by its own name, or one the ingress renamed to it), under `client`'s
+/// name, if any.
+fn trusted_disk_definition_named_as(client: &acp::McpServer, disk: &DiskMcpDefinitions) -> Option<acp::McpServer> {
+    use fuigo_mcp::servers::{sanitize_mcp_server_name, set_mcp_server_name};
+    let name = mcp_server_name(client);
+    if let Some((on_disk, trusted)) = disk.get(name) {
+        return trusted.then(|| on_disk.clone());
+    }
+    disk.iter()
+        .find(|(disk_name, (_, trusted))| *trusted && sanitize_mcp_server_name(disk_name) == name)
+        .map(|(_, (on_disk, _))| {
+            let mut renamed = on_disk.clone();
+            set_mcp_server_name(&mut renamed, name.to_owned());
+            renamed
+        })
+}
+
+/// The disk definition `client` is a copy of, under `client`'s name, if any: the one of the same name, or one whose
+/// name the ingress had to rename to `client`'s (`com.example` arrives as `com-example` on the merge after the
+/// ingress, Astra P136 r1 #1).
+fn disk_definition_copied_by(client: &acp::McpServer, disk: &DiskMcpDefinitions) -> Option<(String, acp::McpServer)> {
+    use fuigo_mcp::servers::{sanitize_mcp_server_name, set_mcp_server_name};
+    let name = mcp_server_name(client);
+    if let Some((on_disk, _)) = disk.get(name)
+        && same_definition_modulo_unresolved_bearer(on_disk, client)
+    {
+        return Some((name.to_owned(), on_disk.clone()));
+    }
+    disk.iter()
+        .filter(|(disk_name, _)| disk_name.as_str() != name && sanitize_mcp_server_name(disk_name) == name)
+        .find_map(|(disk_name, (on_disk, _))| {
+            let mut renamed = on_disk.clone();
+            set_mcp_server_name(&mut renamed, name.to_owned());
+            same_definition_modulo_unresolved_bearer(&renamed, client).then(|| (disk_name.clone(), renamed))
+        })
+}
+
+/// The CURRENT disk definition a seed's forwarded copy of `disk_name` stands for, under the copy's (possibly
+/// renamed) name; `None` once `disk_name` is gone from disk. Any provenance: it is the definition the shell itself
+/// loads (an untrusted source's comes cleaned by its loader), exactly what the copy was replaced by at ingress.
+fn current_disk_definition_of_copy(
+    copy: &acp::McpServer,
+    disk_name: &str,
+    disk: &DiskMcpDefinitions,
+) -> Option<acp::McpServer> {
+    let (on_disk, _) = disk.get(disk_name)?;
+    let mut current = on_disk.clone();
+    fuigo_mcp::servers::set_mcp_server_name(&mut current, mcp_server_name(copy).to_owned());
+    Some(current)
+}
+
+/// Admit client `entries` (each a server, with the disk definition name an earlier ingress marked it a copy of, if
+/// any) against `disk`, the enabled definitions the local sources produce (by name), as the shell itself would start
+/// them; also returns, for each admitted server (same order), the name of the disk definition it IS, `None` for a
+/// server the client supplied itself.
+///
+/// P136 (Astra r3 #3): a client server that IS one of them (the pager loads the user's own config and forwards it in
+/// `session/new` and `session/load`) is replaced by that disk definition, with its provenance: a user config that
+/// names the saved key keeps working exactly as in v1.0.20. Any other client server, a same-named one that differs
+/// included, is an untrusted source: it is scrubbed and inherits nothing from the disk definition.
+fn admit_client_mcp_servers_tracked(
+    entries: Vec<(acp::McpServer, Option<String>)>,
+    blocked: &std::collections::HashSet<String>,
+    disk: &DiskMcpDefinitions,
+) -> (Vec<acp::McpServer>, Vec<Option<String>>) {
+    let unblocked = |s: &acp::McpServer| blocked.is_empty() || !blocked.contains(&mcp_vendor_block_key(s));
+    // Block by the raw name first: a vendor entry is matched on what the client sent, not on the projected name.
+    let admitted: Vec<(acp::McpServer, Option<String>)> = entries
+        .into_iter()
+        .filter(|(s, _)| unblocked(s))
+        .filter_map(|(s, copy_of)| match copy_of {
+            // P141: a seed's forwarded copy is the CURRENT disk definition of the name it copied (an edit takes
+            // effect); gone from disk, it is gone (a delete takes effect). Checked against the kill switch as it is now.
+            Some(disk_name) => current_disk_definition_of_copy(&s, &disk_name, disk)
+                .filter(|current| unblocked(current))
+                .map(|current| (current, Some(disk_name))),
+            None => match disk_definition_copied_by(&s, disk) {
+                // P136: the client's copy of an enabled disk definition is that definition.
+                Some((disk_name, on_disk)) => Some((on_disk, Some(disk_name))),
+                // P133: a client-supplied server has no provenance the user vouched for (an editor may apply a
+                // repository's own MCP settings), so it is an untrusted source and never names the saved API key.
+                None => refuse_saved_key_in_server(s, "supplied by the ACP client").map(|s| (s, None)),
+            },
+        })
+        .collect();
+    let (servers, copies): (Vec<_>, Vec<_>) = admitted.into_iter().unzip();
+    (normalize_client_mcp_server_names(servers), copies)
+}
+
+/// The vendor kill-switch keys (see [`mcp_vendor_block_key`]) of every disk server of a vendor whose `mcps` switch is off.
+fn vendor_blocked_keys(
+    cwd: &std::path::Path,
+    compat: &fuigo_tools::types::compat::CompatConfig,
+) -> std::collections::HashSet<String> {
     let mut blocked: std::collections::HashSet<String> = std::collections::HashSet::new();
     if !compat.cursor.mcps {
         let mut forced = *compat;
@@ -112,16 +312,14 @@ pub(crate) fn admit_client_mcp_servers(
                 .map(mcp_vendor_block_key),
         );
     }
-    if blocked.is_empty() {
-        return normalize_client_mcp_server_names(client_mcp_servers);
-    }
-    // Block by the raw name first: a vendor entry is matched on what the client sent, not on the projected name.
-    normalize_client_mcp_server_names(
-        client_mcp_servers
-            .into_iter()
-            .filter(|s| !blocked.contains(&mcp_vendor_block_key(s)))
-            .collect(),
-    )
+    blocked
+}
+
+/// `server` (from a source that may not name the saved key: `origin` says which) with every reference to the saved API key (`FUIGO_API_KEY`) removed from its args, env, headers and url,
+/// and a note recorded. `None` (the server is dropped) when the cleaned definition cannot be rebuilt: fail closed.
+/// fuigo-mcp resolves such references from the key store at spawn, so a server that holds none is never handed the key.
+pub(crate) fn refuse_saved_key_in_server(server: acp::McpServer, origin: &str) -> Option<acp::McpServer> {
+    fuigo_config::key_naming::refuse_key_references_in_server_value(server, origin)
 }
 
 /// Rename client servers whose name cannot be a tool-id segment (see
@@ -163,7 +361,7 @@ fn normalize_client_mcp_server_names(servers: Vec<acp::McpServer>) -> Vec<acp::M
 }
 
 pub(crate) fn merge_managed_mcp_servers_with_policy(
-    client_mcp_servers: Vec<acp::McpServer>,
+    client_mcp_servers: impl Into<ClientMcpSeed>,
     cwd: &std::path::Path,
     plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
     compat: &fuigo_tools::types::compat::CompatConfig,
@@ -174,8 +372,35 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
             .map(|(s, _source)| (mcp_merge_key(&s), s))
             .collect();
 
-    // Re-admit at merge so a caller that forgot ingress sanitization cannot spawn disabled-vendor client servers
-    for server in admit_client_mcp_servers(client_mcp_servers, cwd, compat) {
+    // Re-admit at merge so a caller that forgot ingress sanitization cannot spawn disabled-vendor client servers.
+    // P136: against the same disk definitions as at ingress (what the pager forwards), so a client server that IS one
+    // of them is that definition. P141: a seed's forwarded copy is the CURRENT disk definition of the name it copied,
+    // and is dropped once that name is gone from disk. In the client's order, so the last of two same-named servers wins.
+    let disk = disk_mcp_definitions(cwd, compat);
+    let blocked = vendor_blocked_keys(cwd, compat);
+    let (admitted, _) = admit_client_mcp_servers_tracked(client_mcp_servers.into().entries, &blocked, &disk);
+    for server in admitted {
+        // P136 (Astra r1 #1): a client server never overwrites a TRUSTED disk definition of its name that it is not a
+        // copy of (P141 / Astra r1: a forwarded copy the ingress renamed onto that name included). The user's own definition runs; this also keeps a stale forwarded copy (the seed a hot reload
+        // re-merges after the user edited the server) from replacing the edited definition with a scrubbed one.
+        let server = match trusted_disk_definition_named_as(&server, &disk) {
+            Some(users) if !mcp_servers_equivalent(&users, &server) => {
+                // Not for a copy that only lacks the bearer header the pager could not resolve (P138 c-1), and each
+                // distinct client copy once (P138 c-2), not on every reload.
+                if !same_definition_modulo_unresolved_bearer(&users, &server) && first_report_of_differing_server(&server) {
+                    tracing::warn!(
+                        server = mcp_server_name(&server),
+                        "a client-supplied MCP server differs from the user's own definition of that name; the user's definition is used"
+                    );
+                }
+                users
+            }
+            _ => server,
+        };
+        // P141 (Astra r2): the kill switch judges what is inserted, the user's definition substituted above included.
+        if !blocked.is_empty() && blocked.contains(&mcp_vendor_block_key(&server)) {
+            continue;
+        }
         servers.insert(mcp_merge_key(&server), server);
     }
 
@@ -345,8 +570,9 @@ fn non_toml_mcp_servers_with_source(
                 plugin_servers.extend(servers);
             }
             if let Some(ref inline_value) = plugin.inline_mcp_servers {
-                let (servers, _) = load_plugin_mcp_servers_from_value(
+                let (servers, _) = load_plugin_mcp_servers_from_value_labelled(
                     inline_value,
+                    &plugin_manifest_label(&plugin.root, &plugin.name),
                     &plugin.name,
                     &plugin.root_str(),
                     &plugin.data_dir_str(),
@@ -470,10 +696,20 @@ fn load_plugin_mcp_servers(
     plugin_root: &str,
     plugin_data: &str,
 ) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
-    let Some(config) = crate::util::config::read_mcp_json(mcp_path) else {
+    let Some(config) = crate::util::config::read_mcp_json_as(mcp_path, false) else {
         return (vec![], crate::util::config::McpOAuthConfigMap::new());
     };
     load_plugin_mcp_servers_from_config(&config, plugin_name, plugin_root, plugin_data)
+}
+
+/// The manifest file a plugin's inline MCP servers were read from, for a refusal note (Astra r3 R2-7): the first
+/// manifest the plugin directory holds, in the order the loader tries them.
+fn plugin_manifest_label(plugin_root: &std::path::Path, plugin_name: &str) -> String {
+    fuigo_agent::plugins::manifest::MANIFEST_PATHS
+        .iter()
+        .map(|rel| plugin_root.join(rel))
+        .find(|p| p.is_file())
+        .map_or_else(|| format!("plugin {plugin_name} manifest"), |p| p.display().to_string())
 }
 
 /// Like [`load_plugin_mcp_servers`] but from an in-memory JSON value (no I/O).
@@ -483,7 +719,21 @@ fn load_plugin_mcp_servers_from_value(
     plugin_root: &str,
     plugin_data: &str,
 ) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
-    let normalized = fuigo_agent::plugins::manifest::normalize_inline_mcp_servers(root);
+    load_plugin_mcp_servers_from_value_labelled(root, &format!("plugin:{plugin_name}"), plugin_name, plugin_root, plugin_data)
+}
+
+/// [`load_plugin_mcp_servers_from_value`] with the label a refusal note carries (the manifest path).
+fn load_plugin_mcp_servers_from_value_labelled(
+    root: &serde_json::Value,
+    source_label: &str,
+    plugin_name: &str,
+    plugin_root: &str,
+    plugin_data: &str,
+) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
+    let mut normalized = fuigo_agent::plugins::manifest::normalize_inline_mcp_servers(root);
+    // P118 (backlog row P103): a plugin may not name the saved API key.
+    let refused = fuigo_config::key_naming::refuse_json_source(&mut normalized, source_label);
+    fuigo_config::key_naming::report_refusals(&refused);
     let Ok(config) = serde_json::from_value::<crate::util::config::McpConfig>(normalized) else {
         tracing::warn!(plugin = plugin_name, "failed to parse plugin MCP config");
         return (vec![], crate::util::config::McpOAuthConfigMap::new());
@@ -508,37 +758,155 @@ fn load_plugin_mcp_servers_from_config(
 pub(crate) fn collect_plugin_oauth_configs(
     plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
 ) -> crate::util::config::McpOAuthConfigMap {
+    collect_plugin_servers_and_oauth_configs(plugin_registry).1
+}
+
+/// [`collect_plugin_oauth_configs`] with, for each setting, the plugin server definition it was configured with, so
+/// the spawn path can hand it only to that very definition (P136, [`retain_oauth_for_same_destination`]).
+pub(crate) fn collect_plugin_servers_and_oauth_configs(
+    plugin_registry: Option<&fuigo_agent::plugins::PluginRegistry>,
+) -> (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap) {
     let mut oauth_configs = crate::util::config::McpOAuthConfigMap::new();
+    let mut servers: Vec<acp::McpServer> = Vec::new();
     let Some(registry) = plugin_registry else {
-        return oauth_configs;
+        return (servers, oauth_configs);
+    };
+    let mut take = |loaded: (Vec<acp::McpServer>, crate::util::config::McpOAuthConfigMap)| {
+        let (loaded_servers, oauth) = loaded;
+        for (name, cfg) in oauth {
+            if oauth_configs.contains_key(&name) {
+                continue;
+            }
+            if let Some(server) = loaded_servers.iter().find(|s| mcp_server_name(s) == name) {
+                servers.push(server.clone());
+            }
+            oauth_configs.insert(name, cfg);
+        }
     };
 
     for plugin in registry.active_plugins() {
         if let Some(ref mcp_path) = plugin.mcp_config_path {
-            let (_, oauth) = load_plugin_mcp_servers(
+            take(load_plugin_mcp_servers(
                 mcp_path,
                 &plugin.name,
                 &plugin.root_str(),
                 &plugin.data_dir_str(),
-            );
-            for (name, cfg) in oauth {
-                oauth_configs.entry(name).or_insert(cfg);
-            }
+            ));
         }
         if let Some(ref inline_value) = plugin.inline_mcp_servers {
-            let (_, oauth) = load_plugin_mcp_servers_from_value(
+            take(load_plugin_mcp_servers_from_value_labelled(
                 inline_value,
+                &plugin_manifest_label(&plugin.root, &plugin.name),
                 &plugin.name,
                 &plugin.root_str(),
                 &plugin.data_dir_str(),
-            );
-            for (name, cfg) in oauth {
-                oauth_configs.entry(name).or_insert(cfg);
-            }
+            ));
         }
     }
 
-    oauth_configs
+    (servers, oauth_configs)
+}
+
+/// A server definition with the order of its map-like lists (`headers`, `env`) made canonical: the loaders build those
+/// lists from hash maps, so two loads of one definition may list them differently. Everything else (url, command,
+/// args and their order, names, values) is compared exactly.
+fn canonical_server_json(server: &acp::McpServer) -> Option<serde_json::Value> {
+    fn sort_maps(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::Object(m) => {
+                for (k, child) in m.iter_mut() {
+                    if matches!(k.as_str(), "headers" | "env")
+                        && let serde_json::Value::Array(items) = child
+                    {
+                        items.sort_by_cached_key(|item| item.to_string());
+                    } else {
+                        sort_maps(child);
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter_mut().for_each(sort_maps),
+            _ => {}
+        }
+    }
+    let mut v = serde_json::to_value(server).ok()?;
+    sort_maps(&mut v);
+    Some(v)
+}
+
+/// Whether two server definitions are the same definition (P136): equal up to the order of their headers and env
+/// entries, key references compared as written. Fails closed: a definition that cannot be compared is not the same.
+pub(crate) fn mcp_servers_equivalent(a: &acp::McpServer, b: &acp::McpServer) -> bool {
+    match (canonical_server_json(a), canonical_server_json(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Whether `client` is `on_disk` except that it lacks the `Authorization` header `on_disk` has (P138 c-1). A
+/// definition's `bearer_token_env_var` becomes that header only where a credential resolver answers for the variable
+/// (the shell installs one for the saved key; the pager does not), so a pager's copy of a definition that reads the saved key
+/// by name lacks it. The copy is still that definition. Substituting `on_disk` for it is always safe: it is the user's own.
+fn same_definition_modulo_unresolved_bearer(on_disk: &acp::McpServer, client: &acp::McpServer) -> bool {
+    if mcp_servers_equivalent(on_disk, client) {
+        return true;
+    }
+    let (Some(mut disk), Some(client)) = (canonical_server_json(on_disk), canonical_server_json(client)) else {
+        return false;
+    };
+    fn is_auth(entry: &serde_json::Value) -> bool {
+        entry.get("name").and_then(|n| n.as_str()).is_some_and(|n| n.eq_ignore_ascii_case("authorization"))
+    }
+    fn headers(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+        v.get("headers").and_then(|h| h.as_array())
+    }
+    // Only when the user's definition has the header the copy lacks; a copy that has an Authorization of its own then
+    // cannot equal the stripped definition.
+    if !headers(&disk).is_some_and(|h| h.iter().any(is_auth)) {
+        return false;
+    }
+    if let Some(serde_json::Value::Array(h)) = disk.get_mut("headers") {
+        h.retain(|e| !is_auth(e));
+    }
+    disk == client
+}
+
+/// `true` the first time this exact client server (name and definition, compared by hash, never printed) is reported
+/// as differing from the user's own definition, `false` after (P138 c-2): a reload re-merges the same seed.
+fn first_report_of_differing_server(server: &acp::McpServer) -> bool {
+    use std::hash::{Hash, Hasher};
+    static SEEN: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mcp_server_name(server).hash(&mut hasher);
+    canonical_server_json(server).map(|v| v.to_string()).hash(&mut hasher);
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    let seen = seen.get_or_insert_with(Default::default);
+    if seen.len() >= 1024 {
+        seen.clear();
+    }
+    seen.insert(hasher.finish())
+}
+
+/// Keep an OAuth setting (client id, client-secret variable) only for the server it was configured for (P133, P136).
+/// OAuth settings are loaded from disk BY NAME; a server an ACP client supplies under the name of a configured one may
+/// point anywhere, and would otherwise be handed the configured server's secret (which may be the saved API key,
+/// `oauth_client_secret_env_var = "FUIGO_API_KEY"`). `disk` is the enabled definitions the settings were loaded with,
+/// `active` the servers about to be started. Fail closed (Astra r3 #2): a setting survives only on positive evidence,
+/// an enabled disk definition of that name AND an active server that is that very definition. A missing or disabled
+/// definition, or an active server that differs from it (another URL, other headers), keeps nothing.
+pub(crate) fn retain_oauth_for_same_destination(
+    oauth_config_map: &mut crate::util::config::McpOAuthConfigMap,
+    disk: &[acp::McpServer],
+    active: &[acp::McpServer],
+) {
+    oauth_config_map.retain(|name, _| {
+        let Some(on_disk) = disk.iter().find(|s| mcp_server_name(s) == name) else {
+            return false;
+        };
+        let Some(running) = active.iter().find(|s| mcp_server_name(s) == name) else {
+            return false;
+        };
+        matches!(running, acp::McpServer::Http(_) | acp::McpServer::Sse(_)) && mcp_servers_equivalent(on_disk, running)
+    });
 }
 
 pub(crate) fn merge_plugin_oauth_into(
@@ -558,8 +926,33 @@ pub(crate) fn merge_plugin_oauth_into(
 mod tests {
     use super::*;
 
-    fn empty_cwd() -> tempfile::TempDir {
-        tempfile::tempdir().unwrap()
+    /// A private cwd AND a private `FUIGO_HOME`, because this module's merge reads
+    /// both: `merge_managed_mcp_servers_sourced` stamps
+    /// `fuigo_home().join("config.toml")` as the config source and resolves the
+    /// project `.fuigo/config.toml` through folder trust, whose store lives under
+    /// the home. `FUIGO_HOME` is process-global and resolved fresh on every read,
+    /// so these tests were reading whatever home a concurrently-running test had
+    /// pointed it at. That is how `client_cursor_server_kept_when_cursor_mcps_enabled`
+    /// and `toml_claim_survives_when_client_cursor_insert_skipped` failed in a full
+    /// `-p fuigo-shell` run while passing in both baseline runs at 8e11724.
+    /// The home guard is exclusive process-wide; see
+    /// `fuigo_test_support::env::PROCESS_ANCHORS`.
+    struct TestCwd {
+        dir: tempfile::TempDir,
+        _home: fuigo_test_support::FuigoHome,
+    }
+
+    impl TestCwd {
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+    }
+
+    fn empty_cwd() -> TestCwd {
+        TestCwd {
+            dir: tempfile::tempdir().unwrap(),
+            _home: fuigo_test_support::FuigoHome::new(),
+        }
     }
 
     /// A client-provided server (e.g. a client session binding injected at `session/new`) exists in no on-disk config and no managed catalog.
@@ -568,6 +961,9 @@ mod tests {
     /// If this property breaks, those reloads silently tear down client-injected servers mid-session.
     #[test]
     fn client_provided_servers_survive_merge() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let client = vec![acp::McpServer::Http(
             acp::McpServerHttp::new(
                 "demo-mcp".to_string(),
@@ -608,6 +1004,9 @@ mod tests {
     /// onto the tool-id charset at admission, before anything downstream keys on it.
     #[test]
     fn admit_renames_reverse_dns_client_servers() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let admitted = admit_client_mcp_servers(
@@ -628,6 +1027,9 @@ mod tests {
     /// included (the merge dedupes by name later exactly as before).
     #[test]
     fn admit_is_identity_for_well_formed_client_names() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let input = vec![
@@ -645,6 +1047,9 @@ mod tests {
     /// server whose name was already clean.
     #[test]
     fn admit_suffixes_a_renamed_server_that_collides() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let admitted = admit_client_mcp_servers(
@@ -667,6 +1072,9 @@ mod tests {
     /// blocked dotted vendor server slip through under its new name.
     #[test]
     fn admit_blocks_by_raw_name_before_renaming() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "com.blocked");
         let mut compat = fuigo_tools::types::compat::CompatConfig::default();
@@ -682,6 +1090,9 @@ mod tests {
     /// Vendor mcps kill switch must drop client-forwarded servers that match on-disk vendor config (pager may still load with default-on compat).
     #[test]
     fn client_cursor_server_dropped_when_cursor_mcps_disabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
         let mut compat = fuigo_tools::types::compat::CompatConfig::default();
@@ -702,6 +1113,9 @@ mod tests {
 
     #[test]
     fn client_cursor_server_kept_when_cursor_mcps_enabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
         let compat = fuigo_tools::types::compat::CompatConfig::default();
@@ -721,6 +1135,9 @@ mod tests {
 
     #[test]
     fn unrelated_client_server_survives_when_cursor_mcps_disabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
         let mut compat = fuigo_tools::types::compat::CompatConfig::default();
@@ -750,6 +1167,9 @@ mod tests {
 
     #[test]
     fn toml_claim_survives_when_client_cursor_insert_skipped() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
         std::fs::create_dir_all(cwd.path().join(".fuigo")).unwrap();
@@ -788,6 +1208,9 @@ args = ["ok"]
     /// Admitted seed must stay empty of the blocked server after vendor disk vanishes (hot-reload must not re-admit from a sanitized seed).
     #[test]
     fn admitted_seed_stays_blocked_after_vendor_disk_vanishes() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         write_cursor_project_mcp(cwd.path(), "killswitch-cache");
         let mut compat = fuigo_tools::types::compat::CompatConfig::default();
@@ -816,6 +1239,9 @@ args = ["ok"]
     /// Http/Sse client identity is normalized URL, not display name.
     #[test]
     fn client_cursor_http_dropped_by_normalized_url_when_mcps_disabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = empty_cwd();
         std::fs::create_dir_all(cwd.path().join(".cursor")).unwrap();
         std::fs::write(
@@ -1066,7 +1492,7 @@ enabled = false
 
     /// Builds a trusted git repo whose project config.toml declares two HTTP servers sharing one URL, each with its own auth header.
     /// This mirrors a real setup: one ClickHouse endpoint, two orgs.
-    fn same_url_project_repo() -> tempfile::TempDir {
+    fn same_url_project_repo() -> TestCwd {
         let cwd = empty_cwd();
         std::fs::create_dir_all(cwd.path().join(".fuigo")).unwrap();
         std::fs::write(
@@ -1094,6 +1520,9 @@ Authorization = "Bearer org2-token"
     /// Server NAME is the identity: two entries sharing one URL are distinct servers, and each keeps its own transport config.
     #[test]
     fn same_url_different_names_both_survive_merge() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let cwd = same_url_project_repo();
         let compat = fuigo_tools::types::compat::CompatConfig::default();
         let merged = merge_managed_mcp_servers(vec![], cwd.path(), None, &compat);
@@ -1119,6 +1548,9 @@ Authorization = "Bearer org2-token"
 
     #[test]
     fn same_url_different_names_both_sourced_from_toml() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use fuigo_tools::types::config_source::ConfigSource;
 
         let cwd = same_url_project_repo();
@@ -1141,6 +1573,13 @@ Authorization = "Bearer org2-token"
     /// A client-supplied server still survives, and a trusted workspace keeps its `.mcp.json` server.
     #[test]
     fn untrusted_workspace_drops_project_mcp_servers() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // `record_for_test` writes the folder-trust store under `$FUIGO_HOME` and the
+        // merge reads it back: without a private home this records into, and reads
+        // from, whichever home a concurrent test had set. See `TestCwd`.
+        let _home = fuigo_test_support::FuigoHome::new();
         fn repo_with_project_server() -> tempfile::TempDir {
             let cwd = tempfile::tempdir().unwrap();
             git2::Repository::init(cwd.path()).unwrap();
@@ -1513,3 +1952,21 @@ Authorization = "Bearer org2-token"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "managed_mcp_p118_tests.rs"]
+mod p118_tests;
+
+#[cfg(test)]
+#[path = "managed_mcp_p133_tests.rs"]
+mod p133_tests;
+
+#[cfg(test)]
+#[path = "managed_mcp_p136_tests.rs"]
+mod p136_tests;
+#[cfg(test)]
+#[path = "managed_mcp_p138_tests.rs"]
+mod p138_tests;
+#[cfg(test)]
+#[path = "managed_mcp_p141_tests.rs"]
+mod p141_tests;

@@ -56,3 +56,4 @@ pub(crate) fn ensure_hermetic_git_on_path() {
         }
     });
 }
+pub(crate) mod session_wire;

@@ -1658,9 +1658,7 @@ impl SessionActor {
         self.tool_context
             .goal_loop_active_gate
             .store(active, std::sync::atomic::Ordering::Relaxed);
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .update_resource(
                 fuigo_tools::implementations::fuigo_build::task::types::GoalLoopActive(active),
             )

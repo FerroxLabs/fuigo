@@ -169,12 +169,24 @@ mod tests {
 
     #[test]
     fn test_pool_base_directory() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // This test resolves the fuigo home more than once (and a concurrent guarded test may redirect it
+        // between reads, then delete its directory); hold a private, exclusive one for the whole test.
+        let _home = fuigo_test_support::FuigoHome::new();
         let dir = pool_base_directory();
         assert!(dir.to_string_lossy().contains("worktree_pool"));
     }
 
     #[test]
     fn test_cleanup_stale_only_removes_dead_instances() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // This test resolves the fuigo home more than once (and a concurrent guarded test may redirect it
+        // between reads, then delete its directory); hold a private, exclusive one for the whole test.
+        let _home = fuigo_test_support::FuigoHome::new();
         let live_dir =
             pool_base_directory().join(format!("live-instance-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&live_dir).unwrap();

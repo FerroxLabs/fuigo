@@ -527,6 +527,7 @@ mod tests {
     /// Item paint must not panic via ratatui `set_line`.
     #[test]
     fn render_dropdown_past_buffer_bottom_does_not_panic() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -568,6 +569,7 @@ mod tests {
 
     #[test]
     fn provenance_badge_is_right_aligned() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -630,6 +632,7 @@ mod tests {
     /// These must neither panic (debug arithmetic, non-char-boundary splits) nor loop (zero-progress wrap).
     #[test]
     fn tiny_geometry_never_panics_or_hangs() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -687,6 +690,7 @@ mod tests {
     /// Every item is on screen (present in the hit map) when the area is sized via `desired_item_rows`.
     #[test]
     fn render_dropdown_row_map_covers_all_items_at_desired_height() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -724,6 +728,7 @@ mod tests {
     /// Scrollbar and row map when content exceeds the capped height.
     #[test]
     fn render_dropdown_scrollbar_on_line_overflow() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -869,6 +874,7 @@ mod tests {
 
     #[test]
     fn overlong_untagged_command_renders_ellipsized_label() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

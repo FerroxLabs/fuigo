@@ -119,8 +119,13 @@ impl EnvKeys {
         }
     }
     /// Resolve the first set, non-blank process env value among configured names.
+    ///
+    /// The names are also denied to child processes from here on (P86): this is the one place
+    /// every `env_key` is read as a credential, including one a remote model catalogue supplied,
+    /// which no config file names.
     pub(crate) fn resolve_value(&self) -> Option<String> {
-        self.resolve_value_with(|name| std::env::var(name).ok())
+        fuigo_tools::util::shell_env_policy::register_credential_env_names(self.names());
+        self.resolve_value_with(crate::agent::auth_method::read_named_key_env)
     }
     /// Testable resolve with an injected getenv.
     pub(crate) fn resolve_value_with(
@@ -149,7 +154,7 @@ impl std::fmt::Display for EnvKeys {
         f.write_str(&self.names().join(", "))
     }
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EndpointsConfig {
     /// cli chat proxy base URL.
@@ -159,7 +164,7 @@ pub struct EndpointsConfig {
     pub cli_chat_proxy_base_url: Option<String>,
     /// Base URL for the public Ferrox Labs API.
     pub fuigo_api_base_url: String,
-    /// Optional extra access-header value (applied only with the optional non-production feature, and only for matching first-party hosts).
+    /// Optional extra access-header value (applied only with the optional non-production feature, and only for matching Ferrox-operated non-production hosts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alpha_test_key: Option<String>,
     /// Env: `FUIGO_MODELS_BASE_URL`. Enables custom endpoint mode.
@@ -248,6 +253,67 @@ pub struct EndpointsConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gcs_service_account_key: Option<String>,
 }
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for EndpointsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            cli_chat_proxy_base_url,
+            fuigo_api_base_url,
+            alpha_test_key,
+            models_base_url,
+            models_list_url,
+            feedback_base_url,
+            trace_upload_url,
+            trace_upload_bucket,
+            trace_upload_region,
+            trace_upload_credentials_file,
+            trace_upload_credentials,
+            trace_upload_endpoint_url,
+            deployment_key,
+            managed_config_url,
+            otel_exporter_otlp_endpoint,
+            otel_exporter_otlp_traces_endpoint,
+            otel_exporter_otlp_headers,
+            fuigo_internal_otlp_traces_endpoint,
+            fuigo_internal_otlp_headers,
+            external_otel_master_switch,
+            otel_traces_exporter,
+            otel_traces_export_interval,
+            otel_exporter_otlp_timeout,
+            management_api_key,
+            gcs_service_account_key,
+        } = self;
+        f.debug_struct("EndpointsConfig")
+            .field("cli_chat_proxy_base_url", &cli_chat_proxy_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("fuigo_api_base_url", &fuigo_auth::redact_url(fuigo_api_base_url))
+            .field("alpha_test_key", &alpha_test_key.as_ref().map(|_| "<redacted>"))
+            .field("models_base_url", &models_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("models_list_url", &models_list_url.as_deref().map(fuigo_auth::redact_url))
+            .field("feedback_base_url", &feedback_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("trace_upload_url", &trace_upload_url.as_deref().map(fuigo_auth::redact_url))
+            .field("trace_upload_bucket", trace_upload_bucket)
+            .field("trace_upload_region", trace_upload_region)
+            .field("trace_upload_credentials_file", trace_upload_credentials_file)
+            .field("trace_upload_credentials", &trace_upload_credentials.as_ref().map(|_| "<redacted>"))
+            .field("trace_upload_endpoint_url", &trace_upload_endpoint_url.as_deref().map(fuigo_auth::redact_url))
+            .field("deployment_key", &deployment_key.as_ref().map(|_| "<redacted>"))
+            .field("managed_config_url", &managed_config_url.as_deref().map(fuigo_auth::redact_url))
+            .field("otel_exporter_otlp_endpoint", &otel_exporter_otlp_endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field("otel_exporter_otlp_traces_endpoint", &otel_exporter_otlp_traces_endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field("otel_exporter_otlp_headers", &otel_exporter_otlp_headers.as_ref().map(|_| "<redacted>"))
+            .field("fuigo_internal_otlp_traces_endpoint", &fuigo_internal_otlp_traces_endpoint.as_deref().map(fuigo_auth::redact_url))
+            .field("fuigo_internal_otlp_headers", &fuigo_internal_otlp_headers.as_ref().map(|_| "<redacted>"))
+            .field("external_otel_master_switch", external_otel_master_switch)
+            .field("otel_traces_exporter", otel_traces_exporter)
+            .field("otel_traces_export_interval", otel_traces_export_interval)
+            .field("otel_exporter_otlp_timeout", otel_exporter_otlp_timeout)
+            .field("management_api_key", &management_api_key.as_ref().map(|_| "<redacted>"))
+            .field("gcs_service_account_key", &gcs_service_account_key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
 /// A blank or whitespace-only override counts as unset.
 /// Single source of truth for the "an empty value means not configured" rule shared by the endpoint resolvers.
 fn blank_as_unset(opt: &Option<String>) -> Option<String> {
@@ -296,7 +362,7 @@ impl EndpointsConfig {
         resolved.external_otel_master_switch = external_otel_master_switch;
         resolved
     }
-    /// Base URL for the auxiliary first-party services: feedback, trace upload,
+    /// Base URL for the auxiliary Ferrox services: feedback, trace upload,
     /// managed deployment config and the internal OTLP firehose.
     ///
     /// Upstream this defaulted to xAI's cli-chat-proxy and was never allowed to
@@ -483,13 +549,43 @@ impl EndpointsConfig {
         self.deployment_key.is_some() || self.resolve_direct_upload_method().is_some()
     }
     /// Tries the direct bucket, then the proxy (if `auth_token` or `deployment_key`), then ambient GCS, else `None`.
+    ///
+    /// P47: `auth_token` is treated as the session token (every in-crate caller passes a Ferrox session key). A
+    /// caller holding a credential of unknown kind uses [`Self::resolve_upload_method_for_auth`].
     pub fn resolve_upload_method(
         &self,
         auth_token: Option<String>,
     ) -> Option<crate::session::repo_changes::UploadMethod> {
+        self.resolve_upload_method_classified(auth_token, true)
+    }
+    /// [`Self::resolve_upload_method`] for a resolved credential: a static `AuthMode::ApiKey` credential is not a
+    /// session token and keeps its own rules (P47).
+    pub fn resolve_upload_method_for_auth(
+        &self,
+        auth: Option<&crate::auth::FuigoAuth>,
+    ) -> Option<crate::session::repo_changes::UploadMethod> {
+        let is_session = auth.is_some_and(crate::auth::session_delivery::is_session_credential);
+        self.resolve_upload_method_classified(auth.map(|a| a.key.clone()), is_session)
+    }
+    fn resolve_upload_method_classified(
+        &self,
+        auth_token: Option<String>,
+        is_session: bool,
+    ) -> Option<crate::session::repo_changes::UploadMethod> {
         if let Some(method) = self.resolve_direct_upload_method() {
             return Some(method);
         }
+        // P47: `auth_token` is the session token, and the proxy upload path may send it from a static credential
+        // (`fuigo-file-utils` trusts its caller). It is kept only when the service-endpoint trust class admits the
+        // trace-upload URL; otherwise it is dropped here (and the refusal logged), so it can never be put on the
+        // wire. A deployment key wins on the wire and keeps its own rules.
+        let auth_token = auth_token.filter(|_| {
+            !is_session || self.deployment_key.is_some() || {
+                let url = self.resolve_trace_upload_url();
+                crate::auth::session_delivery::service_session_url_gate(&url, Some(&url), "trace_upload_static")
+                    .is_ok()
+            }
+        });
         if auth_token.is_some() || self.deployment_key.is_some() {
             return Some(crate::session::repo_changes::UploadMethod::Proxy {
                 proxy_base_url: self.resolve_trace_upload_url(),
@@ -650,6 +746,10 @@ pub struct RuntimeResolutionContext<'a> {
     pub laziness_debug_log: Option<&'a std::path::Path>,
     /// CLI `--storage-mode` override. `None` defers to env/remote/default.
     pub storage_mode: Option<&'a str>,
+    /// The config files merged WITHOUT campaign patches, from the SAME read as `raw_config`
+    /// (see [`crate::config::load_effective_config_with_campaign_free`]). P90 F6: which helper
+    /// models the user chose. `None`: no config-file helper value counts as the user's choice.
+    pub campaign_free_config: Option<&'a toml::Value>,
 }
 /// First-party credential env vars scrubbed from a BYOK auth-provider helper's environment.
 /// Scrubbing keeps the helper from inheriting the keys Fuigo uses for its own first-party requests.
@@ -668,7 +768,57 @@ pub(crate) const FIRST_PARTY_CREDENTIAL_ENV_VARS: &[&str] = &[
     "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
     "OTEL_EXPORTER_OTLP_HEADERS",
     "FUIGO_INTERNAL_OTLP_HEADERS",
+    // P113 (Astra r1 #3): the rest of Fuigo's own secrets, which children are denied too
+    // (`fuigo_tools::util::shell_env_policy::FUIGO_INTERNAL_CREDENTIAL_ENV_VARS`; a test keeps the two equal).
+    "FUIGO_AGENT_SECRET",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "FUIGO_TELEMETRY_EVENTS_API_KEY",
+    "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
 ];
+/// P86 (CB-1): every variable a config names as holding a credential -- a `[model.*]` or
+/// `[model_providers.*]` `env_key`, or the variable behind an `env_http_headers` entry -- is denied
+/// to the agent's child processes (bash tool, hooks, stdio MCP and LSP servers), exactly like the
+/// built-in provider key names. Done at parse time, so every loader path (startup, reload, ACP,
+/// headless, `/provider`) covers it, before any child is spawned from that config. Additive and
+/// process-wide: a name stays denied for the life of the process.
+fn deny_configured_credentials_to_children(
+    models: &IndexMap<String, ConfigModelOverride>,
+    providers: &IndexMap<String, ModelProviderConfig>,
+) {
+    let model_names = models.values().flat_map(|model| {
+        configured_credential_names(model.env_key.as_ref(), &model.env_http_headers)
+    });
+    let provider_names = providers.values().flat_map(|provider| {
+        configured_credential_names(provider.env_key.as_ref(), &provider.env_http_headers)
+    });
+    fuigo_tools::util::shell_env_policy::register_credential_env_names(
+        model_names.chain(provider_names),
+    );
+}
+
+/// [`deny_configured_credentials_to_children`] for a raw config that is not (yet) being turned
+/// into a [`Config`]: the hot-reload path calls it on the new file BEFORE it tells sessions to
+/// restart their MCP servers, so a server added in the same edit as an `env_key` cannot be spawned
+/// while that variable is still allowed through.
+pub(crate) fn deny_credentials_named_in(raw_config: &toml::Value) {
+    let models = super::config_model_override_parse::parse_model_overrides(raw_config).models;
+    let (providers, _) = parse_model_providers(raw_config);
+    deny_configured_credentials_to_children(&models, &providers);
+    // P113 (E2): and the token variables its `[mcp_servers.*]` name (parsing registers them).
+    crate::util::config::parse_mcp_servers_with_problems(raw_config);
+}
+
+fn configured_credential_names<'a>(
+    env_key: Option<&'a EnvKeys>,
+    env_http_headers: &'a IndexMap<String, String>,
+) -> impl Iterator<Item = &'a str> {
+    env_key
+        .map(EnvKeys::names)
+        .unwrap_or_default()
+        .into_iter()
+        .chain(env_http_headers.values().map(String::as_str))
+}
 /// Read an env var as a trimmed string. Returns `None` if unset or empty/whitespace-only.
 pub(crate) fn env_string(name: &str) -> Option<String> {
     let value = std::env::var(name).ok()?;
@@ -1022,7 +1172,7 @@ pub struct DiagnosticsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crash_handler: Option<bool>,
 }
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1090,6 +1240,59 @@ pub struct ModelsConfig {
     pub subagent_rate_limit_max_attempts: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ModelsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            default,
+            pre_campaign_default,
+            default_is_campaign_driven,
+            default_reasoning_effort,
+            web_search,
+            session_summary,
+            image_description,
+            prompt_suggestion,
+            allowed_models,
+            hidden_models,
+            disabled_models,
+            agent_type,
+            extra_headers,
+            temperature,
+            top_p,
+            max_completion_tokens,
+            max_retries,
+            rate_limit_retry_threshold,
+            inference_idle_timeout_secs,
+            subagent_rate_limit_max_attempts,
+            stream_tool_calls,
+        } = self;
+        f.debug_struct("ModelsConfig")
+            .field("default", default)
+            .field("pre_campaign_default", pre_campaign_default)
+            .field("default_is_campaign_driven", default_is_campaign_driven)
+            .field("default_reasoning_effort", default_reasoning_effort)
+            .field("web_search", web_search)
+            .field("session_summary", session_summary)
+            .field("image_description", image_description)
+            .field("prompt_suggestion", prompt_suggestion)
+            .field("allowed_models", allowed_models)
+            .field("hidden_models", hidden_models)
+            .field("disabled_models", disabled_models)
+            .field("agent_type", agent_type)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
+            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field("stream_tool_calls", stream_tool_calls)
+            .finish()
+    }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1270,6 +1473,81 @@ pub struct ShellEnvironmentPolicyKnownKeys {
     pub set: Option<toml::Value>,
     pub include_only: Option<toml::Value>,
 }
+/// Persist one write to the process-wide trust set in the unified log
+/// (`$FUIGO_HOME/logs/unified.jsonl`).
+///
+/// WHY NOT ONLY `tracing`. `TrustSetChange::trace` already emits an event, but
+/// what a subscriber keeps depends on its filter, and the defaults keep very
+/// little: headless (`fuigo -p`) stderr is `off`, agent mode stderr is `error`,
+/// the TUI shows `warn` in its in-app log and persists none of it, and the file
+/// firehose exists only under `FUIGO_DEBUG_LOG`/`FUIGO_LOG_FILE`. A widening that
+/// no default configuration keeps would not be detection. The unified log is
+/// always on in every mode and has no level filter, so it is the record.
+///
+/// WHAT IS WRITTEN. The process baseline (the first set installed, whichever
+/// entry point installed it) and every movement; not unchanged republishes, which
+/// happen on every settings reapply. What the set ADMITS, per matcher tier
+/// (`RecordedTrust`: credential origins and host-only hosts) — never a configured
+/// endpoint string, which can carry userinfo or a token.
+///
+/// LIMITS, stated so nobody over-reads this. The file is capped
+/// (`unified_log::MAX_SIZE`) and trimmed oldest-first, so old records age out;
+/// a write that fails (unwritable home) is dropped; and it is a local file that
+/// whoever can rewrite `config.toml` can usually rewrite too. It detects; it does
+/// not prevent, and it is not tamper-evident.
+#[cfg(not(test))]
+struct UnifiedLogTrustSink;
+
+#[cfg(not(test))]
+impl crate::util::TrustRecordSink for UnifiedLogTrustSink {
+    fn record(&self, change: &crate::util::TrustSetChange, via: crate::util::TrustWritePath) {
+        record_trust_change(change, via);
+    }
+}
+
+/// Install the unified-log sink into `fuigo-shell-base`, which dispatches every
+/// trust-set write to it itself. The product binary calls this once at process
+/// start, before any code that can write the trust set; the Config paths call it
+/// too as a backstop for embedders. Idempotent; writes made before the first call are
+/// held by the base crate and replayed on install, so no caller can bypass the record.
+#[cfg(not(test))]
+pub fn install_trust_record_sink() {
+    crate::util::install_trust_record_sink(std::sync::Arc::new(UnifiedLogTrustSink));
+}
+
+#[cfg(not(test))]
+fn record_trust_change(change: &crate::util::TrustSetChange, via: crate::util::TrustWritePath) {
+    use crate::util::TrustSetChange;
+    match change {
+        TrustSetChange::Initial { current } => fuigo_telemetry::unified_log::info(
+            "trusted API origins: process baseline",
+            None,
+            Some(serde_json::json!({ "via": via.as_str(), "current": current })),
+        ),
+        TrustSetChange::Unchanged { .. } => {}
+        TrustSetChange::Changed {
+            previous,
+            current,
+            added,
+            removed,
+        } => fuigo_telemetry::unified_log::warn(
+            if change.is_widening() {
+                "trusted API origins WIDENED"
+            } else {
+                "trusted API origins narrowed"
+            },
+            None,
+            Some(serde_json::json!({
+                "via": via.as_str(),
+                "added": added,
+                "removed": removed,
+                "previous": previous,
+                "current": current,
+            })),
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub features: Features,
@@ -1292,6 +1570,17 @@ pub struct Config {
     /// Declared so documented sampling keys are not reported as unrecognized.
     #[serde(default)]
     pub prompt_suggestions: crate::util::config::PromptSuggestConfig,
+    /// The user-configured API origin set this config resolves to (credential delivery; see
+    /// `fuigo_shell_base::util::TrustedApiOrigins` for why it is not identity disclosure).
+    ///
+    /// The INJECTABLE form of the trust set, recomputed by every
+    /// `new_from_toml_cfg` from `[endpoints]`, so it follows a configuration
+    /// reload. [`Config::publish_trusted_api_origins`] is what pushes it to the
+    /// process-wide default for the call sites that have no `Config` in hand.
+    /// Held as a value so the mapping can be asserted per instance, with no
+    /// shared mutable state and no dependence on the test schedule.
+    #[serde(skip)]
+    pub(crate) trusted_origins: crate::util::TrustedApiOrigins,
     /// What `[features]` said in the merged layers.
     /// One tier of [`Config::feature`].
     #[serde(skip)]
@@ -1551,6 +1840,10 @@ pub struct Config {
     /// Consumed with a catalog guard by `handle_suggest_prompt`; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
     pub prompt_suggest_model_pin: crate::config::PromptSuggestModelPin,
+    /// Which of the helper models above the user chose explicitly (P90 F6); see
+    /// [`crate::config::ExplicitHelperModels`].
+    #[serde(skip)]
+    pub explicit_helper_models: crate::config::ExplicitHelperModels,
 }
 #[derive(Debug, Clone, Default)]
 pub struct CliAgentOverrides {
@@ -1764,6 +2057,7 @@ impl Default for Config {
             worktree: WorktreeConfigSection::default(),
             auto_mode: AutoModeConfig::default(),
             prompt_suggestions: crate::util::config::PromptSuggestConfig::default(),
+            trusted_origins: crate::util::TrustedApiOrigins::default(),
             feature_values: BTreeMap::new(),
             config_models: IndexMap::new(),
             config_warnings: Vec::new(),
@@ -1852,6 +2146,7 @@ impl Default for Config {
             session_summary_model: None,
             image_description_model: None,
             prompt_suggest_model_pin: crate::config::PromptSuggestModelPin::Unpinned,
+            explicit_helper_models: crate::config::ExplicitHelperModels::default(),
         };
         cfg.apply_env_overrides();
         cfg
@@ -1891,7 +2186,11 @@ fn non_boolean_feature_error(path: &str, value: &toml::Value) -> String {
     format!("{path}: expected true or false, found {found}")
 }
 /// Config paths read by raw-layer resolvers, not [`Config`] serde fields, so `serde_ignored` must not report them as unrecognized keys.
-const NON_SERDE_CONFIG_PATHS: &[&str] = &[crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH];
+const NON_SERDE_CONFIG_PATHS: &[&str] = &[
+    crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH,
+    // P93: read from the user config file alone (`agent::relay_opt_in`), never through the merged `Config`.
+    crate::agent::relay_opt_in::TRUSTED_RELAY_ORIGINS_CONFIG_PATH,
+];
 /// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups, every registered feature, and every [`UNMIRRORED_BOOLEAN_FEATURES`] key.
 fn is_non_serde_config_path(path: &str) -> bool {
     NON_SERDE_CONFIG_PATHS.contains(&path)
@@ -2031,6 +2330,7 @@ impl Config {
         } = super::config_model_override_parse::parse_model_overrides(raw_config);
         let (mut auth_providers, auth_provider_warnings) = parse_auth_providers(raw_config);
         let (model_providers, mut model_provider_warnings) = parse_model_providers(raw_config);
+        deny_configured_credentials_to_children(&config_models, &model_providers);
         for (model_id, model) in &config_models {
             let Some(cert_dir) = model.mtls_cert_dir.as_deref() else {
                 continue;
@@ -2219,26 +2519,37 @@ impl Config {
         if config.client_version.is_none() {
             config.client_version = Self::default().client_version;
         }
-        let model_overrides =
-            crate::config::ModelOverrideConfig::resolve(None, None, raw_config, None);
+        let model_overrides = crate::config::ModelOverrideConfig::resolve_with_user_config(
+            None,
+            None,
+            raw_config,
+            // No campaign-free table travels with a bare TOML value: nothing counts as the
+            // user's helper choice here. Every agent config is then re-resolved by
+            // `resolve_runtime_fields`, which has it.
+            None,
+            None,
+        );
         config.web_search_model = model_overrides.web_search;
         config.session_summary_model = model_overrides.session_summary;
         config.image_description_model = model_overrides.image_description;
         config.prompt_suggest_model_pin = model_overrides.prompt_suggestion;
+        config.explicit_helper_models = model_overrides.explicit;
         config.apply_env_overrides();
+        config.trusted_origins =
+            crate::util::TrustedApiOrigins::new(config.trusted_origins_from_endpoints());
         config.install_trusted_api_origins();
         Ok(config)
     }
 
-    /// Install a first-party trust set for tests.
+    /// Install a configured-API-origin trust set for tests.
     ///
     /// These tests exercise *routing* — does a session bearer follow a
-    /// first-party endpoint and not a third-party one — rather than *policy*,
-    /// which is "no vendor is first-party unless configured". They therefore
+    /// configured API origin and not a third-party one — rather than *policy*,
+    /// which is "no vendor is a configured API origin unless configured". They therefore
     /// need an installation that has configured origins.
     ///
     /// Both are installed because the suite uses `api.x.ai` as its
-    /// first-party fixture and FluxRouter is the shipped default; an
+    /// configured-origin fixture and FluxRouter is the shipped default; an
     /// installation configured for Grok is a legitimate opt-in.
     ///
     /// The policy itself is asserted where it cannot be undermined by a test
@@ -2248,7 +2559,8 @@ impl Config {
     /// Ordering-independent because every caller installs the SAME set, not
     /// because there is only one caller -- there are many, across several test
     /// files, plus `install_trusted_api_origins` itself under `cfg(test)`. The
-    /// store is a process-wide `OnceLock` where the first write wins, so a call
+    /// store is a process-wide `RwLock<Option<..>>`, and the seed entry point
+    /// used here (`set_trusted_api_origins`) is first-write-wins, so a call
     /// site passing a DIFFERENT set would silently make results depend on the
     /// test schedule. If a test needs different origins it needs its own
     /// process (see `fuigo-shell-base/tests/trust_fails_closed.rs`).
@@ -2260,42 +2572,119 @@ impl Config {
         ]);
     }
 
-    /// Publish the configured first-party API origins to `fuigo-shell-base`,
+    /// Publish the user-configured API origins to `fuigo-shell-base`,
     /// which decides where a session bearer may be attached.
     ///
     /// This must happen after `apply_env_overrides`, so `FUIGO_API_BASE_URL`
-    /// and friends are reflected. The underlying store is a `OnceLock`: the
-    /// first config to load wins, and a later one cannot widen the trust set.
+    /// and friends are reflected.
     ///
-    /// Until this runs, nothing is first-party and every credential check
+    /// WHAT THE STORE ACTUALLY GUARANTEES — this comment previously claimed the
+    /// opposite, and the claim was false. The store is NOT a `OnceLock`; it is an
+    /// `RwLock<Option<TrustedApiOrigins>>` (`fuigo-shell-base/src/util/mod.rs`), and a
+    /// later config CAN widen the trust set. What is write-once is the *authority*:
+    /// [`crate::util::claim_trusted_origin_authority`] yields `Some` to the first
+    /// caller and `None` forever after, and the production claimant is the config
+    /// layer at startup, before any plugin, MCP server or extension code runs. So
+    /// code that arrives later cannot obtain the capability to publish — but the
+    /// config layer itself republishes whenever it re-resolves the runtime fields,
+    /// by design, because otherwise an endpoint the user edits goes on being
+    /// refused the credential it was issued for. That happens in the background
+    /// settings reapply that session creation (`/new`) spawns — only once
+    /// authentication resolves, and coalesced while one is already in flight, so
+    /// not on literally every `/new`.
+    ///
+    /// The consequence to keep in view: whoever can write the effective config can
+    /// move the trust set at the next reapply. That is bounded rather than
+    /// harmless — the same file already carries campaign patches, MCP server
+    /// definitions and hooks, so it is an authority that grants code execution by
+    /// other routes too — but it is a real widening, so every write is recorded:
+    /// see `record_trust_change` (reached through `TrustRecordSink`). `tests/trusted_origins_follow_config.rs` and
+    /// `tests/trusted_origins_parsing_is_not_authority.rs` say what the tests do
+    /// and do not prove.
+    ///
+    /// Until this runs, no origin is configured and every credential check
     /// fails closed. That is the safe direction — see
     /// `fuigo-shell-base/tests/trust_fails_closed.rs`.
     ///
     /// These are the endpoints the user pointed Fuigo at, so `x.ai` becomes
-    /// first-party if and only if they configured it. Previously `*.x.ai` was
+    /// a configured API origin if and only if they configured it. Previously `*.x.ai` was
     /// trusted by compilation and the configured endpoint was not.
     fn install_trusted_api_origins(&self) {
-        // In a test binary the store is one process-wide `OnceLock` shared by
-        // every test, and the FIRST writer wins. Whichever test happened to
-        // load a `Config` first would otherwise decide the trust set for the
-        // whole run, so `cargo test agent::config` and a full `cargo test`
-        // disagree about which hosts are first-party. That is not hypothetical:
-        // eight tests in this file passed in a full run and failed under a
-        // filter, and the full run is what hid it.
+        // In a test binary the process-wide store is shared by every test and
+        // the FIRST writer wins. Whichever test happened to load a `Config`
+        // first would otherwise decide the trust set for the whole run, so
+        // `cargo test agent::config` and a full `cargo test` disagree about
+        // which hosts are configured API origins. That is not hypothetical: eight tests in
+        // this file passed in a full run and failed under a filter, and the
+        // full run is what hid it.
         //
         // Test builds therefore always install the suite's fixture origins, so
-        // the trust set does not depend on the schedule.
+        // the trust set does not depend on the schedule. The `cfg` stays,
+        // because deleting it would reintroduce exactly that flakiness. The
+        // production mapping is covered instead by `self.trusted_origins`,
+        // which is a value EVERY build computes and which unit tests assert per
+        // instance (`configured_endpoints_become_the_trusted_origins`,
+        // `the_injectable_trust_set_follows_the_endpoints_in_use`), and by
+        // `tests/trusted_origins_follow_config.rs` and
+        // `tests/trusted_origins_parsing_is_not_authority.rs`, which link the library
+        // compiled WITHOUT `cfg(test)` and so run the arm below for real.
         #[cfg(test)]
         Self::install_test_trusted_origins();
         #[cfg(not(test))]
-        crate::util::set_trusted_api_origins(self.trusted_origins_from_endpoints());
+        {
+            install_trust_record_sink();
+            crate::util::set_trusted_api_origins(self.trusted_origins.origins().to_vec());
+        }
+    }
+
+    /// The user-configured API origin set this config resolves to, as a value.
+    ///
+    /// Prefer this over the free `crate::util::is_*` predicates wherever a
+    /// `Config` is in hand: it is the set THIS configuration names, so it
+    /// cannot go stale behind a reload.
+    pub fn trusted_origins(&self) -> &crate::util::TrustedApiOrigins {
+        &self.trusted_origins
+    }
+
+    /// Publish this config's trust set as the process-wide default.
+    ///
+    /// Called from [`Config::resolve_runtime_fields`], which is the
+    /// authoritative "this config is now the live one" hook: the three binaries
+    /// run it once at startup, and `re_resolve_runtime_fields` runs it again
+    /// with a freshly loaded effective config when settings are reapplied.
+    /// Every OTHER `new_from_toml_cfg` caller — the reloader comparing an OLD
+    /// config against a new one, a one-shot command parsing a stripped table —
+    /// must NOT be able to move the trust set, which is why this is separate
+    /// from `install_trusted_api_origins` and is not called from the parser.
+    ///
+    /// The authority is claimed once and kept: nothing that runs later can
+    /// obtain one, so nothing that runs later can widen the trust set. See
+    /// [`crate::util::TrustedOriginAuthority`].
+    fn publish_trusted_api_origins(&self) {
+        // Under `cfg(test)` the process-wide store is shared by every test in
+        // the binary, so publishing a per-config set here would reintroduce the
+        // schedule dependence `install_trusted_api_origins` exists to prevent.
+        #[cfg(test)]
+        Self::install_test_trusted_origins();
+        #[cfg(not(test))]
+        {
+            static AUTHORITY: std::sync::OnceLock<
+                Option<crate::util::TrustedOriginAuthority>,
+            > = std::sync::OnceLock::new();
+            install_trust_record_sink();
+            if let Some(authority) =
+                AUTHORITY.get_or_init(crate::util::claim_trusted_origin_authority)
+            {
+                authority.publish(self.trusted_origins.clone());
+            }
+        }
     }
 
     /// The origins [`Self::install_trusted_api_origins`] would publish.
     ///
     /// Split out because the install itself is test-pinned (above) and would
     /// otherwise leave this mapping -- the thing that decides which hosts are
-    /// first-party for a real user -- with no coverage at all. This is a pure
+    /// configured API origins for a real user -- with no coverage at all. This is a pure
     /// function of the config, so it can be asserted directly without touching
     /// the process-wide store.
     pub(crate) fn trusted_origins_from_endpoints(&self) -> Vec<String> {
@@ -2374,6 +2763,14 @@ impl Config {
     ///
     /// Note: `worktree_type` is resolved directly in `MvpAgent::new` via `resolve_worktree_type` since it's an agent-level field, not a Config field.
     pub fn resolve_runtime_fields(&mut self, ctx: &RuntimeResolutionContext<'_>) {
+        // The authoritative path, and the only one allowed to move the
+        // process-wide trust set: it publishes the origins this `Config` sends
+        // to, so the credential guards always admit the endpoint in use (a set
+        // left behind the endpoints refused the user's own endpoint its
+        // session bearer and `FUIGO_API_KEY`, and every request went out
+        // unauthenticated). `[endpoints]` itself is read when the process
+        // starts; see `re_resolve_runtime_fields` (P150).
+        self.publish_trusted_api_origins();
         self.cli_subagents = ctx.cli_subagents;
         self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
@@ -2440,16 +2837,18 @@ impl Config {
         );
         self.managed_mcps_enabled = mcps.enabled;
         self.managed_mcp_gateway_tools_enabled = mcps.gateway_tools_enabled;
-        let models = crate::config::ModelOverrideConfig::resolve(
+        let models = crate::config::ModelOverrideConfig::resolve_with_user_config(
             ctx.cli_web_search_model,
             ctx.cli_session_summary_model,
             ctx.raw_config,
+            ctx.campaign_free_config,
             ctx.remote_settings,
         );
         self.web_search_model = models.web_search;
         self.session_summary_model = models.session_summary;
         self.image_description_model = models.image_description;
         self.prompt_suggest_model_pin = models.prompt_suggestion;
+        self.explicit_helper_models = models.explicit;
         self.memory_enabled_override = ctx.memory_enabled_override;
         let mem = self.resolve_memory(ctx.memory_enabled_override, ctx.remote_settings);
         self.memory_config = if mem.enabled { Some(mem) } else { None };
@@ -2484,17 +2883,47 @@ impl Config {
     /// Re-resolve eagerly-resolved runtime fields using the current `Config` state and fresh `raw_config`.
     /// Builds a [`RuntimeResolutionContext`] from the CLI flags already stored on this `Config`.
     ///
-    /// Integration test coverage: `tests/test_settings_refresh.rs`.
-    pub(crate) fn re_resolve_runtime_fields(&mut self, raw_config: &toml::Value) {
+    /// Coverage: `agent::config_tests` (`the_injectable_trust_set_follows_the_endpoints_in_use`
+    /// and neighbours) for this function, `mvp_agent::tests` for the settings-refresh
+    /// caller's failed-read handling, and `tests/trusted_origins_follow_config.rs` for
+    /// the process-wide republish it triggers.
+    pub(crate) fn re_resolve_runtime_fields(
+        &mut self,
+        raw_config: &toml::Value,
+        campaign_free_config: Option<&toml::Value>,
+    ) {
+        // The trust set covers every origin this process may SEND TO (P150, B25/F5): the endpoints it started with,
+        // which stay in use (`self.endpoints`, the model catalog and each session's `base_url` are fixed at process
+        // start), AND the `[endpoints]` just re-read, which a reloaded `[model.*] base_url` can point at. Before, the
+        // set was REPLACED by the re-read endpoints, so an `[endpoints]` edit followed by a settings reapply (every
+        // new session) withheld the session token and `FUIGO_API_KEY` from the endpoint still in use (401 until a
+        // restart); taking only the live endpoints would instead withhold them from a reloaded model's new origin
+        // (Astra r1). Both are origins the user configured; the re-read half is replaced on every reload, so it does
+        // not accumulate, and `resolve_runtime_fields` records any movement in the unified log. A requirements pin
+        // re-applied to `self.endpoints` (`sync_campaign_fields`) is followed too. A failed parse keeps the set
+        // as it was (plus the live endpoints): it says nothing new about `[endpoints]`, and dropping the last
+        // re-read origin would strand a reloaded model already pointed at it (Astra r2).
+        let mut origins = self.trusted_origins_from_endpoints();
         match Self::new_from_toml_cfg(raw_config) {
             Ok(parsed_config) => {
+                for origin in parsed_config.trusted_origins_from_endpoints() {
+                    if !origins.contains(&origin) {
+                        origins.push(origin);
+                    }
+                }
                 self.memory = parsed_config.memory;
                 self.compaction = parsed_config.compaction;
             }
             Err(error) => {
                 tracing::warn!(%error, "config parse failed during runtime re-resolution");
+                for origin in self.trusted_origins.origins() {
+                    if !origins.contains(origin) {
+                        origins.push(origin.clone());
+                    }
+                }
             }
         }
+        self.trusted_origins = crate::util::TrustedApiOrigins::new(origins);
         let remote_settings = self.remote_settings.clone();
         let cli_web_search_model = self.web_search_model_override.clone();
         let cli_session_summary_model = self.session_summary_model_override.clone();
@@ -2511,6 +2940,7 @@ impl Config {
             todo_gate: self.todo_gate,
             laziness_debug_log: laziness_debug_log.as_deref(),
             storage_mode: None,
+            campaign_free_config,
         };
         self.resolve_runtime_fields(&ctx);
         crate::util::config::set_remote_campaigns_from_settings(self.remote_settings.as_ref());
@@ -3597,8 +4027,8 @@ pub(crate) fn resolve_model_list(
         std::collections::HashSet::new();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
-            models_base_url = ?cfg.endpoints.models_base_url,
-            models_list_url = ?cfg.endpoints.models_list_url,
+            models_base_url = ?cfg.endpoints.models_base_url.as_deref().map(fuigo_auth::redact_url),
+            models_list_url = ?cfg.endpoints.models_list_url.as_deref().map(fuigo_auth::redact_url),
             "custom models endpoint active, skipping built-in defaults",
         );
     } else {
@@ -3699,7 +4129,7 @@ pub(crate) fn resolve_model_list(
         }
         tracing::debug!(
             model_key = %key,
-            base_url = %entry.info.base_url,
+            base_url = %fuigo_auth::redact_url(&entry.info.base_url),
             has_api_key = entry.api_key.is_some(),
             env_key = ?entry.env_key,
             auth_provider = entry.auth_provider.as_ref().map(|p| p.name.as_str()),
@@ -4030,7 +4460,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         })
         .collect()
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
     /// Stable unique identifier for this catalog entry.
     /// When present, used as the catalog map key.
@@ -4161,6 +4591,93 @@ pub struct ModelEntryConfig {
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
 }
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ModelEntryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            id,
+            model,
+            model_family,
+            base_url,
+            name,
+            description,
+            max_completion_tokens,
+            temperature,
+            top_p,
+            api_key,
+            env_key,
+            api_backend,
+            auth_scheme,
+            reasoning_effort,
+            supports_reasoning_effort,
+            reasoning_efforts,
+            variants,
+            extra_headers,
+            context_window,
+            auto_compact_threshold_percent,
+            system_prompt_label,
+            api_base_url,
+            use_concise,
+            agent_type,
+            inference_idle_timeout_secs,
+            max_retries,
+            rate_limit_retry_threshold,
+            subagent_rate_limit_max_attempts,
+            hidden,
+            supported_in_api,
+            supports_backend_search,
+            programmatic_tool_calling,
+            compactions_remaining,
+            compaction_at_tokens,
+            show_model_fingerprint,
+            stream_tool_calls,
+            reasoning_summary,
+            laziness_detector,
+        } = self;
+        f.debug_struct("ModelEntryConfig")
+            .field("id", id)
+            .field("model", model)
+            .field("model_family", model_family)
+            .field("base_url", &fuigo_auth::redact_url(base_url))
+            .field("name", name)
+            .field("description", description)
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("env_key", env_key)
+            .field("api_backend", api_backend)
+            .field("auth_scheme", auth_scheme)
+            .field("reasoning_effort", reasoning_effort)
+            .field("supports_reasoning_effort", supports_reasoning_effort)
+            .field("reasoning_efforts", reasoning_efforts)
+            .field("variants", variants)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("context_window", context_window)
+            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field("system_prompt_label", system_prompt_label)
+            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("use_concise", use_concise)
+            .field("agent_type", agent_type)
+            .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field("hidden", hidden)
+            .field("supported_in_api", supported_in_api)
+            .field("supports_backend_search", supports_backend_search)
+            .field("programmatic_tool_calling", programmatic_tool_calling)
+            .field("compactions_remaining", compactions_remaining)
+            .field("compaction_at_tokens", compaction_at_tokens)
+            .field("show_model_fingerprint", show_model_fingerprint)
+            .field("stream_tool_calls", stream_tool_calls)
+            .field("reasoning_summary", reasoning_summary)
+            .field("laziness_detector", laziness_detector)
+            .finish()
+    }
+}
 /// Derives `PartialEq` on `f32`, which is fine for the current shape.
 /// Both `f32` fields default to `None`, so there's no parsed-vs-literal `0.7` float equality footgun.
 /// If a future default introduces `Some(0.7)`, this helper must be reworked (e.g. compare on tolerance, or switch to a bit-pattern compare).
@@ -4171,7 +4688,7 @@ fn is_default_laziness_detector(cfg: &LazinessDetectorPerModelConfig) -> bool {
 /// A `[model.foo]` entry from config.toml, parsed directly from raw TOML (bypassing deep merge).
 /// Scalar fields are `Option` so absent means "inherit from defaults/prefetched".
 /// The collection fields (`extra_headers`, `reasoning_efforts`) merge only when non-empty and so cannot express "override to empty."
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ConfigModelOverride {
     pub model: Option<String>,
@@ -4233,6 +4750,97 @@ pub struct ConfigModelOverride {
     pub show_model_fingerprint: Option<bool>,
     pub stream_tool_calls: Option<bool>,
     pub reasoning_summary: Option<ReasoningSummary>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ConfigModelOverride {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            model,
+            model_family,
+            base_url,
+            mtls_cert_dir,
+            name,
+            description,
+            api_key,
+            env_key,
+            auth_provider,
+            model_provider,
+            api_base_url,
+            max_completion_tokens,
+            temperature,
+            top_p,
+            api_backend,
+            auth_scheme,
+            extra_headers,
+            query_params,
+            env_http_headers,
+            context_window,
+            auto_compact_threshold_percent,
+            system_prompt_label,
+            use_concise,
+            agent_type,
+            inference_idle_timeout_secs,
+            max_retries,
+            rate_limit_retry_threshold,
+            subagent_rate_limit_max_attempts,
+            hidden,
+            supported_in_api,
+            reasoning_effort,
+            supports_reasoning_effort,
+            reasoning_efforts,
+            supports_backend_search,
+            programmatic_tool_calling,
+            compactions_remaining,
+            compaction_at_tokens,
+            show_model_fingerprint,
+            stream_tool_calls,
+            reasoning_summary,
+        } = self;
+        f.debug_struct("ConfigModelOverride")
+            .field("model", model)
+            .field("model_family", model_family)
+            .field("base_url", &base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("mtls_cert_dir", mtls_cert_dir)
+            .field("name", name)
+            .field("description", description)
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("env_key", env_key)
+            .field("auth_provider", auth_provider)
+            .field("model_provider", model_provider)
+            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("api_backend", api_backend)
+            .field("auth_scheme", auth_scheme)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("env_http_headers", env_http_headers)
+            .field("context_window", context_window)
+            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field("system_prompt_label", system_prompt_label)
+            .field("use_concise", use_concise)
+            .field("agent_type", agent_type)
+            .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field("hidden", hidden)
+            .field("supported_in_api", supported_in_api)
+            .field("reasoning_effort", reasoning_effort)
+            .field("supports_reasoning_effort", supports_reasoning_effort)
+            .field("reasoning_efforts", reasoning_efforts)
+            .field("supports_backend_search", supports_backend_search)
+            .field("programmatic_tool_calling", programmatic_tool_calling)
+            .field("compactions_remaining", compactions_remaining)
+            .field("compaction_at_tokens", compaction_at_tokens)
+            .field("show_model_fingerprint", show_model_fingerprint)
+            .field("stream_tool_calls", stream_tool_calls)
+            .field("reasoning_summary", reasoning_summary)
+            .finish()
+    }
 }
 impl ConfigModelOverride {
     pub(crate) fn apply(
@@ -4369,7 +4977,7 @@ impl ConfigModelOverride {
     }
 }
 /// Shared model metadata: the common fields across all model sources.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelInfo {
     /// Stable unique identifier for this catalog entry.
     /// Falls back to `model` when absent.
@@ -4455,6 +5063,95 @@ pub struct ModelInfo {
     /// See [`LazinessDetectorPerModelConfig`].
     #[serde(default)]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ModelInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            id,
+            model,
+            model_family,
+            base_url,
+            name,
+            description,
+            max_completion_tokens,
+            temperature,
+            top_p,
+            api_backend,
+            auth_scheme,
+            extra_headers,
+            query_params,
+            env_http_headers,
+            context_window,
+            auto_compact_threshold_percent,
+            system_prompt_label,
+            use_concise,
+            agent_type,
+            agent_type_inferred,
+            inference_idle_timeout_secs,
+            max_retries,
+            rate_limit_retry_threshold,
+            subagent_rate_limit_max_attempts,
+            hidden,
+            user_selectable,
+            supported_in_api,
+            reasoning_effort,
+            supports_reasoning_effort,
+            reasoning_efforts,
+            variants,
+            supports_backend_search,
+            programmatic_tool_calling,
+            compactions_remaining,
+            compaction_at_tokens,
+            show_model_fingerprint,
+            stream_tool_calls,
+            reasoning_summary,
+            laziness_detector,
+        } = self;
+        f.debug_struct("ModelInfo")
+            .field("id", id)
+            .field("model", model)
+            .field("model_family", model_family)
+            .field("base_url", &fuigo_auth::redact_url(base_url))
+            .field("name", name)
+            .field("description", description)
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("api_backend", api_backend)
+            .field("auth_scheme", auth_scheme)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("env_http_headers", env_http_headers)
+            .field("context_window", context_window)
+            .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
+            .field("system_prompt_label", system_prompt_label)
+            .field("use_concise", use_concise)
+            .field("agent_type", agent_type)
+            .field("agent_type_inferred", agent_type_inferred)
+            .field("inference_idle_timeout_secs", inference_idle_timeout_secs)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("subagent_rate_limit_max_attempts", subagent_rate_limit_max_attempts)
+            .field("hidden", hidden)
+            .field("user_selectable", user_selectable)
+            .field("supported_in_api", supported_in_api)
+            .field("reasoning_effort", reasoning_effort)
+            .field("supports_reasoning_effort", supports_reasoning_effort)
+            .field("reasoning_efforts", reasoning_efforts)
+            .field("variants", variants)
+            .field("supports_backend_search", supports_backend_search)
+            .field("programmatic_tool_calling", programmatic_tool_calling)
+            .field("compactions_remaining", compactions_remaining)
+            .field("compaction_at_tokens", compaction_at_tokens)
+            .field("show_model_fingerprint", show_model_fingerprint)
+            .field("stream_tool_calls", stream_tool_calls)
+            .field("reasoning_summary", reasoning_summary)
+            .field("laziness_detector", laziness_detector)
+            .finish()
+    }
 }
 /// Whether `slug` names an OpenAI model: `gpt-*` (including `gpt-oss`), `chatgpt-*`, `codex-*`, or an `o<N>` reasoning model (`o3`, `o4-mini`).
 /// Case-insensitive; a provider prefix such as `openai/` and the FluxRouter `flux-pinned-` lane prefix are ignored.
@@ -4626,7 +5323,7 @@ impl ModelInfo {
 }
 /// Flat struct so credential and endpoint fields coexist after deep-merge.
 /// Routing reads fields, not provenance.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub info: ModelInfo,
     /// Local mTLS client identity directory selected with an explicit model-level `base_url`.
@@ -4640,6 +5337,29 @@ pub struct ModelEntry {
     pub auth_provider: Option<crate::auth::AuthProviderRef>,
     /// When set, `base_url` is used for session auth, `api_base_url` for API-key auth.
     pub api_base_url: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ModelEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            info,
+            mtls_cert_dir,
+            api_key,
+            env_key,
+            auth_provider,
+            api_base_url,
+        } = self;
+        f.debug_struct("ModelEntry")
+            .field("info", info)
+            .field("mtls_cert_dir", mtls_cert_dir)
+            .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
+            .field("env_key", env_key)
+            .field("auth_provider", auth_provider)
+            .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
+            .finish()
+    }
 }
 impl ModelEntry {
     /// Minimal fallback entry for an unknown model slug.
@@ -5051,13 +5771,16 @@ pub(crate) struct ResolvedCredentials {
 }
 /// First usable BYOK credential: a non-empty (trimmed) api_key, else the first set, non-empty env_key value.
 /// Single source of truth for has_own_credentials, resolve_credentials, and the JWT-reload path.
+/// A model's own credential: its `api_key`, else the variable its `env_key` names. P70a: an `api_key` that says
+/// `${FUIGO_API_KEY}` (left literal by config loading unless the key was exported) is resolved here, into the runtime
+/// credential only, from the in-memory key store.
 pub(crate) fn first_own_credential(
     api_key: Option<&str>,
     env_key: Option<&EnvKeys>,
 ) -> Option<String> {
     api_key
         .filter(|k| !k.trim().is_empty())
-        .map(str::to_owned)
+        .map(|k| fuigo_config::resolve_first_party_key_references(k).into_owned())
         .or_else(|| env_key.and_then(EnvKeys::resolve_value))
 }
 /// Whether the session bearer may be attached to `url`, saying so when not.
@@ -5078,9 +5801,9 @@ fn session_may_be_sent_to(model: &str, url: &str) -> bool {
     }
     tracing::warn!(
         model = %model,
-        base_url = %url,
+        base_url = %fuigo_auth::redact_url(url),
         "the session credential was not attached: this model's endpoint is not a \
-         configured first-party HTTPS origin. Set `[endpoints].fuigo_api_base_url` \
+         configured HTTPS API origin. Set `[endpoints].fuigo_api_base_url` \
          to it, or give the model its own `api_key`/`env_key`."
     );
     false
@@ -5093,7 +5816,7 @@ fn session_may_be_sent_to(model: &str, url: &str) -> bool {
 /// the same hole open with a different key: a prefetched catalogue model
 /// carries its own `base_url`, never passes through the `[model.*]` fail-closed
 /// guard in `resolve_model_list` (a prefetched map replaces `resolved`
-/// wholesale), and would otherwise receive the user's first-party API key at
+/// wholesale), and would otherwise receive the user's own Fuigo API key at
 /// whatever host the catalogue named.
 ///
 /// This uses [`crate::util::is_configured_api_origin`], not the strict
@@ -5119,9 +5842,9 @@ fn env_api_key_may_be_sent_to(model: &str, url: &str) -> bool {
     }
     tracing::warn!(
         model = %model,
-        base_url = %url,
+        base_url = %fuigo_auth::redact_url(url),
         "FUIGO_API_KEY was not attached: this model's endpoint is not a configured \
-         first-party origin. Give the model its own `env_key`, or add the host to \
+         API origin. Give the model its own `env_key`, or add the host to \
          `[endpoints]`, if it should be reachable."
     );
     false
@@ -5197,6 +5920,13 @@ pub(crate) fn resolve_credentials(
 /// `disable_api_key_auth` at the credential seam: swap a first-party Ferrox Labs API key for the IdP session.
 /// When no session is available the request fails and forces a login.
 /// BYOK (non-Ferrox Labs `base_url`) is untouched; no-op when the switch is off.
+///
+/// Two decisions, two predicates (P42):
+/// * **Refusing** the API key uses the broad `is_fuigo_api_url` (host only, any scheme or port, every
+///   loopback URL). Broad is right for a refusal: it refuses the key in more places, never fewer.
+/// * **Substituting** the session token is a delivery, so it asks the one session-delivery predicate,
+///   `session_delivery::session_may_reach`. Where the key is refused but the session may not go
+///   (`http://`, another port, an unconfigured loopback), the request carries no credential and 401s.
 pub(crate) fn enforce_disable_api_key_auth(
     creds: &mut ResolvedCredentials,
     disable_api_key_auth: bool,
@@ -5206,13 +5936,17 @@ pub(crate) fn enforce_disable_api_key_auth(
         && creds.auth_type == fuigo_chat_state::AuthType::ApiKey
         && crate::util::is_fuigo_api_url(&creds.base_url)
     {
+        let session_may_reach = crate::auth::session_delivery::session_may_reach(&creds.base_url);
         creds.auth_type = fuigo_chat_state::AuthType::SessionToken;
-        creds.api_key = session_key.map(str::to_owned);
+        creds.api_key = session_key
+            .filter(|_| session_may_reach)
+            .map(str::to_owned);
         fuigo_telemetry::unified_log::debug(
             "auth: kill switch blocked a first-party API key at the credential seam",
             None,
             Some(serde_json::json!({
-                "replaced_with_session": session_key.is_some(),
+                "replaced_with_session": creds.api_key.is_some(),
+                "session_withheld_from_destination": session_key.is_some() && !session_may_reach,
                 "base_url": creds.base_url,
             })),
         );
@@ -5332,6 +6066,56 @@ pub(crate) fn resolve_aux_model_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
 ) -> Option<SamplerConfig> {
+    resolve_aux_model_sampling_config_inner(
+        model_id,
+        models,
+        endpoints,
+        session_key,
+        true,
+        disable_api_key_auth,
+        alpha_test_key,
+        client_version,
+        HelperModelChoice::Default,
+    )
+}
+/// [`resolve_aux_model_sampling_config`] for the credential the `AuthManager` holds.
+/// P42: a held `AuthMode::ApiKey` credential is a static key, not a session token, so the session-delivery
+/// predicate does not bound it on the fallback route (it keeps its pre-P42 behaviour there).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_aux_model_sampling_config_for_held(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    endpoints: &EndpointsConfig,
+    held: Option<&crate::auth::FuigoAuth>,
+    disable_api_key_auth: bool,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    choice: HelperModelChoice,
+) -> Option<SamplerConfig> {
+    resolve_aux_model_sampling_config_inner(
+        model_id,
+        models,
+        endpoints,
+        held.map(|a| a.key.as_str()),
+        held.is_none_or(crate::auth::session_delivery::is_session_credential),
+        disable_api_key_auth,
+        alpha_test_key,
+        client_version,
+        choice,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn resolve_aux_model_sampling_config_inner(
+    model_id: &str,
+    models: &IndexMap<String, ModelEntry>,
+    endpoints: &EndpointsConfig,
+    session_key: Option<&str>,
+    session_key_is_session: bool,
+    disable_api_key_auth: bool,
+    alpha_test_key: Option<String>,
+    client_version: Option<String>,
+    choice: HelperModelChoice,
+) -> Option<SamplerConfig> {
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
@@ -5353,8 +6137,26 @@ pub(crate) fn resolve_aux_model_sampling_config(
             );
             return None;
         }
+        // P90 F6: a helper the user chose whose endpoint takes no credential (a local model) is
+        // used as configured, with no credential. Falling through would substitute the Ferrox
+        // inference route and a session/`FUIGO_API_KEY`/deployment key the user never chose
+        // for this helper (or, with none, the caller's session fallback). Only an endpoint the
+        // Ferrox bearer may be sent to (HTTPS, a trusted Ferrox origin; never arbitrary
+        // loopback) is excluded: it needs the bearer the fallthrough supplies.
+        if choice == HelperModelChoice::Explicit
+            && !crate::util::is_fuigo_api_bearer_url(&sampler.base_url)
+        {
+            return Some(sampler);
+        }
     }
+    // P42: this entry carries the bearer as its own `api_key`, which `resolve_credentials` attaches
+    // without a destination check, so the session token must pass the one delivery predicate here.
+    let inference_base_url = endpoints.resolve_inference_base_url();
     let fuigo_bearer = session_key
+        .filter(|_| {
+            !session_key_is_session
+                || crate::auth::session_delivery::session_may_reach(&inference_base_url)
+        })
         .map(|s| s.to_owned())
         .or_else(|| crate::agent::auth_method::read_fuigo_api_key_env().ok())
         .or_else(|| endpoints.deployment_key.clone());
@@ -5367,7 +6169,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
                 model: catalog_entry
                     .map(|e| e.info.model)
                     .unwrap_or_else(|| model_id.to_owned()),
-                base_url: endpoints.resolve_inference_base_url(),
+                base_url: inference_base_url,
                 name: None,
                 description: None,
                 max_completion_tokens: None,
@@ -5426,20 +6228,46 @@ pub(crate) fn resolve_aux_model_sampling_config(
     );
     None
 }
+/// How a helper (auxiliary) model was chosen; see [`stamp_session_local_sampler_fields`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HelperModelChoice {
+    /// The compiled default or a remote-settings value.
+    Default,
+    /// Set by the user in a config file, an environment variable or a CLI flag.
+    Explicit,
+}
+impl HelperModelChoice {
+    /// `Explicit` exactly when `slug` is the value the user chose for this helper slot.
+    pub(crate) fn of(explicit: Option<&str>, slug: &str) -> Self {
+        if explicit == Some(slug) {
+            Self::Explicit
+        } else {
+            Self::Default
+        }
+    }
+}
 /// Stamp the session-local fields (client id, attribution, bearer resolver, retries) from the active session onto a routed aux `SamplerConfig`.
 /// A helper model then keeps the session's auth/attribution.
 /// Shared by image-describe and the auto-mode classifier so the two can't drift.
 ///
 /// The resolver gate is host-based, stricter than `session_token_auth_gate`.
 /// A session-token deployment on a custom `models_base_url` loses aux-sampler refresh, rather than risk the session bearer on a third-party endpoint.
+///
+/// During a subscription session a [`HelperModelChoice::Default`] helper is replaced by the
+/// subscription session's config: a default must not turn a selected subscription into a paid
+/// API call, or into a call on another subscription provider or account (a resolver is bound
+/// to its account, so even the same provider may be a different account). A
+/// [`HelperModelChoice::Explicit`] helper keeps its own route
+/// (P90 F6): the user chose it, possibly to keep images or commands away from the
+/// subscription vendor.
 pub(crate) fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
     client_identifier: Option<String>,
     max_retries: Option<u32>,
+    choice: HelperModelChoice,
 ) {
-    // Auxiliary defaults must not turn a selected subscription into a paid API call.
-    if active_session_config.subscription.is_some() && cfg.subscription.is_none() {
+    if active_session_config.subscription.is_some() && choice == HelperModelChoice::Default {
         *cfg = active_session_config.clone();
     }
     cfg.client_identifier = client_identifier;
@@ -5460,6 +6288,7 @@ pub(crate) fn finalize_image_describe_sampler_config(
     active_session_config: &SamplerConfig,
     client_identifier: Option<String>,
     max_retries: Option<u32>,
+    choice: HelperModelChoice,
 ) -> (String, SamplerConfig) {
     match resolved_aux {
         Some(mut describe_cfg) => {
@@ -5468,6 +6297,7 @@ pub(crate) fn finalize_image_describe_sampler_config(
                 active_session_config,
                 client_identifier,
                 max_retries,
+                choice,
             );
             let model = describe_cfg.model.clone();
             (model, describe_cfg)
@@ -5477,6 +6307,70 @@ pub(crate) fn finalize_image_describe_sampler_config(
             (model, active_session_config.clone())
         }
     }
+}
+/// P90 F6: during a subscription session an explicit helper is used only as the user's own
+/// catalog model. A slug the catalog does not know (say a local entry removed by a reload)
+/// would otherwise be resolved on the Ferrox inference route with whatever key is around, which
+/// is neither the user's helper nor the subscription; it becomes unusable (`None`) instead.
+pub(crate) fn explicit_helper_route(
+    resolved: Option<SamplerConfig>,
+    in_catalog: bool,
+    active_session_config: &SamplerConfig,
+    choice: HelperModelChoice,
+) -> Option<SamplerConfig> {
+    if choice == HelperModelChoice::Explicit
+        && active_session_config.subscription.is_some()
+        && !in_catalog
+    {
+        return None;
+    }
+    resolved
+}
+/// What to do with a helper route resolved earlier (the auto-mode classifier is wired once per
+/// session) now that the session's model may have changed; see [`cached_helper_route`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CachedHelperRoute {
+    /// Use the cached helper route.
+    Keep,
+    /// Use the session's current model instead.
+    UseSession,
+    /// Use neither: the helper is the user's explicit choice and cannot be used.
+    Refuse,
+}
+/// P90 F6, re-judged per request against the session's CURRENT config: in a subscription
+/// session a default helper follows the session (a route cached before a switch to the
+/// subscription may be a paid one), and an explicit helper is kept only while it is still a
+/// catalog model ([`explicit_helper_route`]). Outside a subscription session nothing changes.
+pub(crate) fn cached_helper_route(
+    choice: HelperModelChoice,
+    in_catalog: bool,
+    active_session_config: &SamplerConfig,
+) -> CachedHelperRoute {
+    if active_session_config.subscription.is_none() {
+        return CachedHelperRoute::Keep;
+    }
+    match choice {
+        HelperModelChoice::Default => CachedHelperRoute::UseSession,
+        HelperModelChoice::Explicit if !in_catalog => CachedHelperRoute::Refuse,
+        HelperModelChoice::Explicit => CachedHelperRoute::Keep,
+    }
+}
+/// P90 F6: whether a helper must fail instead of falling back to the active session. During a
+/// subscription session an explicitly chosen helper that cannot be used is an error: falling
+/// back would send its input to the subscription vendor the user chose a different helper to
+/// avoid. Image description fails the turn; the auto-mode classifier answers "unavailable"
+/// (which asks the user), since it also judges subagents that may run on other providers.
+/// The session-summary client is the one exception: it is built during session setup, where a
+/// failure would refuse the whole session, and it only ever summarises the session's own
+/// conversation, which the session model already receives.
+pub(crate) fn explicit_helper_fallback_refused(
+    resolved_aux: Option<&SamplerConfig>,
+    active_session_config: &SamplerConfig,
+    choice: HelperModelChoice,
+) -> bool {
+    resolved_aux.is_none()
+        && choice == HelperModelChoice::Explicit
+        && active_session_config.subscription.is_some()
 }
 /// Re-derive `auth_type` from the model's own credentials so BYOK env-key models stay on `ApiKey` even when a session token is present.
 /// Falls back to `fallback` when the model isn't in the on-disk catalog.
@@ -5492,7 +6386,13 @@ pub(crate) fn resolve_chat_state_auth_type(
 /// Selects Ferrox Labs-only Responses extensions for trusted backend-search routes.
 ///
 /// Third-party Responses providers reject `no_inline_citations`.
-/// So it must stay on a trusted first-party route and apply only to models with backend search.
+/// So it must stay on a user-configured HTTPS API origin (or the compiled cli-chat-proxy route) and apply only to models
+/// with backend search. P30: this follows configured trust, not the FluxRouter-operated host check. That is unchanged
+/// behaviour and is recorded, not certified: the field is requested when the effective model entry says
+/// `supports_backend_search`. That flag is model metadata (from a catalogue, possibly inherited, or a `[model.*]`
+/// override) and is NOT bound to the current destination: an override can change `base_url` and keep the flag.
+/// Nothing verifies that the destination accepts the field. It discloses no identity and no credential, so it is outside both
+/// trust classes; contrast `fuigo_extra_ca::fluxrouter::is_fluxrouter_url`, which gates fields Fuigo adds unasked.
 pub(crate) fn response_include_extensions(
     supports_backend_search: bool,
     api_backend: &ApiBackend,
@@ -5519,6 +6419,10 @@ pub(crate) fn sampling_config_for_model(
     let max_completion_tokens = info.max_completion_tokens;
     let temperature = info.temperature;
     let top_p = info.top_p;
+    // P70a: `extra_headers` are NOT resolved against the saved key (Astra f3 #1): besides user config they come from
+    // the remote model catalogue and its disk cache (`models/cache.rs` keeps them as literal values), and resolving
+    // `${FUIGO_API_KEY}` there would hand the key to a catalogue-named endpoint. `api_key` (user config only) and
+    // `env_key` / `env_http_headers` are the spellings that see it.
     let mut extra_headers = info.extra_headers.clone();
     inject_url_derived_headers(
         &mut extra_headers,
@@ -5581,7 +6485,7 @@ pub(crate) fn sampling_config_for_model(
 ///
 /// * cli-chat-proxy bases get `X-XAI-Token-Auth` and `x-authenticateresponse` headers.
 ///   This mirrors the inline match in the legacy `sampling::Client::new` on `is_cli_chat_proxy_url`.
-/// * With the optional non-production feature, matching first-party hosts may get an extra access header from the corresponding key argument.
+/// * With the optional non-production feature, matching Ferrox-operated non-production hosts may get an extra access header from the corresponding key argument.
 ///
 /// Existing entries are never overwritten so callers can pre-set a value.
 pub(crate) fn inject_url_derived_headers(
@@ -5597,6 +6501,34 @@ pub(crate) fn inject_url_derived_headers(
             .entry("x-authenticateresponse".to_string())
             .or_insert_with(|| "authenticate-response".to_string());
     }
+    // P15-R examined this line and left it UNGATED, deliberately. It is the one `x-fuigo-*`
+    // name outside `fuigo-sampler` that reaches a BYOK destination, and P15's §4 deliverable
+    // was to enumerate the namespace, so the decision is recorded here rather than left to be
+    // rediscovered:
+    //
+    // * The value is two-valued — `"interactive"` or `"headless"` (`fuigo_http::CLIENT_MODE_HEADER`).
+    //   It is a behavioural flag, not an identifier: it is identical for every user in the same
+    //   mode, so it cannot correlate one user's traffic across providers. That is the property
+    //   the P15 gate exists to protect, and this header does not have it.
+    // * It discloses strictly LESS than what already reaches the same destination
+    //   unconditionally: `fuigo_sampler`'s `SamplingClient::new` always sets
+    //   `User-Agent: fuigo-shell/<version> (<os>; <arch>)`, on every request to every host, with
+    //   no gate. Withholding `x-fuigo-client-mode` while announcing the product, version and
+    //   platform in the UA would buy nothing.
+    // * Gating it on `fuigo_extra_ca::fluxrouter::is_fluxrouter_operated_url` (a compiled
+    //   `https://api.fluxrouter.ai` host check; `is_first_party_url` before P30) would strip it
+    //   from self-hosted gateways and from the cli-chat-proxy this very function exists to
+    //   serve. P30 resolved the "two definitions of first-party" collision by naming the two
+    //   classes apart (FluxRouter-operated = identity disclosure; user-configured API origin =
+    //   credential delivery, `docs/destination-trust-policy.md`). This header is neither: it
+    //   carries no identity and no credential, so it is ungated.
+    // * `config_tests::inject_url_derived_headers_skips_proxy_headers_for_external_url` pins the
+    //   present behaviour on purpose: it asserts the proxy-auth pair IS withheld from
+    //   `https://api.x.ai/v1` and that this header is NOT. Changing it is a contract change and
+    //   belongs in its own packet, with that test rewritten deliberately.
+    //
+    // The `x-fuigo-*` names that DO carry identity are gated, and enumerated, in
+    // `fuigo_sampler::client` (`CLIENT_IDENTITY_HEADERS`, `PER_REQUEST_IDENTITY_HEADERS`).
     headers
         .entry(crate::http::CLIENT_MODE_HEADER.to_string())
         .or_insert_with(|| crate::http::process_client_mode().to_string());

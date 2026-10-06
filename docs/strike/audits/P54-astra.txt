@@ -1,0 +1,87 @@
+P54 — Astra cross-model audit (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null).
+Each round's final report is reproduced verbatim (ANSI colour codes stripped); the tool-call transcripts are omitted.
+
+===== Round 1: 6f4d853a..ea36b26e =====
+Audited `6f4d853a..ea36b26e` on `strike/p54`. No files modified. **The disclosure rule is not fully enforced.**
+
+1. **HIGH — OTLP still exports account identity through span attributes.**  
+   [otel_layer/mod.rs:350](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:350) redacts the batch without a destination decision. [redact.rs:126](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-telemetry/src/otel_layer/redact.rs:126) explicitly permits `user_id`, populated with the authenticated account ID by [mvp_agent/mod.rs:1520](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/mod.rs:1520). Consequently, a non-FluxRouter collector receives the account ID despite the resource gate. The retry clones and resends this same batch. Apply destination withholding to span/event/link identity attributes and test both attempts.
+
+2. **HIGH — Registry pseudonymization leaves the machine’s hostname exposed.**  
+   [session_registry_client.rs:139](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/session_registry_client.rs:139) clones the entire request and replaces only `device_id`. [acp_agent.rs:1669](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:1669) obtains the real OS hostname, subsequently serialized as `hostname`. A non-FluxRouter registry therefore retains another stable machine identifier, potentially containing the user’s name. The comment claims a recorded decision, but its referenced receipt is missing.
+
+3. **HIGH — The unchanged LOC identity reaches feedback-upload bodies.**  
+   [agent_ops.rs:4298](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:4298) writes machine/account attribution into `hunk_records.jsonl`. [feedback_archive.rs:68](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:68) packs session files without identity filtering; [feedback.rs:334](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/extensions/feedback.rs:334) uploads that archive. A non-FluxRouter `cli_chat_proxy_base_url` survives the “custom destination” check, which only checks dedicated trace settings at [agent_ops.rs:3556](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:3556). LOC cannot be classified simply as local storage: this upload needs destination-aware handling or an explicit applicable exemption.
+
+4. **MEDIUM — Workspace environment uploads are an unclassified body-identity site.**  
+   [environment.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-workspace/src/upload/environment.rs:184) copies `user_id` and team `principal_id`; [handle.rs:2612](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-workspace/src/handle.rs:2612) enqueues the JSON for the configured storage proxy without an identity decision. This is absent from P54’s policy table. Explicitly classify whether workspace collection configuration authorizes these identifiers; otherwise gate them. General collection consent alone should not silently establish the exception.
+
+5. **MEDIUM — The new guard misses ordinary new identity writers.**  
+   [identity_body_guard.rs:29](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:29) omits `email`; [identity_body_guard.rs:223](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:223) recognizes only public field declarations. An in-memory emulation matched the baseline across **3,039 files**, but both `json!({"email": auth.email})` and a private serializable `user_id: String` field counted **zero**. Either can introduce an identity-bearing request without failing the guard. Add these spellings and positive controls.
+
+6. **MEDIUM — OTLP’s hostile test does not protect production destination wiring.**  
+   [otel_layer/mod.rs:588](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-telemetry/src/otel_layer/mod.rs:588) tests only `resource_with_tenant_id`. Replacing the production endpoint arguments at lines 314 and 385 with a fixed FluxRouter URL leaves that test—and the token-count guard—unchanged while disclosing identity. Add an exporter-level capture covering initial delivery and refresh retry. Registry/upsert tests do exercise their real send paths; Mixpanel/review tests principally exercise helpers.
+
+7. **LOW — Referenced classification evidence is absent.**  
+   [destination-trust-policy.md:162](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/docs/destination-trust-policy.md:162) and the guard refer to `docs/strike/receipts/R063-p54.md`, which does not exist in this checkout. Include the actual classifications, especially unchanged or ambiguous sites.
+
+The changed gates otherwise follow their request destinations; current Mixpanel enrichment, `principal`, and `user_id` are removed. External OTEL, explicitly configured feedback authors, and ACP initialization have supporting reasons to remain unchanged. Consent gates are unchanged.
+
+The pseudonym hashes the normalized origin and input with SHA-256, without reversible encoding. Its tests establish fixture inequality; the implementation does not explicitly guarantee inequality for every arbitrary input. Rust tests and mutation tests were not executed in this read-only audit.
+
+VERDICT: DO-NOT-LAND
+
+===== Round 2: ea36b26e..5c1be0aa (full 6f4d853a..5c1be0aa) =====
+Audited `strike/p54` at `5c1be0aae02a632e68726dfd1337a867378a9852`. Two round-1 findings remain unresolved. No files modified.
+
+- **HIGH — HIGH-3 remains: persisted LOC identity bypasses the destination gate.** [agent_ops.rs:4302](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:4302) applies disclosure only when creating the writer context. Existing `hunk_records.jsonl` records remain untouched—the writer [appends](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-hunk-tracker/src/loc/mod.rs:250). Reopening a session created before P54, or under an allowed destination, then uploading feedback through a non-FluxRouter proxy sends those raw identifiers: [feedback.rs:314](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/extensions/feedback.rs:314) builds the archive before resolving its current destination, and [feedback_archive.rs:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:110) copies file bytes unchanged. Previously generated pseudonyms also retain their old origin scope. Apply disclosure to the outgoing archive using its actual destination, covering existing records. A currently configured custom bucket **does** block one-shot feedback; that narrower case is not the finding.
+
+- **MEDIUM — MEDIUM-5 remains partially unresolved: serialized email fields evade the guard.** [identity_body_guard.rs:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:55) omits `email` and `user_email` from `FIELD_NAMES`. Adding `"email"` to `BODY_KEYS` catches quoted literals, but a derived serializable body containing `email: String` or `user_email: String` contributes zero tokens. The visibility fix catches private `user_id` fields, but not these email fields. Extend the field list and positive controls.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Round-2 read-only audit completed; landing gate fails. |
+| HIGH-1: OTLP attributes | ✅ Done | Identity removed from spans, events and links before retry cloning. Retry resource is gated again. |
+| HIGH-2: registry hostname | ✅ Done | Non-FluxRouter registration omits hostname; production serialization and capture-test assertions agree. |
+| HIGH-3: LOC archives | ⬜ Pending | Persisted records and destination changes remain uncovered, as above. |
+| MEDIUM-4: workspace environment | ⬜ Pending | Correctly deferred outside P54 ownership; decision/proposal still required in R063. |
+| MEDIUM-5: guard scanning | ⬜ Pending | Quoted email and private listed fields covered; email field declarations still missed. |
+| MEDIUM-6: OTLP production wiring | ✅ Done | Test now exercises `export_inputs`, directly called by production `export()`. |
+| LOW-7: receipt | ⬜ Pending | Expected post-gate deliverable; absence is not an additional landing finding. |
+
+No additional fix-induced issue was established. `export_inputs` preserves the existing export gates and credential behavior; redaction now runs synchronously before export. The regular session-state upload path currently returns `session_state_upload_unavailable`, so the HIGH finding rests on the reachable feedback archive path.
+
+Verification was source-based. A read-only Python reproduction of the guard scanned **3,039 Rust files**, matched all **242** pinned entries, and demonstrated the email-field misses. Rust tests were not run in this read-only environment; these are not runtime-pass claims.
+
+VERDICT: DO-NOT-LAND
+
+===== Round 3: 5c1be0aa..bfa84701 (full 6f4d853a..bfa84701) =====
+Audited `strike/p54` at `bfa84701`. **HIGH-3 and MEDIUM-5 are resolved in the inspected source.** No new BLOCKER/HIGH finding; one nonblocking MEDIUM regression remains.
+
+- **MEDIUM — double pseudonymization splits machine attribution.** [feedback_archive.rs:71](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:71) hashes every stored machine identifier, but [agent_ops.rs:4302](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:4302) already pseudonymizes new records. At destination D, legacy records therefore carry `P(D, machine)` while new records carry `P(D, P(D, machine))`. A read-only reproduction confirmed different keys for the same machine and origin. Identity remains withheld, but attribution continuity breaks. Follow up with a migration-aware, single-transformation design and mixed old/new regression coverage.
+
+Verification:
+
+- **Archive gate:** [feedback.rs:311](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/extensions/feedback.rs:311) resolves the destination before packing and uses that same configuration for upload. Every packed `hunk_records.jsonl` passes through sanitization: machine strings become origin-scoped pseudonyms, human account identifiers become null, `userId`/`user_id` disappear, and invalid JSON/non-object lines are dropped. FluxRouter receives original bytes; local files are opened read-only.
+- **Other upload paths:** no alternate active LOC-file uploader found. [trace.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/upload/trace.rs:77) disables normal session-state upload; the harness uploader returns false; the general session-state archive builder is test-only.
+- **Guard:** [identity_body_guard.rs:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-extra-ca/tests/identity_body_guard.rs:55) includes both email fields. Independent scanner reproduction inspected **3,039 Rust files**, matched **248 pinned files / 1,731 tokens**, and reproduced the **12-token** positive control with **zero EXPECTED mismatches**.
+
+Recorded ownership exclusions remain unchanged: workspace `user_id`/`principal_id` at `fuigo-workspace/src/upload/environment.rs:175`; identity-bearing unified/debug logs uploaded through `fuigo-shell/src/upload/trace.rs:845`; persisted feedback `author_email` at `fuigo-shell/src/session/feedback_manager.rs:99`.
+
+No files modified; worktree remains clean. `git diff --check` passed. Rust compilation and archive tests were not executed under the read-only restriction; archive conclusions are source-level verification.
+
+VERDICT: LAND-WITH-FOLLOWUPS
+
+===== Round 4: bfa84701..fe981fd0 (full 6f4d853a..fe981fd0) =====
+Audited `fe981fd0` on clean branch `strike/p54`, covering both `bfa84701..HEAD` and the full `6f4d853a..HEAD` packet. No open BLOCKER, HIGH, MEDIUM or LOW findings within P54.
+
+- **Round 3 MEDIUM resolved:** [agent_ops.rs:4305](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:4305) supplies real local IDs again. [feedback_archive.rs:46](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/upload/feedback_archive.rs:46) applies the sole transformation when packing. [feedback.rs:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p54/crates/codegen/fuigo-shell/src/extensions/feedback.rs:320) derives its destination from the same configuration used for upload. Pre-P54 and newly written records therefore receive the same single transformation.
+- **EXPECTED pin consistent:** read-only reproduction of the scanner and its positive control found 3,039 Rust files, 248 nonzero file entries and 1,729 tokens, with zero mismatches. `agent_ops.rs` correctly counts 4.
+- **Full-packet review:** no additional regression found in telemetry filtering, pseudonym generation, registry/backend bodies, review comments or archive wiring. `git diff --check` passed.
+
+Receipt exclusions remain unchanged: workspace `environment.rs` user/principal IDs; unified/debug logs uploaded through `upload/trace.rs`; persisted feedback `author_email` in session archives. These remain outside P54 ownership.
+
+Verification is source-level plus the scanner reproduction; Rust compilation and runtime tests were not rerun under the read-only restriction. No files modified.
+
+VERDICT: LAND
+

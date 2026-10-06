@@ -242,8 +242,24 @@ pub(super) struct ResultLine {
     pub(super) structured_output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) errors: Option<Vec<String>>,
+    /// The schema's own `permission_denials` (Contract D.2.2), in its own entry shape. Omitted when
+    /// fuigo has no denial to report — fuigo does not see every refusal (a deny rule is decided
+    /// inside the agent and never asks), so it does not claim an empty list means none happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) permission_denials: Option<Vec<PermissionDenial>>,
     pub(super) session_id: String,
     pub(super) uuid: String,
+}
+
+/// One entry of the `result.permission_denials` array, exactly the schema's
+/// `{tool_name, tool_use_id, tool_input}`. Fuigo-only detail (the rule, the remedy) is deliberately
+/// **not** added here: this format is not fuigo's to extend, and an unknown key in a strictly
+/// parsed schema is how a denial gets dropped. That detail is on stderr and in the other formats.
+#[derive(Clone, Serialize)]
+pub(super) struct PermissionDenial {
+    pub(super) tool_name: String,
+    pub(super) tool_use_id: String,
+    pub(super) tool_input: Value,
 }
 
 /// Raw Messages API stream events serialized as the `event` body of a `stream_event` line.

@@ -125,9 +125,119 @@ packages. `node scripts/package-notices.js --check` verifies exact source
 bytes before meta publication. Keep these files in each manifest's `files`
 list; the release archives must contain them alongside their actual binaries.
 
-The current workflow publishes with the configured npm token and does not request
-provenance attestations. `FerroxLabs/fuigo` is public. Enabling provenance requires
-both `--provenance` and `id-token: write`; the existing release does not claim it.
+The workflow publishes with the configured npm token and requests provenance attestations
+(`npm publish --access public --provenance` on every publish). `FerroxLabs/fuigo` is public, so
+npm accepts provenance from it. Three things work together: each of the seven `package.json`
+files carries a `repository` field naming `git+https://github.com/FerroxLabs/fuigo.git` (with
+its own `directory`; `sync-version.js` stamps it and `--check` fails on drift, and
+`verify-package-archives.js` and `verify-published-platform.js` require it in the packed and
+the published manifest, and, under Actions, equal to `GITHUB_REPOSITORY`, because npm refuses a
+provenance publish whose `repository.url` does not match the repository that built it),
+`id-token: write` on the publish job only, and `--provenance` on both publish commands.
+Nothing proves the attestation itself until a real tagged run publishes.
+
+The post-publish verifier downloads through the same pinned public npm as
+`scripts/release/registry-release-inputs.sh` (empty environment, no npmrc, both registries
+pinned; `scripts/pinned-npm.js`). Each verify job uploads its digests (tarball sha512 and raw
+executable sha256), and the `github-release` job compares all six with the release assets it
+laid out (`scripts/release/verify-release-digests.js`) before creating the release.
+
+Nothing else in the release path depends on the repository's visibility: the
+publish job downloads the build artifacts of its own run (no token), publishes
+with `--access public` (the scoped `@fuigo/*` packages need it on every first
+publish, whatever the repository is) and uses no submodules. Users install from
+the public npm registry without credentials.
+
+---
+
+## GitHub Release
+
+From 1.0.21 on, a tag push also publishes a GitHub Release `v<version>`
+(decision D20). Users who installed through the gh-release path
+(`installer = "gh-release"` in `~/.fuigo/config.toml`) update with two `gh`
+commands from `crates/codegen/fuigo-update`:
+
+```sh
+gh release list --repo FerroxLabs/fuigo --limit 1 --exclude-drafts --exclude-pre-releases \
+  --json tagName --jq '.[0].tagName'                       # newest by creation date
+gh release download v<version> --repo FerroxLabs/fuigo \
+  --pattern fuigo-<version>-<os>-<arch> --output … --clobber
+```
+
+`<os>-<arch>` is one of `macos-aarch64`, `macos-x86_64`, `linux-aarch64`,
+`linux-x86_64`, `windows-aarch64`, `windows-x86_64`. No release before 1.0.21
+carried an asset under that name (v1.0.7 to v1.0.11 shipped only the npm
+tarballs), so that path had stopped updating at 1.0.11.
+
+The `github-release` job in `release.yml` runs last, after `verify-published`,
+only on a tag ref, and is the only job with `contents: write`. It uses the
+runner's `gh` CLI, no third-party action. `scripts/release/github-release-assets.sh`
+lays out 15 assets:
+
+| asset | source |
+|---|---|
+| `fuigo-<version>-<os>-<arch>` (6) | the build job's binary, checked byte-identical to the executable inside the matching npm tarball |
+| `fuigo-<version>.tgz`, `fuigo-<platform>-<version>.tgz` (7) | the npm tarballs, exactly what npm received |
+| `release-manifest.json` | `verify-package-archives.js`: name, version, integrity, shasum, size per tarball |
+| `SHA256SUMS` | sha256 of the other 14 assets, the v1.0.11 format |
+
+Release notes come from `docs/release-notes-<version>.md`; without that file the
+body is a short install line. A version with a `-` suffix is marked prerelease,
+so stable installers skip it. The publish job runs the same layout script on
+every run, dry runs included, so a broken layout fails before anything ships.
+
+**Re-running** is supported. An existing release for the tag, draft or not, is
+completed rather than duplicated: missing assets are uploaded, assets already
+present with the same sha256 (GitHub's asset `digest`) are left alone, a draft is
+published, and existing notes are never overwritten. An asset whose content
+differs fails the job; to replace it on purpose, run the workflow by hand on the
+tag with `dry_run` off and `replace_release_assets` on. After publishing, the job
+reads the release back, runs the installer's `gh release list` query and fails if
+it does not return this tag while this tag is the newest stable release, then
+downloads `fuigo-<version>-linux-x86_64` with the installer's command and checks
+it against SHA256SUMS.
+
+**Recovering when `verify-published` fails after npm published.** `github-release`
+needs all six verify jobs, so a failed one leaves npm complete and the release
+missing. Do **not** publish again: `publish` skips versions npm already has, and the
+tag cannot be moved. A "Re-run failed jobs" or a `workflow_dispatch` on the tag runs the
+tag's own copy of the workflow and scripts, so it only helps when the failure was a
+flaky runner, not a script bug. For a script bug, finish by hand from a checkout of the
+fixed scripts whose `crates/codegen/fuigo-pager/npm/fuigo/package.json` version equals
+the release version (the verifier reads its version from that file). Needs node 22,
+npm, `gh` (write access), `jq`, and Linux or macOS for the shell scripts:
+
+```sh
+V=1.0.21; W=$(mktemp -d)
+# 1. Run the verifier for every platform on a machine of that platform (the two win32
+#    ones need Windows; the others can run anywhere that platform is available):
+node crates/codegen/fuigo-pager/npm/fuigo/scripts/verify-published-platform.js <platform> \
+  --digest-out "$W/verified/verified-<platform>.json"      # all six JSON files into one dir
+# 2. Lay the assets out from the registry bytes and compare them with what was executed:
+scripts/release/registry-release-inputs.sh "$V" "$W/bin" "$W/npm"
+scripts/release/github-release-assets.sh "$V" "$W/bin" "$W/npm" "$W/gh-release"
+node scripts/release/verify-release-digests.js "$V" "$W/verified" "$W/gh-release"
+# 3. Create the release, exactly as the workflow does (add --prerelease for a "-" version).
+#    The notes file is optional: without docs/release-notes-$V.md the notes are the short install line the workflow writes.
+NOTES=(--notes "## Fuigo $V
+
+Install or update: \`npm install -g fuigo@$V\`
+
+SHA256SUMS lists the sha256 of every asset.")
+[ -s "docs/release-notes-$V.md" ] && NOTES=(--notes-file "docs/release-notes-$V.md")
+gh release create "v$V" --repo FerroxLabs/fuigo --verify-tag --title "Fuigo $V" \
+  "${NOTES[@]}" "$W"/gh-release/*
+```
+
+If a release or draft for the tag already exists, `gh release upload` the missing assets
+and `gh release edit "v$V" --draft=false` instead of `create`. Do not skip step 1 or 2:
+they are what proves the release carries the bytes that executed.
+
+The client and the script agree on asset names through
+`gh_release_asset_names_match_release_layout_script` in
+`crates/codegen/fuigo-update/src/auto_update_tests.rs`; change both together.
+The gh-release installer itself does not check SHA256SUMS today. It relies on
+`gh` over HTTPS.
 
 ---
 
@@ -145,6 +255,8 @@ Two places that *do* need real signing:
   `codesign --verify` fails on the app and notarization is rejected.
 - **GitHub Releases direct download**: browser-downloaded files are quarantined,
   so macOS needs Developer ID + notarization and Windows wants Authenticode.
+  The release's raw binaries carry only the linker's ad-hoc signature; they are
+  meant for the gh-release installer, which fetches them with `gh`, not a browser.
 
 If you strip to save size, note the trade: 166 MB → 141 MB raw, 42 MB → 43 MB
 brotli, so roughly 10% compressed for the loss of symbols in crash reports.
@@ -166,3 +278,7 @@ and an invalidated signature on arm64 is `Killed: 9` with no diagnostic.
 - [ ] all six binaries built for their own triple
 - [ ] `npm pack --dry-run` in the meta package shows `bin/` and nothing unexpected
 - [ ] tag the commit; `fuigo --version` embeds the short hash
+- [ ] `docs/release-notes-<version>.md` committed before tagging (the GitHub
+      Release body)
+- [ ] after the run: the `github-release` job is green and
+      `gh release view v<version> --repo FerroxLabs/fuigo` lists 15 assets

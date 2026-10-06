@@ -267,6 +267,9 @@ mod tests {
 /// Unix subprocess tests that lower `RLIMIT_NPROC` in a **child** process.
 /// Parent never touches rlimits (would flake parallel cargo test).
 /// Linux is the fidelity target; abort assert is Linux-only.
+// Test code: prints reach the harness (R077 print-deny waiver; `cfg(all(test, ..))` is not
+// recognised by clippy's `allow-print-in-tests`).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 #[cfg(all(test, unix))]
 mod nproc_tests {
     use super::tests::temp_repo_with_dirty_file;

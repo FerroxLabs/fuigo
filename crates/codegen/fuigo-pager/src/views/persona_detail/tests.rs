@@ -148,6 +148,7 @@ fn detail_paste_targets_only_active_editor_and_sanitizes() {
 
 #[test]
 fn detail_editor_uses_canonical_graphemes_and_keeps_cursor_visible() {
+    let _theme = crate::theme::cache::pin_theme();
     let (_directory, _path, mut state) = editable_state();
     state.selected_field = PersonaField::Model;
     let _ = handle_persona_detail_key(
@@ -186,4 +187,51 @@ fn detail_editor_uses_canonical_graphemes_and_keeps_cursor_visible() {
     );
     let cursor_x = viewport.cursor_display_column as u16;
     assert_eq!(buffer[(cursor_x, 0)].bg, theme.text_primary);
+}
+
+/// P72: two views of one persona (two pagers) saving DIFFERENT fields at the
+/// same time keep each other's change: a save writes only its own field,
+/// through the shared read-modify-write, and leaves no temp behind.
+#[test]
+#[serial_test::serial(FUIGO_HOME)] // the state lock lives under the fuigo home
+fn two_views_saving_different_fields_at_once_keep_both() {
+    let (directory, path, _state) = editable_state();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let run = |field: PersonaField, tag: &'static str| {
+        let (path, barrier) = (path.clone(), barrier.clone());
+        std::thread::spawn(move || {
+            let mut view = PersonaDetailState::from_toml_file(&path, true, "project").unwrap();
+            barrier.wait();
+            for i in 0..25 {
+                view.set_field_value(field, format!("{tag}{i}"));
+                view.save_field_to_file(field).unwrap();
+            }
+        })
+    };
+    let a = run(PersonaField::Model, "m");
+    let b = run(PersonaField::Description, "d");
+    a.join().unwrap();
+    b.join().unwrap();
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(saved["model"].as_str(), Some("m24"));
+    assert_eq!(saved["description"].as_str(), Some("d24"));
+    assert_eq!(saved["instructions"].as_str(), Some("read only instructions"));
+    let names: Vec<String> = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["reviewer.toml"]);
+}
+
+/// P72: saving into a persona whose file was deleted meanwhile is refused,
+/// not a fresh one-field file.
+#[test]
+#[serial_test::serial(FUIGO_HOME)] // the state lock lives under the fuigo home
+fn saving_into_a_deleted_persona_is_refused() {
+    let (_directory, path, mut state) = editable_state();
+    std::fs::remove_file(&path).unwrap();
+    state.set_field_value(PersonaField::Model, "x".to_owned());
+    let err = state.save_field_to_file(PersonaField::Model).unwrap_err();
+    assert!(err.contains("no longer exists"), "{err}");
+    assert!(!path.exists());
 }

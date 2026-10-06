@@ -73,7 +73,7 @@ fn detect_cli_surface() -> ClientSurface {
 
 /// Result of requesting a device code from the server.
 /// Callers display `verification_uri` and `user_code` to the user, then pass this struct to `complete_device_code_login`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct DeviceCode {
     pub verification_uri: String,
     pub verification_uri_complete: Option<String>,
@@ -81,6 +81,29 @@ pub(crate) struct DeviceCode {
     device_code: String,
     interval: i32,
     expires_in: i64,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. `device_code` is the secret polled at the token endpoint; `user_code` is shown to the user anyway. The two verification URIs come from the issuer and may carry anything in their userinfo or query, so they print through `redact_url` (P70a, Astra r2).
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for DeviceCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            verification_uri,
+            verification_uri_complete,
+            user_code,
+            device_code: _,
+            interval,
+            expires_in,
+        } = self;
+        f.debug_struct("DeviceCode")
+            .field("verification_uri", &fuigo_auth::redact_url(verification_uri))
+            .field("verification_uri_complete", &verification_uri_complete.as_deref().map(fuigo_auth::redact_url))
+            .field("user_code", user_code)
+            .field("device_code", &"<redacted>")
+            .field("interval", interval)
+            .field("expires_in", expires_in)
+            .finish()
+    }
 }
 
 // --- Wire types (serde) ---
@@ -137,7 +160,11 @@ pub(crate) async fn request_device_code(
         client
             .post(&url)
             // Lets oauth2-provider segment device-flow success by client version.
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
+            // P43: identity-class header, FluxRouter-operated destinations only.
+            .headers(
+                fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&url)
+                    .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+            )
             // Lets oauth2-provider separate human-completable logins from headless automation in the device-flow funnel metrics
             .header("x-fuigo-client-surface", surface.as_str())
             .form(&[
@@ -223,7 +250,11 @@ pub(crate) async fn complete_device_code_login(
         let resp = with_alpha_test_key(
             client
                 .post(&token_url)
-                .header("x-fuigo-client-version", fuigo_version::VERSION)
+                // P43: identity-class header, FluxRouter-operated destinations only.
+                .headers(
+                    fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&token_url)
+                        .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+                )
                 .header("x-fuigo-client-surface", surface.as_str())
                 .form(&[
                     ("grant_type", DEVICE_GRANT_TYPE),
@@ -342,32 +373,32 @@ async fn prompt_and_poll(
         .as_deref()
         .unwrap_or(&device_code.verification_uri);
 
-    eprintln!();
-    eprintln!("To sign in, open this URL in your browser:");
-    eprintln!();
-    eprintln!("  {}", display_uri);
-    eprintln!();
+    fuigo_tty_utils::cli_eprintln!();
+    fuigo_tty_utils::cli_eprintln!("To sign in, open this URL in your browser:");
+    fuigo_tty_utils::cli_eprintln!();
+    fuigo_tty_utils::cli_eprintln!("  {}", display_uri);
+    fuigo_tty_utils::cli_eprintln!();
 
     if !open_browser_detached(display_uri).await {
-        eprintln!("  (Could not open browser automatically — open the URL above manually.)");
-        eprintln!();
+        fuigo_tty_utils::cli_eprintln!("  (Could not open browser automatically — open the URL above manually.)");
+        fuigo_tty_utils::cli_eprintln!();
     }
 
     // Show the code to confirm it matches the browser (anti-phishing): a complete URL pre-fills it (just confirm), otherwise the user types it
     if device_code.verification_uri_complete.is_some() {
-        eprintln!("Confirm this code in your browser:");
+        fuigo_tty_utils::cli_eprintln!("Confirm this code in your browser:");
     } else {
-        eprintln!("Then enter this code:");
+        fuigo_tty_utils::cli_eprintln!("Then enter this code:");
     }
-    eprintln!();
-    eprintln!("  {}", device_code.user_code);
-    eprintln!();
-    eprintln!(
+    fuigo_tty_utils::cli_eprintln!();
+    fuigo_tty_utils::cli_eprintln!("  {}", device_code.user_code);
+    fuigo_tty_utils::cli_eprintln!();
+    fuigo_tty_utils::cli_eprintln!(
         "\x1b[90mOnly continue with a code you requested. \
          Don't share it with anyone.\x1b[0m"
     );
-    eprintln!();
-    eprintln!("Waiting for authorization...");
+    fuigo_tty_utils::cli_eprintln!();
+    fuigo_tty_utils::cli_eprintln!("Waiting for authorization...");
 
     // The caller prints the `✓ Signed in` confirmation (it also owns the external-provider and devbox early-return paths that never reach here)
     complete_device_code_login(issuer, client_id, device_code, auth_manager, surface).await
@@ -511,6 +542,42 @@ fn validate_verification_uri(uri: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    /// P43 hostile: the device-token poll (`complete_device_code_login`, its own gate) sends a
+    /// non-FluxRouter issuer no client version. The mock answers the first poll, which ends it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn device_token_poll_sends_no_identity_to_a_non_fluxrouter_issuer() {
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let dir = tempfile::tempdir().unwrap();
+        let am = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+        let code = super::DeviceCode {
+            verification_uri: format!("{base}/device"),
+            verification_uri_complete: None,
+            user_code: "ABCD".into(),
+            device_code: "dev-code".into(),
+            interval: 1,
+            expires_in: 60,
+        };
+        let _ = super::complete_device_code_login(&base, "client", code, &am, super::ClientSurface::Cli)
+            .await;
+        handle.abort();
+        let seen = seen.lock().unwrap().clone();
+        assert!(!seen.is_empty(), "the poll made no request, so this proves nothing");
+        for headers in &seen {
+            for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+                assert!(!headers.contains_key(name), "device-token poll sent {name}");
+            }
+        }
+    }
+
+    /// P43 hostile: an OAuth issuer that is not FluxRouter-operated gets no client version on
+    /// the device-code request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn device_code_request_sends_no_identity_to_a_non_fluxrouter_issuer() {
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let _ = super::request_device_code(&base, "client", &[], super::ClientSurface::Cli).await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity_headers(&seen, "device_code");
+    }
     use std::sync::Arc;
 
     use super::{AuthManager, build_auth, validate_verification_uri};
@@ -858,5 +925,30 @@ pub(crate) mod tests {
             .await
             .expect_err("expired_token must be an error");
         assert!(err.to_string().contains("expired"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod p70a_redacted_debug {
+    use super::*;
+
+    /// P70a (Astra r2): the device code and anything in the issuer's verification URIs' userinfo or query never
+    /// reach a `{:?}`; the host and the user code (shown to the user anyway) still print.
+    #[test]
+    fn device_code_debug_redacts_the_code_and_uri_credentials() {
+        let code = DeviceCode {
+            verification_uri: "https://u:p70vu-FAKE-1a2b3c4d@login.p70.invalid/device?k=p70vq-FAKE-5e6f7a8b".into(),
+            verification_uri_complete: Some("https://login.p70.invalid/device?user_code=P70U-CODE&k=p70vc-FAKE-9c0d1e2f".into()),
+            user_code: "P70U-CODE".into(),
+            device_code: "p70dc-FAKE-3a4b5c6d".into(),
+            interval: 5,
+            expires_in: 600,
+        };
+        for out in [format!("{code:?}"), format!("{code:#?}")] {
+            assert!(out.contains("<redacted>") && out.contains("login.p70.invalid") && out.contains("P70U-CODE"), "control: {out}");
+            for secret in ["p70vu-FAKE", "p70vq-FAKE", "p70vc-FAKE", "p70dc-FAKE"] {
+                assert!(!out.contains(secret), "Debug holds {secret}: {out}");
+            }
+        }
     }
 }

@@ -1407,7 +1407,9 @@ fn casual_commenting_keeps_its_parked_draft_when_a_card_closes() {
 fn enter_feedback_mode_refuses_under_a_line_viewer() {
     let id = AgentId(0);
     let mut app = test_app_with_agent();
-    let path = std::env::temp_dir().join("feedback_guard_line_viewer.txt");
+    // A directory of this test's own: under a fixed name in the shared temp dir, another suite on the host finishing this same test deleted the file before the viewer opened it ("the preview is open", P78).
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("feedback_guard_line_viewer.txt");
     std::fs::write(&path, "a preview line\n").unwrap();
     {
         let agent = app.agents.get_mut(&id).unwrap();
@@ -1431,7 +1433,6 @@ fn enter_feedback_mode_refuses_under_a_line_viewer() {
         app.agents[&id].question_view.is_none(),
         "the pane must not open under a viewer that owns the keyboard"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A plan approval owns the composer and outranks the pane for keys, so the pane must refuse rather than open unreachable.
@@ -1498,6 +1499,116 @@ fn feedback_failed_reports_the_error_and_spares_the_composer() {
         app.agents[&id].prompt.text(),
         "unrelated draft",
         "a failed report must not land in the composer, which sends to the model"
+    );
+}
+
+/// Every System block text in the agent's scrollback, oldest first.
+fn p152_system_texts(app: &AppView, id: AgentId) -> Vec<String> {
+    let sb = &app.agents[&id].scrollback;
+    (0..sb.len())
+        .filter_map(|i| match &sb.get(i)?.block {
+            RenderBlock::System(sys) => Some(sys.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// P152 (e2e lane B #3): `/feedback` thanks the user only once the report actually went out. Sending it is not success:
+/// with feedback disabled (or the POST failing) the user saw "Thanks for the feedback!" and then "Couldn't send
+/// feedback", which contradict each other. A failed send shows one message, the reason, and no thanks.
+#[test]
+fn p152_feedback_failure_shows_one_message_and_no_thanks() {
+    let id = AgentId(0);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(
+        Action::SendFeedback {
+            text: "the tool crashed".into(),
+            images: Default::default(),
+            trace: None,
+        },
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendFeedback { .. })),
+        "the report is sent: {effects:?}"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::FeedbackFailed {
+            agent_id: id,
+            error: "Feedback is disabled. To enable, set FUIGO_FEEDBACK_ENABLED=true or [features] feedback = true in config.toml.".into(),
+        }),
+        &mut app,
+    );
+    let texts = p152_system_texts(&app, id);
+    assert!(
+        texts.iter().all(|t| !t.contains("Thanks")),
+        "a report that was not sent must not be thanked for: {texts:?}"
+    );
+    let failures: Vec<_> = texts.iter().filter(|t| t.contains("feedback")).collect();
+    assert_eq!(failures.len(), 1, "exactly one message about the failed send: {texts:?}");
+    assert!(
+        failures[0].contains("Feedback is disabled"),
+        "the message says why: {texts:?}"
+    );
+}
+
+/// P152: the thanks arrives with the confirmation that the report was sent, exactly once.
+#[test]
+fn p152_feedback_thanks_follow_the_confirmed_send() {
+    let id = AgentId(0);
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::SendFeedback {
+            text: "the tool crashed".into(),
+            images: Default::default(),
+            trace: None,
+        },
+        &mut app,
+    );
+    assert!(
+        p152_system_texts(&app, id).iter().all(|t| !t.contains("Thanks")),
+        "no thanks before the send is confirmed"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::FeedbackComplete { agent_id: id }),
+        &mut app,
+    );
+    let thanks = p152_system_texts(&app, id)
+        .into_iter()
+        .filter(|t| t.contains("Thanks for the feedback"))
+        .count();
+    assert_eq!(thanks, 1, "one thanks once the send is confirmed");
+}
+
+/// P152 (Astra r2 #6): when the tab the report came from closed before the send finished, the outcome is still shown,
+/// as a toast on the tab the user is on.
+#[test]
+fn p152_feedback_outcome_survives_a_closed_tab() {
+    let mut app = test_app_with_agent();
+    let gone = AgentId(99);
+    assert!(!app.agents.contains_key(&gone));
+    let _ = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::FeedbackComplete { agent_id: gone }),
+        &mut app,
+    );
+    let texts = p152_system_texts(&app, AgentId(0));
+    assert!(
+        texts.iter().any(|t| t.contains("Thanks for the feedback")),
+        "the thanks reaches the open tab's scrollback: {texts:?}"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(crate::app::actions::TaskResult::FeedbackFailed {
+            agent_id: gone,
+            error: "Feedback is disabled".into(),
+        }),
+        &mut app,
+    );
+    let texts = p152_system_texts(&app, AgentId(0));
+    assert!(
+        texts.iter().any(|t| t.contains("Couldn't send feedback")),
+        "the failure reaches the open tab's scrollback: {texts:?}"
     );
 }
 

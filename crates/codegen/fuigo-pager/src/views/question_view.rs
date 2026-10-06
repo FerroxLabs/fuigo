@@ -819,6 +819,14 @@ impl QuestionViewState {
         option.preview.as_deref()
     }
 
+    /// The local `/fork` or new-session worktree question (P152): its typed answer is mapped onto an option.
+    pub fn is_worktree_question(&self) -> bool {
+        matches!(
+            self.local_kind,
+            Some(LocalQuestionKind::Fork { .. } | LocalQuestionKind::NewSession)
+        )
+    }
+
     /// Either stage of the `/feedback` card (report or trace consent).
     pub fn is_feedback(&self) -> bool {
         matches!(

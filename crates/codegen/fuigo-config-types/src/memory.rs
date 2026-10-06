@@ -883,4 +883,41 @@ mod tests {
         // recency_decay is left at the default, so no decay
         assert_eq!(s.effective_half_life_days(), None);
     }
+
+    /// P10. These four values are published to users in
+    /// `fuigo-pager/docs/user-guide/13-memory.md`, which is `include_str!`'d into the
+    /// binary. For four releases the guide said Dream consolidation and the
+    /// pre-compaction flush run automatically; both are off, so a user could read the
+    /// guide, write no config, and reasonably believe memory was being consolidated
+    /// when nothing was running.
+    ///
+    /// If you change a default here, change the guide in the same commit. The guide has
+    /// its own pin (`docs::tests::memory_guide_publishes_the_real_defaults`) which will
+    /// fail alongside this one.
+    #[test]
+    fn documented_memory_defaults_match_the_code() {
+        let dream = MemoryDreamConfig::default();
+        assert!(
+            !dream.enabled,
+            "Dream is off by default; 13-memory.md must not say otherwise"
+        );
+        assert_eq!(dream.min_hours, 24);
+        assert_eq!(dream.min_sessions, 5);
+
+        let flush = MemoryFlushConfig::default();
+        assert!(
+            !flush.enabled,
+            "the pre-compaction flush is off by default; 13-memory.md must not say otherwise"
+        );
+        assert_eq!(
+            flush.idle_timeout_secs, None,
+            "idle flushes are unset by default, not 300s"
+        );
+        assert_eq!(flush.soft_threshold_tokens, 4000);
+        assert_eq!(flush.max_flush_write_chars, 8000);
+
+        // The struct default; the effective default is resolved in `resolve_settings`
+        // and is also `true` (`.default(true)`), which is what the guide documents.
+        assert!(MemoryConfig::default().enabled);
+    }
 }

@@ -18,10 +18,68 @@ pub const MANAGED_ARTIFACT_FILES: [&str; 4] = [
     fuigo_config::signed_policy::MANAGED_IDENTITY_SIDECAR_FILE,
 ];
 
+/// P147 (e2e C1): `$FUIGO_HOME/managed_config.toml` and `requirements.toml` are the copies Fuigo keeps in sync with an
+/// organisation's console, and the sync converges or removes them. A file there that Fuigo has no record of syncing (no
+/// sync marker) was not written by the sync, for example one a user made by hand: before the sync removes or replaces
+/// it, its content is copied to `<name>.user-<unix time>.bak` with a warning that names both paths, so it is never lost.
+/// The original stays in place until the sync's own atomic replace or removal (Astra r1 #2: a failed refresh never
+/// leaves the slot empty). Runs under the managed-config lock. Returns the files it could not back up, with the error:
+/// the caller leaves those alone.
+pub(super) fn back_up_unsynced_policy_files(home: &std::path::Path) -> Vec<(&'static str, std::io::Error)> {
+    let mut failed = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for name in [
+        fuigo_config::MANAGED_CONFIG_FILENAME,
+        fuigo_config::REQUIREMENTS_FILENAME,
+    ] {
+        // Only a marker that records this file as served is a record that Fuigo wrote it (Astra r1, r2: a squatting
+        // directory, a corrupt marker, or one whose sync did not serve this file is no record).
+        if fuigo_config::managed_marker_records_file(home, name) {
+            continue;
+        }
+        let path = home.join(name);
+        // A symlink is removed or replaced as a link: its target, wherever it is, is untouched.
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            continue;
+        }
+        let mut backup = home.join(format!("{name}.user-{now}.bak"));
+        let mut n = 1;
+        while std::fs::symlink_metadata(&backup).is_ok() {
+            backup = home.join(format!("{name}.user-{now}-{n}.bak"));
+            n += 1;
+        }
+        match std::fs::copy(&path, &backup) {
+            Ok(_) => tracing::warn!(
+                file = %path.display(),
+                backup = %backup.display(),
+                "{name} in the Fuigo home is kept in sync with your organisation's console, and Fuigo did not write \
+                 this copy; it was saved to the backup before the sync replaced or removed it. Put your own settings \
+                 in config.toml."
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    file = %path.display(),
+                    error = %e,
+                    "could not back up a managed config file Fuigo did not write; leaving it in place"
+                );
+                let _ = std::fs::remove_file(&backup);
+                failed.push((name, e));
+            }
+        }
+    }
+    failed
+}
+
 pub(super) fn remove_managed_config_files(home: &std::path::Path) {
-    let mut artifacts_removed = true;
+    let kept = back_up_unsynced_policy_files(home);
+    let mut artifacts_removed = kept.is_empty();
     for name in MANAGED_ARTIFACT_FILES {
-        artifacts_removed &= remove_synced_file(home, name, "removed managed config file");
+        if !kept.iter().any(|(k, _)| *k == name) {
+            artifacts_removed &= remove_synced_file(home, name, "removed managed config file");
+        }
     }
     // Marker last, only on full success: crash/error leaves the detector armed for the next start.
     // The stage shares the marker's fate — only a completed eviction may delete it.
@@ -278,10 +336,18 @@ pub(super) fn apply_managed_config(
         ),
     ];
 
+    let mut kept = back_up_unsynced_policy_files(home);
     let mut changed = false;
     let mut first_err: Option<std::io::Error> = None;
     for (name, content) in artifacts {
         let path = home.join(name);
+        if let Some(at) = kept.iter().position(|(k, _)| *k == name) {
+            // Not backed up: leave the file as it is, and report the copy's own error (its kind is what decides
+            // whether a verified refresh is staged for the next boot).
+            let (_, e) = kept.swap_remove(at);
+            first_err.get_or_insert(e);
+            continue;
+        }
         match content.filter(|s| !s.is_empty()) {
             Some(content) => {
                 clear_squatting_dir(&path);

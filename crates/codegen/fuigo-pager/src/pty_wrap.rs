@@ -22,6 +22,20 @@ fn apply_wrap_child_env(
     cmd: &mut portable_pty::CommandBuilder,
     appearance: Option<SystemAppearance>,
 ) {
+    // The wrapped program is the user's own: it never sees Fuigo's secrets (P120).
+    // Read from the builder's own base environment, not only this process's: on Windows `CommandBuilder::new` also
+    // loads the system and user registry environment, which can hold a secret this process does not. This process's
+    // names too, for a value that is not UTF-8 (`iter_full_env_as_str` skips it).
+    let mut secrets: Vec<std::ffi::OsString> = cmd
+        .iter_full_env_as_str()
+        .map(|(name, _)| name)
+        .filter(|name| fuigo_tools::util::shell_env_policy::is_fuigo_owned_secret(name))
+        .map(std::ffi::OsString::from)
+        .collect();
+    secrets.extend(fuigo_tools::util::shell_env_policy::inherited_fuigo_owned_secret_names());
+    for name in secrets {
+        cmd.env_remove(name);
+    }
     cmd.env("FUIGO_OSC52_SINK", "1");
     cmd.env("LC_FUIGO_OSC52_SINK", "1");
     if let Some(appearance) = appearance {
@@ -432,5 +446,51 @@ mod tests {
         assert_eq!(env_str(&cmd, "FUIGO_APPEARANCE").as_deref(), Some("dark"));
         assert_eq!(env_str(&cmd, "LC_FUIGO_APPEARANCE"), None);
         assert_eq!(env_str(&cmd, "FUIGO_OSC52_SINK").as_deref(), Some("1"));
+    }
+}
+
+/// P120: `fuigo wrap` runs the user's own program; it must not inherit Fuigo's own secrets either.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_wrapped_program_does_not_inherit_fuigo_secrets() {
+        const NAME: &str = "pty_wrap::p120_tests::p120_wrapped_program_does_not_inherit_fuigo_secrets";
+        const REGISTERED: &str = "P120_WRAP_BEARER";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        apply_wrap_child_env(&mut cmd, None);
+        let present: Vec<&str> = probe::SECRETS
+            .iter()
+            .copied()
+            .filter(|name| cmd.get_env(name).is_some())
+            .collect();
+        assert!(present.is_empty(), "the wrapped program would inherit {present:?}");
+        assert!(cmd.get_env(REGISTERED).is_some(), "control: the user's own registered credential name stays");
+        assert_eq!(cmd.get_env("P120_BENIGN").and_then(|v| v.to_str()), Some("kept"), "control");
+        assert!(cmd.get_env("FUIGO_OSC52_SINK").is_some(), "control: the wrapper's own variables stay");
+    }
+    /// P120 (Astra r3 #4): a secret that only the builder's own base environment holds (on Windows, the registry
+    /// environment `CommandBuilder::new` loads) is removed too.
+    #[test]
+    fn p120_wrapped_program_loses_secrets_only_the_builder_holds() {
+        const NAME: &str = "pty_wrap::p120_tests::p120_wrapped_program_loses_secrets_only_the_builder_holds";
+        const REGISTERED: &str = "P120_BUILDER_ONLY_BEARER";
+        if probe::in_parent(NAME, &[]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let mut cmd = portable_pty::CommandBuilder::new("true");
+        // Not in this process's environment: the builder alone holds it, as a registry-only variable would be.
+        cmd.env(REGISTERED, "fake-p120-registry");
+        cmd.env("FUIGO_API_KEY", "fake-p120-registry");
+        apply_wrap_child_env(&mut cmd, None);
+        assert!(cmd.get_env(REGISTERED).is_some(), "the user's own registered name held by the builder stays");
+        assert!(cmd.get_env("FUIGO_API_KEY").is_none(), "a first-party key held only by the builder survives");
     }
 }

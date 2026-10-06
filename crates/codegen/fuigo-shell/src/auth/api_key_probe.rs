@@ -18,12 +18,6 @@ use serde::Deserialize;
 /// Wall-clock budget for the entire probe, covering all attempts and backoff.
 pub(crate) const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(400);
 
-/// Returns the last 12 chars of a key for diagnostic logs, never the full secret.
-/// This is a copy; importing it from `auth::model` would create an import cycle under Bazel.
-fn key_suffix(t: &str) -> &str {
-    let len = t.len();
-    if len > 12 { &t[len - 12..] } else { t }
-}
 
 /// Whether `initialize` should HTTP-probe the first-party env key.
 ///
@@ -197,7 +191,8 @@ async fn probe_fuigo_api_key_at_url(key: &str, url: &str, timeout: Duration) -> 
             "elapsed_ms": elapsed_ms,
             "timeout_ms": timeout.as_millis() as u64,
             "attempts": attempts,
-            "key_suffix": key_suffix(key),
+            // P70: a fingerprint, not the key's last 12 characters (the whole of a short key)
+            "key_suffix": fuigo_auth::bearer_fingerprint(key),
         })),
     );
 
@@ -407,6 +402,28 @@ mod tests {
         );
         let v = probe_fuigo_api_key_at_url("fuigo-good", &url, Duration::from_secs(2)).await;
         assert_eq!(v, ApiKeyProbeVerdict::Usable);
+    }
+
+    /// P70: the probe's unified-log line used to carry the key's last 12 characters (all of a short key). A short
+    /// key's probe line now carries its fingerprint and no run of four of its characters.
+    #[tokio::test]
+    async fn probe_log_line_holds_a_fingerprint_not_the_key() {
+        const SHORT_KEY: &str = "q7zX9w";
+        let url = serve_one_http_response(
+            "HTTP/1.1 200 OK",
+            br#"{"api_key_id":"abc","api_key_blocked":false,"api_key_disabled":false}"#,
+        );
+        let v = probe_fuigo_api_key_at_url(SHORT_KEY, &url, Duration::from_secs(2)).await;
+        assert_eq!(v, ApiKeyProbeVerdict::Usable);
+        // The unit-test binary's unified log is a private temp file (`test_support` ctor); other tests write it too.
+        let log = String::from_utf8(fuigo_telemetry::unified_log::snapshot_log().expect("the probe logged")).unwrap();
+        let fp = fuigo_auth::bearer_fingerprint(SHORT_KEY);
+        assert!(log.contains(&format!("\"key_suffix\":\"{fp}\"")), "control: the probe line carries the fingerprint");
+        let chars: Vec<char> = SHORT_KEY.chars().collect();
+        for w in chars.windows(4) {
+            let frag: String = w.iter().collect();
+            assert!(!log.contains(&frag), "the unified log holds {frag:?} of the probed key");
+        }
     }
 
     #[tokio::test]

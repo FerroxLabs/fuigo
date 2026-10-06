@@ -79,3 +79,9 @@ AARCH64_APPLE_DARWIN_JEMALLOC_SYS_WITH_LG_PAGE = "14"
 AARCH64_UNKNOWN_LINUX_GNU_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_LG_PAGE = "16"
 AARCH64_UNKNOWN_LINUX_MUSL_JEMALLOC_SYS_WITH_BACKGROUND_THREADS = "0"
+
+# insta: bake the workspace root into the test binaries at compile time (`option_env!("INSTA_WORKSPACE_ROOT")`).
+# Without it insta runs `cargo metadata` at test time to find the root, and when that fails (a test binary run directly, with no cargo on PATH,
+# or from a moved checkout) it falls back to the crate dir and writes `.snap.new` files into the source tree under a doubled path
+# (`crates/codegen/fuigo-pager/crates/...`). `relative = true` resolves against this file's parent, the repository root.
+INSTA_WORKSPACE_ROOT = { value = ".", relative = true }

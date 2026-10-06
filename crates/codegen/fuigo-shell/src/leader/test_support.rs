@@ -33,6 +33,7 @@ pub(crate) fn fake_caps(control_v1: bool, relaunch_v1: bool) -> LeaderCapabiliti
         profile_formats: Vec::new(),
         workspace_exposure: false,
         relaunch_v1,
+        downgrade_stop_v1: false,
     }
 }
 /// Wire behavior of a [`spawn_fake_leader`] instance.

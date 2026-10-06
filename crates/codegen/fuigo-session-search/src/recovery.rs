@@ -149,11 +149,10 @@ pub(crate) fn heal_unusable(
     let effective = JournalMode::for_db_path(db_path).effective_db_path(db_path);
 
     let lock_path = with_suffix(&effective, ".lock");
-    let _lock_file = match std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
+    let _lock_file = match fuigo_config::owner_only_file_options(
+        std::fs::OpenOptions::new().create(true).truncate(false).write(true),
+    )
+    .open(&lock_path)
     {
         Ok(f) => f,
         Err(e) => {
@@ -161,6 +160,7 @@ pub(crate) fn heal_unusable(
             return;
         }
     };
+    fuigo_config::tighten_file_owner_only(&_lock_file, &lock_path);
     if let Err(e) = _lock_file.lock_exclusive() {
         tracing::debug!(error = %e, "could not acquire cross-process heal lock; skipping quarantine");
         return;
@@ -246,6 +246,22 @@ mod tests {
             "transient failure: no quarantine"
         );
         assert!(quarantined_after(|_| Ok(false)), "corrupt: quarantine");
+    }
+
+    /// P150 (D6/S14, Astra r3): a heal lock an older version left 0644 is tightened when it is reused.
+    #[cfg(unix)]
+    #[test]
+    fn p150_existing_heal_lock_is_tightened() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("session_search.sqlite");
+        std::fs::write(&db, b"looks-like-a-db").unwrap();
+        let lock = with_suffix(&JournalMode::for_db_path(&db).effective_db_path(&db), ".lock");
+        std::fs::write(&lock, b"").unwrap();
+        std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+        heal_unusable(&db, &rusqlite::Error::QueryReturnedNoRows, |_| Ok(true), |_| Ok(()));
+        let mode = std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{} must be owner-only", lock.display());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use fuigo_acp_lib::{
     acp_channels,
 };
 use fuigo_shell::{
-    agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
+    agent::{MvpAgent, MvpAgentHandle, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
     auth::AuthManager,
     util::fuigo_home::fuigo_home,
 };
@@ -240,7 +240,7 @@ pub async fn spawn_fuigo_shell(
 
     let skills_paths = agent_config.skills.paths.clone();
 
-    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static> = {
+    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgentHandle>> + Send + 'static> = {
         Box::new(move |client_tx| {
             let gateway = AcpGatewaySender::new(client_tx);
 
@@ -268,12 +268,51 @@ pub async fn spawn_fuigo_shell(
     })
 }
 
+/// The in-process agent's reply rail (P149, live lane C2 D1): the pager calls the agent directly, with no
+/// `AgentSideConnection` in between, so it gets the same [`ScrubSentCredentials`] wrapper every other transport
+/// gets from `agent_side_connection`. Without it an error whose text echoes a credential this process sent (a
+/// provider's 401/402 naming the key) reached the headless printer and the `stream-json` error line verbatim.
+///
+/// [`ScrubSentCredentials`]: fuigo_shell::agent::credential_scrub::ScrubSentCredentials
+fn direct_gateway<A: agent_client_protocol::Agent + 'static>(
+    rx: fuigo_acp_lib::AcpAgentRx,
+    agent: A,
+) -> AcpGatewayReceiver<
+    agent_client_protocol::ClientSide,
+    fuigo_shell::agent::credential_scrub::ScrubSentCredentials<A>,
+> {
+    AcpGatewayReceiver::new(
+        rx,
+        fuigo_shell::agent::credential_scrub::ScrubSentCredentials(agent),
+    )
+}
+
+/// The agent-side hooks `spawn_agent_thread_direct` drives besides ACP dispatch. A seam only (P149 m1 follow-up):
+/// it lets a test spawn the real worker thread with a stub agent. [`MvpAgentHandle`] forwards unchanged.
+trait AgentThreadHooks {
+    fn reload_skills_all_sessions(&self);
+    fn advertise_commands_all_sessions(&self);
+    async fn flush_all_sessions(&self, grace: Duration);
+}
+
+impl AgentThreadHooks for MvpAgentHandle {
+    fn reload_skills_all_sessions(&self) {
+        fuigo_shell::agent::MvpAgent::reload_skills_all_sessions(self);
+    }
+    fn advertise_commands_all_sessions(&self) {
+        fuigo_shell::agent::MvpAgent::advertise_commands_all_sessions(self);
+    }
+    async fn flush_all_sessions(&self, grace: Duration) {
+        fuigo_shell::agent::MvpAgent::flush_all_sessions(self, grace).await;
+    }
+}
+
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
 ///
 /// The agent runs on a single-threaded tokio LocalSet runtime.
 /// RPC requests go directly to the agent via Rc, bypassing simplex pipes.
-async fn spawn_agent_thread_direct(
-    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static>,
+async fn spawn_agent_thread_direct<A: agent_client_protocol::Agent + AgentThreadHooks + 'static>(
+    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<A>> + Send + 'static>,
     channel: AcpAgentChannel,
     cancel: CancellationToken,
     skills_paths: Vec<String>,
@@ -298,8 +337,7 @@ async fn spawn_agent_thread_direct(
                 let agent_rc = spawn_agent(client_tx)?;
 
                 // Direct dispatch: RPC requests go straight to the agent
-                let gw_rx =
-                    AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
+                let gw_rx = direct_gateway(channel.rx, agent_rc.clone()).with_tracing(true);
                 tokio::task::spawn_local(gw_rx.run());
 
                 let _skills_watcher = {
@@ -360,6 +398,166 @@ async fn spawn_agent_thread_direct(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An agent whose prompt fails with an upstream error that echoes a credential back (live lane C2 D1: a 402
+    /// "Credit limit reached for key <key>"). The trait is `async_trait(?Send)`; it is implemented in its expanded
+    /// form so this crate needs no `async-trait` dependency for one test.
+    struct EchoingAgent(&'static str);
+    type Reply<'a, T> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = agent_client_protocol::Result<T>> + 'a>,
+    >;
+    fn refuse<'a, T: 'a>() -> Reply<'a, T> {
+        Box::pin(async { Err(agent_client_protocol::Error::internal_error()) })
+    }
+    impl agent_client_protocol::Agent for EchoingAgent {
+        fn initialize<'life0, 'async_trait>(
+            &'life0 self,
+            _: agent_client_protocol::InitializeRequest,
+        ) -> Reply<'async_trait, agent_client_protocol::InitializeResponse>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            refuse()
+        }
+        fn authenticate<'life0, 'async_trait>(
+            &'life0 self,
+            _: agent_client_protocol::AuthenticateRequest,
+        ) -> Reply<'async_trait, agent_client_protocol::AuthenticateResponse>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            refuse()
+        }
+        fn new_session<'life0, 'async_trait>(
+            &'life0 self,
+            _: agent_client_protocol::NewSessionRequest,
+        ) -> Reply<'async_trait, agent_client_protocol::NewSessionResponse>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            refuse()
+        }
+        fn prompt<'life0, 'async_trait>(
+            &'life0 self,
+            _: agent_client_protocol::PromptRequest,
+        ) -> Reply<'async_trait, agent_client_protocol::PromptResponse>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            let key = self.0;
+            Box::pin(async move {
+                let mut err = agent_client_protocol::Error::internal_error().data(serde_json::json!({
+                    "message": format!(
+                        "API error (status 402 Payment Required): Credit limit reached for key {key}; top up"
+                    ),
+                    "error_kind": "api",
+                    "http_status": 402,
+                }));
+                err.message = format!("Internal error: key {key}");
+                Err(err)
+            })
+        }
+        fn cancel<'life0, 'async_trait>(
+            &'life0 self,
+            _: agent_client_protocol::CancelNotification,
+        ) -> Reply<'async_trait, ()>
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// P149 (S8, live lane C2 D1): the in-process agent the pager (TUI and headless `-p`) talks to directly replies
+    /// through the same sent-credential scrub as every other ACP transport, so a provider-echoed key never reaches
+    /// the headless printer, the `stream-json` error line or a client.
+    #[test]
+    fn the_direct_in_process_gateway_scrubs_sent_credentials_from_errors() {
+        const SENT: &str = "fuigo-p149-SYNTH-direct-gw-key-0001";
+        let _registry = crate::test_util::sent_credentials_lock();
+        fuigo_telemetry::sent_credentials::record(SENT);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let err = local.block_on(&rt, async {
+            let (client, agent) = fuigo_acp_lib::acp_channels();
+            tokio::task::spawn_local(direct_gateway(agent.rx, Rc::new(EchoingAgent(SENT))).run());
+            fuigo_acp_lib::acp_send(
+                agent_client_protocol::PromptRequest::new(
+                    agent_client_protocol::SessionId::new("sess-p149"),
+                    vec![],
+                ),
+                &client.tx,
+            )
+            .await
+            .expect_err("the agent fails the prompt")
+        });
+        let wire = serde_json::to_string(&err).unwrap();
+        assert!(!wire.contains(SENT), "the in-process reply carried the sent key: {wire}");
+        assert!(wire.contains("<redacted>"), "control: the text is kept around the key: {wire}");
+        assert!(wire.contains("Credit limit reached"), "control: {wire}");
+    }
+
+    impl AgentThreadHooks for EchoingAgent {
+        fn reload_skills_all_sessions(&self) {}
+        fn advertise_commands_all_sessions(&self) {}
+        async fn flush_all_sessions(&self, _grace: Duration) {}
+    }
+
+    /// P149 m1 follow-up (Fable re-audit MEDIUM): the call site in `spawn_agent_thread_direct` must wire the
+    /// scrubbing gateway. Spawns the real worker thread with an echoing agent; no emitter or `main` scrub is in the
+    /// loop, so reverting the call to an unscrubbed `AcpGatewayReceiver::new` fails this test alone.
+    #[test]
+    fn spawn_agent_thread_direct_wires_the_scrubbing_gateway() {
+        const SENT: &str = "fuigo-p149-SYNTH-m1-wiring-key-0002";
+        let _registry = crate::test_util::sent_credentials_lock();
+        fuigo_telemetry::sent_credentials::record(SENT);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (client, agent) = fuigo_acp_lib::acp_channels();
+            let cancel = CancellationToken::new();
+            let handle = spawn_agent_thread_direct(
+                Box::new(|_| Ok(Rc::new(EchoingAgent(SENT)))),
+                agent,
+                cancel.clone(),
+                vec![],
+            )
+            .await
+            .expect("spawn the agent thread");
+            let err = fuigo_acp_lib::acp_send(
+                agent_client_protocol::PromptRequest::new(
+                    agent_client_protocol::SessionId::new("sess-m1"),
+                    vec![],
+                ),
+                &client.tx,
+            )
+            .await
+            .expect_err("the agent fails the prompt");
+            assert!(!err.message.contains(SENT), "message carried the key: {}", err.message);
+            let data = err.data.as_ref().expect("error data");
+            let text = data["message"].as_str().expect("data.message is a string");
+            assert!(!text.contains(SENT), "data.message carried the key: {text}");
+            assert!(text.contains("Credit limit reached for key <redacted>"), "{text}");
+            assert!(
+                data["verdicts"].is_object(),
+                "the reply did not cross ScrubSentCredentials: {data}"
+            );
+            cancel.cancel();
+            tokio::task::spawn_blocking(move || handle.join().unwrap().unwrap())
+                .await
+                .unwrap();
+        });
+    }
 
     /// Teardown must stay grace-bounded with a non-abortable blocking task
     /// still in flight (a plain drop would wait it out).

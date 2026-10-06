@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod egress;
 pub mod fluxrouter;
 pub mod public_download;
+pub mod service_trust;
 mod redirect;
 
 pub const MAX_EXTRA_CA_BUNDLE_BYTES: u64 = 1024 * 1024;

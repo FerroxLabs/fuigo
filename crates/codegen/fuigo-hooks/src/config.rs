@@ -97,7 +97,7 @@ pub struct MatcherGroup {
     pub hooks: Vec<RawHandler>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct RawHandler {
     #[serde(rename = "type")]
     pub handler_type: String,
@@ -108,6 +108,27 @@ pub struct RawHandler {
     /// Extra env vars, merged into [`HookSpec::extra_env`].
     #[serde(default, deserialize_with = "deserialize_optional_string_map")]
     pub env: HashMap<String, String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for RawHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            handler_type,
+            command,
+            url,
+            timeout,
+            env,
+        } = self;
+        f.debug_struct("RawHandler")
+            .field("handler_type", handler_type)
+            .field("command", &command.as_ref().map(|_| "<redacted>"))
+            .field("url", &url.as_deref().map(fuigo_auth::redact_url))
+            .field("timeout", timeout)
+            .field("env", &env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// Treat `null` or an absent field as an empty map (serde otherwise rejects `null` for a `HashMap`).
@@ -207,7 +228,7 @@ impl std::str::FromStr for HandlerType {
 }
 
 /// A validated hook specification, ready for the dispatcher.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HookSpec {
     pub name: String,
     pub event: HookEventName,
@@ -236,6 +257,45 @@ pub struct HookSpec {
     /// `#[serde(default)]` maps specs serialized before this field existed to `File`.
     #[serde(default)]
     pub layer: HookProvenance,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there, and the command (which `extra_env` is expanded into) prints as present / absent.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for HookSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            name,
+            event,
+            handler_type,
+            configured_matcher,
+            matcher,
+            enabled,
+            command,
+            command_raw,
+            url,
+            url_raw,
+            timeout_ms,
+            source_dir,
+            extra_env,
+            layer,
+        } = self;
+        f.debug_struct("HookSpec")
+            .field("name", name)
+            .field("event", event)
+            .field("handler_type", handler_type)
+            .field("configured_matcher", configured_matcher)
+            .field("matcher", matcher)
+            .field("enabled", enabled)
+            .field("command", &command.as_ref().map(|_| "<redacted>"))
+            .field("command_raw", &command_raw.as_ref().map(|_| "<redacted>"))
+            .field("url", &url.as_deref().map(fuigo_auth::redact_url))
+            .field("url_raw", &url_raw.as_deref().map(fuigo_auth::redact_url))
+            .field("timeout_ms", timeout_ms)
+            .field("source_dir", source_dir)
+            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("layer", layer)
+            .finish()
+    }
 }
 
 pub const RUNNER_ALWAYS_SET_ENV: &[&str] = &[
@@ -414,6 +474,8 @@ pub fn parse_hooks_from_value_with_dir(
             source_dir,
             error_path,
             provenance: HookProvenance::File,
+            // Agent frontmatter (project, user or plugin agents): not a tier that may name the saved key.
+            may_name_saved_key: false,
         },
     )
 }
@@ -460,6 +522,8 @@ pub fn parse_hooks_from_config_layers(
                 source_dir: &source_dir,
                 error_path,
                 provenance: layer.provenance(),
+                // Config-layer hooks are user-level or managed: the tiers that may name the saved key.
+                may_name_saved_key: true,
             },
         );
         all_specs.extend(specs);
@@ -469,7 +533,21 @@ pub fn parse_hooks_from_config_layers(
     (all_specs, all_errors)
 }
 
+/// Parse a JSON hook file. A file whose tier is not known to the caller is treated as a project or plugin source: a
+/// reference to the saved API key `FUIGO_API_KEY` in it is refused (P118); see [`parse_hook_file_with_key_naming`].
 pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
+    parse_hook_file_with_key_naming(content, file_path, false)
+}
+
+/// [`parse_hook_file`] for a caller that knows the file's tier. `may_name_saved_key` is true only for user-level
+/// hooks (the global sources); for a project hook file or a plugin it is false, and every `$FUIGO_API_KEY` /
+/// `${FUIGO_API_KEY}` reference in the hook's `command`, `url` and `env` values is removed before anything is expanded
+/// (an exported key included), with a note saying which file and which key (P118, backlog row P103).
+pub fn parse_hook_file_with_key_naming(
+    content: &str,
+    file_path: &Path,
+    may_name_saved_key: bool,
+) -> (Vec<HookSpec>, Vec<HookError>) {
     let specs = Vec::new();
     let mut errors = Vec::new();
 
@@ -521,6 +599,7 @@ pub fn parse_hook_file(content: &str, file_path: &Path) -> (Vec<HookSpec>, Vec<H
             source_dir: &source_dir,
             error_path: file_path,
             provenance: HookProvenance::File,
+            may_name_saved_key,
         },
     )
 }
@@ -610,12 +689,14 @@ struct SpecContext<'a> {
     source_dir: &'a Path,
     error_path: &'a Path,
     provenance: HookProvenance,
+    /// P118: whether this source may name the saved API key (`FUIGO_API_KEY`); false refuses every reference.
+    may_name_saved_key: bool,
 }
 
 /// Build one [`HookSpec`] from a handler entry, or the [`HookError`] preventing it.
 /// `command`/`url` are env-expanded (unset refs kept for the runner); `matcher` is not, since `$` is the regex end anchor.
 fn build_one_spec(
-    handler: RawHandler,
+    mut handler: RawHandler,
     event: HookEventName,
     name: String,
     configured_matcher: Option<String>,
@@ -634,6 +715,9 @@ fn build_one_spec(
         }
     };
 
+    if !ctx.may_name_saved_key {
+        refuse_saved_key_references(&mut handler, &name, ctx.error_path);
+    }
     let mut extra_env: HashMap<String, String> = handler.env;
     strip_reserved_env_keys(&mut extra_env, &name, ctx.error_path);
 
@@ -662,6 +746,7 @@ fn build_one_spec(
                 &extra_env,
                 RUNNER_ALWAYS_SET_ENV,
             );
+            let expanded = refuse_expanded(expanded, ctx, &name, "command");
             (Some(PathBuf::from(expanded)), Some(command), None, None)
         }
         HandlerType::Http => {
@@ -677,6 +762,7 @@ fn build_one_spec(
                 &extra_env,
                 RUNNER_ALWAYS_SET_ENV,
             );
+            let expanded = refuse_expanded(expanded, ctx, &name, "url");
             (None, None, Some(expanded), Some(url))
         }
     };
@@ -697,6 +783,49 @@ fn build_one_spec(
         extra_env,
         layer: ctx.provenance,
     })
+}
+
+/// P118: remove every reference to the saved API key from a hook handler of a source that may not name it, and leave a
+/// note per reference (which file, which key, what to do instead). Runs before any expansion, so an exported key is
+/// refused too.
+fn refuse_saved_key_references(handler: &mut RawHandler, hook_name: &str, file: &Path) {
+    use fuigo_config::key_naming::{RefusedKeyReference, refuse_key_references_in_str, report_refusals};
+    let file_label = file.display().to_string();
+    let mut refused = Vec::new();
+    let mut scrub = |value: &mut String, key: String| {
+        if let Some(clean) = refuse_key_references_in_str(value) {
+            *value = clean;
+            refused.push(RefusedKeyReference { file: file_label.clone(), key });
+        }
+    };
+    if let Some(command) = handler.command.as_mut() {
+        scrub(command, format!("{hook_name}.command"));
+    }
+    if let Some(url) = handler.url.as_mut() {
+        scrub(url, format!("{hook_name}.url"));
+    }
+    for (name, value) in handler.env.iter_mut() {
+        scrub(value, format!("{hook_name}.env.{name}"));
+    }
+    report_refusals(&refused);
+}
+
+/// P118 (Astra r1 #5): expansion can build a reference out of text that held none (`echo ${D}FUIGO_API_KEY` with
+/// `env = { D = "$" }`), so a source that may not name the saved key is refused again on the expanded text.
+fn refuse_expanded(expanded: String, ctx: &SpecContext<'_>, hook_name: &str, field: &str) -> String {
+    if ctx.may_name_saved_key {
+        return expanded;
+    }
+    match fuigo_config::key_naming::refuse_key_references_in_str(&expanded) {
+        Some(clean) => {
+            fuigo_config::key_naming::report_refusals(&[fuigo_config::key_naming::RefusedKeyReference {
+                file: ctx.error_path.display().to_string(),
+                key: format!("{hook_name}.{field}"),
+            }]);
+            clean
+        }
+        None => expanded,
+    }
 }
 
 /// Strip user `env` entries that would shadow runner-reserved keys, with a warning.

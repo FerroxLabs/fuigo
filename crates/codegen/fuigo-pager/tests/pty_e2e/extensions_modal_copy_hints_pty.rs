@@ -1,3 +1,6 @@
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 // Per-test-case module for the `pty_e2e` integration test crate.
 //
 // The Plugins-tab footer shows contextual Space enable/disable (not "toggle") and freeform `a install` (not `a add`)

@@ -3121,6 +3121,9 @@ fn model_provider_honored_only_from_trusted_disk_layers() {
 #[test]
 #[serial_test::serial]
 fn enterprise_two_file_merge_routes_deployment_key_to_proxy() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     for k in [
         "FUIGO_MANAGED_CONFIG_URL",
         "FUIGO_CLI_CHAT_PROXY_BASE_URL",
@@ -3227,6 +3230,9 @@ email_domain = "example.com"
 #[test]
 #[serial_test::serial]
 fn project_config_never_sources_feedback_user() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -3788,6 +3794,9 @@ fn explicit_fuigo_root_is_the_only_user_source() {
 #[test]
 #[serial_test::serial]
 fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -3846,6 +3855,9 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
 #[test]
 #[serial_test::serial]
 fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_agent::plugins::{TrustStore, discover_plugins};
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
@@ -3919,6 +3931,9 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
 #[test]
 #[serial_test::serial]
 fn kill_switched_cold_cwd_stays_allowed_through_plugins_config_read() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     use fuigo_test_support::EnvGuard;
     let home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::set("FUIGO_HOME", home.path());
@@ -3998,4 +4013,76 @@ fn optional_bwrap_routes_can_degrade() {
         route_bwrap_startup::<()>(None, false, false),
         BwrapStartup::Continue
     );
+}
+/// P90 F6: only a config-file key, its environment variable or its CLI flag makes a helper
+/// model explicit; remote settings and the compiled default do not.
+#[test]
+fn model_overrides_record_which_helpers_the_user_chose() {
+    let empty = toml::Value::Table(toml::map::Map::new());
+    let remote = crate::util::config::RemoteSettings {
+        session_summary_model: Some("remote-ss".to_owned()),
+        image_description_model: Some("remote-id".to_owned()),
+        ..Default::default()
+    };
+    with_model_overrides_env(None, None, None, || {
+        let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+        assert_eq!(cfg.image_description.as_deref(), Some("remote-id"));
+        assert_eq!(cfg.explicit, ExplicitHelperModels::default());
+        let cfg = ModelOverrideConfig::resolve(None, None, &empty, None);
+        assert!(cfg.image_description.is_some() && cfg.session_summary.is_some());
+        assert_eq!(cfg.explicit, ExplicitHelperModels::default());
+        let file: toml::Value = toml::from_str(
+            "[models]\nimage_description = \"local-id\"\nsession_summary = \"local-ss\"\n",
+        )
+        .unwrap();
+        let cfg = ModelOverrideConfig::resolve(None, None, &file, Some(&remote));
+        assert_eq!(cfg.explicit.image_description.as_deref(), Some("local-id"));
+        assert_eq!(cfg.explicit.session_summary.as_deref(), Some("local-ss"));
+        // An empty key means "the default": not a choice.
+        let blank: toml::Value = toml::from_str("[models]\nimage_description = \"\"\n").unwrap();
+        let cfg = ModelOverrideConfig::resolve(None, None, &blank, None);
+        assert_eq!(cfg.explicit.image_description, None);
+        let cfg = ModelOverrideConfig::resolve(None, Some("cli-ss"), &empty, Some(&remote));
+        assert_eq!(cfg.explicit.session_summary.as_deref(), Some("cli-ss"));
+        assert_eq!(cfg.explicit.image_description, None);
+    });
+    with_model_overrides_env(None, Some("env-ss"), Some("env-id"), || {
+        let cfg = ModelOverrideConfig::resolve(None, None, &empty, Some(&remote));
+        assert_eq!(cfg.explicit.session_summary.as_deref(), Some("env-ss"));
+        assert_eq!(cfg.explicit.image_description.as_deref(), Some("env-id"));
+        assert_eq!(
+            cfg.explicit.image_description_choice("env-id"),
+            crate::agent::config::HelperModelChoice::Explicit
+        );
+        assert_eq!(
+            cfg.explicit.image_description_choice("remote-id"),
+            crate::agent::config::HelperModelChoice::Default
+        );
+    });
+}
+/// P90 F6 (Astra r1 H3): a helper a remote campaign patched into the effective config is not
+/// the user's choice; only the campaign-free config files decide.
+#[test]
+fn campaign_patched_helper_models_are_not_explicit() {
+    with_model_overrides_env(None, None, None, || {
+        let effective: toml::Value = toml::from_str(
+            "[models]\nimage_description = \"campaign-id\"\nsession_summary = \"own-ss\"\n",
+        )
+        .unwrap();
+        let files: toml::Value = toml::from_str("[models]\nsession_summary = \"own-ss\"\n").unwrap();
+        let cfg =
+            ModelOverrideConfig::resolve_with_user_config(None, None, &effective, Some(&files), None);
+        assert_eq!(cfg.image_description.as_deref(), Some("campaign-id"));
+        assert_eq!(cfg.explicit.image_description, None);
+        assert_eq!(cfg.explicit.session_summary.as_deref(), Some("own-ss"));
+        // A campaign that overrides the user's own value is not the user's choice either.
+        let overridden: toml::Value =
+            toml::from_str("[models]\nsession_summary = \"campaign-ss\"\n").unwrap();
+        let cfg =
+            ModelOverrideConfig::resolve_with_user_config(None, None, &overridden, Some(&files), None);
+        assert_eq!(cfg.explicit.session_summary, None);
+        // Unreadable files: nothing from a file counts as explicit.
+        let cfg = ModelOverrideConfig::resolve_with_user_config(None, None, &effective, None, None);
+        assert_eq!(cfg.explicit, ExplicitHelperModels::default());
+    });
 }

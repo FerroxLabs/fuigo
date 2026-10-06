@@ -6,8 +6,6 @@ edition.workspace = true
 description = "Foundation modules for the fuigo shell crate family: environment presets, CPU profiling, and process/filesystem utilities."
 
 [features]
-# Forwarded from shell; empty here (no local-ws code in this crate).
-local-workspace = []
 # Exposes `#[cfg(test)]`-only helpers (`env::EnvVarGuard`,
 # `cpu_profile` test seams) to downstream crates' test targets. Enabled by
 test-support = ["fuigo-env/test-support"]
@@ -29,6 +27,8 @@ fuigo-env = { workspace = true }
 fuigo-shared = { workspace = true }
 fuigo-version = { workspace = true }
 fuigo-tty-utils = { workspace = true }
+# P145: the owner-only file ACL moved to fuigo-secrets so crates below this one can use it too.
+fuigo-secrets = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

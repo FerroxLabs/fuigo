@@ -1,5 +1,6 @@
 pub mod conversation;
 pub mod error;
+pub mod error_verdicts;
 pub mod types;
 
 // `Client` is the legacy alias used throughout the shell; it points at the sampler crate's `SamplingClient`

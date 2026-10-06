@@ -187,3 +187,79 @@
             "control chars must not reach toast: {text:?}"
         );
     }
+
+    // ── wire-level proof: real leader bytes through the real ACP decode path ──
+
+    async fn recv_decoded(rx: &mut fuigo_acp_lib::AcpClientRx) -> AcpClientMessage {
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("version-mismatch notice never reached the pager: the ACP decoder rejected the wire method")
+            .expect("bridge channel closed")
+    }
+
+    fn assert_decoded_version_mismatch(msg: &AcpClientMessage) {
+        let AcpClientMessage::ExtNotification(ext) = msg else {
+            panic!("expected an ExtNotification, got another message");
+        };
+        assert_eq!(ext.request.method.as_ref(), "fuigo/leader/version_mismatch");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_leader_version_mismatch_reaches_pager_toast() {
+        let mut leader =
+            crate::acp::leader_bridge::real_leader_harness::bridge_to_real_leader("0.1.157", "0.1.150")
+                .await;
+        let msg = recv_decoded(&mut leader.bridge.channel.rx).await;
+        assert_decoded_version_mismatch(&msg);
+        let mut app = make_app_with_agent("sess-1");
+        assert!(handle(msg, &mut app), "the handler must act on the notice");
+        assert_eq!(agent_toast(&app, AgentId(0)), Some(toast_157_150().as_str()));
+    }
+
+    /// An older leader sends the bare method; a new pager must still show the toast (bridge normalization).
+    #[tokio::test]
+    async fn legacy_unprefixed_leader_version_mismatch_reaches_pager_toast() {
+        let (leader_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut bridge = crate::acp::leader_bridge::bridge_channels(
+            leader_tx,
+            inbound_rx,
+            cancel.clone(),
+            None,
+            fuigo_shell::leader::ReconnectPolicy::bounded(),
+        )
+        .unwrap();
+        inbound_tx
+            .send(
+                r#"{"jsonrpc":"2.0","method":"fuigo/leader/version_mismatch","params":{"clientVersion":"0.1.157","leaderVersion":"0.1.150"}}"#
+                    .to_string(),
+            )
+            .unwrap();
+        let msg = recv_decoded(&mut bridge.channel.rx).await;
+        assert_decoded_version_mismatch(&msg);
+        let mut app = make_app_with_agent("sess-1");
+        assert!(handle(msg, &mut app));
+        assert_eq!(agent_toast(&app, AgentId(0)), Some(toast_157_150().as_str()));
+        cancel.cancel();
+    }
+
+    #[test]
+    fn version_mismatch_handler_accepts_prefixed_and_bare_method() {
+        for method in ["fuigo/leader/version_mismatch", "_fuigo/leader/version_mismatch"] {
+            let mut app = make_app_with_agent("sess-1");
+            let notif = acp::ExtNotification::new(
+                method,
+                std::sync::Arc::from(
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "clientVersion": "0.1.157",
+                        "leaderVersion": "0.1.150",
+                    }))
+                    .unwrap(),
+                ),
+            );
+            assert!(handle_ext_notification(&notif, &mut app), "{method}");
+            assert_eq!(agent_toast(&app, AgentId(0)), Some(toast_157_150().as_str()), "{method}");
+        }
+    }

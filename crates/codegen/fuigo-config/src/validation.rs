@@ -230,7 +230,13 @@ fn validate_user_requirements(home: Option<&Path>) -> Result<(), RequirementsErr
 /// `fail_closed` for [`validate_requirements`]'s version check.
 /// The admin file flag is authoritative; the env can only TIGHTEN it (force-on), never loosen.
 fn resolve_fail_closed_mode(requirements: &toml::Value) -> bool {
-    fail_closed_flag(requirements) || env_bool(FAIL_CLOSED_ENV) == Some(true)
+    resolve_fail_closed_mode_for(env_bool(FAIL_CLOSED_ENV), requirements)
+}
+
+/// [`resolve_fail_closed_mode`] with the parsed env value passed in, so the rule is testable
+/// without writing the process environment that `validate_requirements` callers also read.
+fn resolve_fail_closed_mode_for(env: Option<bool>, requirements: &toml::Value) -> bool {
+    fail_closed_flag(requirements) || env == Some(true)
 }
 
 #[cfg(test)]
@@ -309,37 +315,27 @@ minimum_version = "not-a-version"
         let _ = std::fs::remove_file(&path);
     }
 
+    // Through the pure core: writing `FUIGO_MANAGED_CONFIG_FAIL_CLOSED=1` process-wide made every
+    // concurrent `validate_requirements` caller (e.g. the soft-fail layer test) fail closed.
     #[test]
     fn fail_closed_env_can_tighten_but_not_loosen() {
-        // SAFETY: process-global env mutation, restored before return.
         let off: toml::Value = toml::from_str("fail_closed = false\n").unwrap();
         let on: toml::Value = toml::from_str("fail_closed = true\n").unwrap();
-        let prior = std::env::var(FAIL_CLOSED_ENV).ok();
 
         // env=1 force-enables even when the file is off (tighten is allowed).
-        unsafe { std::env::set_var(FAIL_CLOSED_ENV, "1") };
-        assert!(resolve_fail_closed_mode(&off));
-        assert!(resolve_fail_closed_mode(&on));
+        assert!(resolve_fail_closed_mode_for(Some(true), &off));
+        assert!(resolve_fail_closed_mode_for(Some(true), &on));
 
         // env=0 must NOT disable an admin's fail_closed=true (no local bypass).
-        unsafe { std::env::set_var(FAIL_CLOSED_ENV, "0") };
         assert!(
-            resolve_fail_closed_mode(&on),
+            resolve_fail_closed_mode_for(Some(false), &on),
             "a local env must not loosen admin fail_closed"
         );
-        assert!(!resolve_fail_closed_mode(&off));
+        assert!(!resolve_fail_closed_mode_for(Some(false), &off));
 
         // Unset: the admin file flag governs
-        unsafe { std::env::remove_var(FAIL_CLOSED_ENV) };
-        assert!(resolve_fail_closed_mode(&on));
-        assert!(!resolve_fail_closed_mode(&off));
-
-        unsafe {
-            match prior {
-                Some(p) => std::env::set_var(FAIL_CLOSED_ENV, p),
-                None => std::env::remove_var(FAIL_CLOSED_ENV),
-            }
-        }
+        assert!(resolve_fail_closed_mode_for(None, &on));
+        assert!(!resolve_fail_closed_mode_for(None, &off));
     }
 
     #[test]

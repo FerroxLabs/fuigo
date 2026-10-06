@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // Request and response types. They live here rather than in cli-chat-proxy because only the agent uses them.
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RegisterRequest {
     pub session_id: String,
@@ -30,6 +30,8 @@ pub struct RegisterRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
     /// Opaque id for this machine (telemetry's `agent_id()`), so the server can tell machines apart.
+    /// P54: only a FluxRouter-operated registry receives it as is; any other registry receives a
+    /// pseudonym scoped to its own origin ([`register_body_for`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,12 +122,47 @@ pub struct SearchResponse {
     pub sessions: Vec<SessionRecord>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DownloadResponse {
     pub download_url: String,
     pub file: String,
     pub turn: i32,
+}
+
+/// Hand-written `Debug` (P70a): a pre-signed download URL is a bearer capability, so it prints as `<redacted>`.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for DownloadResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            download_url: _,
+            file,
+            turn,
+        } = self;
+        f.debug_struct("DownloadResponse")
+            .field("download_url", &"<redacted>")
+            .field("file", file)
+            .field("turn", turn)
+            .finish()
+    }
+}
+
+/// The register body actually sent to `url` (P54). `device_id` is the persisted machine id, a
+/// cross-destination identifier: a FluxRouter-operated registry receives it unchanged, any other
+/// registry (an operator's own cli-chat-proxy, a loopback mock, a cleartext downgrade) receives
+/// `IdentityDisclosure::body_key_for(url, device_id)`, a pseudonym stable at that origin, so the
+/// registry can still tell this machine's sessions apart without learning the machine id.
+/// `hostname` is the OS host name, another stable machine identifier (often carrying the user's
+/// name), and the pseudonymous `deviceId` already separates machines, so it is omitted there.
+pub(crate) fn register_body_for(url: &str, req: &RegisterRequest) -> RegisterRequest {
+    let mut body = req.clone();
+    body.device_id = body
+        .device_id
+        .map(|id| fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for(url, &id));
+    if !fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url).is_permitted() {
+        body.hostname = None;
+    }
+    body
 }
 
 // ============================================================================
@@ -179,6 +216,8 @@ impl SessionRegistryClient {
                 auth_manager.clone(),
                 self.credentials.deployment_key.clone(),
                 self.credentials.alpha_test_key.clone(),
+                Some(self.base_url.clone()),
+                "session_registry",
             ),
         );
         self.credentials = self.credentials.with_auth_manager(auth_manager);
@@ -192,7 +231,7 @@ impl SessionRegistryClient {
         &self,
         builder: RequestBuilder,
         op: &'static str,
-    ) -> Result<(reqwest::Response, Option<fuigo_auth::StampedBearerSuffix>)> {
+    ) -> Result<(reqwest::Response, Option<fuigo_auth::StampedBearerFingerprint>)> {
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         fuigo_auth::execute_with_stamp(&self.client, request)
@@ -211,7 +250,7 @@ impl SessionRegistryClient {
     fn check_response(
         &self,
         response: reqwest::Response,
-        stamp: Option<&fuigo_auth::StampedBearerSuffix>,
+        stamp: Option<&fuigo_auth::StampedBearerFingerprint>,
         op: &str,
     ) -> anyhow::Error {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
@@ -224,15 +263,15 @@ impl SessionRegistryClient {
 
     /// Emit a single `auth 401 attribution` log entry tagged with `consumer = "SessionRegistryClient.<op>"`.
     /// The op string is the operation name passed to `check_response`, e.g. `"session register"`.
-    /// `stamp` is what the middleware put on the wire; [`fuigo_auth::StampedBearerSuffix`] explains why it is never re-resolved.
-    fn record_401_attribution(&self, op: &str, stamp: Option<&fuigo_auth::StampedBearerSuffix>) {
+    /// `stamp` is what the middleware put on the wire; [`fuigo_auth::StampedBearerFingerprint`] explains why it is never re-resolved.
+    fn record_401_attribution(&self, op: &str, stamp: Option<&fuigo_auth::StampedBearerFingerprint>) {
         if let Some(manager) = self.credentials.auth_manager() {
             crate::auth::attribution::record_consumer_401(
                 manager.as_ref(),
                 self.session_id.as_deref(),
                 crate::auth::attribution::ConsumerKind::SessionRegistryClient,
                 op,
-                stamp.map(|s| s.0.as_str()),
+                stamp.map(|s| &s.0),
             );
         }
     }
@@ -248,8 +287,9 @@ impl SessionRegistryClient {
     /// POST /v1/sessions/register (idempotent via ON CONFLICT)
     pub async fn register(&self, req: &RegisterRequest) -> Result<()> {
         let url = format!("{}/sessions/register", self.base_url);
+        let body = register_body_for(&url, req);
         let (response, stamp) = self
-            .send_authed(self.post(&url).json(req), "session register")
+            .send_authed(self.post(&url).json(&body), "session register")
             .await?;
         if !response.status().is_success() {
             return Err(self.check_response(response, stamp.as_ref(), "session register"));
@@ -623,6 +663,99 @@ mod tests {
             sent, "Bearer fresh-from-auth-manager",
             "outgoing bearer must come from AuthManager (not the build-time token)"
         );
+    }
+
+    fn register_request_with_device(device_id: &str) -> RegisterRequest {
+        RegisterRequest {
+            session_id: "s1".into(),
+            cwd: "/x".into(),
+            gcs_trace_prefix: "t".into(),
+            model_id: None,
+            repo_remote_url: None,
+            repo_branch: None,
+            repo_head_at_start: None,
+            hostname: Some("host-a".into()),
+            device_id: Some(device_id.into()),
+            parent_session_id: None,
+            subagent_type: None,
+            subagent_persona: None,
+            subagent_role: None,
+            fork_context_source: None,
+            subagent_depth: None,
+        }
+    }
+
+    /// P54 hostile: a registry that is not FluxRouter-operated receives, on the wire, no machine id
+    /// and no host name in the register body, only the origin-scoped pseudonym; FluxRouter still
+    /// receives both.
+    #[tokio::test]
+    async fn session_register_sends_no_machine_id_to_a_non_fluxrouter_registry() {
+        use axum::{Router, response::IntoResponse, routing::post};
+        use std::sync::Arc;
+        use tokio::net::TcpListener;
+
+        const MACHINE_ID: &str = "5d1f0c2a-7a7a-4b4b-8c8c-0123456789ab";
+        let captured = Arc::new(parking_lot::Mutex::new(None::<String>));
+        let captured_for_handler = captured.clone();
+        let router = Router::new().route(
+            "/sessions/register",
+            post(move |body: String| {
+                let captured = captured_for_handler.clone();
+                async move {
+                    *captured.lock() = Some(body);
+                    (axum::http::StatusCode::OK, "").into_response()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        use crate::auth::{AuthManager, AuthMode, FuigoAuth, FuigoComConfig};
+        use chrono::{Duration, Utc};
+        let dir = tempfile::tempdir().unwrap();
+        let am = Arc::new(AuthManager::new(dir.path(), FuigoComConfig::default()));
+        am.hot_swap(FuigoAuth {
+            key: "tok".into(),
+            auth_mode: AuthMode::ApiKey,
+            create_time: Utc::now(),
+            user_id: "user-42".into(),
+            expires_at: Some(Utc::now() + Duration::hours(1)),
+            ..FuigoAuth::test_default()
+        });
+        let client = SessionRegistryClient::new(base.clone(), "tok").with_auth(am);
+        client
+            .register(&register_request_with_device(MACHINE_ID))
+            .await
+            .unwrap();
+        let body = captured.lock().clone().expect("registry saw the request");
+        assert!(!body.contains(MACHINE_ID), "machine id on the wire: {body}");
+        assert!(!body.contains("host-a"), "host name on the wire: {body}");
+        let sent: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            sent["deviceId"].as_str(),
+            Some(
+                fuigo_extra_ca::fluxrouter::destination_pseudonym(
+                    &format!("{base}/sessions/register"),
+                    MACHINE_ID
+                )
+                .as_str()
+            ),
+            "the registry still gets a stable per-machine key"
+        );
+        assert_eq!(sent["sessionId"], "s1");
+
+        let flux = register_body_for(
+            "https://api.fluxrouter.ai/v1/sessions/register",
+            &register_request_with_device(MACHINE_ID),
+        );
+        assert_eq!(flux.device_id.as_deref(), Some(MACHINE_ID));
+        assert_eq!(flux.hostname.as_deref(), Some("host-a"));
+        let none = register_body_for("http://127.0.0.1:9/sessions/register", &RegisterRequest {
+            device_id: None,
+            ..register_request_with_device(MACHINE_ID)
+        });
+        assert_eq!(none.device_id, None, "a suppressed (ZDR) device id stays absent");
     }
 
     // last_turn_number can run ahead of restorable_turn_number: a turn can be done while the session-state upload is still in flight

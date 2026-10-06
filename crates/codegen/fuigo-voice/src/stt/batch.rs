@@ -75,6 +75,16 @@ pub fn pcm_to_wav(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
 /// Refuses an unset base for the same reason `ws_url` does: this carries a
 /// live microphone, so an unconfigured endpoint must be an explicit failure
 /// rather than a guess or a malformed URL that fails later.
+/// The batch STT attribution header. P43: `x-fuigo-client-identifier` is identity-class, so it
+/// goes only to a FluxRouter-operated `url`; empty (the probe binary and tests) is omitted.
+fn attribution_headers(url: &str, config: &VoiceConfig) -> reqwest::header::HeaderMap {
+    if config.client_identifier.is_empty() {
+        return reqwest::header::HeaderMap::new();
+    }
+    fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
+        .header_map([("x-fuigo-client-identifier", config.client_identifier.as_str())])
+}
+
 pub fn transcription_url(config: &VoiceConfig) -> Result<String, VoiceError> {
     let base = config.api_base.trim().trim_end_matches('/');
     if base.is_empty() {
@@ -214,9 +224,7 @@ impl BatchSttClient {
             .header("Authorization", format!("Bearer {bearer}"));
         // Attribution headers, matching the streaming transport. Skipped when
         // empty (the probe binary and tests); their absence is never fatal.
-        if !config.client_identifier.is_empty() {
-            request = request.header("x-fuigo-client-identifier", &config.client_identifier);
-        }
+        request = request.headers(attribution_headers(&url, config));
         if !config.user_agent.is_empty() {
             request = request.header("User-Agent", &config.user_agent);
         }
@@ -346,6 +354,25 @@ fn server_message(body: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: a speech-to-text endpoint that is not FluxRouter-operated gets no client
+    /// identifier; FluxRouter still does.
+    #[test]
+    fn batch_attribution_goes_only_to_fluxrouter() {
+        let config = VoiceConfig {
+            client_identifier: "fuigo-shell".into(),
+            ..VoiceConfig::default()
+        };
+        let headers =
+            attribution_headers("https://api.fluxrouter.ai/v1/audio/transcriptions", &config);
+        assert_eq!(headers["x-fuigo-client-identifier"], "fuigo-shell");
+        for url in [
+            "https://api.x.ai/v1/audio/transcriptions",
+            "https://stt.example/v1/audio/transcriptions",
+            "http://api.fluxrouter.ai/v1/audio/transcriptions",
+        ] {
+            assert!(attribution_headers(url, &config).is_empty(), "{url} got identity");
+        }
+    }
     use super::*;
 
     fn cfg(api_base: &str, language: &str) -> VoiceConfig {

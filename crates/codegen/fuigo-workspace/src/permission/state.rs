@@ -368,7 +368,8 @@ async fn persist_state_to_dir(
     // FUIGO_HOME may sit on a slow filesystem, so no blocking fs work on the async worker
     let result = persist_state_to_path_with_writer(&path, state, move |path, contents| {
         fuigo_config::create_dir_all_owner_only(&dir)?;
-        fuigo_config::fs_atomic::write_atomically(path, contents, None)
+        // The session's permission grants: owner-only like the other session files (P150, S14).
+        fuigo_config::fs_atomic::write_atomically(path, contents, Some(0o600))
     })
     .await;
     if let Err(e) = result {
@@ -787,6 +788,19 @@ allowed_mcp_servers = ["a"]
 
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    /// P150 (S14; live e2e lane M): the permission state file (`permission_<client>.toml`) is written 0600.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn p150_persisted_permission_state_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("sessions").join("%2Fsome%2Fcwd");
+        persist_state_to_dir(&dir, &PermissionState::default(), Some("fuigo-shell")).await;
+        let path = state_file_path(&dir, Some("fuigo-shell"));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{}", path.display());
     }
 
     #[tokio::test]

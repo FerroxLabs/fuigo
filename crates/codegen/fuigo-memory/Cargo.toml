@@ -23,6 +23,7 @@ git2 = { version = "0.20", default-features = false, features = [
 ] }
 libc = { workspace = true }
 notify = { workspace = true }
+regex = { workspace = true }
 reqwest = { workspace = true }
 reqwest-middleware = { workspace = true }
 # rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
@@ -33,9 +34,12 @@ sqlite-vec = "=0.1.7-alpha.2"
 tar = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 tracing = { workspace = true }
+unicode-normalization = { workspace = true }
 fuigo-auth = { workspace = true }
 fuigo-config-types = { workspace = true }
+fuigo-file-utils = { path = "../fuigo-file-utils" }
 fuigo-http = { workspace = true }
+fuigo-secrets = { workspace = true }
 fuigo-tools = { workspace = true }
 fuigo-version = { workspace = true }
 fuigo-sqlite-journal = { workspace = true }

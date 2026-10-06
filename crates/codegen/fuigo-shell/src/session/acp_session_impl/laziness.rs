@@ -203,7 +203,10 @@ pub(crate) async fn append_laziness_debug_log_line(
     log_handle: &std::sync::Arc<std::path::Path>,
     line: &LazinessDebugLogLine,
 ) -> std::io::Result<()> {
-    let mut json = serde_json::to_string(line).map_err(std::io::Error::other)?;
+    // P70b: a debug log file is a log sink (the line can carry a failed turn's error detail).
+    let mut json = fuigo_telemetry::sent_credentials::scrub_owned(
+        serde_json::to_string(line).map_err(std::io::Error::other)?,
+    );
     json.push('\n');
     let path = std::sync::Arc::clone(log_handle);
     tokio::task::spawn_blocking(move || {

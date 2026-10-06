@@ -423,6 +423,8 @@ impl<'a> EntryRenderer<'a> {
             return lines;
         }
         // Collapsed / Truncated foldable entries render a compact ~1-line header, NOT their (often huge) hidden body
+        // Use the ENTRY-level foldability (`block.is_foldable()` OR attached hooks), matching the fold path
+        // A collapsed entry foldable only through hooks would otherwise be over-counted
         let lines = if self.entry.display_mode != DisplayMode::Expanded && self.entry.is_foldable()
         {
             1
@@ -909,6 +911,7 @@ mod tests {
 
     #[test]
     fn test_entry_renderer_height() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::stub("Hello", Color::Blue));
         let renderer = EntryRenderer::new(&entry, &theme);
@@ -946,6 +949,7 @@ mod tests {
     /// A collapsed row drops the rail and keeps the column, so content must not shift with it.
     #[test]
     fn a_collapsed_entry_drops_the_rail_but_keeps_the_column() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::stub("Test", Color::Blue))
             .with_display_mode(DisplayMode::Collapsed);
@@ -964,6 +968,7 @@ mod tests {
 
     #[test]
     fn test_entry_renderer_layout() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::stub("Test", Color::Blue));
         let renderer = EntryRenderer::new(&entry, &theme);
@@ -993,6 +998,7 @@ mod tests {
 
     #[test]
     fn pending_user_input_keeps_diamond_bullet_with_static_color() {
+        let _theme = crate::theme::cache::pin_theme();
         // While a tool is blocked on a permission / question we keep the default Diamond bullet but freeze its color
         // There is no character swap and no wave brightness animation
         // The bullet must read the same glyph at every tick so the eye sees "paused on you", not the running-wave loading cue
@@ -1030,6 +1036,7 @@ mod tests {
 
     #[test]
     fn non_pending_running_tool_keeps_default_bullet() {
+        let _theme = crate::theme::cache::pin_theme();
         // Sanity check: when is_pending_user_input is false we leave the normal Diamond bullet alone
         // The running wave animation runs on top of it as before
         use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
@@ -1072,6 +1079,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_short_format_for_user_prompt() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hello"));
         // Not selected: short format "h:mm AM/PM"
@@ -1098,6 +1106,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_short_format_for_agent_message() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
         let renderer = EntryRenderer::new(&entry, &theme);
@@ -1122,6 +1131,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_expands_on_mouse_hover() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
         let width: u16 = 80;
@@ -1155,6 +1165,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_collapses_when_mouse_away() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
         let width: u16 = 80;
@@ -1191,6 +1202,7 @@ mod tests {
 
     #[test]
     fn test_no_timestamp_for_thinking_block() {
+        let _theme = crate::theme::cache::pin_theme();
         crate::appearance::cache::set_show_thinking_blocks(true);
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::thinking("deep thoughts"));
@@ -1213,6 +1225,7 @@ mod tests {
 
     #[test]
     fn test_no_timestamp_for_tool_call() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::tool_call("Read", "src/main.rs", true));
         let renderer = EntryRenderer::new(&entry, &theme);
@@ -1234,6 +1247,7 @@ mod tests {
 
     #[test]
     fn test_should_show_timestamp_returns_correct_values() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::blocks::BtwBlock;
 
         let theme = Theme::current();
@@ -1289,6 +1303,7 @@ mod tests {
 
     #[test]
     fn test_timestamp_not_rendered_when_narrow() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::user_prompt("hi"));
         let renderer = EntryRenderer::new(&entry, &theme);
@@ -1313,6 +1328,7 @@ mod tests {
 
     #[test]
     fn gutter_cleared_on_non_first_content_row_without_background() {
+        let _theme = crate::theme::cache::pin_theme();
         // Regression: nothing wrote the timestamp gutter on rows past the first
         // A glyph stranded there (e.g. a wide table cell past `text_width`) used to persist; every content row must now clear it.
         let theme = Theme::current();
@@ -1348,6 +1364,7 @@ mod tests {
 
     #[test]
     fn gutter_clear_preserves_first_row_timestamp() {
+        let _theme = crate::theme::cache::pin_theme();
         // The gutter clear runs before the timestamp overlay, so it must not wipe the first-row timestamp
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("hello"));
@@ -1375,6 +1392,7 @@ mod tests {
 
     #[test]
     fn background_block_gutter_uses_block_background_fill() {
+        let _theme = crate::theme::cache::pin_theme();
         // Background blocks own the gutter via the existing full-area fill, so the no-bg clear must not run for them
         // Concrete theme so bg_light != bg_base (Theme::current() quantizes both to Reset in the test env)
         let theme = Theme::fuigonight();
@@ -1410,6 +1428,10 @@ mod tests {
         // Requires color support: under `NO_COLOR` the global markdown style has no code background while this test's `fuigonight()` theme has RGB
         // That mismatch is impossible in production
         // (Historically this passed under NO_COLOR only because the md_style Reset-to-silver fallback bug painted a concrete bg despite the opt-out.)
+        //
+        // The code background comes from the global markdown style, which follows the process-global color level and terminal-native lock.
+        // Hold the pin: without it a theme test running beside this one changes them after the color check below, and the code row renders with no background while the gutter gets `bg_base` (P78).
+        let _theme = pin_theme();
         if !crate::theme::color_support::detect().has_color() {
             return;
         }
@@ -1537,37 +1559,49 @@ mod tests {
         );
     }
 
-    /// Retargeted from the hook-foldable variant: foldability now comes only from the block, so the live contract is
-    /// "a collapsed non-foldable entry estimates its body; a collapsed foldable one takes the compact shortcut".
     #[test]
-    fn estimate_uses_foldability_for_collapsed_shortcut() {
+    fn estimate_uses_entry_level_foldability_for_collapsed_shortcut() {
         let _theme = pin_theme();
+        // An AgentMessage block is NOT block-foldable, but attaching hooks makes the ENTRY foldable (matching the fold path)
+        // A Collapsed foldable entry takes the compact ~1-line shortcut; a non-foldable one estimates its body
+        use crate::scrollback::blocks::tool::hook::{
+            HookRunEntry, HookRunStatus, ToolCallHookData,
+        };
         let theme = Theme::current();
         // AgentMessage renders as markdown (single newlines collapse to spaces), so force a multi-row body with length, not line count
         let body = "word ".repeat(60);
 
-        // Not foldable: a Collapsed entry estimates its body, not the 1-line fold shortcut
+        // With no hooks the entry is not foldable, so a Collapsed entry estimates its body, not the 1-line fold shortcut
         let mut plain = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
         plain.set_display_mode(DisplayMode::Collapsed);
-        assert!(!plain.is_foldable());
         let plain_est = EntryRenderer::new(&plain, &theme).estimate_height(80);
         assert!(
             plain_est > 1,
             "non-foldable collapsed entry estimates its body, not the shortcut (got {plain_est})"
         );
 
-        // Foldable: the same long body collapsed costs far less than expanded (the shortcut, not the body)
-        let output = "line\n".repeat(200);
-        let mut folded = ScrollbackEntry::new(RenderBlock::execute_with_output("ls", output.as_str(), None::<String>));
-        folded.set_display_mode(DisplayMode::Collapsed);
-        assert!(folded.is_foldable());
-        let folded_est = EntryRenderer::new(&folded, &theme).estimate_height(80);
-        let mut opened = ScrollbackEntry::new(RenderBlock::execute_with_output("ls", output.as_str(), None::<String>));
-        opened.set_display_mode(DisplayMode::Expanded);
-        let opened_est = EntryRenderer::new(&opened, &theme).estimate_height(80);
+        // With hooks the entry is foldable, so the compact shortcut applies (1 line, no vpad)
+        let mut hooked = ScrollbackEntry::new(RenderBlock::agent_message(body.as_str()));
+        hooked.set_display_mode(DisplayMode::Collapsed);
+        hooked.hook_data = Some(ToolCallHookData {
+            pre_hooks: vec![HookRunEntry {
+                name: "fmt".into(),
+                status: HookRunStatus::Success {
+                    elapsed: std::time::Duration::from_millis(1),
+                },
+                output: None,
+            }],
+            ..Default::default()
+        });
+        let hooked_est = EntryRenderer::new(&hooked, &theme).estimate_height(80);
+        assert_eq!(
+            hooked_est, 1,
+            "hook-foldable collapsed entry uses the compact shortcut"
+        );
         assert!(
-            folded_est <= 3 && opened_est > folded_est + 100,
-            "collapsed foldable entry takes the compact shortcut (collapsed {folded_est} vs expanded {opened_est})"
+            plain_est > hooked_est,
+            "entry-level foldability must change the collapsed estimate \
+             (plain {plain_est} vs hooked {hooked_est})"
         );
     }
 
@@ -1679,6 +1713,7 @@ mod tests {
 
     #[test]
     fn thinking_entry_height_zero_when_show_thinking_blocks_off() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::thinking("reason step by step"));
         crate::appearance::cache::set_show_thinking_blocks(true);

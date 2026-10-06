@@ -247,6 +247,7 @@ mod tests {
 
     #[test]
     fn narrow_dialog_keeps_middle_unicode_cursor_visible() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 40, 12);
         let grapheme = "👩🏽\u{200d}💻";
         let label = format!("xxxxxxxxxxxx中e\u{301}{grapheme}tail");

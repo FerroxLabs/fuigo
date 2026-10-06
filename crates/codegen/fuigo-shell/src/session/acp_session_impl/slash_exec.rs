@@ -66,15 +66,19 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::Dream => {
-                // Intentionally no user-visible output, matching /flush behaviour
-                if self.memory.is_enabled() {
-                    self.run_dream_slash_command().await;
+                // An explicit `/dream` reports its result or why it could not run (user guide, 13-memory.md);
+                // background dreams stay silent (P150: it used to say nothing at all here).
+                let result = if self.memory.is_enabled() {
+                    self.run_dream_slash_command().await
                 } else {
                     tracing::warn!(
                         session_id = %self.session_info.id.0,
                         "dream skipped via /dream: memory not enabled for this session",
                     );
-                }
+                    "skipped: memory is not enabled for this session (turn it on with /memory on)".to_owned()
+                };
+                self.send_host_turn_slash_command_output(&format!("Dream: {result}"))
+                    .await;
                 ok_end_turn(0, None)
             }
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
@@ -84,7 +88,9 @@ impl SessionActor {
                         fuigo_telemetry::session_ctx::log_event(
                             fuigo_telemetry::events::HookTrusted { success: true },
                         );
-                        format!("Trusted: {}.", root.display())
+                        // The same reconciliation as the `/hooks` modal's Trust: the now-admitted repo hooks load without a restart
+                        let reload_msg = self.reload_hooks_impl().await;
+                        format!("Trusted: {}.\n{reload_msg}", root.display())
                     }
                     Err(e) => {
                         fuigo_telemetry::session_ctx::log_event(
@@ -142,7 +148,12 @@ impl SessionActor {
                 } else {
                     // CWE-427: Use shared add_hooks_path() which validates
                     // paths are under ~/.fuigo/ to prevent hook path injection.
-                    match crate::config::add_hooks_path(&path) {
+                    match crate::config::off_reactor({
+                        let path = path.to_string();
+                        move || crate::config::add_hooks_path(&path)
+                    })
+                    .await
+                    {
                         Ok(()) => {
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::HookAdded { success: true },
@@ -173,7 +184,12 @@ impl SessionActor {
                     )
                     .await;
                 } else {
-                    match crate::config::remove_hooks_path(&path) {
+                    match crate::config::off_reactor({
+                        let path = path.to_string();
+                        move || crate::config::remove_hooks_path(&path)
+                    })
+                    .await
+                    {
                         Ok(true) => {
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::HookRemoved { success: true },
@@ -208,8 +224,15 @@ impl SessionActor {
             }
             BuiltinAction::HooksUntrust => {
                 let msg = match Self::do_hooks_untrust_project(&self.session_info.cwd) {
-                    Ok((root, true)) => format!("Untrusted: {}.", root.display()),
-                    Ok((root, false)) => format!("Not currently trusted: {}", root.display()),
+                    // Either way this session drops what the folder gate no longer admits, as the `/hooks` modal's Untrust does
+                    Ok((root, true)) => {
+                        let reload_msg = self.reload_hooks_impl().await;
+                        format!("Untrusted: {}.\n{reload_msg}", root.display())
+                    }
+                    Ok((root, false)) => {
+                        let reload_msg = self.reload_hooks_impl().await;
+                        format!("Not currently trusted: {}\n{reload_msg}", root.display())
+                    }
                     Err(e) => e,
                 };
                 self.send_host_turn_slash_command_output(&msg).await;
@@ -392,7 +415,12 @@ impl SessionActor {
                         }
                     };
                     let path_str = resolved.to_string_lossy().to_string();
-                    match crate::config::add_plugin_path(&path_str) {
+                    match crate::config::off_reactor({
+                        let path_str = path_str.to_string();
+                        move || crate::config::add_plugin_path(&path_str)
+                    })
+                    .await
+                    {
                         Ok(()) => {
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::PluginAdded {
@@ -440,7 +468,12 @@ impl SessionActor {
                         }
                     };
                     let path_str = resolved.to_string_lossy().to_string();
-                    match crate::config::remove_plugin_path(&path_str) {
+                    match crate::config::off_reactor({
+                        let path_str = path_str.to_string();
+                        move || crate::config::remove_plugin_path(&path_str)
+                    })
+                    .await
+                    {
                         Ok(()) => {
                             fuigo_telemetry::session_ctx::log_event(
                                 fuigo_telemetry::events::PluginRemoved { success: true },
@@ -508,7 +541,21 @@ impl SessionActor {
                         ))
                         .await;
                     } else {
-                        match crate::plugin::install_plugin(&source, cwd) {
+                        // Off the reactor: the install clones, and its auto-enable
+                        // waits on the config.toml lock (see `config::off_reactor`).
+                        let installed = tokio::task::spawn_blocking({
+                            let source = source.to_string();
+                            let cwd = std::path::PathBuf::from(cwd);
+                            move || crate::plugin::install_plugin(&source, &cwd)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(fuigo_agent::plugins::install_registry::InstallError::Io {
+                                path: std::path::PathBuf::from(cwd),
+                                source: std::io::Error::other(format!("install task failed: {e}")),
+                            })
+                        });
+                        match installed {
                             Ok(outcome) => {
                                 for w in &outcome.warnings {
                                     tracing::warn!("{w}");
@@ -678,7 +725,9 @@ impl SessionActor {
             }
             BuiltinAction::Feedback { text } => self.execute_feedback_command(text).await,
             BuiltinAction::MemoryBrowse => {
-                let file_infos = if let Some(ref storage) = *self.memory.storage.borrow() {
+                // `storage()` clones the handle out of the `RefCell` so no borrow spans the awaits below.
+                let storage = self.memory.storage();
+                let file_infos = if let Some(storage) = storage.as_ref() {
                     match storage.list_memory_files() {
                         Ok(files) => files
                             .into_iter()
@@ -794,6 +843,8 @@ impl SessionActor {
                 };
                 self.send_host_turn_slash_command_output(&msg).await;
                 self.refresh_goal_harness_enabled().await;
+                // `/flush` and `memoryEnabled` both follow the memory state; tell clients it changed
+                self.send_available_commands_update().await;
                 ok_end_turn(0, None)
             }
             // GoalSet is handled directly in handle_prompt, before this function is called

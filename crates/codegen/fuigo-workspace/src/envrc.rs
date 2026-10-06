@@ -360,6 +360,8 @@ fn run_with_deadline(mut cmd: Command, deadline: Instant, label: &str) -> RunOut
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // `.envrc` is user code: it never sees Fuigo's secrets (P120). What it exports itself is still imported.
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     fuigo_tools::util::detach_std_command(&mut cmd);
     fuigo_sandbox::child_net::restrict_child_network_std(&mut cmd);
     #[allow(clippy::disallowed_methods)] // best-effort enrolled in the global ProcessScope below
@@ -459,6 +461,22 @@ impl PipeDrain {
             let mut chunk = [0u8; 8192];
             loop {
                 if stop.load(Ordering::Relaxed) {
+                    // `finish` stopped waiting (EOF, cap, or a quiet spell). A reader that the scheduler starved for that long has not yet taken what the evaluator wrote before it exited, and it is still in the pipe: take it now (the read end is non-blocking, so this ends at the first empty read).
+                    loop {
+                        let n = match pipe.read(&mut chunk) {
+                            Ok(n) => n,
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(_) => break,
+                        };
+                        let mut buf = lock_ignore_poison(&sink);
+                        if n == 0 || buf.len() + n > MAX_DRAIN_BYTES {
+                            if n != 0 {
+                                cut.store(true, Ordering::Relaxed);
+                            }
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
                     break;
                 }
                 let mut pollfd = libc::pollfd {
@@ -595,12 +613,15 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    /// A loader that is expected to SUCCEED gets a budget far above any real run: the timeout only matters when it fails, and on a starved host spawning the shell alone can take seconds.
+    const LOAD_BUDGET: Duration = Duration::from_secs(120);
+
     #[test]
     fn test_simple_export() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -615,7 +636,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "PATH_add bin\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
         let path = env.get("PATH").unwrap();
         assert!(path.contains(&format!("{}/bin", dir.path().display())));
     }
@@ -659,7 +680,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join(".envrc"), "export FOO=bar\nsleep 5 &\n").unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -675,7 +696,7 @@ mod tests {
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
         assert_eq!(env.get("FOO"), Some(&"bar".to_string()));
     }
 
@@ -690,7 +711,7 @@ mod tests {
         )
         .unwrap();
 
-        let env = load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).unwrap();
+        let env = load_envrc_with_timeout(dir.path(), LOAD_BUDGET).unwrap();
         assert_eq!(
             env.get("__FUIGO_ENVRC_COMPLETE__"),
             Some(&"decoy".to_string())
@@ -714,5 +735,32 @@ mod tests {
         let started = Instant::now();
         assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+}
+
+/// P120: `.envrc` evaluation (direnv, or bash when direnv is absent) runs user code; it must not inherit Fuigo's
+/// secrets, a registered credential name included.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_envrc_evaluation_does_not_inherit_fuigo_secrets() {
+        const NAME: &str = "p120_tests::p120_envrc_evaluation_does_not_inherit_fuigo_secrets";
+        const REGISTERED: &str = "P120_ENVRC_BEARER";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-envrc");
+        let out = dir.join("envrc-env.txt");
+        std::fs::write(dir.join(".envrc"), format!("env > '{}'\nexport P120_FROM_ENVRC=1\n", out.display())).unwrap();
+        let loaded = load_envrc_or_empty(&dir);
+        let dump = std::fs::read_to_string(&out).expect("the .envrc ran");
+        probe::assert_clean(&dump, &[]);
+        probe::assert_kept(&dump, REGISTERED);
+        assert_eq!(loaded.get("P120_FROM_ENVRC").map(String::as_str), Some("1"), "control: the .envrc's own export is still imported");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

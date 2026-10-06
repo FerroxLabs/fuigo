@@ -135,9 +135,11 @@ fn gc_dry_run_preserves_records() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db = db_at(&tmp);
 
+    // A path inside this test's own temp dir that is never created: a fixed host path such as `/nonexistent`
+    // can exist on a shared build box (another project's root test created it), which makes the record look alive.
     let record = crate::db::WorktreeRecord {
         created_at: 100,
-        ..crate::test_support::worktree_record("dry-1", "/nonexistent")
+        ..crate::test_support::worktree_record("dry-1", tmp.path().join("never-created"))
     };
     db.register(&record).unwrap();
 

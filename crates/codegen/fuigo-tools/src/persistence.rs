@@ -290,14 +290,38 @@ impl ResourcesPersistence {
 
     async fn write_json(path: &Path, value: &serde_json::Value) -> io::Result<()> {
         let (tmp_path, json) = Self::prepare_write(path, value)?;
-        tokio::fs::write(&tmp_path, json).await?;
+        let mut file = Self::create_owner_only(&tmp_path).await?;
+        file.write_all(&json).await?;
+        // tokio's File acknowledges a write before the blocking write has run; flush waits for it and reports its error
+        // (ENOSPC, ...) before the temp replaces the last good snapshot (Astra P145 r1 #1).
+        file.flush().await?;
+        drop(file);
         Self::replace_state_path(path, &tmp_path).await
+    }
+
+    /// Create (truncate) the temp file owner-only (P145). `resources_state.json` lives in the session directory and is a
+    /// session file like the others: 0600 on Unix (at creation, and tightened if the temp already existed looser), the
+    /// owner-only ACL on Windows, where it used to keep the folder's inherited ACL. The rename keeps the temp's
+    /// mode/ACL. Tightening is best effort: a filesystem without permissions must not stop tool state from being saved.
+    async fn create_owner_only(tmp_path: &Path) -> io::Result<tokio::fs::File> {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let file = options.open(tmp_path).await?;
+        if let Err(error) = fuigo_secrets::owner_only::restrict_to_owner(tmp_path) {
+            static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(?error, ?tmp_path, "resources state: could not restrict it to owner-only; continuing");
+            }
+        }
+        Ok(file)
     }
 
     async fn write_json_durable(path: &Path, value: &serde_json::Value) -> io::Result<()> {
         let (tmp_path, json) = Self::prepare_write(path, value)?;
         let result = async {
-            let mut file = tokio::fs::File::create(&tmp_path).await?;
+            let mut file = Self::create_owner_only(&tmp_path).await?;
             file.write_all(&json).await?;
             file.sync_all().await?;
             drop(file);
@@ -436,6 +460,32 @@ mod tests {
         // Verify WebCitationCounter roundtripped
         let counter = restored.get::<State<WebCitationCounter>>().unwrap();
         assert_eq!(counter.counter, 7);
+    }
+
+    /// P145 (S14): `resources_state.json` is a session file and is written owner-only by both writers (debounced and
+    /// durable), including over a loose temp left behind. Windows gets the owner-only ACL (verified live, R145).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn p145_resources_state_is_written_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("resources_state.json");
+        let value = serde_json::json!({"state": {}});
+
+        ResourcesPersistence::write_json(&path, &value).await.unwrap();
+        assert_eq!(mode(&path), 0o600, "debounced writer");
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, b"stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o666)).unwrap();
+        ResourcesPersistence::write_json_durable(&path, &value).await.unwrap();
+        assert_eq!(mode(&path), 0o600, "durable writer over a loose leftover temp");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            value
+        );
     }
 
     #[tokio::test]

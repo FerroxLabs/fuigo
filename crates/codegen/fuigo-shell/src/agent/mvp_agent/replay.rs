@@ -313,24 +313,32 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         mark_replay: bool,
-    ) -> Vec<ReplayCompletionRx> {
+    ) -> (Vec<ReplayCompletionRx>, u64) {
         use std::io::{Read, Seek, SeekFrom};
 
         let Some(updates_path) = updates_file_path.as_ref() else {
-            return Vec::new();
+            return (Vec::new(), from_offset);
         };
 
         let mut file = match std::fs::File::open(updates_path) {
             Ok(f) => f,
-            Err(_) => return Vec::new(),
+            Err(_) => return (Vec::new(), from_offset),
         };
         if file.seek(SeekFrom::Start(from_offset)).is_err() {
-            return Vec::new();
+            return (Vec::new(), from_offset);
         }
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_err() || contents.is_empty() {
-            return Vec::new();
+            return (Vec::new(), from_offset);
         }
+        // What this read can vouch for having shown the client: whole records only (see `whole_records_end`).
+        let preceded_by_boundary = from_offset == 0 || {
+            let mut prev = [0u8; 1];
+            file.seek(SeekFrom::Start(from_offset - 1))
+                .and_then(|_| file.read_exact(&mut prev))
+                .is_ok_and(|()| prev[0] == b'\n')
+        };
+        let read_through = whole_records_end(from_offset, &contents, preceded_by_boundary);
 
         let live_lines = crate::session::storage::filter_delta_replay_lines(&contents);
         let delta_count = live_lines.len();
@@ -367,7 +375,37 @@ impl MvpAgent {
             );
         }
 
-        completions
+        (completions, read_through)
+    }
+}
+
+/// The offset a delta read through which every record was read WHOLE, so that a marker inside `[0, end)` was parsed
+/// and forwarded rather than split across two reads. A read that starts mid-record (`!preceded_by_boundary`) vouches
+/// for nothing (its first fragment cannot parse), and a trailing record without its newline is not yet complete.
+fn whole_records_end(from_offset: u64, contents: &str, preceded_by_boundary: bool) -> u64 {
+    if !preceded_by_boundary {
+        return from_offset;
+    }
+    match contents.rfind('\n') {
+        Some(last_newline) => from_offset + last_newline as u64 + 1,
+        None => from_offset,
+    }
+}
+
+#[cfg(test)]
+mod whole_record_tests {
+    use super::whole_records_end;
+
+    #[test]
+    fn only_whole_records_count_as_read() {
+        // Starts on a boundary, ends mid-record: the trailing fragment is excluded.
+        assert_eq!(whole_records_end(10, "ab\ncd\nef", true), 10 + 6);
+        // Ends on a boundary: everything counts.
+        assert_eq!(whole_records_end(10, "ab\ncd\n", true), 10 + 6);
+        // No newline at all: nothing is whole.
+        assert_eq!(whole_records_end(10, "abcdef", true), 10);
+        // Starts mid-record: the read vouches for nothing, however many newlines follow.
+        assert_eq!(whole_records_end(10, "ab\ncd\n", false), 10);
     }
 }
 

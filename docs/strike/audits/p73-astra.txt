@@ -1,0 +1,17 @@
+# gpt-6-astra read-only audit, P73. Brief given, then the auditor's final answer verbatim.
+# (The full tool transcript was ~0.4-1.5 MB per round and is trimmed; the final answer is complete.)
+
+## BRIEF
+Round 5 audit (confirmation). Worktree at your cwd (read-only), HEAD vs base `strike/p73-base`. Use `git diff strike/p73-base..HEAD`. Do NOT run cargo. Round 4 (docs/strike/audits/p73-astra-r4.txt) found one HIGH: the guard's substring token `set(ThemeKind::` matched the new private-cell tests' `cell.set(ThemeKind::FuigoDay, ...)` in crates/codegen/fuigo-pager-render/src/theme/cache.rs, so the guard would reject the tree. Fixed: the token is gone from MUTATORS; `has_bare_set` (theme_pin_guard_tests.rs) matches `set(ThemeKind::` only when the preceding char is not `.`, `_` or alphanumeric; regression test `guard_ignores_instance_set_on_a_private_cell`. The guard test and the cache tests passed on the Hetzner build box at this HEAD (guard: 8 passed incl. the real-tree scan; cache: 40 passed). Also removed a stale comment. Verify: (1) the R4 HIGH is closed and has no sibling (grep the three crates' test code for any other instance/associated `set`/`reset`/`apply_kind`-like call that the MUTATORS tokens (`cache::set(`, `reset_for_test(`, `set_terminal_native_lock(`, `set_terminal_theme_enabled(`, `set_level_for_test(`, `set_auto_mode(`, `apply_kind(`, `dispatch(Action::SetTheme(` ...) would now wrongly flag, or that has_bare_set would flag); (2) no new BLOCKER/HIGH anywhere in the diff, with special attention to cache.rs `KindCell` and the guard. Report findings by severity with file:line, then end with exactly one line `VERDICT: <APPROVE|APPROVE WITH LOW-SEVERITY NIT|REQUEST CHANGES> - <reason>`. Use REQUEST CHANGES only for BLOCKER or HIGH.
+
+## FINAL ANSWER
+Audited `strike/p73-base..c226b6cc3765c0f940d05124e740820af485ae6b` read-only. No Cargo or Rust tests run; the Hetzner results are user-supplied evidence.
+
+- **BLOCKER/HIGH:** None found. R4’s HIGH is closed: [theme_pin_guard_tests.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) excludes instance `.set(...)` calls while retaining bare setters; the regression at line 611 covers this distinction. Searching all three crates found no sibling false-positive call among the remaining mutator tokens. The unrelated appearance-cache setter retains its exemption.
+- **LOW — Existing coverage limitation:** [theme_pin_guard_tests.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) still misses a directly imported `set(kind)` with a variable argument. This is documented and unchanged in practical scope.
+
+`KindCell` retains serialized publication, unlocked loading, and the second loaded check that prevents stale seeds overwriting setters. Reset never makes the published cell unloaded. Current production callbacks do not re-enter the publication mutex; arbitrary callback re-entry remains unsupported.
+
+No new BLOCKER/HIGH found elsewhere in the diff. Only the guard and cache changed since R4; source whitespace checks passed.
+
+VERDICT: APPROVE WITH LOW-SEVERITY NIT - R4 HIGH is closed with no sibling found; only the documented imported-setter coverage gap remains.

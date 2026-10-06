@@ -14,8 +14,10 @@ use fuigo_sampling_types::ReasoningEffort;
 use fuigo_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
+pub(crate) mod owner_only;
 pub(crate) mod relocation;
 mod replay;
+pub(crate) mod snapshot_lock;
 #[cfg(test)]
 mod replay_tests;
 pub mod search;
@@ -40,9 +42,41 @@ pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 /// Write `bytes` to `path` by writing a uniquely named sibling temp file and renaming it over the target.
 /// A crash or a concurrent writer never leaves a torn file; the temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    write_bytes_atomic_with(path, bytes, sync_file_durable, || {
+    write_bytes_atomic_reporting(path, bytes).map_err(AtomicWriteError::into_io)
+}
+
+/// How a failed [`write_bytes_atomic`] left the target.
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    /// The target still holds what it held before (or does not exist, as before).
+    NotReplaced(io::Error),
+    /// The new bytes were renamed over the target and a later step (the parent directory sync) failed.
+    Replaced(io::Error),
+}
+
+impl AtomicWriteError {
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            Self::NotReplaced(error) | Self::Replaced(error) => error,
+        }
+    }
+}
+
+/// [`write_bytes_atomic`] that says, when it fails, whether the rename over the target happened.
+pub(crate) fn write_bytes_atomic_reporting(path: &Path, bytes: &[u8]) -> Result<(), AtomicWriteError> {
+    #[cfg(test)]
+    jsonl::load_repair::seams::wait_if_held(path);
+    let result = write_bytes_atomic_outcome_with(path, bytes, sync_file_durable, || {
         sync_parent_dir_durable(path)
-    })
+    });
+    if matches!(&result, Ok(()) | Err(AtomicWriteError::Replaced(_)))
+        && path.file_name().is_some_and(|name| name == CHAT_HISTORY_FILE)
+        && let Some(dir) = path.parent()
+    {
+        // The whole chat history was rewritten: a compaction rewrite that had not landed is superseded (P111).
+        jsonl::compaction_witness::clear_after_chat_rewrite(dir, Some(bytes));
+    }
+    result
 }
 
 fn write_bytes_atomic_with(
@@ -51,9 +85,18 @@ fn write_bytes_atomic_with(
     sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
     sync_parent: impl Fn() -> io::Result<()>,
 ) -> io::Result<()> {
+    write_bytes_atomic_outcome_with(path, bytes, sync_file, sync_parent).map_err(AtomicWriteError::into_io)
+}
+
+fn write_bytes_atomic_outcome_with(
+    path: &Path,
+    bytes: &[u8],
+    sync_file: impl Fn(&std::fs::File) -> io::Result<()>,
+    sync_parent: impl Fn() -> io::Result<()>,
+) -> Result<(), AtomicWriteError> {
     let tmp = temp_sibling(path);
     let write_synced = || -> io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
+        let mut file = owner_only::create(&tmp)?;
         file.write_all(bytes)?;
         // NTFS/ext4 journal a rename as old-file-or-new-file only when the new file's data is already flushed
         // Without this fsync a power loss can leave the committed rename in place with zero-length content
@@ -65,10 +108,10 @@ fn write_bytes_atomic_with(
     // A retry after a rename whose parent sync failed sees the file present and cannot tell create from replace
     // So every successful rename pays the parent sync
     match write_synced().and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => sync_parent(),
+        Ok(()) => sync_parent().map_err(AtomicWriteError::Replaced),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            Err(e)
+            Err(AtomicWriteError::NotReplaced(e))
         }
     }
 }
@@ -221,10 +264,19 @@ fn is_fs_root(path: &Path) -> bool {
 }
 
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || write_bytes_atomic(&path, &bytes))
+    write_bytes_atomic_reporting_async(path, bytes)
         .await
-        .map_err(io::Error::other)?
+        .map_err(AtomicWriteError::into_io)
+}
+
+pub(crate) async fn write_bytes_atomic_reporting_async(
+    path: &Path,
+    bytes: Vec<u8>,
+) -> Result<(), AtomicWriteError> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || write_bytes_atomic_reporting(&path, &bytes))
+        .await
+        .map_err(|error| AtomicWriteError::NotReplaced(io::Error::other(error)))?
 }
 
 fn to_jsonl_bytes<T: serde::Serialize>(items: &[T]) -> io::Result<Vec<u8>> {
@@ -281,7 +333,7 @@ pub(crate) mod chat_rebuild {
 
         let chat_path = dir.join(CHAT_HISTORY_FILE);
         let tmp_path = dir.join(format!("{CHAT_HISTORY_FILE}.{}.tmp", uuid::Uuid::now_v7()));
-        let file = std::fs::File::create(&tmp_path)?;
+        let file = crate::session::storage::owner_only::create(&tmp_path)?;
         let mut writer = std::io::BufWriter::new(file);
         let mut reducer = ChatReducer::new();
 
@@ -298,11 +350,23 @@ pub(crate) mod chat_rebuild {
                 }
             }
 
-            // CompactionCheckpoint: truncate file and reset
+            // CompactionCheckpoint: everything before it is replaced by the checkpoint's compacted projection (the
+            // history the model continued from), so truncate and start again from that projection.
             if reducer.should_truncate() {
                 reducer.clear_truncate_flag();
                 let _ = writer.seek(std::io::SeekFrom::Start(0));
                 let _ = writer.get_mut().set_len(0);
+                reducer.projection_lines = 0;
+                if let Some(file) = reducer.checkpoint_file.take() {
+                    for item in compacted_projection(dir, &file) {
+                        if let Ok(line) = serde_json::to_string(&item) {
+                            let _ = writer.write_all(line.as_bytes());
+                            let _ = writer.write_all(b"\n");
+                            reducer.item_count += 1;
+                            reducer.projection_lines += 1;
+                        }
+                    }
+                }
             }
         }
 
@@ -313,16 +377,83 @@ pub(crate) mod chat_rebuild {
             }
         }
 
+        // This reducer keeps tool calls but does not apply rewinds. When a rewind follows the latest compaction, the
+        // projection written above may be one the rewind abandoned. If that compaction is still active, use the
+        // rewind-aware replay (text only; what 1.0.10-1.0.19 loaded here, under the same rule). Otherwise drop the
+        // projection and keep the reducer's tail, which is what this rebuild produced before P88.
+        let mut drop_projection = 0;
+        if reducer.rewound_after_checkpoint {
+            match crate::session::helpers::replay::replay_if_latest_compaction_active(&updates_path, dir) {
+                Ok(Some(conversation)) => {
+                    let _ = writer.seek(std::io::SeekFrom::Start(0));
+                    let _ = writer.get_mut().set_len(0);
+                    reducer.item_count = 0;
+                    for item in &conversation {
+                        if let Ok(line) = serde_json::to_string(item) {
+                            let _ = writer.write_all(line.as_bytes());
+                            let _ = writer.write_all(b"\n");
+                            reducer.item_count += 1;
+                        }
+                    }
+                }
+                Ok(None) => drop_projection = reducer.projection_lines,
+                Err(error) => {
+                    tracing::warn!(dir = %dir.display(), %error,
+                        "chat history rebuild: a rewind follows the latest compaction and its checkpoint is unreadable; \
+                         rebuilding without the compaction summary");
+                    drop_projection = reducer.projection_lines;
+                }
+            }
+        }
+
         if let Err(e) = writer.flush() {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
         drop(writer);
+        if drop_projection > 0 {
+            let rebuilt = std::fs::read_to_string(&tmp_path).and_then(|text| {
+                let kept: String = text.split_inclusive('\n').skip(drop_projection).collect();
+                crate::session::storage::owner_only::write(&tmp_path, kept)
+            });
+            if let Err(e) = rebuilt {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+            reducer.item_count = reducer.item_count.saturating_sub(drop_projection);
+        }
         if let Err(e) = std::fs::rename(&tmp_path, &chat_path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(e);
         }
+        // Rebuilt from the transcript, compactions included: no compaction rewrite is outstanding (P111).
+        super::jsonl::compaction_witness::clear_after_chat_rewrite(dir, None);
         Ok(reducer.count())
+    }
+
+    /// The compacted projection a checkpoint marker activated. Without it the rebuild after that marker would hold only
+    /// the post-compaction tail, losing the summary (P88). An unreadable file degrades to that tail, with a warning.
+    fn compacted_projection(dir: &Path, checkpoint_file: &str) -> Vec<ConversationItem> {
+        let path = crate::extensions::notification::contained_checkpoint_path(dir, checkpoint_file);
+        let parsed = crate::extensions::notification::read_contained_checkpoint(dir, checkpoint_file)
+            .map_err(|e| e.to_string())
+            .and_then(|bytes| {
+                serde_json::from_slice::<crate::extensions::notification::CompactionCheckpointFile>(&bytes)
+                    .map_err(|e| e.to_string())
+            });
+        match parsed {
+            Ok(file) if file.schema_version == 1 => file.compacted_history,
+            Ok(file) => {
+                tracing::warn!(path = %path.display(), schema_version = file.schema_version,
+                    "chat history rebuild: unsupported compaction checkpoint schema; rebuilt history lacks its summary");
+                Vec::new()
+            }
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error,
+                    "chat history rebuild: compaction checkpoint unreadable; rebuilt history lacks its summary");
+                Vec::new()
+            }
+        }
     }
 
     /// Turn boundaries: a switch from user to agent flushes the user item, and a switch from agent to user flushes the agent item.
@@ -336,6 +467,15 @@ pub(crate) mod chat_rebuild {
         in_user_turn: bool,
         has_agent_content: bool,
         needs_truncate: bool,
+        /// Checkpoint file of the compaction marker that set `needs_truncate`.
+        checkpoint_file: Option<String>,
+        checkpoint_seen: bool,
+        /// A rewind marker follows the latest compaction marker.
+        rewound_after_checkpoint: bool,
+        /// Lines of the latest checkpoint's projection at the head of the output.
+        projection_lines: usize,
+        /// `_meta.promptIndex` of the user run being accumulated.
+        user_prompt_index: Option<usize>,
 
         tool_args: HashMap<String, String>,
         emitted_tool_results: HashSet<String>,
@@ -352,6 +492,11 @@ pub(crate) mod chat_rebuild {
                 in_user_turn: false,
                 has_agent_content: false,
                 needs_truncate: false,
+                checkpoint_file: None,
+                checkpoint_seen: false,
+                rewound_after_checkpoint: false,
+                projection_lines: 0,
+                user_prompt_index: None,
                 tool_args: HashMap::new(),
                 emitted_tool_results: HashSet::new(),
                 item_count: 0,
@@ -382,9 +527,17 @@ pub(crate) mod chat_rebuild {
             use crate::extensions::notification::SessionUpdate as FuigoUpdate;
 
             match update {
-                FuigoUpdate::CompactionCheckpoint(_) => {
+                FuigoUpdate::CompactionCheckpoint(info) => {
                     self.reset();
                     self.needs_truncate = true;
+                    self.checkpoint_file = Some(info.checkpoint_file.clone());
+                    self.checkpoint_seen = true;
+                    self.rewound_after_checkpoint = false;
+                    Vec::new()
+                }
+                FuigoUpdate::RewindMarker { .. } => {
+                    // This reducer does not apply rewinds; see `rebuild_chat_history`.
+                    self.rewound_after_checkpoint |= self.checkpoint_seen;
                     Vec::new()
                 }
                 _ => Vec::new(), // DiffReview, MemoryFlush, etc. not needed
@@ -410,6 +563,20 @@ pub(crate) mod chat_rebuild {
                 out.extend(self.flush_user());
             }
             self.user_is_interjection = interjection;
+            // A new `_meta.promptIndex` starts a new prompt even with no response in between (a prompt cancelled before
+            // any output), and the item keeps its index as the live history does (P88).
+            let prompt_index = chunk
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("promptIndex"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            if prompt_index.is_some() && self.user_prompt_index.is_some() && prompt_index != self.user_prompt_index {
+                out.extend(self.flush_user());
+            }
+            if !interjection && self.user_prompt_index.is_none() {
+                self.user_prompt_index = prompt_index;
+            }
 
             match &chunk.content {
                 acp::ContentBlock::Text(t) => {
@@ -460,6 +627,13 @@ pub(crate) mod chat_rebuild {
         }
 
         fn on_tool_call(&mut self, tc: &acp::ToolCall) -> Vec<ConversationItem> {
+            // A tool call ends the user's run even when the model said nothing first; otherwise the prompt stays
+            // buffered and lands after the tool call and result it caused (P88).
+            let mut out = Vec::new();
+            if self.in_user_turn {
+                out.extend(self.flush_user());
+                self.in_user_turn = false;
+            }
             let id = tc.tool_call_id.0.to_string();
             let args = tc
                 .raw_input
@@ -474,7 +648,7 @@ pub(crate) mod chat_rebuild {
                 arguments: std::sync::Arc::<str>::from(args),
             });
 
-            Vec::new()
+            out
         }
 
         fn on_tool_call_update(&mut self, tc: &acp::ToolCallUpdate) -> Vec<ConversationItem> {
@@ -530,15 +704,19 @@ pub(crate) mod chat_rebuild {
 
         fn flush_user(&mut self) -> Option<ConversationItem> {
             let interjection = std::mem::take(&mut self.user_is_interjection);
+            let prompt_index = self.user_prompt_index.take();
             if self.user_parts.is_empty() {
                 return None;
             }
             let content = std::mem::take(&mut self.user_parts);
-            let item = ConversationItem::User(UserItem {
+            let mut item = ConversationItem::User(UserItem {
                 content,
                 synthetic_reason: interjection.then_some(SyntheticReason::Interjection),
                 ..Default::default()
             });
+            if let Some(prompt_index) = prompt_index {
+                item.set_prompt_index(prompt_index);
+            }
             self.item_count += 1;
             Some(item)
         }
@@ -569,6 +747,7 @@ pub(crate) mod chat_rebuild {
 
         fn reset(&mut self) {
             self.user_parts.clear();
+            self.user_prompt_index = None;
             self.user_is_interjection = false;
             self.agent_text.clear();
             self.agent_tool_calls.clear();
@@ -614,6 +793,34 @@ pub(crate) mod chat_rebuild {
             return raw.to_string();
         }
         String::new()
+    }
+
+    #[cfg(test)]
+    mod contained_checkpoint_tests {
+        use super::*;
+
+        /// A cached marker (pulled by an older version) naming a path outside the session dir must not be read.
+        #[test]
+        fn hostile_marker_path_is_not_read_by_the_rebuild() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let dir = tmp.path().join("s");
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = crate::extensions::notification::CompactionCheckpointFile {
+                inherited_prefix_len: None,
+                checkpoint_id: "x".into(),
+                prompt_index_at_compaction: 1,
+                compacted_history: vec![ConversationItem::user("OUTSIDE-SECRET")],
+                schema_version: 1,
+                created_at: "2026-10-04T00:00:00Z".into(),
+                original_user_info: None,
+                reread_file_paths: vec![],
+            };
+            std::fs::write(tmp.path().join("outside.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+            let abs = tmp.path().join("outside.json").display().to_string();
+            for hostile in ["../outside.json", abs.as_str()] {
+                assert!(compacted_projection(&dir, hostile).is_empty(), "{hostile} was read");
+            }
+        }
     }
 }
 
@@ -808,7 +1015,11 @@ pub struct PersistedData {
     pub plan_state: Option<TodoState>,
     /// Persisted plan mode lifecycle state (None for sessions created before plan mode)
     pub plan_mode_state: Option<crate::session::plan_mode::PlanModeSnapshot>,
+    /// The rewind points that parse, in file order.
     pub rewind_points: Vec<RewindPoint>,
+    /// Line numbers of the rows of `rewind_points.jsonl` that did not parse (a torn append). They are left out of
+    /// `rewind_points` and kept in the file as they were: they record which prompts' saved files are missing (P114, P123).
+    pub damaged_rewind_lines: Vec<usize>,
     /// Persisted session signals (None for sessions created before signals persistence)
     pub signals: Option<SessionSignals>,
     /// Persisted announcement tracking state (None for sessions before this feature)
@@ -823,6 +1034,9 @@ pub struct PersistedData {
 pub struct PersistedDataLight {
     pub summary: Summary,
     pub chat_history: Vec<ConversationItem>,
+    /// Lines of `chat_history.jsonl` the reader skipped as unparseable (torn or interleaved appends).
+    /// `chat_history` does not contain them.
+    pub skipped_chat_lines: usize,
     pub plan_state: Option<TodoState>,
     pub plan_mode_state: Option<crate::session::plan_mode::PlanModeSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by `FileStateTracker`)
@@ -1158,6 +1372,332 @@ impl SessionFileSet {
     }
 }
 
+/// Why [`open_beneath_nofollow`] did not open a file.
+#[derive(Debug)]
+pub(crate) enum BeneathRefusal {
+    /// The path is refused (a symlink, a non-directory folder, a non-regular file, a component leaving `base`).
+    Refused(&'static str),
+    Io(io::Error),
+}
+
+/// Open `base/relative` for reading without following a symlink at any component below `base`, and only when it is
+/// a regular file (P146, S17). On Unix every folder is opened with `O_DIRECTORY | O_NOFOLLOW` relative to the one
+/// above it and the file with `openat(O_NOFOLLOW | O_NONBLOCK)`, so a component swapped for a symlink after any check
+/// cannot redirect the read, and a FIFO cannot block it. On Windows every folder is opened as a handle that refuses
+/// rename and delete while it is held, checked from that handle, and kept open until the file is opened, so a folder
+/// cannot be swapped for a link in between (P154). On any other platform every folder is checked with
+/// `symlink_metadata` and the file is opened without following a link (a folder swapped between the check and the
+/// open is not caught there). `base` itself is trusted.
+pub(crate) fn open_beneath_nofollow(base: &Path, relative: &Path) -> Result<std::fs::File, BeneathRefusal> {
+    const NOT_REGULAR: &str = "it is not a regular file (a symlink is never followed)";
+    #[cfg(not(windows))]
+    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part),
+            _ => return Err(BeneathRefusal::Refused("its path leaves the session folder")),
+        }
+    }
+    let Some(leaf) = parts.pop() else {
+        return Err(BeneathRefusal::Refused("its path is empty"));
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::io::{AsRawFd as _, FromRawFd as _};
+        let c = |p: &std::ffi::OsStr| {
+            std::ffi::CString::new(p.as_bytes()).map_err(|e| BeneathRefusal::Io(io::Error::other(e)))
+        };
+        let base_c = c(base.as_os_str())?;
+        // SAFETY: open(2) on a NUL-terminated path; the descriptor is owned by the File right after.
+        let fd = unsafe { libc::open(base_c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(BeneathRefusal::Io(io::Error::last_os_error()));
+        }
+        // SAFETY: a fresh descriptor nothing else owns.
+        let mut dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        for part in parts {
+            let part_c = c(part)?;
+            // SAFETY: openat(2) relative to a live directory descriptor, on one NUL-terminated component.
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    part_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                let error = io::Error::last_os_error();
+                return Err(match error.raw_os_error() {
+                    Some(libc::ELOOP) | Some(libc::ENOTDIR) => BeneathRefusal::Refused(NOT_DIR),
+                    _ => BeneathRefusal::Io(error),
+                });
+            }
+            // SAFETY: a fresh descriptor nothing else owns.
+            dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        let leaf_c = c(leaf)?;
+        // SAFETY: as above. O_NONBLOCK: opening a FIFO must not wait for a writer; it is refused just below.
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                leaf_c.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::ELOOP) => BeneathRefusal::Refused(NOT_REGULAR),
+                _ => BeneathRefusal::Io(error),
+            });
+        }
+        // SAFETY: a fresh descriptor nothing else owns.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        match file.metadata() {
+            Ok(meta) if meta.is_file() => Ok(file),
+            Ok(_) => Err(BeneathRefusal::Refused(NOT_REGULAR)),
+            Err(error) => Err(BeneathRefusal::Io(error)),
+        }
+    }
+    #[cfg(windows)]
+    {
+        // Every folder stays open (see `hold_folders_beneath_windows`) until the file is opened and checked.
+        let (held, dir) = hold_folders_beneath_windows(base, &parts)?;
+        open_leaf_beneath_windows(&held, &dir, leaf)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let mut dir = base.to_path_buf();
+        for part in parts {
+            dir.push(part);
+            match std::fs::symlink_metadata(&dir) {
+                Ok(meta) if meta.file_type().is_dir() => {}
+                Ok(_) => return Err(BeneathRefusal::Refused(NOT_DIR)),
+                Err(error) => return Err(BeneathRefusal::Io(error)),
+            }
+        }
+        let file = std::fs::File::open(dir.join(leaf)).map_err(BeneathRefusal::Io)?;
+        match file.metadata() {
+            Ok(meta) if meta.is_file() => Ok(file),
+            Ok(_) => Err(BeneathRefusal::Refused(NOT_REGULAR)),
+            Err(error) => Err(BeneathRefusal::Io(error)),
+        }
+    }
+}
+
+/// Windows: `FILE_ATTRIBUTE_REPARSE_POINT` is set (a symlink or junction, never followed here).
+#[cfg(windows)]
+fn is_reparse_point_windows(meta: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Windows: open the file itself, never the target of a symlink at its path (`FILE_FLAG_OPEN_REPARSE_POINT`); the
+/// caller then checks the handle's metadata.
+#[cfg(windows)]
+fn open_leaf_windows(path: &Path) -> Result<std::fs::File, BeneathRefusal> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+        .map_err(BeneathRefusal::Io)
+}
+
+/// Windows: the final path of an open handle (`GetFinalPathNameByHandleW`, normalized, DOS volume name) as UTF-16
+/// units, where the object really lives, whatever path it was opened through. Never turned into text: a name may hold
+/// an isolated surrogate, and a lossy conversion would make two different folders compare equal.
+#[cfg(windows)]
+fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
+    use std::os::windows::io::AsRawHandle as _;
+    // kernel32 is linked by std.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFinalPathNameByHandleW(file: *mut std::ffi::c_void, path: *mut u16, len: u32, flags: u32) -> u32;
+    }
+    let mut buffer = vec![0u16; 1024];
+    loop {
+        // SAFETY: a live handle and a writable buffer of the length passed.
+        let len = unsafe { GetFinalPathNameByHandleW(file.as_raw_handle(), buffer.as_mut_ptr(), buffer.len() as u32, 0) };
+        if len == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if (len as usize) < buffer.len() {
+            buffer.truncate(len as usize);
+            return Ok(buffer);
+        }
+        buffer.resize(len as usize + 1, 0);
+    }
+}
+
+/// Windows: `child` (a final path) is `name` directly inside `parent` (a final path). Both come from
+/// `GetFinalPathNameByHandleW` as UTF-16 units and the parent part must match unit for unit: a case-sensitive folder
+/// can hold `session` and `SESSION` apart, and a name may hold an isolated surrogate that a lossy text conversion
+/// would turn into the same U+FFFD as another name. Only the last name is compared without regard to case, as the
+/// volume itself may be case-insensitive.
+#[cfg(windows)]
+fn is_direct_child_windows(parent: &[u16], child: &[u16], name: &std::ffi::OsStr) -> bool {
+    use std::os::windows::ffi::OsStrExt as _;
+    let backslash = u16::from(b'\\');
+    let mut parent = parent;
+    while let [rest @ .., last] = parent {
+        if *last != backslash {
+            break;
+        }
+        parent = rest;
+    }
+    let Some(rest) = child.strip_prefix(parent) else {
+        return false;
+    };
+    let Some(last) = rest.strip_prefix(&[backslash]) else {
+        return false;
+    };
+    if last.contains(&backslash) {
+        return false;
+    }
+    let wanted: Vec<u16> = name.encode_wide().collect();
+    last == wanted.as_slice() || String::from_utf16_lossy(last).to_lowercase() == String::from_utf16_lossy(&wanted).to_lowercase()
+}
+
+/// Windows: open `dir/leaf` (the folders `held` are still open) and refuse anything but a regular file that really
+/// lives directly in the last held folder. The location check catches a folder turned into a junction in place (an
+/// empty folder can be, through another handle) between the folder checks and this open: the file would then be read
+/// from the junction's target, whose final path is not under the folder's own (P154). With no folder held the file
+/// is directly in `base`, which is trusted.
+#[cfg(windows)]
+fn open_leaf_beneath_windows(
+    held: &[std::fs::File],
+    dir: &Path,
+    leaf: &std::ffi::OsStr,
+) -> Result<std::fs::File, BeneathRefusal> {
+    const NOT_REGULAR: &str = "it is not a regular file (a symlink is never followed)";
+    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    let file = open_leaf_windows(&dir.join(leaf))?;
+    match file.metadata() {
+        Ok(meta) if meta.is_file() && !is_reparse_point_windows(&meta) => {}
+        Ok(_) => return Err(BeneathRefusal::Refused(NOT_REGULAR)),
+        Err(error) => return Err(BeneathRefusal::Io(error)),
+    }
+    if let Some(folder) = held.last() {
+        let folder_path = final_path_windows(folder).map_err(BeneathRefusal::Io)?;
+        let file_path = final_path_windows(&file).map_err(BeneathRefusal::Io)?;
+        if !is_direct_child_windows(&folder_path, &file_path, leaf) {
+            return Err(BeneathRefusal::Refused(NOT_DIR));
+        }
+    }
+    Ok(file)
+}
+
+/// Windows: open every folder of `parts` under `base`, one below the other, and return the open handles with the
+/// folder's path. A handle takes `FILE_SHARE_READ` only, so while it is held Windows refuses to rename or delete
+/// that folder or any above it, and refuses data-write opens of it; it cannot be swapped for a symlink or junction
+/// between this check and the file's open. (An in-place conversion of an empty folder is caught later, by the
+/// location check in `open_leaf_beneath_windows`.) Each folder is checked from its own handle: a
+/// directory, and not a reparse point. The caller keeps the handles until the file is opened and checked (P154).
+#[cfg(windows)]
+fn hold_folders_beneath_windows(
+    base: &Path,
+    parts: &[&std::ffi::OsStr],
+) -> Result<(Vec<std::fs::File>, PathBuf), BeneathRefusal> {
+    hold_folders_beneath_windows_with(base, parts, &mut |_| {})
+}
+
+/// [`hold_folders_beneath_windows`], calling `after_each(index)` once folder `index` is held and checked (a test
+/// seam: it lets a test act between two folder opens).
+#[cfg(windows)]
+fn hold_folders_beneath_windows_with(
+    base: &Path,
+    parts: &[&std::ffi::OsStr],
+    after_each: &mut dyn FnMut(usize),
+) -> Result<(Vec<std::fs::File>, PathBuf), BeneathRefusal> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    const NOT_DIR: &str = "a folder on its path is not a real directory (a symlink is never followed)";
+    // FILE_TRAVERSE too: an open that asks for attribute access alone is not share-checked, so a handle with only
+    // FILE_READ_ATTRIBUTES would not stop a rename of its folder (found on a Windows host, P154).
+    const FILE_ACCESS: u32 = 0x80 | 0x20; // FILE_READ_ATTRIBUTES | FILE_TRAVERSE
+    // No FILE_SHARE_WRITE and no FILE_SHARE_DELETE: nothing else can open the folder for data writes or to rename or
+    // delete it. Files created inside it are not affected. An open for FILE_WRITE_ATTRIBUTES alone is not share-checked,
+    // and can still turn an EMPTY folder into a junction in place (shown on Windows Server 2022); that case is caught
+    // by the location checks (`is_direct_child_windows`).
+    const SHARE_READ: u32 = 0x1;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let mut held = Vec::with_capacity(parts.len());
+    let mut dir = base.to_path_buf();
+    // Where `base` really is (it is trusted, so a link in it is followed). Each folder must really be directly in
+    // the one above it: a folder turned into a junction in place between two opens would otherwise lead the walk
+    // out, and the file's own location check would then only see the outside folder and the file agree.
+    let mut above: Vec<u16> = Vec::new();
+    if !parts.is_empty() {
+        let base_handle = std::fs::OpenOptions::new()
+            .access_mode(FILE_ACCESS)
+            .share_mode(0x7)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(base)
+            .map_err(BeneathRefusal::Io)?;
+        above = final_path_windows(&base_handle).map_err(BeneathRefusal::Io)?;
+    }
+    for (index, part) in parts.iter().enumerate() {
+        dir.push(part);
+        let handle = std::fs::OpenOptions::new()
+            .access_mode(FILE_ACCESS)
+            .share_mode(SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&dir)
+            .map_err(BeneathRefusal::Io)?;
+        match handle.metadata() {
+            Ok(meta) if meta.is_dir() && !is_reparse_point_windows(&meta) => {}
+            Ok(_) => return Err(BeneathRefusal::Refused(NOT_DIR)),
+            Err(error) => return Err(BeneathRefusal::Io(error)),
+        }
+        let here = final_path_windows(&handle).map_err(BeneathRefusal::Io)?;
+        if !is_direct_child_windows(&above, &here, part) {
+            return Err(BeneathRefusal::Refused(NOT_DIR));
+        }
+        above = here;
+        held.push(handle);
+        after_each(index);
+    }
+    Ok((held, dir))
+}
+
+/// The durable copy of `rewind_points.jsonl` a rewind keeps while it is in progress (P146), next to it. One left
+/// behind means an earlier rewind did not finish; the next rewind is refused until it is dealt with.
+pub(crate) fn rewind_points_pre_rewind_copy(rewind_points: &Path) -> PathBuf {
+    rewind_points.with_extension("jsonl.pre-rewind")
+}
+
+/// The rewind points rewrite lock, held from [`StorageAdapter::lock_rewind_points_rewrite`] until the rewind it was
+/// taken for is done (P146). `None` inside: the lock file could not be opened, and the rewrite runs without it, as a
+/// rewrite that takes the lock itself does then. Dropping it releases the lock.
+#[derive(Debug, Default)]
+pub struct RewindPointsRewriteLock {
+    /// `rewind_points.jsonl.rewrite.lock`, exclusive.
+    pub(crate) rewrite: Option<std::fs::File>,
+}
+
+/// What `rewind_points.jsonl` held before a rewind rewrote it (`None`: it did not exist), to put it back when the
+/// rewind does not go through (P146).
+#[derive(Debug, Default)]
+pub struct RewindPointsUndo {
+    pub(crate) previous: Option<Vec<u8>>,
+    /// What the rewind's rewrite wrote: a put-back keeps whatever was appended after it.
+    pub(crate) written: Vec<u8>,
+}
+
+/// The rewrite of `rewind_points.jsonl` a rewind makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindPointsRewrite {
+    /// A file rewind (All, FilesOnly): drop the points of prompts `from_index` and later.
+    TruncateFrom(usize),
+    /// A conversation-only rewind: fold the points of prompts `target_index` and later into the one before.
+    MergeFrom(usize),
+}
+
 /// Abstracts over different storage backends (JSONL, SQLite, etc.)
 #[async_trait]
 pub trait StorageAdapter: Send + Sync {
@@ -1379,12 +1919,37 @@ pub trait StorageAdapter: Send + Sync {
     /// It never relies on a (possibly partially loaded) in-memory tracker, so historical points can't be lost.
     async fn merge_rewind_points_from(&self, info: &Info, target_index: usize) -> io::Result<()>;
 
+    /// Take the rewind points rewrite lock (and check the append lock can be had), waiting as long as a rewrite does.
+    /// A rewind takes it before it changes anything and keeps it until it is done (P146): `WouldBlock` when another
+    /// process holds either all that time, so the rewind is refused with nothing changed instead of going through and
+    /// then dropping its rewrite.
+    async fn lock_rewind_points_rewrite(&self, info: &Info) -> io::Result<RewindPointsRewriteLock>;
+
+    /// [`Self::truncate_rewind_points_from`] or [`Self::merge_rewind_points_from`] for a rewind that holds the rewrite
+    /// lock (from [`Self::lock_rewind_points_rewrite`]) until it is done. First keeps a durable copy of the file
+    /// (`rewind_points.jsonl.pre-rewind`); returns what it held and what was written, for
+    /// [`Self::end_rewind_points_rewrite`]. A failed rewrite leaves the file as it was and removes the copy.
+    async fn rewrite_rewind_points_holding(&self, info: &Info, rewrite: RewindPointsRewrite) -> io::Result<RewindPointsUndo>;
+
+    /// The rewind [`Self::rewrite_rewind_points_holding`] was made for is done, its rewrite lock still held.
+    /// `put_back`: it did not go through, so `rewind_points.jsonl` gets back what it held, followed by any row appended
+    /// since. The durable copy is then removed; it stays when the put-back failed.
+    async fn end_rewind_points_rewrite(&self, info: &Info, undo: RewindPointsUndo, put_back: bool) -> io::Result<()>;
+
     /// Replace the entire chat history (used for compaction and rewind)
     async fn replace_chat_history(
         &self,
         info: &Info,
         messages: &[ConversationItem],
     ) -> io::Result<()>;
+
+    /// [`Self::replace_chat_history`] that says, when it fails, whether `chat_history.jsonl` already holds `messages`
+    /// (`Committed`: a step after the file replacement failed) or still the previous history (`NotCommitted`).
+    async fn replace_chat_history_commit_aware(
+        &self,
+        info: &Info,
+        messages: &[ConversationItem],
+    ) -> Result<(), AppendChatError>;
 
     /// Copy the on-disk chat history before a destructive image-strip rewrite (first backup wins), mirroring the `*.corrupt` quarantine.
     /// Required, not defaulted: a new adapter must choose explicitly how its data stays recoverable.
@@ -1441,6 +2006,22 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
     ) -> io::Result<()>;
+
+    /// Before a compaction's activation marker is appended, record which checkpoint it activates and what
+    /// `chat_history.jsonl` holds at that moment, durably (P111). See `jsonl::compaction_witness`.
+    async fn write_compaction_witness(
+        &self,
+        info: &Info,
+        checkpoint: &crate::extensions::notification::CompactionCheckpointFile,
+    ) -> io::Result<()>;
+
+    /// The compaction `checkpoint_id` activated (its marker is in `updates.jsonl`): earlier witness entries are no
+    /// longer needed. Best effort.
+    async fn compaction_activated(&self, info: &Info, checkpoint_id: &str);
+
+    /// The compacted history to resume with when the latest compaction committed but its rewrite of
+    /// `chat_history.jsonl` never landed; `None` when `chat_history.jsonl` is authoritative (the normal case).
+    async fn unapplied_compaction_projection(&self, info: &Info) -> Option<Vec<ConversationItem>>;
 
     /// Write a compaction request artifact to `compaction_requests/{request_id}.json`.
     /// Captures the exact request sent to the compaction model and the response (or final error) it produced.
@@ -2186,6 +2767,246 @@ pub(crate) fn parse_prompt_extract_event(line: &str) -> PromptExtractEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P154: the Windows beneath-open holds every folder, so none can be swapped for a link before the file opens.
+    #[cfg(windows)]
+    mod open_beneath_windows {
+        use super::*;
+
+        fn make_dir_link(link: &Path, target: &Path) {
+            if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+                return;
+            }
+            // No symlink privilege: a junction needs none.
+            let status = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("run cmd mklink");
+            assert!(status.status.success(), "mklink /J failed: {status:?}");
+        }
+
+        // kernel32 is linked by std; these two calls build and run the in-place conversion the audit named.
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn DeviceIoControl(
+                device: *mut std::ffi::c_void,
+                code: u32,
+                input: *const std::ffi::c_void,
+                input_len: u32,
+                output: *mut std::ffi::c_void,
+                output_len: u32,
+                returned: *mut u32,
+                overlapped: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+
+        /// Try to turn the EMPTY folder `victim` into a junction to `target` in place, through a second handle
+        /// (`FSCTL_SET_REPARSE_POINT`), with each access mask that could allow it. True when one of them worked.
+        fn convert_in_place(victim: &Path, target: &Path) -> bool {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            use std::os::windows::io::AsRawHandle as _;
+            use std::os::windows::ffi::OsStrExt as _;
+            // A temp dir path is plain `C:\...`; the NT form of it starts `\??\`. Lossless: a name may hold an
+            // isolated surrogate.
+            let substitute: Vec<u16> = "\\??\\".encode_utf16().chain(target.as_os_str().encode_wide()).collect();
+            let sub_bytes = (substitute.len() * 2) as u16;
+            let data_len = 8 + sub_bytes + 2 + 2;
+            let mut buffer: Vec<u8> = Vec::new();
+            buffer.extend_from_slice(&0xA000_0003u32.to_le_bytes()); // IO_REPARSE_TAG_MOUNT_POINT
+            buffer.extend_from_slice(&data_len.to_le_bytes());
+            buffer.extend_from_slice(&0u16.to_le_bytes());
+            buffer.extend_from_slice(&0u16.to_le_bytes()); // substitute offset
+            buffer.extend_from_slice(&sub_bytes.to_le_bytes());
+            buffer.extend_from_slice(&(sub_bytes + 2).to_le_bytes()); // print offset
+            buffer.extend_from_slice(&0u16.to_le_bytes()); // print length
+            for unit in &substitute {
+                buffer.extend_from_slice(&unit.to_le_bytes());
+            }
+            buffer.extend_from_slice(&[0, 0, 0, 0]);
+            // FILE_WRITE_DATA (= FILE_ADD_FILE on a folder), FILE_WRITE_ATTRIBUTES, and both.
+            for access in [0x2u32, 0x100, 0x102] {
+                let Ok(handle) = std::fs::OpenOptions::new()
+                    .access_mode(access)
+                    .share_mode(0x7)
+                    .custom_flags(0x0200_0000 | 0x0020_0000)
+                    .open(victim)
+                else {
+                    continue;
+                };
+                let mut returned = 0u32;
+                // SAFETY: a live handle and a fully built REPARSE_DATA_BUFFER; no output buffer is asked for.
+                let ok = unsafe {
+                    DeviceIoControl(
+                        handle.as_raw_handle(),
+                        0x0009_00A4, // FSCTL_SET_REPARSE_POINT
+                        buffer.as_ptr().cast(),
+                        buffer.len() as u32,
+                        std::ptr::null_mut(),
+                        0,
+                        &mut returned,
+                        std::ptr::null_mut(),
+                    )
+                };
+                if ok != 0 {
+                    return true;
+                }
+            }
+            false
+        }
+
+        #[test]
+        fn a_held_folder_cannot_be_turned_into_a_junction_before_the_file_opens() {
+            let tmp = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("f.txt"), b"secret").unwrap();
+            std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+            let parts = [std::ffi::OsStr::new("a"), std::ffi::OsStr::new("b")];
+            let (held, dir) = hold_folders_beneath_windows(tmp.path(), &parts).expect("holds");
+            let converted = convert_in_place(&tmp.path().join("a").join("b"), outside.path());
+            eprintln!("P154 in-place conversion succeeded: {converted}");
+            // Whether or not the conversion got through, the outside file must not be read.
+            if let Ok(mut file) = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt")) {
+                let mut text = String::new();
+                io::Read::read_to_string(&mut file, &mut text).unwrap();
+                assert_ne!(text, "secret", "the leaf was read through a junction made after the check");
+            }
+        }
+
+        #[test]
+        fn a_folder_turned_into_a_junction_between_two_folder_opens_is_refused() {
+            let tmp = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::create_dir(outside.path().join("b")).unwrap();
+            std::fs::write(outside.path().join("b").join("f.txt"), b"secret").unwrap();
+            std::fs::create_dir(tmp.path().join("a")).unwrap(); // empty, so it can be converted in place
+            let parts = [std::ffi::OsStr::new("a"), std::ffi::OsStr::new("b")];
+            let mut converted = false;
+            let result = hold_folders_beneath_windows_with(tmp.path(), &parts, &mut |index| {
+                if index == 0 {
+                    converted = convert_in_place(&tmp.path().join("a"), outside.path());
+                }
+            });
+            eprintln!("P154 mid-walk conversion succeeded: {converted}");
+            if converted {
+                assert!(
+                    matches!(result, Err(BeneathRefusal::Refused(_))),
+                    "folders below a junction made mid-walk were accepted"
+                );
+            } else {
+                assert!(result.is_err());
+            }
+        }
+
+        fn wide(text: &str) -> Vec<u16> {
+            text.encode_utf16().collect()
+        }
+
+        #[test]
+        fn a_sibling_that_differs_only_in_case_is_not_the_folder() {
+            let name = std::ffi::OsStr::new("f.txt");
+            let ok = |parent: &str, child: &str| is_direct_child_windows(&wide(parent), &wide(child), name);
+            assert!(ok(r"\\?\C:\s\session\ck", r"\\?\C:\s\session\ck\f.txt"));
+            // A case-sensitive folder can hold `session` and `SESSION` apart; a read from the other one is refused.
+            assert!(!ok(r"\\?\C:\s\session\ck", r"\\?\C:\s\SESSION\ck\f.txt"));
+            // Not nested, and not the name asked for.
+            assert!(!ok(r"\\?\C:\s\ck", r"\\?\C:\s\ck\x\f.txt"));
+            assert!(!ok(r"\\?\C:\s\ck", r"\\?\C:\s\ck\g.txt"));
+        }
+
+        #[test]
+        fn folders_whose_names_differ_only_in_an_isolated_surrogate_are_not_the_same() {
+            let name = std::ffi::OsStr::new("f.txt");
+            let mut with_lone = wide(r"\\?\C:\s\");
+            with_lone.push(0xD800);
+            with_lone.extend(wide(r"\id\ck"));
+            let with_replacement = wide("\\\\?\\C:\\s\\\u{FFFD}\\id\\ck");
+            let mut child = with_lone.clone();
+            child.extend(wide(r"\f.txt"));
+            assert!(is_direct_child_windows(&with_lone, &child, name));
+            assert!(!is_direct_child_windows(&with_replacement, &child, name));
+        }
+
+        #[test]
+        fn a_folder_converted_to_a_junction_onto_a_lookalike_name_is_refused() {
+            use std::os::windows::ffi::OsStringExt as _;
+            let tmp = tempfile::tempdir().unwrap();
+            // `<U+FFFD>/id/ck` is the trusted folder; `<D800>/id/ck` is outside and holds the same-named file.
+            let replacement = tmp.path().join("\u{FFFD}").join("id");
+            let lone = tmp.path().join(std::ffi::OsString::from_wide(&[0xD800])).join("id");
+            std::fs::create_dir_all(replacement.join("ck")).unwrap(); // empty: can be converted in place
+            std::fs::create_dir_all(lone.join("ck")).unwrap();
+            std::fs::write(lone.join("ck").join("f.txt"), b"secret").unwrap();
+            let parts = [std::ffi::OsStr::new("ck")];
+            let (held, dir) = hold_folders_beneath_windows(&replacement, &parts).expect("holds");
+            let converted = convert_in_place(&replacement.join("ck"), &lone.join("ck"));
+            eprintln!("P154 lookalike conversion succeeded: {converted}");
+            if let Ok(mut file) = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt")) {
+                let mut text = String::new();
+                io::Read::read_to_string(&mut file, &mut text).unwrap();
+                assert_ne!(text, "secret", "the leaf was read from a lookalike folder");
+            }
+        }
+
+        #[test]
+        fn plain_folders_and_a_regular_file_open() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+            std::fs::write(tmp.path().join("a").join("b").join("f.txt"), b"hello").unwrap();
+            let mut file = open_beneath_nofollow(tmp.path(), Path::new("a/b/f.txt")).expect("opens");
+            let mut text = String::new();
+            io::Read::read_to_string(&mut file, &mut text).unwrap();
+            assert_eq!(text, "hello");
+        }
+
+        #[test]
+        fn a_folder_that_is_a_symlink_or_junction_is_refused() {
+            let tmp = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("f.txt"), b"secret").unwrap();
+            make_dir_link(&tmp.path().join("a"), outside.path());
+            assert!(matches!(
+                open_beneath_nofollow(tmp.path(), Path::new("a/f.txt")),
+                Err(BeneathRefusal::Refused(_))
+            ));
+            // The same below a real folder.
+            std::fs::create_dir(tmp.path().join("real")).unwrap();
+            make_dir_link(&tmp.path().join("real").join("b"), outside.path());
+            assert!(matches!(
+                open_beneath_nofollow(tmp.path(), Path::new("real/b/f.txt")),
+                Err(BeneathRefusal::Refused(_))
+            ));
+        }
+
+        #[test]
+        fn a_file_that_is_a_symlink_is_refused() {
+            let tmp = tempfile::tempdir().unwrap();
+            let outside = tempfile::tempdir().unwrap();
+            std::fs::write(outside.path().join("f.txt"), b"secret").unwrap();
+            std::os::windows::fs::symlink_file(outside.path().join("f.txt"), tmp.path().join("l.txt"))
+                .expect("create a file symlink (needs the symlink privilege)");
+            assert!(matches!(
+                open_beneath_nofollow(tmp.path(), Path::new("l.txt")),
+                Err(BeneathRefusal::Refused(_))
+            ));
+        }
+
+        #[test]
+        fn a_held_folder_cannot_be_renamed_or_swapped_until_released() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join("a").join("b")).unwrap();
+            let parts = [std::ffi::OsStr::new("a"), std::ffi::OsStr::new("b")];
+            let (held, dir) = hold_folders_beneath_windows(tmp.path(), &parts).expect("holds");
+            assert_eq!(held.len(), 2);
+            assert_eq!(dir, tmp.path().join("a").join("b"));
+            assert!(std::fs::rename(tmp.path().join("a"), tmp.path().join("a-moved")).is_err());
+            assert!(std::fs::rename(tmp.path().join("a").join("b"), tmp.path().join("a").join("b-moved")).is_err());
+            assert!(std::fs::remove_dir(tmp.path().join("a").join("b")).is_err());
+            drop(held);
+            std::fs::rename(tmp.path().join("a"), tmp.path().join("a-moved")).expect("free after the handles drop");
+        }
+    }
 
     mod rebuild_interjections {
         use super::*;

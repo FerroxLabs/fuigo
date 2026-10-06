@@ -51,6 +51,9 @@ fn git_worktree_add_detached(repo: &Path, worktree: &Path) {
 
 #[test]
 fn nested_subdir_cwd_derives_label_from_second_component_after_prefix() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);
 
@@ -93,6 +96,9 @@ fn cwd_outside_worktrees_dir_has_no_identity() {
 
 #[test]
 fn db_recorded_source_wins_over_git_discovery() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);
@@ -131,6 +137,9 @@ fn db_recorded_source_wins_over_git_discovery() {
 
 #[test]
 fn linked_worktree_without_db_record_derives_source_from_git() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);
@@ -151,6 +160,9 @@ fn linked_worktree_without_db_record_derives_source_from_git() {
 
 #[test]
 fn plain_directory_under_worktrees_dir_does_not_inherit_enclosing_repo() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);
@@ -207,6 +219,9 @@ fn resolved_cwd_under_symlinked_worktrees_dir_still_derives_identity() {
 #[cfg(unix)]
 #[test]
 fn standalone_clone_behind_symlinked_worktrees_dir_reports_no_source() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let root = dunce::canonicalize(temp.path()).unwrap();
@@ -233,6 +248,9 @@ fn standalone_clone_behind_symlinked_worktrees_dir_reports_no_source() {
 
 #[test]
 fn standalone_clone_with_source_marker_and_no_db_derives_marker_source() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);
@@ -258,6 +276,9 @@ fn standalone_clone_with_source_marker_and_no_db_derives_marker_source() {
 
 #[test]
 fn standalone_git_dir_without_db_record_keeps_label_but_no_source() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_test_utils::require_git!();
     let temp = tempfile::TempDir::new().unwrap();
     let fixture = locked_worktrees_fixture(&temp);

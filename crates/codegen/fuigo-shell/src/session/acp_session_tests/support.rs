@@ -10,6 +10,11 @@ pub(crate) fn completion_identity(actor: &SessionActor) -> std::rc::Rc<()> {
         .map(|task| task.identity.clone())
         .unwrap_or_else(|| std::rc::Rc::new(()))
 }
+/// P42: an origin that may receive the session token in this test binary (`Config::install_test_trusted_origins`).
+/// Session-auth tests about refresh/recovery mechanics must aim here: since P42 an `http://` or loopback
+/// `base_url` never receives the session token, so it can no longer stand in for "the session endpoint".
+pub(crate) const P42_CONFIGURED_ORIGIN: &str = "https://api.fluxrouter.ai/v1";
+#[cfg(test)]
 pub(crate) fn test_auth_method_id(id: &str) -> crate::agent::auth_method::SharedAuthMethodId {
     crate::agent::auth_method::new_shared_auth_method_id(Some(acp::AuthMethodId::new(id)))
 }
@@ -193,6 +198,40 @@ pub(crate) async fn create_test_actor_ex(
     )
     .await
 }
+/// The test actor's chat-state actor, with `persistence` behind it (the test actor itself uses
+/// [`fuigo_chat_state::NullChatPersistence`]).
+#[cfg(test)]
+pub(crate) fn spawn_test_chat_state(
+    context_window: u64,
+    persistence: Box<dyn fuigo_chat_state::ChatPersistence>,
+) -> fuigo_chat_state::ChatStateHandle {
+    let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    fuigo_chat_state::ChatStateActor::spawn(
+        vec![],
+        fuigo_sampling_types::SamplingConfig {
+            base_url: fuigo_test_support::refused_loopback_url(),
+            model: "test".to_string(),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            max_retries: None,
+            api_backend: Default::default(),
+            extra_headers: Default::default(),
+            query_params: Default::default(),
+            env_http_headers: Default::default(),
+            context_window: std::num::NonZeroU64::new(context_window)
+                .expect("test context_window must be non-zero"),
+            reasoning_effort: None,
+            stream_tool_calls: None,
+            mtls_cert_dir: None,
+            rate_limit_retry_threshold: None,
+            reasoning_summary: None,
+        },
+        persistence,
+        chat_event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+}
 #[cfg(test)]
 pub(crate) async fn create_test_actor_with_terminal(
     total_tokens: u64,
@@ -233,33 +272,9 @@ pub(crate) async fn create_test_actor_with_terminal(
         hook_block_hold: Default::default(),
         nudges_used_this_session: 0,
     });
-    let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-    let chat_state_handle = fuigo_chat_state::ChatStateActor::spawn(
-        vec![],
-        fuigo_sampling_types::SamplingConfig {
-            base_url: "http://localhost".to_string(),
-            model: "test".to_string(),
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            max_retries: None,
-            api_backend: Default::default(),
-            extra_headers: Default::default(),
-            query_params: Default::default(),
-            env_http_headers: Default::default(),
-            context_window: std::num::NonZeroU64::new(context_window)
-                .expect("test context_window must be non-zero"),
-            reasoning_effort: None,
-            stream_tool_calls: None,
-            mtls_cert_dir: None,
-            rate_limit_retry_threshold: None,
-            reasoning_summary: None,
-        },
-        Box::new(fuigo_chat_state::NullChatPersistence),
-        chat_event_tx,
-        tokio_util::sync::CancellationToken::new(),
-    );
+    let chat_state_handle =
+        spawn_test_chat_state(context_window, Box::new(fuigo_chat_state::NullChatPersistence));
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
@@ -414,7 +429,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announcements: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
@@ -431,6 +446,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_registry_live: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -441,6 +457,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+        _turn_owner_lock: None,
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
@@ -469,20 +486,10 @@ pub(crate) async fn create_test_actor_with_terminal(
         trace_config_template: std::cell::RefCell::new(None),
     };
     if let Some(reservations) = actor.tool_context.task_completion_reservations.clone() {
-        actor
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(reservations)
-            .await;
+        actor.tool_bridge_handle().update_resource(reservations).await;
     }
     if let Some(gate) = actor.tool_context.task_wake_suppressed.clone() {
-        actor
-            .agent
-            .borrow()
-            .tool_bridge()
-            .update_resource(gate)
-            .await;
+        actor.tool_bridge_handle().update_resource(gate).await;
     }
     (actor, event_rx)
 }
@@ -1020,4 +1027,51 @@ pub(crate) fn transient_state(step_attempts: u32, enabled: bool) -> TransientRet
         episode_start: None,
         enabled,
     }
+}
+
+/// The prompt index from which `message` asks persistence to drop rewind snapshots (`rewind_points.jsonl`), if it does.
+pub(crate) fn truncation_of(message: &crate::session::persistence::PersistenceMsg) -> Option<usize> {
+    use crate::session::persistence::PersistenceMsg;
+    use crate::session::storage::RewindPointsRewrite;
+    match message {
+        PersistenceMsg::TruncateRewindPoints { from_index } => Some(*from_index),
+        PersistenceMsg::RewriteRewindPointsAndAck { rewrite: RewindPointsRewrite::TruncateFrom(from_index), .. } => {
+            Some(*from_index)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) type RecordedTruncations = std::sync::Arc<std::sync::Mutex<Vec<usize>>>;
+
+/// A persistence channel that answers what a rewind waits for (its rewind points lock and rewrite, P146) without
+/// touching disk, and records every truncation the handler asks for.
+pub(crate) fn answering_persistence() -> (
+    tokio::sync::mpsc::UnboundedSender<crate::session::persistence::PersistenceMsg>,
+    RecordedTruncations,
+) {
+    use crate::session::persistence::PersistenceMsg;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let recorded = RecordedTruncations::default();
+    let seen = recorded.clone();
+    tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
+            if let Some(from_index) = truncation_of(&message) {
+                seen.lock().unwrap().push(from_index);
+            }
+            match message {
+                PersistenceMsg::LockRewindPointsRewrite { gate, respond_to } if gate.start() => {
+                    let _ = respond_to.send(Ok(Default::default()));
+                }
+                PersistenceMsg::RewriteRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                    let _ = respond_to.send(Ok(Default::default()));
+                }
+                PersistenceMsg::EndRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                    let _ = respond_to.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
+    (tx, recorded)
 }

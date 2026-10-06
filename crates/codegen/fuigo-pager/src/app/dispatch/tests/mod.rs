@@ -112,6 +112,10 @@ fn test_app() -> AppView {
         active_announcements: vec![],
         hidden_announcement_ids: Default::default(),
         announcements_last_gen: 0,
+        relay_refusal: None,
+        relay_refusal_noted: Default::default(),
+        relay_sync_refusals: Default::default(),
+        leader_notices: Vec::new(),
         announcement: None,
         changelog_markdown: None,
         changelog_bullets: Vec::new(),
@@ -128,16 +132,6 @@ fn test_app() -> AppView {
         require_plan_approval: false,
         plan_mode: false,
         chat_mode: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
-        #[cfg(feature = "local-workspace")]
-        local_workspace_startup_locked: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_session_local_workspace: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_local_workspace_ack_pending: false,
-        #[cfg(feature = "local-workspace")]
-        welcome_history_load_as_build: false,
         subagents: false,
         ask_user: false,
         mouse_captured: true,
@@ -235,10 +229,6 @@ fn test_app() -> AppView {
         welcome_privacy_banner_opt_out_rect: None,
         welcome_privacy_banner_terms_rect: None,
         welcome_privacy_banner_policy_rect: None,
-        #[cfg(feature = "local-workspace")]
-        welcome_workspace_mode_rects: Default::default(),
-        #[cfg(feature = "local-workspace")]
-        welcome_on_workspace_mode: false,
         welcome_toast: None,
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
@@ -506,6 +496,7 @@ fn cta_mcp_server(
         name: name.into(),
         display_name: None,
         status,
+        status_reason: None,
         tool_count: 0,
         auth_required: matches!(status, McpServerDisplayStatus::NeedsAuth),
         setup_required: false,
@@ -561,6 +552,7 @@ fn arm_reconcile_with_meta(
             cancellation_category: cancellation_category.map(str::to_string),
             cancellation_context: None,
             error_kind: None,
+            verdicts: None,
             received_at: std::time::Instant::now() - age,
         });
 }
@@ -569,6 +561,7 @@ pub(super) fn end_turn() -> Action {
         agent_id: AgentId(0),
         result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
         http_status: None,
+        verdicts: None,
         prompt_id: None,
     })
 }
@@ -1001,6 +994,10 @@ fn with_theme_test_env(f: impl FnOnce()) {
     f();
     crate::theme::system_appearance::clear_mock();
     crate::theme::cache::reset_for_test();
+    // Leave the cache LOADED: `reset_for_test` clears it, and the next unlocked `Theme::current()`
+    // anywhere in the binary would then seed the kind from disk outside the theme lock, overwriting
+    // whatever a `pin_theme()` holder had set (R070).
+    crate::theme::cache::set(crate::theme::ThemeKind::FuigoNight);
 }
 fn agent_scrollback_len(app: &AppView) -> usize {
     app.agents.get(&AgentId(0)).unwrap().scrollback.len()

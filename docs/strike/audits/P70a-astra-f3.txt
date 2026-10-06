@@ -1,0 +1,61 @@
+P70a follow-up (explicit references) Astra audit, round f3 (cleaned: the brief as sent and the auditor's final report; the tool transcript between them is omitted).
+Audited tree: strike/p70a-s24 at 6060ee17 (diff a84e3234..HEAD at the time).
+Command: codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null  (project-local codex, from wt-p70a)
+Raw transcript: 10399 lines, sha256 8c9c5e17822a97089175f4993e641a2d661068b285de1b42c3519ede3b3d5eec; tokens used 195,914; kept at wt-p70a/target/p70a-astra/f3.raw.txt (git-ignored, not committed).
+
+===== BRIEF =====
+You are an independent security/code auditor. Repository: the current directory (a git worktree, branch strike/p70a-s24). Read-only: do not run cargo, do not modify files. Audit the diff `git diff a84e3234..HEAD` (the P70a follow-up "explicit references", audit round 3, on top of P70a rebased onto integration fc3ccb94; a84e3234 is P70a's receipt commit after the rebase), reading whatever surrounding code you need.
+
+CONTEXT. P70a stopped copying the user's SAVED first-party API key (from `~/.fuigo/auth.json` at ACP `initialize`, or from `fuigo/setApiKey`) into the agent's own environment variable `FUIGO_API_KEY`; the key is held in process memory (`STORED_API_KEY`, `crates/codegen/fuigo-shell/src/agent/auth_method.rs`), so children that inherit the agent's environment (`!` bash-mode commands, client terminals, git/gh, status line, notification hooks, update restarts) no longer see it. Side effect in P70a: config strings that say `${FUIGO_API_KEY}` / `$FUIGO_API_KEY` stopped resolving to the saved key. Product decision (2026-10-03): keep P70a, BUT explicit `${FUIGO_API_KEY}` references the user writes in config must keep resolving, from the in-memory key store, without the key ever being placed in the agent's environment. Writing the reference is the user's consent. The expanded value must go only to the place the reference is written (e.g. that MCP server's own child env, that header, that hook's own child env), never into the agent's env. Only the variable name FUIGO_API_KEY gets the key-store fallback.
+
+CLAIMS to verify or refute (round 3; the design changed after round 2, see F0):
+ F0 (history). Round 1 resolved the reference when config was LOADED and scrubbed sinks; round 2 showed that spreads the key into everything that reads/shows/records/re-saves config (mcp/list and servers_updated, session events, MCP logs, OAuth store identifiers, settings saves, Debug) and that scrubbing the current key cannot follow a changed key. Commit 6060ee17 reverts the scrubbing and switches to LATE BINDING.
+ F1 (one resolver). `crates/codegen/fuigo-config/src/credential_env.rs` holds the process-wide installable resolver (moved from `fuigo-config-types`, which re-exports and delegates). The shell installs `read_named_key_env_without_runtime`; for `FUIGO_API_KEY` it answers a `setApiKey` key, then an exported `FUIGO_API_KEY`, then the key loaded from auth.json; never the runtime key an ACP client supplied for inference.
+ F2 (late binding). `fuigo_config::expand_env_vars_in_string` (every config layer, every MCP source, model fields) reads ONLY the process environment, as before P70a: an exported key expands at load exactly as before; an unexported `${FUIGO_API_KEY}` stays literal, so no record of config holds the saved key. `resolve_first_party_key_references` resolves the plain spellings (`${FUIGO_API_KEY}`, `$FUIGO_API_KEY` at an identifier boundary) from the resolver, only at destinations: fuigo-mcp stdio `args` + `env` values at spawn (`start_mcp_server`, `apply_stdio_env`, after `apply_shell_environment_policy`), HTTP header values when the client is built (also used by the anonymous OAuth probe to that server); shell model `api_key` (`first_own_credential`) and `extra_headers` (`sampling_config_for_model`). The MCP URL, command and cwd are deliberately NOT resolved (documented). Client-supplied `session/new` MCP servers also pass through the spawn-time resolution; NOTE the ACP client can already read the saved key with `fuigo/getApiKey`, so we consider this no new exposure (refute if wrong).
+ F3 (hooks). Parse-time command expansion is unchanged (process env only), so the saved key is never substituted into a hook's COMMAND LINE. At spawn, `env_expand::hook_child_env` gives that one hook's child `FUIGO_API_KEY=<key>` when its command references the key in any shell form (textual, boundary-checked detector incl. nested `${X:-$FUIGO_API_KEY}`, `${#FUIGO_API_KEY}`), and resolves references inside its `env` map values; an env-map `FUIGO_API_KEY` wins. Applied after the environment-policy strip. A hook whose config does not name the key gets nothing. An HTTP hook URL naming it is resolved at request time; `HttpInfo.expanded_url` and the validation reason show the reference (ASCII case-insensitive replacement of the key that expansion used, decided at creation); `HttpInfo` Debug prints URLs via `redact_url`.
+ F4 (tests). Real spawn paths: `fuigo-shell/tests/murage_conformance_acp.rs::explicit_key_references_in_config_reach_only_their_own_destination` (real agent binary; key only in auth.json): stdio MCP `env` and `args`, HTTP MCP header, hook command and hook env map get the saved key; the MCP URL reference is not resolved; a hook script without a reference, a `!` command and a client terminal do not get it (the latter two inherit the agent's live environment); `_fuigo/mcp/list` shows the reference; no file under FUIGO_HOME except auth.json, no wire line, no stderr holds the key. Unit tests: fuigo-config, fuigo-hooks (real `run_command_hook` / `run_http_hook` incl. a loopback listener proving the request carries the key), shell `auth_method` (incl. model api_key). `/proc/self/environ` is asserted too; it only shows the environment a process STARTED with, so `std::env::vars` and the inheriting-child dumps are the real detectors of a `set_var`.
+ F5 (two round-6 LOWs closed). Guard skips generic parameter lists / `where` clauses; `ObservedAccessToken` Debug destructures.
+ F6 (docs). `fuigo-pager/docs/user-guide/02-authentication.md`.
+
+KNOWN and NOT claimed: (a) an EXPORTED key still expands at load into every config consumer, as before P70a; (b) any config source (project config after folder trust, plugins, managed config, `.mcp.json`, `~/.claude.json`) can reference the key, as with the old env copy; (c) settings saves write back expanded values of OTHER variables, pre-existing.
+
+Find defects in the delta: correctness, security (the key reaching a place the user did not name, the agent environment, logs, Debug output, error text, the wire), concurrency, tests that cannot fail or exercise a test double instead of the production path. For each finding: severity BLOCKER/HIGH/MEDIUM/LOW, file:line, a concrete scenario, and whether an existing test catches it. End with exactly one verdict: LAND / LAND-WITH-FOLLOWUPS / DO-NOT-LAND.
+
+===== FINAL REPORT =====
+Audited `a84e3234..6060ee17` read-only. No Cargo, tests, or file modifications. The concurrent uncommitted change in `config_tests.rs` is excluded.
+
+1. **HIGH — Model-catalogue headers can extract the saved key without user consent.**  
+   [config.rs:6215](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/config.rs:6215)
+
+   This resolves references in every model’s `extra_headers`, including remote catalogue and disk-cache entries. The remote parser accepts `extraHeaders`; [cache.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/models/cache.rs:77) deliberately preserves `extra_headers` because they previously contained only literal values.
+
+   A cached entry can specify an attacker-controlled `base_url`/`api_base_url` and `extra_headers = {"X-Api-Key": "${FUIGO_API_KEY}"}`. Selecting that model after the saved key loads now sends the key in that header, even when `resolve_credentials` correctly withholds its normal credential. The user never wrote an authorizing config reference.
+
+   **Existing tests:** Not caught. `a_tampered_cache_cannot_supply_credentials` checks other credential fields, but does not inject a reference into `extra_headers` and build the sampler. Resolution needs to distinguish user configuration from catalogue/cache data.
+
+2. **HIGH — HTTP-hook aliases bypass key redaction and disclose the key in diagnostics.**  
+   [http.rs:179](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:179)
+
+   Consider this HTTP-hook configuration, with these variables absent from the process environment:
+
+   ```toml
+   url = "https://${P70A_ALIAS}.invalid/hook"
+   env = { P70A_ALIAS = "${P70A_TOKEN}", P70A_TOKEN = "${FUIGO_API_KEY}" }
+   ```
+
+   Parse-time expansion leaves `spec.url` containing `${P70A_TOKEN}`. At execution, `hook_child_env` resolves `P70A_TOKEN` to the saved key but does not insert `FUIGO_API_KEY`, because the URL itself no longer names it. Consequently, `url_key` is `None`.
+
+   The second expansion puts the key into the hostname. `HttpInfo.expanded_url` retains it; its Debug retains the hostname; a DNS failure quotes that hostname in the logged reason and the client’s hook-failure notification.
+
+   **Existing tests:** Not caught. The new HTTP test constructs a direct `${FUIGO_API_KEY}` URL with an empty env map. Redaction must track secrets actually expanded through map values, using a consistent key snapshot.
+
+3. **MEDIUM — The new HTTP-hook request test hangs before reaching its assertions.**  
+   [http.rs:1067](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:1067)
+
+   The listener serves plaintext HTTP and the test supplies `http://127.0.0.1:…`. Production `validate_hook_url` rejects every non-HTTPS URL at line 86, before connecting. The test discards that failure and awaits `server` at line 1073, whose task is still waiting in `listener.accept()` without a timeout.
+
+   **Existing tests:** This test cannot complete normally or prove the claimed request delivery. Its later path/hostname redaction assertions are also unreachable. Use a trusted TLS fixture, assert the runner outcome, and bound the listener wait.
+
+The history change, resolver precedence, runtime-key exclusion, process-environment-only config loading, and F5 changes are supported by inspection. The ACP-client rationale also holds: `fuigo/getApiKey` already returns the echoable saved key. I found no new write of that key into the agent’s environment. However, F2/F3 confinement and F6’s corresponding promises fail in the scenarios above, and F4’s HTTP-hook proof is invalid.
+
+DO-NOT-LAND

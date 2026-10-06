@@ -3310,6 +3310,7 @@ mod tests {
 
     #[test]
     fn search_bar_cursor_visible_only_when_search_active() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -3358,6 +3359,7 @@ mod tests {
 
     #[test]
     fn viewport_search_bar_reserves_counter_without_text_or_cursor_overlap() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -3401,6 +3403,7 @@ mod tests {
 
     #[test]
     fn narrow_search_bar_omits_real_counters_to_preserve_caret_cell() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 
@@ -3910,6 +3913,7 @@ mod tests {
 
     #[test]
     fn picker_graphemes_paste_and_viewport_use_line_editor() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
 

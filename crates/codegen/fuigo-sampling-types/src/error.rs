@@ -1397,6 +1397,24 @@ mod tests {
         assert!(msg.ends_with('\u{2026}'));
     }
 
+    /// P70b: the cap is NOT credential-aware. The capped text is what the error is classified on, so it stays
+    /// byte-for-byte what it was; a credential the cap cut through is recognised at the display and log sinks by its
+    /// beginning followed by the truncation mark (`fuigo_secrets::sent_credentials`).
+    #[test]
+    fn the_length_cap_is_unchanged_and_the_sink_scrub_removes_a_credential_it_cut_through() {
+        let cred = "p70b-stypes-cred-0123456789";
+        fuigo_secrets::sent_credentials::record(cred);
+        let head = "x".repeat(MAX_USER_ERROR_BODY_CHARS - 12);
+        let long_msg = format!("{head}{cred} and more text after it");
+        let bytes = format!(r#"{{"error":{{"message":"{long_msg}","type":"server_error"}}}}"#);
+        let msg = parse_error_bytes(bytes.as_bytes());
+        assert_eq!(msg.chars().count(), MAX_USER_ERROR_BODY_CHARS + 1, "{msg}");
+        assert!(msg.ends_with("xp70b-stypes-\u{2026}"), "{msg}");
+        let shown = fuigo_secrets::sent_credentials::scrub(&msg);
+        assert!(!shown.contains("p70b"), "{shown}");
+        assert!(shown.ends_with("x<redacted>\u{2026}"), "{shown}");
+    }
+
     /// Regression test: 403 Forbidden must NOT be classified as an auth error.
     /// The proxy returns 403 for policy denials unrelated to the caller's credentials.
     /// Those cover content-safety blocks, ZDR-gated operations, and other usage-policy blocks.

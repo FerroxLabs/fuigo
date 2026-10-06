@@ -1,0 +1,21 @@
+# P84 Astra round 1 — final report (range e0145e0f..386b2015; raw transcript sha256 8c08525645accaab81b9d9d8f14bb3a9e1bcd92d3f7c57928837543f35f98cf9, copy at hetzner-dsm:/root/fuigo-builds/p84/audits/p84-astra-r1.raw)
+
+Audited `e0145e0f..386b2015`, excluding uncommitted edits. Read-only; no Cargo or runtime checks.
+
+1. **HIGH — The committed unit-test target cannot compile.**  
+   [tests.rs:7364](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests.rs:7364) still executes `agent.gateway = GatewaySender::new(tx)`. Its helper now returns `MvpAgentHandle`, whose [Deref implementation](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:69) provides only shared access. The assignment requires `DerefMut` and therefore fails type checking. This blocks even a filtered P84 unit-test run, because the whole test target must compile.  
+   **Caught by:** compilation of the existing announcement-retry test; no runtime assertion is reached. This is a source-established failure, not an observed compiler run. Adapt the fixture while preserving the handle’s restriction on mutable access.
+
+2. **LOW — The setter test does not exercise the aliasing condition.**  
+   [p84_relocation_tests.rs:140](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p84_relocation_tests.rs:140) uses `|_agent_ref| std::future::pending()`: the `LocalRef` is discarded during construction, and the task is never polled before the setter runs. Consequently, no suspended `&MvpAgent` exists. A defective implementation that obtains `&mut MvpAgent` **before** checking pending work would still pass this panic test.  
+   **Caught by:** none of the added tests. Add a task that signals after retaining an agent borrow across an await, with alias-checking instrumentation to validate the unsafe boundary. This is a coverage weakness, not evidence that the current setter implementation aliases.
+
+The remaining source checks support P84’s design:
+
+- Construction pins the state before any bound work; the handle exposes no safe move-out path. Moving the owner is compatible with the [Pin contract](https://doc.rust-lang.org/std/pin/index.html).
+- Production setters run before bound work starts; the guard precedes mutable access.
+- All **14 ACP overrides** forward to matching methods. `logout` and `fork_session` retain identical defaults; workspace `unstable` features cover the forwarded feature-gated methods.
+- `BoundTasks` remains first, preserving P83’s teardown order.
+- The relocation tests exercise the production constructor and `spawn_bound`. Their claimed failures at `43511dea` were not independently executed.
+
+DO-NOT-LAND

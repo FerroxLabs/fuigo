@@ -10,13 +10,24 @@
 //!
 //! 1. The agent calls `AskUserQuestion` with an array of structured questions
 //!    (each with options, optional preview, optional multi_select).
-//! 2. The tool sends a `UserQuestionAsked` **notification** to the gateway/client
-//!    carrying the full question payload as JSON.
-//! 3. The tool returns `AskUserQuestionOutput::QuestionsSent` to the model as
-//!    an immediate confirmation.
-//! 4. The client presents the question UI, collects user answers, and injects
-//!    them back into the conversation as the tool result. This client-side
-//!    round-trip is handled by the orchestration layer, not by this tool.
+//! 2. The tool sends a `UserQuestionRequest` to the session's question
+//!    coordinator (in fuigo-shell), which makes the `fuigo/ask_user_question`
+//!    ACP round trip, and emits a `UserQuestionAsked` notification.
+//! 3. The tool blocks until the client answers, cancels, or the wait budget
+//!    elapses, and returns the formatted result as
+//!    `AskUserQuestionOutput::UserAnswered`.
+//!
+//! ## Outcomes
+//!
+//! - Answered → the formatted answers.
+//! - Unanswered (cancel or timeout) → [`format::CANCEL_TEXT`] interactively,
+//!   [`format::NO_OPERATOR_TEXT`] in a non-interactive session.
+//! - Non-interactive only: an unreachable client (transport error, e.g. an
+//!   embedder without a `fuigo/ask_user_question` handler) or an already-closed
+//!   coordinator → [`format::NO_OPERATOR_TEXT`], and the wait is capped at
+//!   [`NON_INTERACTIVE_RESPONSE_TIMEOUT`].
+//! - Interactive transport break, malformed reply, or a session with no
+//!   coordinator wired → a hard `ToolError`.
 //!
 //! ## Plan-Mode Interview Actions
 //!
@@ -39,14 +50,8 @@ pub use types::{
 use crate::notification::types::UserQuestionAsked;
 use crate::types::output::AskUserQuestionOutput;
 use crate::types::requirements::{Expr, ToolRequirement};
-use crate::types::resources::{NotificationHandle, SharedResources};
+use crate::types::resources::NotificationHandle;
 use crate::types::tool::{ToolKind, ToolNamespace};
-
-/// Migration fallback: when `true`, a missing `UserQuestionSender` falls
-/// back to the old fire-and-forget `QuestionsSent` behavior with a warning.
-/// Set to `false` (or delete entirely) once the shell coordinator is wired
-/// up in TS-03 and confirmed working.
-const MIGRATION_FALLBACK: bool = true;
 
 /// Default max time to wait for the user to answer the questionnaire (all
 /// questions in this tool call share one timer): 30 minutes. On expiry the
@@ -59,6 +64,19 @@ const MIGRATION_FALLBACK: bool = true;
 /// integer seconds) still overrides this default directly —
 /// e.g. `FUIGO_ASK_USER_QUESTION_TIMEOUT_SECS=8` for tests / TUI repro.
 pub const RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Ceiling on the wait budget in a non-interactive session (headless `-p`,
+/// SDK, a third-party ACP embedder that set `nonInteractive`): 30 seconds.
+///
+/// Nobody is at a keyboard, so the 30-minute interactive budget only turns an
+/// embedder that acks `fuigo/ask_user_question` but never replies into a
+/// 30-minute stall (the coordinator's `ext_method` has no deadline of its own).
+/// Not zero: the question still makes its one ACP round trip, and an
+/// embedder-supplied UI can still answer with a real `Accepted`/`Cancelled`.
+/// A shorter configured budget is honoured; `timeout_enabled = false` does not
+/// lift this ceiling.
+pub const NON_INTERACTIVE_RESPONSE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(30);
 
 /// Default for `timeout_enabled` across every resolver tier and settings
 /// surface: the questionnaire timer is armed unless something disarms it.
@@ -115,7 +133,9 @@ pub struct AskUserQuestionParams {
     pub timeout_secs: Option<u64>,
     /// Session state stamped by the agent builder for non-interactive
     /// sessions (headless `-p`, SDK) — NOT a user config key. `Some(true)`
-    /// switches the cancel/timeout result to [`format::NO_OPERATOR_TEXT`].
+    /// switches every unanswered result (cancel, timeout, unreachable client)
+    /// to [`format::NO_OPERATOR_TEXT`] and caps the wait at
+    /// [`NON_INTERACTIVE_RESPONSE_TIMEOUT`].
     #[serde(default)]
     pub non_interactive: Option<bool>,
 }
@@ -123,8 +143,29 @@ pub struct AskUserQuestionParams {
 crate::register_resource!("fuigo_build", "AskUserQuestion", AskUserQuestionParams);
 
 impl AskUserQuestionParams {
+    /// Whether the agent builder stamped this session non-interactive.
+    pub fn is_non_interactive(&self) -> bool {
+        self.non_interactive.unwrap_or(false)
+    }
+
     /// Effective wait budget: `Some(duration)` = bounded, `None` = wait forever.
+    ///
+    /// A non-interactive session is always bounded, by at most
+    /// [`NON_INTERACTIVE_RESPONSE_TIMEOUT`]; an interactive one gets the
+    /// configured budget unchanged.
     pub fn wait_budget(&self) -> Option<std::time::Duration> {
+        let configured = self.configured_wait_budget();
+        if self.is_non_interactive() {
+            return Some(configured.map_or(NON_INTERACTIVE_RESPONSE_TIMEOUT, |d| {
+                d.min(NON_INTERACTIVE_RESPONSE_TIMEOUT)
+            }));
+        }
+        configured
+    }
+
+    /// The budget the timeout settings alone ask for, before the
+    /// non-interactive ceiling.
+    fn configured_wait_budget(&self) -> Option<std::time::Duration> {
         if !self
             .timeout_enabled
             .unwrap_or(DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED)
@@ -225,7 +266,8 @@ pub struct AskUserQuestionInput {
 ///
 /// Blocks inside `run()` until the user responds or the configured wait
 /// budget elapses for the whole questionnaire (default [`RESPONSE_TIMEOUT`],
-/// 30 minutes). Sends a request over an in-process mpsc channel to a
+/// 30 minutes; at most [`NON_INTERACTIVE_RESPONSE_TIMEOUT`] when
+/// non-interactive). Sends a request over an in-process mpsc channel to a
 /// session-owned coordinator (in fuigo-shell), which performs an ACP
 /// `ext_method` round-trip to the client/pager. The response is sent back
 /// over a oneshot channel and formatted into the model-visible tool result.
@@ -260,63 +302,6 @@ impl crate::types::tool_metadata::ToolMetadata for AskUserQuestionTool {
         // `${% if tools.by_kind.exit_plan %}`-guarded, so it renders
         // fine without the plan tools.
         Expr::True
-    }
-}
-
-impl AskUserQuestionTool {
-    /// Fire-and-forget fallback used during migration when
-    /// `UserQuestionSender` is not yet injected by the shell.
-    ///
-    /// This preserves the old behavior: send a notification, return
-    /// `QuestionsSent`. Remove this method when `MIGRATION_FALLBACK` is
-    /// set to `false`.
-    async fn fallback_fire_and_forget(
-        &self,
-        input: &AskUserQuestionInput,
-        ctx: &fuigo_tool_runtime::ToolCallContext,
-        resources: &SharedResources,
-    ) -> Result<AskUserQuestionOutput, fuigo_tool_runtime::ToolError> {
-        let question_count = input.questions.len();
-
-        let questions_json = serde_json::to_value(&input.questions)
-            .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
-
-        {
-            let res = resources.lock().await;
-            if let Some(handle) = res.get::<NotificationHandle>() {
-                handle.0.send_user_question_asked(UserQuestionAsked {
-                    tool_call_id: ctx.call_id.as_str().to_owned(),
-                    questions_json,
-                });
-            }
-        }
-
-        tracing::info!(question_count, "Asked user questions (fallback path)");
-
-        let question_summary: Vec<String> = input
-            .questions
-            .iter()
-            .enumerate()
-            .map(|(i, q)| {
-                let options: Vec<&str> = q.options.iter().map(|o| o.label.as_str()).collect();
-                format!(
-                    "{}. {} [options: {}]",
-                    i + 1,
-                    q.question,
-                    options.join(", ")
-                )
-            })
-            .collect();
-
-        let message = format!(
-            "Your questions have been presented to the user for answering:\n{}",
-            question_summary.join("\n")
-        );
-
-        Ok(AskUserQuestionOutput::QuestionsSent {
-            message,
-            question_count,
-        })
     }
 }
 
@@ -381,35 +366,56 @@ impl fuigo_tool_runtime::Tool for AskUserQuestionTool {
             }
         }
 
-        // ── Step 2: Obtain UserQuestionSender ───────────────────────────
-        let sender = {
+        // ── Step 2: Read the session wiring and the wait policy ─────────
+        // Both are read before any channel exists or any UI is notified, so the
+        // no-operator short-circuit below cannot race a client that is already
+        // rendering the question.
+        let (sender, params) = {
             let res = resources.lock().await;
-            res.get::<UserQuestionSender>().cloned()
+            (
+                res.get::<UserQuestionSender>().cloned(),
+                // Shell-injected params win; absent or unset fields keep the
+                // legacy env→default budget so non-shell registry consumers are
+                // unchanged.
+                res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
+                    .map(|p| p.0)
+                    .unwrap_or_default(),
+            )
+        };
+        let non_interactive = params.is_non_interactive();
+        // One wording for every unanswered path (cancel, timeout, and — in a
+        // non-interactive session — an unreachable client).
+        let unanswered = format::unanswered_text(non_interactive);
+
+        // The shell spawns the question coordinator for every session and
+        // injects its sender at agent build, so a missing sender is a wiring
+        // fault. It is reported as one, never papered over as "questions sent".
+        let Some(sender) = sender else {
+            tracing::error!(
+                "ask_user_question invoked without a UserQuestionSender; the session's \
+                 question coordinator is not wired"
+            );
+            return Err(missing_user_question_sender_error());
         };
 
-        let sender = match sender {
-            Some(s) => s,
-            None => {
-                if MIGRATION_FALLBACK {
-                    tracing::warn!(
-                        "UserQuestionSender not available; falling back to fire-and-forget QuestionsSent. \
-                         This is expected during migration (TS-03 not yet wired)."
-                    );
-                    return self
-                        .fallback_fire_and_forget(&input, &ctx, &resources)
-                        .await;
-                }
-                return Err(fuigo_tool_runtime::ToolError::custom(
-                    "missing_resource",
-                    "UserQuestionSender".to_string(),
-                ));
-            }
-        };
+        // ── Step 3: No operator can exist → answer now ──────────────────
+        // In a non-interactive session the coordinator is the only route to an
+        // embedder that might render the question. If it is already gone, no
+        // one can answer: return the no-operator result without creating a
+        // channel or emitting `UserQuestionAsked`. Interactive sessions fall
+        // through and report the closed channel as the fault it is.
+        if non_interactive && sender.0.is_closed() {
+            tracing::info!(
+                question_count,
+                "Non-interactive session has no question coordinator; continuing without answers"
+            );
+            return Ok(AskUserQuestionOutput::UserAnswered {
+                message: unanswered.to_string(),
+            });
+        }
 
-        // ── Step 3: Create oneshot ──────────────────────────────────────
+        // ── Step 4: Create oneshot + send UserQuestionRequest ───────────
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-
-        // ── Step 4: Send UserQuestionRequest ────────────────────────────
         let request = types::UserQuestionRequest {
             tool_call_id: ctx.call_id.as_str().to_owned(),
             questions: input.questions.clone(),
@@ -417,14 +423,20 @@ impl fuigo_tool_runtime::Tool for AskUserQuestionTool {
         };
 
         if sender.0.send(request).is_err() {
+            // The coordinator closed between the check above and this send.
+            if non_interactive {
+                return Ok(AskUserQuestionOutput::UserAnswered {
+                    message: unanswered.to_string(),
+                });
+            }
             return Err(fuigo_tool_runtime::ToolError::execution(
                 fuigo_tool_protocol::ToolId::new("ask_user_question").expect("valid"),
                 "User question session ended unexpectedly (coordinator channel closed)",
             ));
         }
 
-        // ── Step 5: Emit UserQuestionAsked + read the wait budget ───────
-        let params = {
+        // ── Step 5: Emit UserQuestionAsked ──────────────────────────────
+        {
             let questions_json = serde_json::to_value(&input.questions)
                 .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
             let res = resources.lock().await;
@@ -434,17 +446,11 @@ impl fuigo_tool_runtime::Tool for AskUserQuestionTool {
                     questions_json,
                 });
             }
-            // Shell-injected params win; absent or unset fields keep the legacy
-            // env→default budget so non-shell registry consumers are unchanged.
-            res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
-                .map(|p| p.0)
-                .unwrap_or_default()
-        };
+        }
         let wait = params.wait_budget();
-        // One wording for both unanswered paths (cancel + timeout below).
-        let unanswered = format::unanswered_text(params.non_interactive.unwrap_or(false));
         tracing::info!(
             question_count,
+            non_interactive,
             timeout_secs = ?wait.map(|d| d.as_secs()),
             "Asked user questions, blocking for response"
         );
@@ -516,6 +522,22 @@ impl fuigo_tool_runtime::Tool for AskUserQuestionTool {
             Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput::UserAnswered {
                 message: unanswered.to_string(),
             }),
+            // Non-interactive: an embedder that enabled the tool but does not
+            // implement `fuigo/ask_user_question` (JSON-RPC -32601), or is
+            // otherwise unreachable, means no one can answer. That is the
+            // no-operator outcome, not an infrastructure error for the model to
+            // retry against.
+            Err(UserQuestionError::TransportError(msg)) if non_interactive => {
+                tracing::info!(
+                    question_count,
+                    error = %msg,
+                    "Non-interactive client did not take the question; continuing without answers"
+                );
+                Ok(AskUserQuestionOutput::UserAnswered {
+                    message: unanswered.to_string(),
+                })
+            }
+            // Interactive: a transport break is a genuine fault.
             Err(UserQuestionError::TransportError(msg)) => {
                 Err(fuigo_tool_runtime::ToolError::execution(
                     fuigo_tool_protocol::ToolId::new("ask_user_question").expect("valid"),
@@ -532,10 +554,23 @@ impl fuigo_tool_runtime::Tool for AskUserQuestionTool {
     }
 }
 
+/// Error code of the hard failure for a session with no question coordinator.
+pub const MISSING_USER_QUESTION_SENDER_CODE: &str = "missing_resource";
+
+/// The hard, named failure returned when `UserQuestionSender` was never
+/// injected (formerly a warning plus a fire-and-forget "questions sent" lie).
+fn missing_user_question_sender_error() -> fuigo_tool_runtime::ToolError {
+    fuigo_tool_runtime::ToolError::custom(
+        MISSING_USER_QUESTION_SENDER_CODE,
+        "UserQuestionSender is not wired into this session: ask_user_question cannot reach a \
+         question coordinator, so no question was shown to anyone",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::resources::Resources;
+    use crate::types::resources::{Resources, SharedResources};
     use crate::types::tool_metadata::test_ctx_with_call_id;
     use indexmap::IndexMap;
     use tokio::sync::mpsc;
@@ -658,36 +693,62 @@ mod tests {
         assert_eq!(input.questions[0].multi_select, Some(true));
     }
 
-    // ── Migration fallback tests (no UserQuestionSender) ─────────────────
+    // ── Missing UserQuestionSender (MIGRATION_FALLBACK removed) ─────────
 
+    /// A session without a `UserQuestionSender` is a wiring fault. It must be a
+    /// hard, named failure — never the old warning plus a fire-and-forget
+    /// "your questions have been presented" lie — and no UI notification may
+    /// go out, in either session kind.
     #[tokio::test]
-    async fn fallback_ask_single_question() {
-        let resources = Resources::new();
-        let shared = resources.into_shared();
-        let tool = AskUserQuestionTool;
+    async fn missing_sender_is_a_hard_named_failure() {
+        use crate::notification::types::ToolNotificationHandle;
 
-        let input = AskUserQuestionInput {
-            questions: vec![make_question(
-                "Which database?",
-                &["Redis (Recommended)", "Memcached"],
-            )],
-            use_id_keyed_format: false,
-        };
+        for non_interactive in [None, Some(false), Some(true)] {
+            let (handle, mut notifications) = ToolNotificationHandle::channel();
+            let mut resources = Resources::new();
+            resources.insert(NotificationHandle(handle));
+            resources.insert(crate::types::resources::Params(AskUserQuestionParams {
+                non_interactive,
+                ..Default::default()
+            }));
+            let input = AskUserQuestionInput {
+                questions: vec![make_question(
+                    "Which database?",
+                    &["Redis (Recommended)", "Memcached"],
+                )],
+                use_id_keyed_format: false,
+            };
 
-        let result =
-            fuigo_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "test-call"), input)
-                .await
-                .unwrap();
+            let err = fuigo_tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(resources.into_shared(), "test-call"),
+                input,
+            )
+            .await
+            .expect_err("a missing UserQuestionSender must fail the tool call");
 
-        match result {
-            AskUserQuestionOutput::QuestionsSent {
-                ref message,
-                question_count,
-            } => {
-                assert_eq!(question_count, 1);
-                assert!(message.contains("Which database?"));
-            }
-            _ => panic!("Expected QuestionsSent fallback"),
+            assert_eq!(
+                err.kind,
+                fuigo_tool_runtime::ToolErrorKind::Custom,
+                "{non_interactive:?}"
+            );
+            assert_eq!(
+                err.details,
+                Some(serde_json::json!({ "code": MISSING_USER_QUESTION_SENDER_CODE })),
+                "{non_interactive:?}"
+            );
+            assert_eq!(MISSING_USER_QUESTION_SENDER_CODE, "missing_resource");
+            let msg = err.to_string();
+            assert!(msg.contains("UserQuestionSender"), "{non_interactive:?}: {msg}");
+            assert!(msg.contains("not wired"), "{non_interactive:?}: {msg}");
+            assert!(
+                !msg.contains("presented to the user"),
+                "{non_interactive:?}: {msg}"
+            );
+            assert!(
+                notifications.try_recv().is_err(),
+                "{non_interactive:?}: no UserQuestionAsked may be emitted without a coordinator"
+            );
         }
     }
 
@@ -716,34 +777,6 @@ mod tests {
                 assert!(message.contains("No questions provided"));
             }
             _ => panic!("Expected QuestionsSent for empty"),
-        }
-    }
-
-    #[tokio::test]
-    async fn fallback_sends_notification() {
-        use crate::notification::types::{ToolNotification, ToolNotificationHandle};
-
-        let (handle, mut rx) = ToolNotificationHandle::channel();
-        let mut resources = Resources::new();
-        resources.insert(NotificationHandle(handle));
-        let shared = resources.into_shared();
-        let tool = AskUserQuestionTool;
-
-        let input = AskUserQuestionInput {
-            questions: vec![make_question("Pick one?", &["A", "B"])],
-            use_id_keyed_format: false,
-        };
-
-        fuigo_tool_runtime::Tool::run(&tool, test_ctx_with_call_id(shared, "call-q"), input)
-            .await
-            .unwrap();
-
-        let notification = rx.try_recv().expect("should have received a notification");
-        match notification {
-            ToolNotification::UserQuestionAsked(asked) => {
-                assert_eq!(asked.tool_call_id, "call-q");
-            }
-            other => panic!("Expected UserQuestionAsked, got {:?}", other),
         }
     }
 
@@ -884,6 +917,13 @@ mod tests {
         match result {
             AskUserQuestionOutput::UserAnswered { message } => {
                 assert_eq!(message, format::NO_OPERATOR_TEXT);
+                // Headless (`headless/ext_protocol.rs` answers `Cancelled` at
+                // once) is the shipped path; pin its model-visible bytes.
+                assert_eq!(
+                    message,
+                    "No user is available to answer questions in this non-interactive session. \
+                     Continue with your best judgment; do not wait for clarification."
+                );
             }
             other => panic!(
                 "Expected UserAnswered with no-operator text, got {:?}",
@@ -1207,5 +1247,252 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("Failed to reach the client"), "msg: {msg}");
         assert!(msg.contains("connection reset"), "msg: {msg}");
+    }
+
+    // ── Non-interactive embedder path (P04) ──────────────────────────────
+
+    /// Spawns the tool with `params` and returns (join handle, coordinator rx).
+    fn spawn_tool(
+        params: AskUserQuestionParams,
+        call_id: &'static str,
+    ) -> (
+        tokio::task::JoinHandle<
+            Result<AskUserQuestionOutput, fuigo_tool_runtime::ToolError>,
+        >,
+        mpsc::UnboundedReceiver<types::UserQuestionRequest>,
+    ) {
+        let (shared, rx) = resources_with_sender_and_params(params);
+        let input = AskUserQuestionInput {
+            questions: vec![make_question("Q?", &["A", "B"])],
+            use_id_keyed_format: false,
+        };
+        let handle = tokio::spawn(async move {
+            fuigo_tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(shared, call_id),
+                input,
+            )
+            .await
+        });
+        (handle, rx)
+    }
+
+    fn non_interactive() -> AskUserQuestionParams {
+        AskUserQuestionParams {
+            non_interactive: Some(true),
+            ..Default::default()
+        }
+    }
+
+    /// Non-interactive budget is seconds, never 30 minutes and never unbounded;
+    /// a shorter configured budget is still honoured. Interactive is unchanged.
+    #[test]
+    fn non_interactive_wait_budget_is_capped_in_seconds() {
+        let cap = NON_INTERACTIVE_RESPONSE_TIMEOUT;
+        assert!(
+            cap > std::time::Duration::ZERO && cap <= std::time::Duration::from_secs(60),
+            "the non-interactive cap must be seconds, not zero and not minutes: {cap:?}"
+        );
+        assert_eq!(
+            non_interactive().wait_budget(),
+            Some(response_timeout().min(cap)),
+            "default non-interactive budget must be the cap, not the 30-minute default"
+        );
+        let disabled = AskUserQuestionParams {
+            timeout_enabled: Some(false),
+            ..non_interactive()
+        };
+        assert_eq!(
+            disabled.wait_budget(),
+            Some(cap),
+            "timeout_enabled = false must not make a non-interactive session wait forever"
+        );
+        let long = AskUserQuestionParams {
+            timeout_enabled: Some(true),
+            timeout_secs: Some(3600),
+            non_interactive: Some(true),
+        };
+        assert_eq!(long.wait_budget(), Some(cap));
+        let short = AskUserQuestionParams {
+            timeout_enabled: Some(true),
+            timeout_secs: Some(5),
+            non_interactive: Some(true),
+        };
+        assert_eq!(short.wait_budget(), Some(std::time::Duration::from_secs(5)));
+        // Interactive keeps the configured budget, including "wait forever".
+        let interactive_long = AskUserQuestionParams {
+            non_interactive: Some(false),
+            ..long
+        };
+        assert_eq!(
+            interactive_long.wait_budget(),
+            Some(std::time::Duration::from_secs(3600))
+        );
+        let interactive_disabled = AskUserQuestionParams {
+            non_interactive: Some(false),
+            ..disabled
+        };
+        assert_eq!(interactive_disabled.wait_budget(), None);
+    }
+
+    /// An embedder that acks the question but never replies resolves within the
+    /// non-interactive cap, with the no-operator text — not after 30 minutes.
+    #[tokio::test(start_paused = true)]
+    async fn non_interactive_silent_embedder_resolves_within_cap() {
+        let started = tokio::time::Instant::now();
+        let (handle, mut rx) = spawn_tool(non_interactive(), "tc-ni-silent");
+        // Keep the request (and so its result_tx) alive: the embedder is silent.
+        let _request = rx.recv().await.expect("the question must still be sent");
+
+        let result = handle.await.unwrap().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= NON_INTERACTIVE_RESPONSE_TIMEOUT + std::time::Duration::from_secs(1),
+            "a silent non-interactive embedder stalled the tool for {elapsed:?}"
+        );
+        match result {
+            AskUserQuestionOutput::UserAnswered { message } => {
+                assert_eq!(message, format::NO_OPERATOR_TEXT);
+            }
+            other => panic!("Expected UserAnswered with no-operator text, got {other:?}"),
+        }
+    }
+
+    /// An embedder-supplied UI can still answer a non-interactive question.
+    #[tokio::test(start_paused = true)]
+    async fn non_interactive_embedder_can_still_answer() {
+        let (handle, mut rx) = spawn_tool(non_interactive(), "tc-ni-answer");
+        let request = rx.recv().await.expect("should receive request");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let mut answers = IndexMap::new();
+        answers.insert("Q?".to_string(), vec!["B".to_string()]);
+        request
+            .result_tx
+            .send(Ok(UserQuestionResponse::Accepted {
+                answers,
+                annotations: None,
+            }))
+            .unwrap();
+        match handle.await.unwrap().unwrap() {
+            AskUserQuestionOutput::UserAnswered { message } => {
+                assert!(message.contains("\"Q?\"=\"B\""), "{message}");
+            }
+            other => panic!("Expected UserAnswered, got {other:?}"),
+        }
+    }
+
+    /// An embedder that enabled the tool but does not implement
+    /// `fuigo/ask_user_question` (JSON-RPC -32601 → TransportError) yields the
+    /// no-operator text in a non-interactive session, not a retryable ToolError.
+    #[tokio::test]
+    async fn non_interactive_missing_handler_returns_no_operator_text() {
+        let (handle, mut rx) = spawn_tool(non_interactive(), "tc-ni-32601");
+        let request = rx.recv().await.unwrap();
+        request
+            .result_tx
+            .send(Err(UserQuestionError::TransportError(
+                "Method not found: fuigo/ask_user_question (-32601)".to_string(),
+            )))
+            .unwrap();
+        match handle.await.unwrap() {
+            Ok(AskUserQuestionOutput::UserAnswered { message }) => {
+                assert_eq!(message, format::NO_OPERATOR_TEXT);
+            }
+            other => panic!("Expected the no-operator text, got {other:?}"),
+        }
+    }
+
+    /// The interactive transport break stays a hard error even when the params
+    /// are present and explicitly interactive.
+    #[tokio::test]
+    async fn interactive_transport_error_still_errors_with_params() {
+        let (handle, mut rx) = spawn_tool(
+            AskUserQuestionParams {
+                non_interactive: Some(false),
+                ..Default::default()
+            },
+            "tc-i-transport",
+        );
+        let request = rx.recv().await.unwrap();
+        request
+            .result_tx
+            .send(Err(UserQuestionError::TransportError(
+                "connection reset".to_string(),
+            )))
+            .unwrap();
+        let msg = handle.await.unwrap().unwrap_err().to_string();
+        assert!(msg.contains("Failed to reach the client"), "msg: {msg}");
+    }
+
+    /// A malformed reply is a client bug, not "no operator": it still errors in
+    /// a non-interactive session.
+    #[tokio::test]
+    async fn non_interactive_malformed_response_still_errors() {
+        let (handle, mut rx) = spawn_tool(non_interactive(), "tc-ni-malformed");
+        let request = rx.recv().await.unwrap();
+        request
+            .result_tx
+            .send(Err(UserQuestionError::MalformedResponse("bad json".to_string())))
+            .unwrap();
+        let msg = handle.await.unwrap().unwrap_err().to_string();
+        assert!(msg.contains("invalid response"), "msg: {msg}");
+    }
+
+    /// No coordinator can be reached in a non-interactive session: answer with
+    /// the no-operator text before any channel or UI notification exists.
+    /// Interactive keeps the hard "coordinator channel closed" error.
+    #[tokio::test]
+    async fn closed_coordinator_non_interactive_returns_no_operator_before_ui() {
+        use crate::notification::types::ToolNotificationHandle;
+
+        for (params, expect_no_operator) in [
+            (non_interactive(), true),
+            (AskUserQuestionParams::default(), false),
+        ] {
+            let (tx, rx) = mpsc::unbounded_channel::<types::UserQuestionRequest>();
+            drop(rx);
+            let (handle, mut notifications) = ToolNotificationHandle::channel();
+            let mut resources = Resources::new();
+            resources.insert(UserQuestionSender(tx));
+            resources.insert(NotificationHandle(handle));
+            resources.insert(crate::types::resources::Params(params));
+            let input = AskUserQuestionInput {
+                questions: vec![make_question("Q?", &["A"])],
+                use_id_keyed_format: false,
+            };
+            let result = fuigo_tool_runtime::Tool::run(
+                &AskUserQuestionTool,
+                test_ctx_with_call_id(resources.into_shared(), "tc-closed"),
+                input,
+            )
+            .await;
+            if expect_no_operator {
+                match result {
+                    Ok(AskUserQuestionOutput::UserAnswered { message }) => {
+                        assert_eq!(message, format::NO_OPERATOR_TEXT);
+                    }
+                    other => panic!("Expected the no-operator text, got {other:?}"),
+                }
+            } else {
+                let msg = result.unwrap_err().to_string();
+                assert!(msg.contains("coordinator channel closed"), "msg: {msg}");
+            }
+            assert!(
+                notifications.try_recv().is_err(),
+                "no UserQuestionAsked may be emitted when no coordinator exists"
+            );
+        }
+    }
+
+    /// The coordinator dropping `result_tx` without replying is a coordinator
+    /// fault, not "no operator": it stays a hard error in a non-interactive
+    /// session too (deliberately outside P04's TransportError mapping).
+    #[tokio::test]
+    async fn non_interactive_coordinator_drop_still_errors() {
+        let (handle, mut rx) = spawn_tool(non_interactive(), "tc-ni-drop");
+        let request = rx.recv().await.unwrap();
+        drop(request.result_tx);
+        let msg = handle.await.unwrap().unwrap_err().to_string();
+        assert!(msg.contains("ended unexpectedly"), "msg: {msg}");
     }
 }

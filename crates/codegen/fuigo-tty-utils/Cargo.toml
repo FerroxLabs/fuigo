@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "Lightweight process-spawning utilities for TTY safety — detach from controlling terminal, suppress interactive pagers, process-group lifecycle"
 
 [dependencies]
+fuigo-secrets = { workspace = true }
 tokio = { workspace = true, features = ["process", "rt", "time"] }
 
 [target.'cfg(unix)'.dependencies]
@@ -14,6 +15,9 @@ libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[dev-dependencies]
+fuigo-secrets = { workspace = true, features = ["test-support"] }
 
 [features]
 # Test-only introspection for crates that link this one and need to pin their

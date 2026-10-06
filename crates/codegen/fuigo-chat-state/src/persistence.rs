@@ -33,6 +33,14 @@ pub trait ChatPersistence: Send + 'static {
     /// Replace the entire chat history (compaction / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
 
+    /// Replace the entire chat history and acknowledge the DISK outcome: `Ok` once the new history is stored (even if
+    /// bookkeeping after it failed), `Err` only while the stored history is still the previous one. Used where success
+    /// may not be reported unless the replacement persisted (a rewind).
+    fn replace_history_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>>;
+
     /// Destructive image-strip rewrite: back up the on-disk history, then
     /// replace it, acking the DISK outcome. A failed backup gates off the
     /// rewrite so recoverability never silently evaporates; backends without
@@ -226,6 +234,18 @@ impl ChatPersistence for MockChatPersistence {
             .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
     }
 
+    fn replace_history_and_ack(
+        &mut self,
+        items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let _ = self
+            .tx
+            .send(PersistenceRecord::ReplaceHistory(items.to_vec()));
+        let _ = reply.send(Ok(()));
+        receiver
+    }
+
     fn replace_history_for_strip_and_ack(
         &mut self,
         items: &[ConversationItem],
@@ -266,6 +286,14 @@ impl ChatPersistence for NullChatPersistence {
         receiver
     }
     fn replace_history(&mut self, _items: &[ConversationItem]) {}
+    fn replace_history_and_ack(
+        &mut self,
+        _items: &[ConversationItem],
+    ) -> oneshot::Receiver<io::Result<()>> {
+        let (reply, receiver) = oneshot::channel();
+        let _ = reply.send(Ok(()));
+        receiver
+    }
     fn replace_history_for_strip_and_ack(
         &mut self,
         _items: &[ConversationItem],

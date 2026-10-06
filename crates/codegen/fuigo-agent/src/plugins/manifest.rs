@@ -260,7 +260,7 @@ fn resolve_dirs(
 // ── Manifest loading ──────────────────────────────────────────────────
 
 /// Manifest search order within a plugin directory.
-const MANIFEST_PATHS: &[&str] = &[
+pub const MANIFEST_PATHS: &[&str] = &[
     "plugin.json",
     ".fuigo-plugin/plugin.json",
     ".claude-plugin/plugin.json",

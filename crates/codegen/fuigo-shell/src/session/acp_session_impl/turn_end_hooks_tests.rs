@@ -1,5 +1,6 @@
 use super::{
-    TURN_END_DRAIN_BUDGET, cancel_details, cancel_reason_for_completion, cancel_reason_for_options,
+    TURN_END_DRAIN_BUDGET, TurnEnd, cancel_details, cancel_reason_for_completion,
+    cancel_reason_for_options,
 };
 use crate::session::CancelOptions;
 use crate::session::CancelTrigger as T;
@@ -116,4 +117,21 @@ fn cancel_detail_names_the_subject_and_reason() {
         Some("no progress".into())
     );
     assert_eq!(cancel_details(&cancelled(None)), None);
+}
+
+/// P70b: `StopFailure` hook input is a sink (a command's stdin, an HTTP body). The failed turn's error text has every
+/// credential sent upstream replaced, also when the clip would have cut through it.
+#[test]
+fn stop_failure_payload_scrubs_credentials_sent_upstream() {
+    const CRED: &str = "p70b-hook-cred-0123456789";
+    fuigo_telemetry::sent_credentials::record(CRED);
+    let payload = TurnEnd::Failed {
+        error: fuigo_hooks::event::StopFailureKind::InvalidRequest,
+        error_details: Some(format!("API error (status 400): bad key {CRED}")),
+        last_assistant_message: Some(format!("Turn failed: bad key {CRED}")),
+    }
+    .into_payload(None);
+    let wire = serde_json::to_string(&payload).expect("serialize hook payload");
+    assert!(!wire.contains(CRED), "{wire}");
+    assert_eq!(wire.matches("bad key <redacted>").count(), 2, "{wire}");
 }

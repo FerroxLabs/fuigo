@@ -313,6 +313,7 @@ fn test_scroll_offset_skips_content() {
 /// Geometry, selection, and the full list's total_height are all compared.
 #[test]
 fn large_scrollback_mid_offset_viewport_window_matches_full_pass() {
+    let _theme = crate::theme::cache::pin_theme();
     const N: usize = 3000;
     let entries = make_entries(N);
     let viewport = Rect::new(0, 0, 80, 24);
@@ -432,6 +433,7 @@ fn large_scrollback_mid_offset_viewport_window_matches_full_pass() {
 /// `paint_window` extends the slice past the window bottom so the label walk sees every member.
 #[test]
 fn windowed_paint_renders_full_verb_group_label_for_offscreen_members() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
     use crate::scrollback::blocks::tool::{ReadToolCallBlock, ToolCallBlock};
 
@@ -499,6 +501,7 @@ fn windowed_paint_renders_full_verb_group_label_for_offscreen_members() {
 /// `paint_window`'s gate must therefore extend the slice for truncation headers too, not just verb headers.
 #[test]
 fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
 
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -560,31 +563,76 @@ fn windowed_paint_labels_truncation_header_on_last_viewport_row() {
     );
 }
 
-/// A mixed verb-group run labels every kind in the rendered header, and expanding it keeps each member at its ordinary
-/// collapsed row height (only the first member carries the synthetic header row).
-/// Retargeted from the hook-aggregation test: its hook suffix pinned removed machinery, this is the live half.
 #[test]
-fn rendered_mixed_verb_group_header_labels_every_kind_and_members_keep_row_height() {
+fn rendered_verb_group_header_aggregates_hook_outcomes_and_keeps_compact_members() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
+    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
 
     crate::appearance::cache::set_group_tool_verbs(true);
     crate::appearance::cache::set_show_thinking_blocks(false);
     let mut state = ScrollbackState::new();
-    state.push_block(RenderBlock::read("a.rs", None));
-    state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
-    state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
+    let first = state.push_block(RenderBlock::read("a.rs", None));
+    let second = state.push_block(RenderBlock::list_dir_with_output("src", "a.rs"));
+    let third = state.push_block(RenderBlock::search("TODO", 1, Vec::new()));
+    let elapsed = std::time::Duration::from_millis(1);
+    state.attach_hooks(
+        first,
+        HookPhase::Post,
+        vec![HookRunEntry {
+            name: "ok-hook".to_owned(),
+            status: HookRunStatus::Success { elapsed },
+            output: None,
+        }],
+    );
+    state.attach_hooks(
+        second,
+        HookPhase::Post,
+        vec![HookRunEntry {
+            name: "blocked-hook".to_owned(),
+            status: HookRunStatus::Blocked {
+                detail: "denied".to_owned(),
+                elapsed,
+            },
+            output: None,
+        }],
+    );
+    state.attach_hooks(
+        third,
+        HookPhase::Post,
+        vec![HookRunEntry {
+            name: "failed-hook".to_owned(),
+            status: HookRunStatus::Failed {
+                error: "exit 1".to_owned(),
+                elapsed,
+            },
+            output: None,
+        }],
+    );
+    let narrow_viewport = Rect::new(0, 0, 80, 24);
+    state.prepare_layout(narrow_viewport.width, narrow_viewport.height);
+    let (narrow_buf, _) = render_state(&state, narrow_viewport, true);
+    let narrow_header = buffer_row_text(&narrow_buf, 0);
+    assert!(
+        narrow_header.contains("1 failed]"),
+        "narrow headers must reserve the complete outcome suffix: {narrow_header:?}"
+    );
 
     let viewport = Rect::new(0, 0, 120, 24);
     state.prepare_layout(viewport.width, viewport.height);
     let (buf, _) = render_state(&state, viewport, true);
     let header_row = buffer_row_text(&buf, 0);
     assert!(
-        header_row.contains("Read 1 file, Listed 1 dir, Searched 1 pattern"),
-        "collapsed header labels every member kind: {header_row:?}"
+        header_row.contains(
+            "Read 1 file, Listed 1 dir, Searched 1 pattern  [hooks: 1 ok, 1 blocked, 1 failed]"
+        ),
+        "collapsed header must show every hidden hook outcome: {header_row:?}"
     );
-    assert!(
-        !header_row.contains("[hooks:"),
-        "no hook suffix exists any more: {header_row:?}"
+    // A collapsed group has no rail, so the diamond at the content column carries the error colour.
+    assert_eq!(
+        buf[(HorizontalLayout::ACCENT + 2, 0)].fg,
+        Theme::current().accent_error,
+        "failed hook marks the group header as errored"
     );
 
     state.set_selected(Some(0));
@@ -605,6 +653,30 @@ fn rendered_mixed_verb_group_header_labels_every_kind_and_members_keep_row_heigh
             "expanded member {idx} keeps its ordinary collapsed row height"
         );
     }
+    let (buf, _) = render_state(&state, viewport, true);
+    let rows: Vec<String> = (0..viewport.height)
+        .map(|y| buffer_row_text(&buf, y))
+        .collect();
+    let hook_rows: Vec<_> = rows.iter().filter(|row| row.contains("[hooks:")).collect();
+    assert_eq!(
+        hook_rows.len(),
+        4,
+        "the group header and each member carry one compact hook summary: {rows:?}"
+    );
+    assert_eq!(
+        hook_rows
+            .iter()
+            .filter(|row| row.contains("[hooks: 1]"))
+            .count(),
+        3,
+        "each expanded member keeps one standalone compact suffix: {rows:?}"
+    );
+    assert!(
+        ["ok-hook", "blocked-hook", "failed-hook", "post_tool_use"]
+            .iter()
+            .all(|detail| rows.iter().all(|row| !row.contains(detail))),
+        "expanded groups must not reveal per-hook detail sections: {rows:?}"
+    );
 }
 
 /// A hidden thinking entry inside a folded run stays transparent through the whole production path.
@@ -612,6 +684,7 @@ fn rendered_mixed_verb_group_header_labels_every_kind_and_members_keep_row_heigh
 /// This pins the `show_thinking` value the render loop passes into the label walk.
 #[test]
 fn rendered_verb_group_label_spans_hidden_thinking_inside_folded_run() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
 
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -662,6 +735,7 @@ fn rendered_verb_group_label_spans_hidden_thinking_inside_folded_run() {
 /// The fold claims it (no standalone "Thought" row anywhere) while the rendered label counts tools only.
 #[test]
 fn rendered_verb_group_label_stays_tools_only_across_folded_thought() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
 
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -721,6 +795,7 @@ fn rendered_verb_group_label_stays_tools_only_across_folded_thought() {
 /// Finished thoughts fold behind it just like in a multi-member run.
 #[test]
 fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
 
     crate::appearance::cache::set_group_tool_verbs(true);
@@ -782,6 +857,7 @@ fn rendered_verb_group_singleton_folds_tool_and_trailing_thoughts() {
 /// Expanding the group reveals the subagent's own row with its live ` · activity` suffix intact.
 #[test]
 fn rendered_verb_group_folds_subagent_row_and_expansion_keeps_activity() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::ScrollbackState;
     use crate::scrollback::blocks::SubagentBlock;
 
@@ -1430,6 +1506,7 @@ fn overlay_relative_link_resolves_against_cwd() {
 
 #[test]
 fn overlay_markdown_relative_link_opens_as_file_url() {
+    let _theme = crate::theme::cache::pin_theme();
     // End-to-end through the real render path: a markdown link to a short media path that matches this transcript's generated media becomes a `file://` overlay
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("images")).unwrap();
@@ -1819,6 +1896,7 @@ fn collapsed_block_header_file_path_is_scanned() {
 
 #[test]
 fn group_header_entry_does_not_leak_hidden_line_links() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
             "cd /Users/foo/project && ls",
@@ -1918,6 +1996,7 @@ fn group_header_entry_does_not_leak_hidden_line_links() {
 
 #[test]
 fn collapse_header_entry_does_not_leak_links_but_visible_group_entries_do() {
+    let _theme = crate::theme::cache::pin_theme();
     // Smallest shape the truncation fold can produce for an expanded group: 3 entries, header count = group_len - 1 = 2
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
@@ -2018,6 +2097,7 @@ fn collapse_header_entry_does_not_leak_links_but_visible_group_entries_do() {
 
 #[test]
 fn group_header_entry_contributes_no_selectable_lines() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
             "echo hidden-secret-command",
@@ -2116,6 +2196,7 @@ fn group_header_entry_contributes_no_selectable_lines() {
 /// Both fold states shift the hitbox past the diamond chrome onto the label glyphs, so highlight always matches the copied text.
 #[test]
 fn verb_group_header_selection_geometry_tracks_chrome() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_show_thinking_blocks(false);
     // Absolute path so the URL/path scanner linkifies member 0's row.
     let mut entries = vec![
@@ -2296,6 +2377,7 @@ fn verb_group_header_selection_geometry_tracks_chrome() {
 /// Before the reserved id, both rows shared (entry 0, range 0, block line 0), so `push_line` merged them and a drag on either selected both.
 #[test]
 fn verb_group_expanded_slot_header_and_member_select_independently() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::text_selection::reconstruct_selection_text;
 
     crate::appearance::cache::set_show_thinking_blocks(false);
@@ -2375,6 +2457,7 @@ fn verb_group_expanded_slot_header_and_member_select_independently() {
 
 #[test]
 fn group_header_entry_not_search_highlighted_from_hidden_text() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut entries = vec![
         ScrollbackEntry::new(RenderBlock::execute_with_output(
             "echo hidden-secret-command",
@@ -2457,6 +2540,7 @@ fn group_header_entry_not_search_highlighted_from_hidden_text() {
 
 #[test]
 fn group_header_media_entry_registers_no_media_placements() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
 
@@ -2599,6 +2683,7 @@ fn truncated_execute_block_detects_urls_in_head_and_tail() {
 /// Collapsed Edit header: after the bullet is prepended the path is span 2, and the OSC8 overlay must cover path cols only (not the verb or bullet).
 #[test]
 fn tool_header_link_target_overlay_covers_path_after_bullet() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::appearance::ToolBullet;
     use crate::scrollback::types::{BlockContext, selectable_cols};
     use unicode_width::UnicodeWidthStr;
@@ -3437,6 +3522,7 @@ fn overlay_pretty_two_wrapping_links_distinct_ids() {
 /// It never registers an inline image (no `inline_media` placement). Rendering is lazy, so the placement holds no path/state.
 #[test]
 fn diagram_emits_affordance_placement_not_inline_image() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_render_mermaid(crate::appearance::RenderMermaid::On);
 
     let entry = make_markdown_entry("intro\n\n```mermaid\nA-->B\n```\n\nbye\n");
@@ -3522,6 +3608,10 @@ fn make_test_png(width: u32, height: u32) -> Vec<u8> {
 /// This is the assertion that the removed `has_filepath_line` flag previously carried.
 #[test]
 fn tool_media_overlay_exposes_filepath_click_rect() {
+    // The overlay decision reads the process-wide `INLINE_OVERLAY_FORCE_OFF` (it beats the
+    // thread-local protocol override), which the mode-switch tests flip while holding the theme
+    // test lock; hold it too.
+    let _modes = crate::theme::cache::pin_theme();
     use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
     use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
 
@@ -3562,4 +3652,42 @@ fn tool_media_overlay_exposes_filepath_click_rect() {
         media.screen_rect.y > rect.y,
         "the image sits below its filepath line",
     );
+}
+
+/// P07b hostile: a collapsed tool row whose header fills the whole row still shows its plugin hook badge on screen.
+/// The badge used to be appended after a full-width header, so the renderer clipped it away and the row showed no hook at all.
+#[test]
+fn a_long_tool_header_keeps_its_hook_badge_on_screen() {
+    use crate::scrollback::ScrollbackState;
+    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+
+    crate::appearance::cache::set_group_tool_verbs(false);
+    let mut state = ScrollbackState::new();
+    let long_command = format!("echo {}", "x".repeat(400));
+    let id = state.push_block(RenderBlock::execute_with_output(
+        long_command,
+        "ok",
+        None::<String>,
+    ));
+    state.attach_hooks(
+        id,
+        HookPhase::Post,
+        vec![HookRunEntry {
+            name: "plugin/probe/hooks:post_tool_use[0].hooks[0]".to_owned(),
+            status: HookRunStatus::Success {
+                elapsed: std::time::Duration::from_millis(1),
+            },
+            output: None,
+        }],
+    );
+    for width in [60u16, 80, 120] {
+        let viewport = Rect::new(0, 0, width, 24);
+        state.prepare_layout(viewport.width, viewport.height);
+        let (buf, _) = render_state(&state, viewport, false);
+        let rows: Vec<String> = (0..4).map(|y| buffer_row_text(&buf, y)).collect();
+        assert!(
+            rows.iter().any(|r| r.contains("[hooks: 1]")),
+            "width {width}: the badge must be on screen beside a full-width header: {rows:#?}"
+        );
+    }
 }

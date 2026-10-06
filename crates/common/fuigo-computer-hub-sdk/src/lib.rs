@@ -63,6 +63,7 @@ pub use notification::HubNotification;
 pub use observability::ObservabilityBridge;
 pub use oidc_provider::{
     OidcAuthProvider, OidcAuthProviderBuilder, OnRefreshCallback, RefreshEvent,
+    check_token_endpoint,
 };
 pub use pool::HubConnectionPool;
 pub use server::{

@@ -53,6 +53,12 @@ pub enum ClientError {
     #[error("invalid configuration: {0}")]
     InvalidConfig(String),
 
+    /// The credential provider refused to send its current credential to this hub URL
+    /// ([`crate::AuthProvider::destination_permits`]). No socket was opened. Terminal: the reconnect
+    /// loop stops instead of retrying. The text is the provider's (it names the remedy).
+    #[error("{0}")]
+    DestinationRefused(String),
+
     /// Wrapped wire-format tool error; surfaces the upstream
     /// [`ToolErrorWire`] variant verbatim for callers that need to
     /// switch on the stable string code.

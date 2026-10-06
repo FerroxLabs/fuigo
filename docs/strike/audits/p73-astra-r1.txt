@@ -1,0 +1,37 @@
+# gpt-6-astra read-only audit, P73. Brief given, then the auditor's final answer verbatim.
+# (The full tool transcript was ~0.4-1.5 MB per round and is trimmed; the final answer is complete.)
+
+## BRIEF
+You are auditing a Rust change in the git worktree at your cwd (read-only). Compare HEAD against base 48886772 (`git diff 48886772..HEAD`; 56 files). Do NOT run cargo. Report findings by severity (BLOCKER/HIGH/MEDIUM/LOW) with file:line, then end with exactly one line `VERDICT: <APPROVE|APPROVE WITH LOW-SEVERITY NIT|REQUEST CHANGES> - <reason>`.
+
+Context: fuigo-pager tests share process-global theme state (crates/codegen/fuigo-pager-render/src/theme/cache.rs: CURRENT, LOADED, TEST_LOCK; `pin_theme()` takes TEST_LOCK and sets a deterministic theme). Flaky tests under host load were traced to (1) tests writing the global theme without the lock, (2) a lazy-init publish race in `current_kind()` (disk read unlocked, then unconditional store that could overwrite a concurrent `set`), (3) `double_submit_prunes_pending_after_latest` using a 2 s wall-clock deadline while the edit-highlight worker's first-use syntect init takes ~2 s under load (measured: worker compute 1982-2078 ms, deadline missed by 60 ms), (4) `execute_header_display_matches_overlay_body` rendering twice through the global theme with no pin.
+
+The change: 
+- cache.rs: PUBLISH_LOCK; `current_kind()` now delegates to `current_kind_seeded_by(load)`, which reads unlocked then re-checks LOADED under PUBLISH_LOCK before publishing; `set()` and `reset_for_test()` take PUBLISH_LOCK. Two new deterministic unit tests (loader injected, performs a `set` mid-read).
+- fuigo-pager/src/theme_pin_guard_tests.rs (new): a source-scanning test that fails when a test-side fn calls a theme mutator without pin_theme/test_lock/with_test_env/with_theme_test_env (or a `// theme-pin:` opt-out). Plus a self-test of the scanner.
+- A mechanical sweep that inserts `let _theme = ...pin_theme();` as the first statement of ~400 `#[test]` fns that read the theme (Theme::current(), current_kind(), theme::cache::...), skipping fns that already hold the lock directly or via a helper. Check this sweep for deadlock risk (a pinned test that calls code which takes the same non-reentrant std Mutex: pin_theme, test_lock(), with_test_env, with_theme_test_env, or the render crate's other TEST_LOCKs), for tests whose meaning changes when the theme is forced to FuigoNight/TrueColor, and for anything that spawns a thread that takes the lock while the spawner holds it.
+- bg_task.rs / text_selection.rs: bare `cache::set` replaced by `pin_theme()`.
+- edit_highlight_worker.rs: `poll_edit_hl_results` split into drain + `apply_edit_hl_results` (behaviour unchanged); `#[cfg(test)] edit_hl_wait_settled_for_test` blocks on the worker channel with no deadline; test now pins the theme and blocks instead of polling against 2 s.
+- permission_view.rs: pin on execute_header_display_matches_overlay_body plus a mechanism test.
+
+Specifically assess: is the PUBLISH_LOCK scheme actually race-free against `set`, `reset_for_test`, `set_terminal_native_lock`, and a second lazy seeder? Can `edit_hl_wait_settled_for_test` hang or spin in any reachable state (worker alive but never answering the latest job; stale results)? Can the guard scanner give false negatives (missed mutators) or false positives that would break on rustfmt-formatted code? Anything in product (non-test) code whose behaviour changed besides the cache publish and the edit-hl poll split?
+
+## FINAL ANSWER
+Audited `48886772..b7768b8c`: **55 files**, not 56. Read-only; no Cargo or Rust tests run.
+
+- **MEDIUM — Scanner silently excludes valid test modules.** [theme_pin_guard_tests.rs:83](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:83) recognizes only `mod` and `pub mod` immediately after `#[cfg(test)]`. It skips `pub(super) mod`—already used by `agent_view/paste.rs:500`—and standalone `#[test]` functions in ordinary source files. An unpinned `cache::set(...)` in either form passes the guard. Recognize these forms and add negative fixtures.
+
+- **LOW — Mutator matching misses directly imported setters.** [theme_pin_guard_tests.rs:13](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:13) detects `cache::set(...)`, but not `use crate::theme::cache::set; set(...)`. Bare setters are an existing convention inside the render cache tests. Import-aware matching or an explicitly enforced qualified-call convention would close this gap.
+
+- **LOW — Comments and strings count as executable code and lock ownership.** [theme_pin_guard_tests.rs:137](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:137) accepts an unpinned mutation merely because its function contains `// TODO: pin_theme()`. Conversely, `// No cache::set() here` produces a violation in an otherwise harmless test. These examples remain valid after rustfmt. Strip comments/string literals before matching; also avoid describing mere lock-name presence as proof of whole-body ownership.
+
+The remaining requested checks:
+
+- **Cache:** `PUBLISH_LOCK` correctly prevents a lazy seed from overwriting a concurrent `set`, and serializes competing seed publications. It is **not complete synchronization against reset or terminal-native changes**: reset does not invalidate an already-running loader, and `set_terminal_native_lock()` remains outside the mutex. Its markdown-polarity update can interleave with `store_kind()` and leave derived markdown settings stale. These limitations predate this diff; reset still relies on test isolation.
+- **Worker:** No reachable stale-result spin or bookkeeping hang found in the actual two-submit fixture. The latest pending job survives stale results; disconnect abandons pending work. The worker never takes `TEST_LOCK`. `recv()` would wait indefinitely if the worker remained alive but stalled, but I found no such path induced by this change.
+- **Pin sweep:** No nested acquisition, indirect lock-taking helper conflict, or spawner/worker lock cycle found. Explicit palette/native-mode tests retain their own setup. Ambient-theme coverage becomes deterministic FuigoNight/TrueColor coverage, as intended.
+- **Product scope:** No additional non-test behavior changes found beyond cache publication and the behavior-preserving poll/apply split.
+
+A Python reproduction of the scanner logic found zero current-tree violations across 664 source files and reproduced the scanner counterexamples above; this is not Rust execution evidence.
+
+VERDICT: REQUEST CHANGES - Fix the scanner’s skipped test forms before relying on it to prevent recurrence; no product regression or pin-induced deadlock found.

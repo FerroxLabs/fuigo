@@ -9,6 +9,40 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 use url::Url;
+/// P149 (S14/K16, live lane C2 D2): `content` as a trace upload sends it. Every text artifact (JSON, JSON lines,
+/// plain text) goes through the `/feedback` archive's scrub ([`super::feedback_archive::scrub_upload_text`]: the
+/// credentials this process sent or holds, credential shapes, private-key blocks); binary payloads (images,
+/// archives) are passed through. The local files a turn writes are not changed: only what leaves the machine is
+/// scrubbed (K16).
+pub(crate) fn scrub_upload_payload<'a>(
+    content: &'a [u8],
+    content_type: &str,
+) -> std::borrow::Cow<'a, [u8]> {
+    if !is_text_payload(content_type) {
+        return std::borrow::Cow::Borrowed(content);
+    }
+    let scrubbed = super::feedback_archive::scrub_upload_text(content.to_vec());
+    if scrubbed == content {
+        std::borrow::Cow::Borrowed(content)
+    } else {
+        std::borrow::Cow::Owned(scrubbed)
+    }
+}
+/// Whether an upload's media type is text the scrub can read (`application/json`, NDJSON, `text/*`, `*+json`).
+fn is_text_payload(content_type: &str) -> bool {
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    essence.starts_with("text/")
+        || essence.ends_with("+json")
+        || matches!(
+            essence.as_str(),
+            "application/json" | "application/x-ndjson" | "application/jsonl" | "application/x-jsonlines"
+        )
+}
 /// Upload the canonical tool definitions trace and wait for completion.
 ///
 /// `ToolDefinition` serializes in Chat Completions format: `{ "type": "function", "function": { ... } }`.
@@ -37,6 +71,7 @@ pub(crate) async fn upload_tool_definitions(
         format!("{prefix}/tool_definitions.json")
     };
     use crate::upload::gcs::WithAuth as _;
+    let bytes = scrub_upload_payload(&bytes, "application/json");
     let ok = fuigo_file_utils::gcs::upload_bytes(
         &gcs_config.with_auth(auth_manager),
         &object_path,
@@ -401,7 +436,12 @@ pub(crate) async fn upload_subagent_metadata(
     let config = base_config.with_auth(Some(auth_manager));
     match tokio::time::timeout(
         SUBAGENT_METADATA_UPLOAD_BOUND,
-        fuigo_file_utils::gcs::upload_bytes(&config, &gcs_path, &json, "application/json"),
+        fuigo_file_utils::gcs::upload_bytes(
+            &config,
+            &gcs_path,
+            &scrub_upload_payload(&json, "application/json"),
+            "application/json",
+        ),
     )
     .await
     {
@@ -583,6 +623,8 @@ pub(crate) async fn upload_artifact_to_gcs(
 ) -> Option<String> {
     let _upload_start = std::time::Instant::now();
     let config = ctx.gcs_config.with_auth(Some(ctx.auth_manager.clone()));
+    let scrubbed = scrub_upload_payload(content, content_type);
+    let content: &[u8] = &scrubbed;
     match upload_bytes(&config, gcs_path, content, content_type).await {
         Ok(gcs_url) => {
             record_upload_success(ctx);
@@ -727,7 +769,25 @@ pub(crate) async fn upload_turn_result(
     result: &TurnResultMetadata,
     wait: UploadWait,
 ) {
-    let json = match serde_json::to_vec_pretty(result) {
+    // P70b: `turn_result.json` leaves the machine. Its `error` is a failed turn's error text; credentials sent
+    // upstream are replaced in the uploaded copy (the caller's value is untouched).
+    let clean_error = result.error.as_deref().and_then(|error| {
+        match fuigo_telemetry::sent_credentials::scrub(error) {
+            std::borrow::Cow::Owned(clean) => Some(clean),
+            std::borrow::Cow::Borrowed(_) => None,
+        }
+    });
+    let serialized = match clean_error {
+        // Only when a credential was found: re-serialize with the cleaned text in place of `error`.
+        Some(clean) => serde_json::to_value(result).and_then(|mut value| {
+            if let Some(slot) = value.get_mut("error") {
+                *slot = serde_json::Value::String(clean);
+            }
+            serde_json::to_vec_pretty(&value)
+        }),
+        None => serde_json::to_vec_pretty(result),
+    };
+    let json = match serialized {
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(
@@ -1096,7 +1156,15 @@ impl TraceExportSource for DynamicResolver {
         failed_bearer: Option<&str>,
         timeout: std::time::Duration,
     ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>> {
-        if self.auth_manager.has_permanent_failure() {
+        // P149 (Astra r1): a refused token endpoint (TokenEndpointRefused) is a verdict that ages out and keeps the
+        // stored sign-in; the queue waits it out as it did when the refusal was transient, instead of dropping work.
+        if let Some(verdict) = self.auth_manager.permanent_failure()
+            && !matches!(
+                verdict,
+                crate::auth::error::AuthError::Refresh(crate::auth::error::RefreshTokenError::Permanent(ref e))
+                    if e.reason == crate::auth::error::RefreshTokenFailedReason::TokenEndpointRefused
+            )
+        {
             return None;
         }
         let current_wire = match &self.base_config.upload_method {
@@ -1317,6 +1385,7 @@ pub(crate) fn spawn_upload_queue(
         auth_manager,
         base_config: gcs_config.clone(),
     });
+    super::install_upload_scrub();
     let queue = UploadQueue::spawn(fuigo_home, resolver, UploadRetryPolicy::default());
     if let Some(ver) = client_version {
         queue.with_client_version(ver)
@@ -1349,6 +1418,9 @@ pub(crate) async fn upload_trace_artifact_deferred(
     artifact_name: &str,
     deadline: tokio::time::Instant,
 ) -> anyhow::Result<()> {
+    // Scrubbed before the durable queue spills it to disk, so the queued copy is what may leave the machine.
+    let scrubbed = scrub_upload_payload(content, content_type);
+    let content: &[u8] = &scrubbed;
     if let Some(queue) = &ctx.upload_queue {
         let session_id = ctx.session_info.id.0.to_string();
         let outcome = queue
@@ -1426,6 +1498,8 @@ pub(crate) async fn upload_trace_artifact(
     content_type: &str,
     artifact_name: &str,
 ) {
+    let scrubbed = scrub_upload_payload(content, content_type);
+    let content: &[u8] = &scrubbed;
     let (ok, err_msg) = if let Some(queue) = &ctx.upload_queue {
         let session_id = ctx.session_info.id.0.to_string();
         match queue
@@ -1556,6 +1630,17 @@ fn build_session_state_archive(
 }
 #[cfg(test)]
 pub(crate) mod tests {
+    /// P149 (S14/K16): the media types the upload scrub reads, including `text/*` with parameters.
+    #[test]
+    fn p149_text_payload_media_types() {
+        for text in ["text/plain", "text/plain; charset=utf-8", "TEXT/Markdown", "application/json", "application/x-ndjson"] {
+            assert!(super::is_text_payload(text), "{text}");
+        }
+        for binary in ["image/png", "application/gzip", "application/octet-stream"] {
+            assert!(!super::is_text_payload(binary), "{binary}");
+        }
+    }
+
     use super::*;
     use crate::session::persistence::CopiedSessionFile;
     use prod_mc_cli_chat_proxy_types::PromptMetadata;
@@ -2067,6 +2152,59 @@ pub(crate) mod tests {
             }
             other => panic!("expected Proxy, got {:?}", other),
         }
+    }
+    /// P149 (Astra r1 regression): a refused token endpoint is now a permanent verdict, but one that keeps the stored
+    /// sign-in and ages out, so the upload queue still waits for recovery instead of dropping the artifact; a
+    /// verdict that needs a sign-in still stops it at once.
+    #[test]
+    fn auth_recovery_waits_out_a_refusal_verdict_but_not_a_sign_in_verdict() {
+        use crate::auth::error::RefreshTokenFailedReason;
+        use crate::session::repo_changes::UploadMethod;
+        let resolver_with = |reason: RefreshTokenFailedReason| {
+            let dir = tempfile::tempdir().unwrap();
+            let manager = Arc::new(crate::auth::AuthManager::new(
+                dir.path(),
+                crate::auth::FuigoComConfig::default(),
+            ));
+            manager.hot_swap(crate::auth::FuigoAuth {
+                key: "p149-verdict-key".into(),
+                ..crate::auth::FuigoAuth::test_default()
+            });
+            manager.record_permanent_failure("p149-verdict-key".into(), reason.into());
+            assert!(manager.has_permanent_failure(), "control: {reason:?} verdict stands");
+            let resolver = DynamicResolver {
+                auth_manager: manager,
+                base_config: TraceExportConfig {
+                    bucket_url: None,
+                    service_account_key: None,
+                    prefix_dir: None,
+                    gcs_prefix: None,
+                    absolute_paths: false,
+                    archive_name_override: None,
+                    upload_method: UploadMethod::Proxy {
+                        proxy_base_url: "https://proxy.example.com".into(),
+                        user_token: String::new(),
+                        deployment_key: None,
+                        alpha_test_key: None,
+                    },
+                },
+            };
+            (dir, resolver)
+        };
+        let (_d1, refused) = resolver_with(RefreshTokenFailedReason::TokenEndpointRefused);
+        assert!(
+            refused
+                .wait_for_auth_recovery(Some("p149-verdict-key"), std::time::Duration::from_millis(1))
+                .is_some(),
+            "a refusal verdict must not drop queued uploads"
+        );
+        let (_d2, rejected) = resolver_with(RefreshTokenFailedReason::RefreshTokenRejected);
+        assert!(
+            rejected
+                .wait_for_auth_recovery(Some("p149-verdict-key"), std::time::Duration::from_millis(1))
+                .is_none(),
+            "control: a sign-in verdict still stops the wait"
+        );
     }
     #[test]
     fn dynamic_resolver_noop_for_direct_mode() {
@@ -2674,7 +2812,10 @@ pub(crate) mod tests {
             tmp.path(),
             crate::auth::FuigoComConfig::default(),
         ));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        // Paused clock: bind the loopback whose I/O keeps step with it (`fuigo_test_support::loopback`).
+        let listener = tokio::net::TcpListener::bind((fuigo_test_support::loopback_ip(), 0))
+            .await
+            .unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let mut held = Vec::new();

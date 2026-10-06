@@ -173,7 +173,7 @@ impl opentelemetry_sdk::logs::LogExporter for StderrLogExporter {
                 .attributes_iter()
                 .map(|(k, v)| format!("{}={v:?}", k.as_str()))
                 .collect();
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "[external-otel] event={} {}",
                 record.event_name().unwrap_or("?"),
                 attrs.join(" ")
@@ -196,7 +196,7 @@ impl opentelemetry_sdk::metrics::exporter::PushMetricExporter for StderrMetricEx
     ) -> impl std::future::Future<Output = opentelemetry_sdk::error::OTelSdkResult> + Send {
         for scope in metrics.scope_metrics() {
             for metric in scope.metrics() {
-                eprintln!(
+                fuigo_tty_utils::cli_eprintln!(
                     "[external-otel] metric={} {:?}",
                     metric.name(),
                     metric.data()

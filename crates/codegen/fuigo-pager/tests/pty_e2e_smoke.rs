@@ -17,6 +17,8 @@ mod connect_ui_timeout_env_override;
 mod doubled_lines_out_of_band_repro;
 #[path = "pty_e2e/embedded_mode_boots_without_hanging_on_blocked_backend.rs"]
 mod embedded_mode_boots_without_hanging_on_blocked_backend;
+#[path = "pty_e2e/feedback_disabled_says_so_once_without_thanks.rs"]
+mod feedback_disabled_says_so_once_without_thanks;
 #[path = "pty_e2e/feedback_slash_opens_descriptive_pane.rs"]
 mod feedback_slash_opens_descriptive_pane;
 #[path = "pty_e2e/fullscreen_external_editor_round_trip.rs"]

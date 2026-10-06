@@ -859,6 +859,7 @@ impl SessionActor {
                                         &workflow_smoke_check_cwd,
                                         workflow_smoke_check_display_cwd.as_deref(),
                                         &workflow_smoke_check_session_dir,
+                                        workflow_write_smoke_check::CHECK_TIMEOUT,
                                     )
                                     .await
                                 } else {
@@ -869,6 +870,7 @@ impl SessionActor {
                                     workflow_write_smoke_check::check_snapshot(
                                         snapshot,
                                         &workflow_smoke_check_permits,
+                                        workflow_write_smoke_check::CHECK_TIMEOUT,
                                     )
                                     .await
                                 }
@@ -1251,6 +1253,7 @@ impl SessionActor {
             self.send_hook_execution(
                 "pre_tool_use",
                 Some(resolved_tool_name),
+                Some(&tool_call_id.0),
                 None,
                 &pre_result.results,
             )

@@ -217,13 +217,7 @@ enum LockAttempt {
 }
 
 fn try_acquire_once(lock_path: &Path) -> LockAttempt {
-    let mut file = match OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-    {
+    let mut file = match open_lock_file(lock_path) {
         Ok(f) => f,
         Err(e) => {
             unified_log::warn(
@@ -276,7 +270,11 @@ fn try_acquire_once(lock_path: &Path) -> LockAttempt {
             }
         }
 
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => LockAttempt::Busy,
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            #[cfg(test)]
+            CONTENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            LockAttempt::Busy
+        }
 
         Err(e) => {
             unified_log::warn(
@@ -291,12 +289,7 @@ fn try_acquire_once(lock_path: &Path) -> LockAttempt {
 
 /// Parks in the kernel until the flock is free; fails if the file was replaced meanwhile.
 fn blocking_acquire(lock_path: &Path) -> io::Result<File> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)?;
+    let mut file = open_lock_file(lock_path)?;
 
     loop {
         match file.lock_exclusive() {
@@ -340,18 +333,39 @@ fn blocking_acquire(lock_path: &Path) -> io::Result<File> {
     }
 }
 
+/// Open (creating) `auth.json.lock`. It holds only the holder's pid and a timestamp, but it sits beside `auth.json`, so
+/// it is created owner-only (0600) on Unix like the file it guards, and one an older version left 0644 is tightened
+/// (best effort) (P150, D6).
+fn open_lock_file(lock_path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        options.mode(0o600);
+        let file = options.open(lock_path)?;
+        if file
+            .metadata()
+            .is_ok_and(|meta| meta.permissions().mode() & 0o777 != 0o600)
+        {
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    options.open(lock_path)
+}
+
 /// Takes the flock iff it is free right now; never waits.
 pub(crate) fn try_lock_auth_file_nonblocking(auth_json_path: &Path) -> Option<AuthFileLock> {
     let lock_path = auth_json_path.with_file_name(LOCK_FILE_NAME);
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .ok()?;
+    let mut file = open_lock_file(&lock_path).ok()?;
 
-    file.try_lock_exclusive().ok()?;
+    if file.try_lock_exclusive().is_err() {
+        #[cfg(test)]
+        CONTENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
 
     if let Err(e) = write_holder_info(&mut file) {
         unified_log::warn(
@@ -413,6 +427,58 @@ impl LockAcquire {
             Self::TimedOut { .. } | Self::Failed { .. } => None,
         }
     }
+
+    /// For writers that must not proceed unlocked: a timeout or an open/flock failure becomes the write's error.
+    pub(crate) fn into_io_result(self) -> io::Result<AuthFileLock> {
+        match self {
+            Self::Acquired(guard) => Ok(guard),
+            Self::TimedOut { holder } => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!(
+                    "auth.json.lock still held by another writer (holder pid {:?}); auth.json left unchanged",
+                    holder.and_then(|h| h.pid)
+                ),
+            )),
+            Self::Failed { error } => Err(error),
+        }
+    }
+}
+
+/// Synchronous, bounded acquire for writers that are not async (the sync API-key writers).
+/// Runs [`try_lock_auth_file_async`] to completion on a private current-thread runtime on a helper thread (the caller
+/// may itself be inside a runtime), so it shares that path's single-flight kernel wait: at most one parked flock thread
+/// per lock file however many callers time out, and no sleep-and-retry poll for a re-taking writer to starve.
+/// The runtime is shut down without waiting for that parked thread; when it gets the lock with no ticket left to claim
+/// it, the lock is dropped at once. Blocks the calling thread for up to `timeout`; async code awaits
+/// [`try_lock_auth_file_async`] directly.
+pub(crate) fn lock_auth_file_blocking(auth_json_path: &Path, timeout: StdDuration) -> LockAcquire {
+    let path = auth_json_path.to_owned();
+    let waiter = std::thread::Builder::new()
+        .name("auth-lock-wait".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()?;
+            let acquired = rt.block_on(try_lock_auth_file_async(&path, timeout, Heartbeat::Skip));
+            rt.shutdown_background();
+            Ok(acquired)
+        });
+    match waiter.map(|handle| handle.join()) {
+        Ok(Ok(Ok(acquired))) => acquired,
+        Ok(Ok(Err(error))) | Err(error) => LockAcquire::Failed { error },
+        Ok(Err(_panicked)) => LockAcquire::Failed {
+            error: io::Error::other("auth lock wait thread panicked"),
+        },
+    }
+}
+
+/// Test-only: acquire attempts in this process that found `auth.json.lock` held, evidence that two writers contended.
+#[cfg(test)]
+static CONTENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(crate) fn contended_acquires() -> u64 {
+    CONTENDED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Instant non-blocking try, then the shared blocking wait bounded by `timeout`.

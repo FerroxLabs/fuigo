@@ -68,6 +68,10 @@ pub enum ManagedConfigError {
         "Can't save the configuration to ~/.fuigo. Make sure the directory exists and is writable.\n  ({0})"
     )]
     DiskWrite(#[from] std::io::Error),
+    /// P47: the managed-config URL may not receive the session token, so the request was not made.
+    /// Terminal: no retry can change the destination.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
 }
 
 impl ManagedConfigError {

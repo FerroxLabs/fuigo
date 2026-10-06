@@ -258,7 +258,10 @@ if (npmRegistry) {
     obj.cli.npm_registry = npmRegistry;
 }
 
-fs.writeFileSync(configPath, TOML.stringify(obj), 'utf8');
+// A new config file is created readable by the user only (0600), like the config
+// files Fuigo itself creates (B20); an existing file keeps its mode. `mode` only
+// applies when the file is created. Windows has no mode bits.
+fs.writeFileSync(configPath, TOML.stringify(obj), { encoding: 'utf8', mode: 0o600 });
 
 // Shell completions: print setup hints (no silent shell config mutation).
 // Set FUIGO_INSTALL_COMPLETIONS=1 to auto-generate to ~/.fuigo/completions.

@@ -62,7 +62,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
             bytes = md.len(),
             "export_cmd: wrote transcript to file"
         );
-        eprintln!("Conversation exported to {}", expanded.display());
+        fuigo_tty_utils::cli_eprintln!("Conversation exported to {}", expanded.display());
     } else if args.clipboard {
         let _ = crate::clipboard::copy_text(&md);
         let lines = md.lines().count();
@@ -72,7 +72,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
             lines,
             "export_cmd: copied transcript to clipboard"
         );
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Conversation copied to clipboard ({} chars, {} lines)",
             md.len(),
             lines

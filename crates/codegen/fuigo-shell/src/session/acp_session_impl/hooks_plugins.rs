@@ -1,6 +1,239 @@
 use super::*;
 
 impl SessionActor {
+    // ── Session hook registry: the one builder every load site uses ───
+
+    /// The folder-trust verdict that gates a session's hook sources: the repo-local hook files and every `Project`-scope plugin's hooks.
+    /// Every site that builds or rebuilds a session's hook registry (session spawn, the agent-hooks spawn override, `/hooks` reload, plugin-snapshot adoption) decides trust here, so no two sites can disagree about the same folder.
+    /// It resolves and records like the session-start site always did, so a mid-session grant or revoke is seen on the next build.
+    /// `remote` carries the remote kill-switch input; a site without remote settings passes `None`.
+    pub(crate) fn session_hook_trust(
+        cwd: &std::path::Path,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> bool {
+        crate::agent::folder_trust::resolve_and_record(cwd, remote, false)
+    }
+
+    /// The hook specs `plugins` contributes: each active plugin's hooks file, then its inline manifest hooks, in plugin order.
+    /// A `Project`-scope plugin's hooks are admitted only while `project_trusted`.
+    /// A plugin registry records the verdict current when it was BUILT, so one built before a `/hooks-untrust` still lists the repo's plugin as active; the verdict passed here is the current one.
+    /// User, CLI and config-path plugins keep the registry's own trust decision.
+    pub(crate) fn plugin_hook_specs(
+        plugins: Option<&fuigo_agent::plugins::PluginRegistry>,
+        project_trusted: bool,
+    ) -> Vec<fuigo_hooks::config::HookSpec> {
+        let Some(plugins) = plugins else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for plugin in plugins.active_plugins() {
+            if plugin.scope == fuigo_agent::plugins::discovery::PluginScope::Project
+                && !project_trusted
+            {
+                tracing::debug!(
+                    plugin = %plugin.name,
+                    "project plugin hooks skipped: folder not trusted"
+                );
+                continue;
+            }
+            if let Some(ref hooks_path) = plugin.hooks_path {
+                let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
+                    hooks_path,
+                    &plugin.name,
+                    &plugin.root_str(),
+                    &plugin.data_dir_str(),
+                );
+                for w in &warnings {
+                    tracing::warn!("{w}");
+                }
+                out.extend(specs);
+            }
+            if let Some(ref inline_value) = plugin.inline_hooks {
+                let (specs, warnings) =
+                    fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
+                        inline_value,
+                        &plugin.name,
+                        &plugin.root_str(),
+                        &plugin.data_dir_str(),
+                    );
+                for w in &warnings {
+                    tracing::warn!("{w}");
+                }
+                out.extend(specs);
+            }
+        }
+        out
+    }
+
+    /// A session's complete hook registry for `cwd`: config-layer and hook-file sources (`discover_hooks`), then the plugin hooks.
+    /// Both halves are gated on the one `project_trusted` verdict (see [`Self::session_hook_trust`]).
+    /// This is the initial load as well as the reload, so a plugin's hooks fire from a session's first turn, not only after something triggers a reload.
+    pub(crate) fn build_session_hook_registry(
+        cwd: &std::path::Path,
+        compat: &fuigo_tools::types::compat::CompatConfig,
+        plugins: Option<&fuigo_agent::plugins::PluginRegistry>,
+        project_trusted: bool,
+    ) -> (
+        fuigo_hooks::discovery::HookRegistry,
+        Vec<fuigo_hooks::error::HookError>,
+    ) {
+        let git_root = fuigo_workspace::session::git::find_git_root_from_path(cwd).ok();
+        let (mut registry, errors) =
+            crate::util::hooks::discover_hooks(git_root.as_deref(), compat, project_trusted);
+        registry.append_specs(Self::plugin_hook_specs(plugins, project_trusted));
+        (registry, errors)
+    }
+
+    /// The plugin set a hook reload takes its plugin hooks from: this session's plugins rediscovered for its cwd on `project_trusted`.
+    /// A stored or freshly pushed plugin registry was built under the verdict current when it was built, and a trust change does not rebuild it:
+    /// after `/hooks-untrust` it can still hold a plugin the repo contributed (a `.fuigo/plugins` dir, or a `[plugins].paths` entry in the
+    /// repo's own config), and its hooks are arbitrary code.
+    /// A session without a registry handle gets NO plugin hooks from a reload. That is every subagent: its stored `plugin_registry` is
+    /// the process-wide snapshot (`subagent_spawn.rs`), not its parent's view of the workspace, so taking plugins from it would install
+    /// another workspace's plugins (the same rule as the subagent spawn fallback). A subagent reaches a reload only by a typed
+    /// `/hooks-trust` / `/hooks-untrust` in its task text; the automatic reload commands skip subagents.
+    fn plugins_for_hook_reload(
+        &self,
+        cwd: &std::path::Path,
+        project_trusted: bool,
+    ) -> Option<Arc<fuigo_agent::plugins::PluginRegistry>> {
+        let handle = self.plugin_registry_handle.as_ref()?;
+        let disk_cfg = crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
+        handle.build_for_cwd(cwd, &disk_cfg, &self.session_plugin_dirs(), project_trusted)
+    }
+
+    /// The plugin set a session's FIRST hook load takes its plugin hooks from.
+    /// `built` was discovered before the session thread started, under the verdict current then; when the verdict at load time is
+    /// untrusted (another session revoked the folder in between) the plugins are rediscovered on it, so no repo-contributed plugin
+    /// admitted under the older verdict gets its hooks installed. A trusted verdict, or no registry handle, keeps `built`:
+    /// a registry built while untrusted can only under-admit.
+    pub(crate) fn plugins_for_initial_hooks(
+        handle: Option<&fuigo_agent::plugins::SharedPluginRegistryHandle>,
+        built: Option<Arc<fuigo_agent::plugins::PluginRegistry>>,
+        cwd: &std::path::Path,
+        project_trusted: bool,
+    ) -> Option<Arc<fuigo_agent::plugins::PluginRegistry>> {
+        let Some(handle) = handle.filter(|_| !project_trusted) else {
+            return built;
+        };
+        let session_dirs = built
+            .as_ref()
+            .map(|r| r.session_plugin_dirs().to_vec())
+            .unwrap_or_default();
+        let disk_cfg = crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
+        handle.build_for_cwd(cwd, &disk_cfg, &session_dirs, false)
+    }
+
+    /// The agent definition's own inline hooks, as the session it defines may run them under `project_trusted`.
+    /// One derivation for the primary-session spawn override (`agent_ops`) and every reload, so a reload keeps an admitted agent's hooks
+    /// and drops a project agent's hooks once the folder is untrusted. A plugin's agent gets none, for any session: the subagent spawn
+    /// already refuses them ("not supported for security"), and an agent definition does not carry its plugin's trust.
+    /// A subagent (only reached by a manual reload) also keeps the subagent spawn's `Stop` -> `SubagentStop` mapping.
+    pub(crate) fn agent_inline_hook_specs(
+        definition: &fuigo_agent::AgentDefinition,
+        cwd: &std::path::Path,
+        project_trusted: bool,
+        is_subagent: bool,
+    ) -> Vec<fuigo_hooks::config::HookSpec> {
+        let Some(hooks_config) = definition.hooks.as_ref() else {
+            return Vec::new();
+        };
+        if definition.plugin_name.is_some() {
+            tracing::warn!(
+                agent = %definition.name,
+                plugin = ?definition.plugin_name,
+                "ignoring hooks on plugin agent (not supported for security)"
+            );
+            return Vec::new();
+        }
+        if !crate::agent::folder_trust::agent_inline_hooks_allowed(definition.scope, || {
+            project_trusted
+        }) {
+            return Vec::new();
+        }
+        let (specs, errors) = fuigo_hooks::config::parse_hooks_from_value_with_dir(
+            &hooks_config.as_value(),
+            &format!(
+                "{}{}",
+                fuigo_hooks::config::AGENT_HOOK_PREFIX,
+                definition.name
+            ),
+            cwd,
+        );
+        for e in &errors {
+            tracing::warn!(agent = %definition.name, error = ?e, "agent hook parse error");
+        }
+        if !is_subagent {
+            return specs;
+        }
+        specs
+            .into_iter()
+            .map(|mut s| {
+                if s.event == fuigo_hooks::event::HookEventName::Stop {
+                    s.event = fuigo_hooks::event::HookEventName::SubagentStop;
+                }
+                s
+            })
+            .collect()
+    }
+
+    /// A primary session's spawn override (disk hooks + plugin hooks + its agent's inline hooks) was built before the session thread
+    /// started, under the verdict current then. When the verdict at load time is untrusted, its plugin hooks are replaced by those of a
+    /// rediscovery on that verdict (see [`Self::plugins_for_initial_hooks`]); a trusted verdict keeps the override as built.
+    pub(crate) fn revalidate_override_plugin_hooks(
+        override_reg: Arc<fuigo_hooks::discovery::HookRegistry>,
+        handle: Option<&fuigo_agent::plugins::SharedPluginRegistryHandle>,
+        built: Option<Arc<fuigo_agent::plugins::PluginRegistry>>,
+        cwd: &std::path::Path,
+        project_trusted: bool,
+    ) -> Arc<fuigo_hooks::discovery::HookRegistry> {
+        if project_trusted {
+            return override_reg;
+        }
+        let plugins = Self::plugins_for_initial_hooks(handle, built, cwd, false);
+        let mut registry = (*override_reg).clone();
+        registry.remove_by_prefix("plugin/");
+        registry.append_specs(Self::plugin_hook_specs(plugins.as_deref(), false));
+        Arc::new(registry)
+    }
+
+    /// Re-derive the session's agent inline hooks after its agent definition changed (a zero-turn harness rebuild on model switch):
+    /// the old agent's hooks go, the new one's come in under the same gate as at spawn, and the handle-visible copy follows.
+    pub(super) fn replace_agent_inline_hooks(&self) {
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        let trusted = Self::session_hook_trust(cwd, None);
+        let specs = Self::agent_inline_hook_specs(
+            self.agent.borrow().definition(),
+            cwd,
+            trusted,
+            self.startup_hints.is_subagent,
+        );
+        {
+            let mut reg = self.hook_registry.borrow_mut();
+            match reg.as_mut() {
+                Some(arc_reg) => {
+                    let hook_reg = Arc::make_mut(arc_reg);
+                    hook_reg.remove_by_prefix(fuigo_hooks::config::AGENT_HOOK_PREFIX);
+                    hook_reg.append_specs(specs);
+                }
+                None if !specs.is_empty() => {
+                    let mut hook_reg = fuigo_hooks::discovery::HookRegistry::default();
+                    hook_reg.append_specs(specs);
+                    *reg = Some(Arc::new(hook_reg));
+                }
+                None => {}
+            }
+        }
+        self.publish_hook_registry();
+    }
+
+    /// Copy the actor's registry into the handle-visible live cell, so a subagent spawned after a reload inherits what the parent fires now.
+    /// Call after every write to `hook_registry`.
+    fn publish_hook_registry(&self) {
+        self.hook_registry_live
+            .set(self.hook_registry.borrow().clone());
+    }
+
     // ── Shared hook/plugin operation functions ────────────────────────
 
     /// Trust the current project via the unified folder-trust store.
@@ -132,12 +365,16 @@ impl SessionActor {
                     requires_reload: false,
                     requires_restart: false,
                 },
-                Ok((root, false)) => ActionOutcome {
-                    status: OutcomeStatus::NotFound,
-                    message: format!("Not currently trusted: {}", root.display()),
-                    requires_reload: false,
-                    requires_restart: false,
-                },
+                Ok((root, false)) => {
+                    // Another session may have revoked the folder already; this session's registry still has to follow the verdict
+                    let _ = self.reload_hooks_impl().await;
+                    ActionOutcome {
+                        status: OutcomeStatus::NotFound,
+                        message: format!("Not currently trusted: {}", root.display()),
+                        requires_reload: false,
+                        requires_restart: false,
+                    }
+                }
                 Ok((root, true)) => {
                     let reload_msg = self.reload_hooks_impl().await;
                     // Revoking trust must drop a previously seeded repo MCP output cap right away, not at the next config reload
@@ -161,7 +398,12 @@ impl SessionActor {
                     };
                 }
                 // CWE-427: add_hooks_path() validates path is under ~/.fuigo/.
-                match crate::config::add_hooks_path(&path) {
+                match crate::config::off_reactor({
+                    let path = path.to_string();
+                    move || crate::config::add_hooks_path(&path)
+                })
+                .await
+                {
                     Ok(()) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: {
@@ -188,7 +430,12 @@ impl SessionActor {
                         requires_restart: false,
                     };
                 }
-                match crate::config::remove_hooks_path(&path) {
+                match crate::config::off_reactor({
+                    let path = path.to_string();
+                    move || crate::config::remove_hooks_path(&path)
+                })
+                .await
+                {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: {
@@ -355,7 +602,7 @@ impl SessionActor {
                             tracing::warn!("Failed to save install registry: {e}");
                         }
                         let (names, post_warnings) =
-                            crate::config::post_install_plugin(&result.repo_key);
+                            crate::config::post_install_plugin_off_reactor(&result.repo_key).await;
                         let count = names.len();
                         let mut msg = format!(
                             "Installed {count} plugin(s) from {source}: {}",
@@ -530,7 +777,12 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::add_plugin_path(&path_str) {
+                match crate::config::off_reactor({
+                    let path_str = path_str.to_string();
+                    move || crate::config::add_plugin_path(&path_str)
+                })
+                .await
+                {
                     Ok(()) => {
                         let mut msg = format!("Added plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -555,8 +807,16 @@ impl SessionActor {
             }
             PluginsAction::Enable { plugin_id } => {
                 // Add to enabled list (for project plugins) and remove from disabled list.
-                let r1 = crate::config::add_enabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_disabled_plugin(&plugin_id);
+                let r1 = crate::config::off_reactor({
+                    let plugin_id = plugin_id.to_string();
+                    move || crate::config::add_enabled_plugin(&plugin_id)
+                })
+                .await;
+                let r2 = crate::config::off_reactor({
+                    let plugin_id = plugin_id.to_string();
+                    move || crate::config::remove_disabled_plugin(&plugin_id)
+                })
+                .await;
                 match r1.and(r2) {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -586,8 +846,16 @@ impl SessionActor {
             }
             PluginsAction::Disable { plugin_id } => {
                 // Add to disabled list and remove from enabled list.
-                let r1 = crate::config::add_disabled_plugin(&plugin_id);
-                let r2 = crate::config::remove_enabled_plugin(&plugin_id);
+                let r1 = crate::config::off_reactor({
+                    let plugin_id = plugin_id.to_string();
+                    move || crate::config::add_disabled_plugin(&plugin_id)
+                })
+                .await;
+                let r2 = crate::config::off_reactor({
+                    let plugin_id = plugin_id.to_string();
+                    move || crate::config::remove_enabled_plugin(&plugin_id)
+                })
+                .await;
                 match r1.and(r2) {
                     Ok(()) => {
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -626,7 +894,12 @@ impl SessionActor {
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
                 let path_str = resolved.display().to_string();
-                match crate::config::remove_plugin_path(&path_str) {
+                match crate::config::off_reactor({
+                    let path_str = path_str.to_string();
+                    move || crate::config::remove_plugin_path(&path_str)
+                })
+                .await
+                {
                     Ok(()) => {
                         let mut msg = format!("Removed plugin path: {path_str}");
                         if let Some(ref handle) = self.plugin_registry_handle {
@@ -655,55 +928,34 @@ impl SessionActor {
     /// Reload hooks mid-session: re-discovers global and project hooks, re-evaluates project trust, and re-appends plugin-contributed hooks.
     /// `pub(super)` so the `SessionCommand::ReloadHooks` arm in `run_session` (parent module) can call it after an interactive folder-trust grant.
     pub(super) async fn reload_hooks_impl(self: &std::sync::Arc<Self>) -> String {
-        let git_root = fuigo_workspace::session::git::find_git_root_from_path(
-            std::path::Path::new(&self.session_info.cwd),
-        )
-        .ok();
         // Reconcile folder-trust so a mid-session /hooks-trust (or --trust) grant counts on reload, then gate project hook sources on the verdict
         let cwd = std::path::Path::new(&self.session_info.cwd);
-        let is_trusted = crate::agent::folder_trust::resolve_and_record(cwd, None, false);
-        // discover_hooks is the single load entry point, so all vendors (compat and native) and custom hook-paths match the session-startup sites
-        let (mut registry, errors) = crate::util::hooks::discover_hooks(
-            git_root.as_deref(),
+        let is_trusted = Self::session_hook_trust(cwd, None);
+        // The same builder as session spawn, so all vendors (compat and native), custom hook-paths and plugin hooks match the session-startup sites
+        // Defense in depth: a subagent's reload never installs plugin hooks itself, whatever registry it holds (see `plugins_for_hook_reload`)
+        let plugins_now = if self.startup_hints.is_subagent {
+            None
+        } else {
+            self.plugins_for_hook_reload(cwd, is_trusted)
+        };
+        let (mut registry, errors) = Self::build_session_hook_registry(
+            cwd,
             &self.rebuild_spec.compat,
+            plugins_now.as_deref(),
             is_trusted,
         );
+        // The session's agent hooks are part of its registry too (the spawn override put them there): re-derive them on the same verdict
+        let agent_specs = Self::agent_inline_hook_specs(
+            self.agent.borrow().definition(),
+            cwd,
+            is_trusted,
+            self.startup_hints.is_subagent,
+        );
+        registry.append_specs(agent_specs);
         for err in &errors {
             tracing::warn!("hook reload error: {err}");
         }
         *self.hook_load_errors.borrow_mut() = errors.iter().map(|e| e.to_string()).collect();
-        // Re-append plugin hooks from current plugin registry.
-        // Clone the Arc out of the RefCell so the borrow is dropped immediately.
-        let plugin_registry_snapshot = self.plugin_registry.borrow().clone();
-        if let Some(ref pr) = plugin_registry_snapshot {
-            for plugin in pr.active_plugins() {
-                if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                        hooks_path,
-                        &plugin.name,
-                        &plugin.root_str(),
-                        &plugin.data_dir_str(),
-                    );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    registry.append_specs(specs);
-                }
-                if let Some(ref inline_value) = plugin.inline_hooks {
-                    let (specs, warnings) =
-                        fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
-                            inline_value,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    registry.append_specs(specs);
-                }
-            }
-        }
         let hook_count = registry.len();
         {
             let mut reg = self.hook_registry.borrow_mut();
@@ -713,6 +965,7 @@ impl SessionActor {
                 *reg = Some(std::sync::Arc::new(registry));
             }
         }
+        self.publish_hook_registry();
         tracing::info!(hook_count, "hooks reloaded mid-session");
 
         // Notify pager about hooks change.
@@ -828,8 +1081,8 @@ impl SessionActor {
         let session_cwd = std::path::Path::new(&self.session_info.cwd);
         let disk_cfg =
             crate::config::resolve_effective_plugins_config(session_cwd).to_discovery_config();
-        // Reads the stored verdict only; the session's spawn resolve already recorded this cwd with the real remote
-        let project_trusted = crate::agent::folder_trust::project_scope_allowed(session_cwd);
+        // The one hook-trust predicate; the session's spawn resolve already recorded this cwd with the real remote
+        let project_trusted = Self::session_hook_trust(session_cwd, None);
         handle.build_for_cwd(session_cwd, &disk_cfg, &dirs, project_trusted)
     }
 
@@ -837,6 +1090,11 @@ impl SessionActor {
     /// Swaps the per-session registry, reloads plugin hooks, re-merges plugin MCP servers, re-scans skills, and notifies the client.
     /// Called by `reload_plugins_impl` in the originating session and by the `ReloadPlugins` command when plugins change in another session.
     /// Returns `(hooks_reloaded, mcp_changed, skill_count)`.
+    /// [`crate::session::SessionCommand::SetClientMcpSeed`].
+    pub(crate) fn set_client_mcp_seed(&self, seed: crate::session::managed_mcp::ClientMcpSeed) {
+        *self.initial_client_mcp_servers.borrow_mut() = seed;
+    }
+
     pub(super) async fn apply_plugin_registry_snapshot(
         self: &Arc<Self>,
         new_registry_snapshot: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>,
@@ -848,38 +1106,14 @@ impl SessionActor {
 
         // Reload hooks in the current session
         let t_hooks = std::time::Instant::now();
-        let mut hooks_reloaded = 0usize;
-        if let Some(ref new_registry) = new_registry_snapshot {
-            let mut new_specs = Vec::new();
-            for plugin in new_registry.active_plugins() {
-                // File-based hooks
-                if let Some(ref hooks_path) = plugin.hooks_path {
-                    let (specs, warnings) = fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks(
-                        hooks_path,
-                        &plugin.name,
-                        &plugin.root_str(),
-                        &plugin.data_dir_str(),
-                    );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    new_specs.extend(specs);
-                }
-                // Inline hooks
-                if let Some(ref inline_value) = plugin.inline_hooks {
-                    let (specs, warnings) =
-                        fuigo_agent::plugins::hooks_adapter::parse_plugin_hooks_from_value(
-                            inline_value,
-                            &plugin.name,
-                            &plugin.root_str(),
-                            &plugin.data_dir_str(),
-                        );
-                    for w in &warnings {
-                        tracing::warn!("{w}");
-                    }
-                    new_specs.extend(specs);
-                }
-            }
+        let hooks_reloaded: usize;
+        // Plugin hooks come from this session's plugins rediscovered on the CURRENT verdict, exactly as in `reload_hooks_impl`:
+        // the snapshot being adopted may have been built before a trust change (a fan-out racing a `/hooks-untrust`)
+        // A `None` result means no plugin is left: it must strip the previous plugin hooks, not keep them
+        {
+            let project_trusted = Self::session_hook_trust(session_cwd, None);
+            let plugins_now = self.plugins_for_hook_reload(session_cwd, project_trusted);
+            let new_specs = Self::plugin_hook_specs(plugins_now.as_deref(), project_trusted);
             hooks_reloaded = new_specs.len();
             {
                 let mut reg = self.hook_registry.borrow_mut();
@@ -890,19 +1124,17 @@ impl SessionActor {
                 } else if !new_specs.is_empty() {
                     // No registry yet: bootstrap config-layer and file hooks the way reload_hooks_impl does
                     // Starting from empty sources instead would let a plugin-first snapshot drop config hooks
-                    let git_root =
-                        fuigo_workspace::session::git::find_git_root_from_path(session_cwd).ok();
-                    let is_trusted =
-                        crate::agent::folder_trust::resolve_and_record(session_cwd, None, false);
-                    let (mut new_reg, _errs) = crate::util::hooks::discover_hooks(
-                        git_root.as_deref(),
+                    let (mut new_reg, _errs) = Self::build_session_hook_registry(
+                        session_cwd,
                         &self.rebuild_spec.compat,
-                        is_trusted,
+                        None,
+                        project_trusted,
                     );
                     new_reg.append_specs(new_specs);
                     *reg = Some(Arc::new(new_reg));
                 }
             }
+            self.publish_hook_registry();
         }
 
         fuigo_telemetry::unified_log::info(
@@ -922,7 +1154,7 @@ impl SessionActor {
         // This mirrors the `UpdateMcpServers` command handler
         let t_mcp = std::time::Instant::now();
         let new_mcp_servers = crate::session::managed_mcp::merge_managed_mcp_servers(
-            self.initial_client_mcp_servers.clone(),
+            self.initial_client_mcp_servers.borrow().clone(),
             session_cwd,
             new_registry_snapshot.as_deref(),
             &self.rebuild_spec.compat,
@@ -1036,3 +1268,381 @@ impl SessionActor {
         (hooks_reloaded, mcp_changed, skill_count)
     }
 }
+
+#[cfg(test)]
+mod p07_plugin_hook_tests {
+    use super::SessionActor;
+    use fuigo_agent::plugins::SharedPluginRegistryHandle;
+    use fuigo_agent::plugins::discovery::DiscoveryConfig;
+
+    fn write_plugin(root: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(
+            root.join("plugin.json"),
+            serde_json::json!({
+                "name": name,
+                "hooks": {"hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "true"}]}]}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// This test's plugins whose hooks are in `specs`; ambient plugins on the test host are ignored.
+    fn plugin_names<'a>(
+        specs: impl IntoIterator<Item = &'a fuigo_hooks::config::HookSpec>,
+    ) -> Vec<String> {
+        let mut names: Vec<String> = specs
+            .into_iter()
+            .filter_map(|s| s.name.strip_prefix("plugin/"))
+            .filter_map(|rest| rest.split('/').next())
+            .filter(|name| ["cligate", "projgate"].contains(name))
+            .map(str::to_owned)
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// A plugin registry records the verdict current when it was BUILT; the hook builder must apply the CURRENT one.
+    /// Built while trusted (as after `/hooks-trust`), the repo's plugin is active; after `/hooks-untrust` its hooks must not load,
+    /// while a CLI-scope plugin (always trusted) is unaffected.
+    #[test]
+    fn project_plugin_hooks_follow_the_current_verdict_not_the_snapshot() {
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        write_plugin(&repo.path().join(".fuigo/plugins/projgate"), "projgate");
+        let cli = tempfile::tempdir().unwrap();
+        let cli_plugin = cli.path().join("cligate");
+        write_plugin(&cli_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["projgate".to_string(), "cligate".to_string()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let built_trusted = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], true);
+        let reg = built_trusted.as_deref();
+        assert!(
+            reg.is_some_and(|r| r.active_plugins().iter().any(|p| p.name == "projgate")),
+            "fixture: the project plugin is active in a registry built while trusted"
+        );
+
+        assert_eq!(
+            plugin_names(&SessionActor::plugin_hook_specs(reg, true)),
+            vec!["cligate", "projgate"],
+            "trusted: both plugins contribute their hooks"
+        );
+        assert_eq!(
+            plugin_names(&SessionActor::plugin_hook_specs(reg, false)),
+            vec!["cligate"],
+            "untrusted now: the stale snapshot's project plugin must contribute nothing"
+        );
+    }
+
+    /// Adopting a plugin snapshot built while the folder was trusted, after the folder was revoked (a fan-out racing `/hooks-untrust`):
+    /// the session's plugin hooks follow the CURRENT verdict, so neither the repo's own plugin (`Project` scope) nor a plugin its config
+    /// named in `[plugins].paths` (`ConfigPath` scope, auto-trusted under `$HOME`) is installed, and the handle-visible copy agrees.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn adopting_a_stale_trusted_snapshot_installs_no_repo_plugin_hooks() {
+        // Writes FUIGO_HOME / HOME, which every test in this binary reads: run in a process of its own
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _fh = EnvGuard::set("FUIGO_HOME", fuigo_home.path());
+        let _h = EnvGuard::set("HOME", home.path());
+        let _sim = EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "0.0.0-p07-sim");
+        let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        write_plugin(&repo.path().join(".fuigo/plugins/projgate"), "projgate");
+        let cfg_plugin = home.path().join("cligate");
+        write_plugin(&cfg_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["projgate".to_string(), "cligate".to_string()],
+            config_paths: vec![cfg_plugin.clone()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let stale = handle.build_for_cwd(repo.path(), &cfg, &[], true);
+        assert_eq!(
+            plugin_names(&SessionActor::plugin_hook_specs(stale.as_deref(), true)),
+            vec!["cligate", "projgate"],
+            "fixture: the snapshot built while trusted carries both repo-contributed plugins"
+        );
+        // The folder is untrusted now: configs present, no grant in the isolated store
+        crate::agent::folder_trust::record_for_test(repo.path(), false);
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut actor = crate::session::acp_session::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                actor.session_info.cwd = repo.path().display().to_string();
+                actor.plugin_registry_handle = Some(handle.clone());
+                *actor.hook_registry.borrow_mut() =
+                    Some(std::sync::Arc::new(fuigo_hooks::discovery::HookRegistry::default()));
+                let actor = std::sync::Arc::new(actor);
+                let _ = actor.apply_plugin_registry_snapshot(stale).await;
+                let installed = actor.hook_registry.borrow().clone().expect("registry");
+                assert_eq!(
+                    plugin_names(installed.all_hooks()),
+                    Vec::<String>::new(),
+                    "untrusted now: no repo-contributed plugin hook may be installed from the stale snapshot"
+                );
+                let published = actor.hook_registry_live.get().expect("published registry");
+                assert_eq!(plugin_names(published.all_hooks()), Vec::<String>::new());
+            })
+            .await;
+    }
+
+    /// A session's first hook load after a revocation that raced its spawn: the spawn-built registry (trusted) is replaced by a
+    /// rediscovery on the untrusted verdict, so a repo-config-path plugin's hooks are not installed; a trusted verdict keeps it as is.
+    #[test]
+    #[serial_test::serial]
+    fn initial_hook_plugins_follow_an_untrusted_verdict_at_load() {
+        // Writes FUIGO_HOME / HOME, which every test in this binary reads: run in a process of its own
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _fh = EnvGuard::set("FUIGO_HOME", fuigo_home.path());
+        let _h = EnvGuard::set("HOME", home.path());
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let cfg_plugin = home.path().join("cligate");
+        write_plugin(&cfg_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["cligate".to_string()],
+            config_paths: vec![cfg_plugin.clone()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let built = handle.build_for_cwd(repo.path(), &cfg, &[], true);
+        let names = |reg: Option<std::sync::Arc<fuigo_agent::plugins::PluginRegistry>>, trusted| {
+            plugin_names(&SessionActor::plugin_hook_specs(reg.as_deref(), trusted))
+        };
+        assert_eq!(names(built.clone(), true), vec!["cligate"], "fixture");
+        let kept = SessionActor::plugins_for_initial_hooks(
+            Some(&handle),
+            built.clone(),
+            repo.path(),
+            true,
+        );
+        assert_eq!(
+            names(kept, true),
+            vec!["cligate"],
+            "trusted at load: the spawn-built set stands"
+        );
+        let redone =
+            SessionActor::plugins_for_initial_hooks(Some(&handle), built, repo.path(), false);
+        assert_eq!(
+            names(redone, false),
+            Vec::<String>::new(),
+            "untrusted at load: the plugin admitted under the older verdict must not contribute hooks"
+        );
+    }
+
+    /// The primary-session spawn override, built while trusted, loads after a revocation raced the spawn: its plugin hooks are
+    /// replaced by the rediscovery on the untrusted verdict, its other hooks (the agent's own) are kept, and a trusted verdict keeps it all.
+    #[test]
+    #[serial_test::serial]
+    fn a_trusted_override_loses_repo_plugin_hooks_under_an_untrusted_verdict() {
+        // Writes FUIGO_HOME / HOME, which every test in this binary reads: run in a process of its own
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _fh = EnvGuard::set("FUIGO_HOME", fuigo_home.path());
+        let _h = EnvGuard::set("HOME", home.path());
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let cfg_plugin = home.path().join("cligate");
+        write_plugin(&cfg_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["cligate".to_string()],
+            config_paths: vec![cfg_plugin.clone()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let built = handle.build_for_cwd(repo.path(), &cfg, &[], true);
+        let mut reg = fuigo_hooks::discovery::HookRegistry::default();
+        reg.append_specs(SessionActor::plugin_hook_specs(built.as_deref(), true));
+        let (agent_specs, _) = fuigo_hooks::config::parse_hooks_from_value_with_dir(
+            &serde_json::json!({"PreToolUse": [{"hooks": [{"type": "command", "command": "true"}]}]}),
+            "agent:probe",
+            repo.path(),
+        );
+        assert!(!agent_specs.is_empty(), "fixture: an agent hook");
+        reg.append_specs(agent_specs);
+        let reg = std::sync::Arc::new(reg);
+        let total = reg.all_hooks().len();
+        assert_eq!(plugin_names(reg.all_hooks()), vec!["cligate"], "fixture");
+
+        let kept = SessionActor::revalidate_override_plugin_hooks(
+            reg.clone(),
+            Some(&handle),
+            built.clone(),
+            repo.path(),
+            true,
+        );
+        assert_eq!(
+            kept.all_hooks().len(),
+            total,
+            "trusted at load: the override stands"
+        );
+        let redone = SessionActor::revalidate_override_plugin_hooks(
+            reg,
+            Some(&handle),
+            built,
+            repo.path(),
+            false,
+        );
+        assert_eq!(
+            plugin_names(redone.all_hooks()),
+            Vec::<String>::new(),
+            "untrusted at load: the repo-config-path plugin's hook must go"
+        );
+        assert_eq!(
+            redone.all_hooks().len(),
+            total - 1,
+            "the agent's own hook stays"
+        );
+    }
+
+    /// An agent definition's inline hooks: admitted for a built-in agent, refused for a plugin's agent in any session.
+    #[test]
+    fn agent_inline_hooks_are_refused_for_plugin_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut def = fuigo_agent::AgentDefinition::from_json(&serde_json::json!({
+            "name": "probe-agent",
+            "description": "probe",
+            "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": "true"}]}]}
+        }))
+        .unwrap();
+        assert_eq!(
+            SessionActor::agent_inline_hook_specs(&def, dir.path(), false, false).len(),
+            1,
+            "a built-in agent's own hook is admitted"
+        );
+        def.plugin_name = Some("someplugin".to_string());
+        for is_subagent in [false, true] {
+            assert!(
+                SessionActor::agent_inline_hook_specs(&def, dir.path(), true, is_subagent)
+                    .is_empty(),
+                "a plugin agent's inline hooks are never admitted (subagent={is_subagent})"
+            );
+        }
+    }
+
+    /// F1: a reload in a session without a plugin registry handle (every subagent) installs no plugin hooks from its stored
+    /// registry - for a subagent that is the process-wide snapshot - and a subagent's reload installs none even with a handle.
+    #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial]
+    async fn a_reload_without_a_session_plugin_view_installs_no_plugin_hooks() {
+        // Writes FUIGO_HOME / HOME, which every test in this binary reads: run in a process of its own
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::env::EnvGuard;
+        let fuigo_home = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let _fh = EnvGuard::set("FUIGO_HOME", fuigo_home.path());
+        let _h = EnvGuard::set("HOME", home.path());
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let cli = tempfile::tempdir().unwrap();
+        let cli_plugin = cli.path().join("cligate");
+        write_plugin(&cli_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["cligate".to_string()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let process_snapshot = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], true);
+        assert_eq!(
+            plugin_names(&SessionActor::plugin_hook_specs(
+                process_snapshot.as_deref(),
+                true
+            )),
+            vec!["cligate"],
+            "fixture: the stored registry carries a plugin with a hook"
+        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for (is_subagent, with_handle) in [(false, false), (true, true)] {
+                    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let mut actor = crate::session::acp_session::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                    actor.session_info.cwd = repo.path().display().to_string();
+                    actor.startup_hints.is_subagent = is_subagent;
+                    *actor.plugin_registry.borrow_mut() = process_snapshot.clone();
+                    actor.plugin_registry_handle = with_handle.then(|| handle.clone());
+                    let actor = std::sync::Arc::new(actor);
+                    let _ = actor.reload_hooks_impl().await;
+                    let names = actor
+                        .hook_registry
+                        .borrow()
+                        .as_ref()
+                        .map(|r| plugin_names(r.all_hooks()))
+                        .unwrap_or_default();
+                    assert_eq!(
+                        names,
+                        Vec::<String>::new(),
+                        "subagent={is_subagent} handle={with_handle}: no plugin hook from the stored registry"
+                    );
+                }
+            })
+            .await;
+    }
+
+    /// The session builder is the initial load: plugin hooks sit beside the disk hooks from the start.
+    #[test]
+    fn build_session_hook_registry_includes_plugin_hooks() {
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        let cli = tempfile::tempdir().unwrap();
+        let cli_plugin = cli.path().join("cligate");
+        write_plugin(&cli_plugin, "cligate");
+        let cfg = DiscoveryConfig {
+            enabled: vec!["cligate".to_string()],
+            ..Default::default()
+        };
+        let handle = SharedPluginRegistryHandle::new(None, vec![]);
+        let plugins = handle.build_for_cwd(repo.path(), &cfg, &[cli_plugin], false);
+        let (registry, _errors) = SessionActor::build_session_hook_registry(
+            repo.path(),
+            &fuigo_tools::types::compat::CompatConfig::default(),
+            plugins.as_deref(),
+            false,
+        );
+        assert_eq!(plugin_names(registry.all_hooks()), vec!["cligate"]);
+    }
+}
+
+#[cfg(test)]
+#[path = "hooks_plugins_p141_tests.rs"]
+mod p141_tests;

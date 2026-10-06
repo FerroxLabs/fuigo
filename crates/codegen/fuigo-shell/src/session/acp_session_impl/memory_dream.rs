@@ -7,12 +7,17 @@ const DREAM_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Stale-lock floor: the whole dream (model call plus post-call reindex) must finish inside this, so it must exceed the model timeout; doubling it leaves reindex headroom.
 const DREAM_LOCK_STALE_FLOOR_SECS: u64 = DREAM_MODEL_TIMEOUT.as_secs() * 2;
 
-/// Whether a dream attempt reached the model call. `Ran` reports its own result; `Skipped` returned
-/// before the model call, so a user-initiated caller surfaces the reason and `/dream` is never silent.
+/// Whether a dream attempt reached the model call. `Ran` carries the result it reported (the same text as its
+/// `MemoryDreamCompleted`, or why the model call failed); `Skipped` returned before the model call, so a
+/// user-initiated caller surfaces the reason and `/dream` is never silent.
 enum DreamAttempt {
-    Ran,
+    Ran(String),
     Skipped(&'static str),
 }
+
+/// What `/dream` shows when there is no session log to consolidate yet (P150).
+pub(super) const DREAM_NO_SESSION_LOGS: &str =
+    "skipped: no session logs to consolidate yet (memory saves a log when a session ends or on /flush)";
 
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
@@ -231,11 +236,15 @@ impl SessionActor {
     }
 
     /// Run dream from the `/dream` slash command, bypassing the time and session gates.
-    pub(super) async fn run_dream_slash_command(&self) {
+    ///
+    /// Returns what happened, as one line for the person who typed `/dream` (P150: every outcome, including
+    /// "no session logs yet", is reported; it used to return silently). A skip is also sent as
+    /// `MemoryDreamCompleted`, as before.
+    pub(super) async fn run_dream_slash_command(&self) -> String {
         use crate::session::memory::dream_lock::sessions_since;
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
-            return;
+            return "skipped: memory storage is not available for this session".to_owned();
         };
 
         let sessions = match sessions_since(
@@ -248,7 +257,13 @@ impl SessionActor {
                     target: fuigo_telemetry::memory_log::TARGET,
                     "MEMORY_DREAM_SLASH: no session logs found, nothing to consolidate"
                 );
-                return;
+                let result = DREAM_NO_SESSION_LOGS.to_owned();
+                self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
+                    result: result.clone(),
+                    path: None,
+                })
+                .await;
+                return result;
             }
             Ok(s) => s,
             Err(e) => {
@@ -257,7 +272,13 @@ impl SessionActor {
                     error = %e,
                     "MEMORY_DREAM_SLASH: failed to list sessions"
                 );
-                return;
+                let result = "failed: the session logs could not be listed".to_owned();
+                self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
+                    result: result.clone(),
+                    path: None,
+                })
+                .await;
+                return result;
             }
         };
 
@@ -268,7 +289,7 @@ impl SessionActor {
         );
 
         // `/dream` is user-initiated, so a skip must be surfaced rather than logged silently.
-        if let DreamAttempt::Skipped(reason) = self
+        match self
             .run_dream_inner(
                 &storage,
                 &lock,
@@ -279,11 +300,16 @@ impl SessionActor {
             )
             .await
         {
-            self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
-                result: format!("skipped: {reason}"),
-                path: None,
-            })
-            .await;
+            DreamAttempt::Ran(result) => result,
+            DreamAttempt::Skipped(reason) => {
+                let result = format!("skipped: {reason}");
+                self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
+                    result: result.clone(),
+                    path: None,
+                })
+                .await;
+                result
+            }
         }
     }
 
@@ -364,17 +390,21 @@ impl SessionActor {
             Err(_) => return DreamAttempt::Skipped("existing memory could not be read"),
         };
 
-        let dream_msg =
-            match build_dream_user_message(sessions_dir, sessions, existing_memory.as_deref()) {
-                Some(msg) => msg,
-                None => {
-                    tracing::info!(
-                        target: fuigo_telemetry::memory_log::TARGET,
-                        "{log_prefix}: no readable session content, skipping"
-                    );
-                    return DreamAttempt::Skipped("no readable session content");
-                }
-            };
+        let dream_msg = match build_dream_user_message_checked(
+            sessions_dir,
+            sessions,
+            existing_memory.as_deref(),
+        ) {
+            Ok(msg) => msg,
+            Err(reason) => {
+                tracing::info!(
+                    target: fuigo_telemetry::memory_log::TARGET,
+                    %reason,
+                    "{log_prefix}: dream input not built, skipping"
+                );
+                return DreamAttempt::Skipped(reason.as_str());
+            }
+        };
 
         let model_response = match tokio::time::timeout(
             DREAM_MODEL_TIMEOUT,
@@ -390,7 +420,7 @@ impl SessionActor {
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran;
+                return DreamAttempt::Ran("failed: the model call failed; retry remains open".to_owned());
             }
             Err(_) => {
                 tracing::warn!(
@@ -398,7 +428,7 @@ impl SessionActor {
                     "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran;
+                return DreamAttempt::Ran("failed: the model call timed out; retry remains open".to_owned());
             }
         };
 
@@ -428,11 +458,12 @@ impl SessionActor {
                     .is_some();
                 if !indexed {
                     self.memory.record_dream_result(false);
+                    let result = "failed: memory saved with recovery but indexing failed; retry remains open";
                     self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
-                        result: "failed: memory saved with recovery but indexing failed; retry remains open".into(),
+                        result: result.into(),
                         path: Some(path.display().to_string()),
                     }).await;
-                    return DreamAttempt::Ran;
+                    return DreamAttempt::Ran(result.to_owned());
                 }
                 self.memory.reindex_and_embed(&path, "dream").await;
 
@@ -493,6 +524,10 @@ impl SessionActor {
                 DreamStatus::Failed(err) => format!("failed: {err}"),
             }
         };
+        let report = match &dream_path {
+            Some(path) => format!("{dream_result_str} \u{2192} {path}"),
+            None => dream_result_str.clone(),
+        };
         self.send_fuigo_notification(FuigoSessionUpdate::MemoryDreamCompleted {
             result: dream_result_str,
             path: dream_path,
@@ -507,7 +542,7 @@ impl SessionActor {
             "{log_prefix}: consolidation complete"
         );
 
-        DreamAttempt::Ran
+        DreamAttempt::Ran(report)
     }
 
     /// Make the dream model call using the session's sampling client.
@@ -862,6 +897,27 @@ impl SessionActor {
     /// Rewrite a raw memory note into well-structured markdown via a one-shot LLM call to `grok-4.6`.
     ///
     /// Same pattern as [`handle_ai_suggest`]: prepare a sampling client, build a system and user prompt, collect with a short idle timeout.
+    /// Write a user note to the workspace `MEMORY.md`. Refused, with nothing written, unless this session has memory on.
+    ///
+    /// The check and the append happen with no `.await` between them. The session actor is single threaded (a `LocalSet`),
+    /// and `/memory off|on` flips the storage handle synchronously on that same thread, so a toggle can never land between
+    /// the check and the write: the note is written entirely before the toggle, or refused entirely after it. Do not
+    /// move the append onto `spawn_blocking`: that would reopen the window.
+    pub(super) async fn save_memory_note(&self, text: &str) -> Result<(), acp::Error> {
+        let Some(storage) = self.memory.storage() else {
+            return Err(crate::acp_error::invalid_request(
+                "memory is not enabled for this session",
+            ));
+        };
+        storage
+            .append_to_memory(crate::session::memory::MemoryScope::Workspace, text)
+            .map_err(|e| crate::acp_error::internal_error(format!("memory note write failed: {e}")))?;
+        // Indexing re-reads the session's own state; if memory was turned off meanwhile it indexes nothing new
+        let path = storage.workspace_memory_file();
+        self.reindex_and_embed(&path, storage.classify_source(&path)).await;
+        Ok(())
+    }
+
     pub(super) async fn handle_rewrite_memory_note(
         &self,
         raw_text: &str,

@@ -927,6 +927,7 @@ async fn drive_silent_turn(total_timeout: Option<std::time::Duration>) -> super:
         // This fixture is about the `--timeout` cap, not the ack watch.
         None,
         &crate::app::prompt_ack::PromptAckDeadlines::from_env(None),
+        &super::InterruptWatch::inert(),
     )
     .await
 }
@@ -1208,6 +1209,86 @@ impl std::io::Write for CapturedOut {
 impl CapturedOut {
     fn text(&self) -> String {
         String::from_utf8(self.0.lock().expect("capture lock").clone()).expect("utf8 output")
+    }
+}
+
+/// P149 (S8, live lane C2 D1): a provider that echoes the key this process sent puts it in the turn's error text.
+/// Every output format's error document carries `<redacted>` in its place, as the TUI
+/// and the ACP reply rail do. The error is built as it would arrive unscrubbed, so this pins the printer itself.
+#[test]
+fn a_prompt_error_echoing_a_sent_credential_is_redacted_in_every_format() {
+    const SENT: &str = "fuigo-p149-SYNTH-headless-key-0001";
+    let _registry = crate::test_util::sent_credentials_lock();
+    fuigo_telemetry::sent_credentials::record(SENT);
+    for format in [
+        super::OutputFormat::Plain,
+        super::OutputFormat::Json,
+        super::OutputFormat::StreamingJson,
+        super::OutputFormat::StreamingMessagesJson,
+    ] {
+        let captured = CapturedOut::default();
+        let mut emitter =
+            super::HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+        let wire_error = acp::Error::internal_error().data(serde_json::json!({
+            "message": format!("API error (status 402 Payment Required): Credit limit reached for key {SENT}; top up"),
+            "error_kind": "api",
+        }));
+        // The returned error is what `main` prints; `headless_error_report` (fuigo-pager-bin) scrubs that line.
+        let _ = super::finish_turn(
+            &mut emitter,
+            Some(Err(wire_error)),
+            false,
+            None,
+            &acp::SessionId::new("sess-p149"),
+            true,
+        )
+        .expect_err("a failed turn exits non-zero");
+        let out = captured.text();
+        assert!(!out.contains(SENT), "{format:?}: stdout carried the sent key: {out}");
+        if format != super::OutputFormat::Plain {
+            assert!(out.contains("Credit limit reached for key <redacted>"), "{format:?}: control: {out}");
+        }
+    }
+}
+
+/// P149 (S8, Astra r3 #1): a schema-validation error quotes the rejected value and rides an `Ok` reply, past the ACP
+/// reply-rail scrub; the terminal document's structured-output error carries `<redacted>` for a sent credential.
+#[test]
+fn a_structured_output_error_quoting_a_sent_credential_is_redacted() {
+    const SENT: &str = "fuigo-p149-SYNTH-schema-error-key-01";
+    let _registry = crate::test_util::sent_credentials_lock();
+    fuigo_telemetry::sent_credentials::record(SENT);
+    let captured = CapturedOut::default();
+    let mut emitter =
+        super::HeadlessEmitter::with_writer(super::OutputFormat::Json, true, Box::new(captured.clone()));
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        "structuredOutputError".into(),
+        serde_json::json!(format!("\"{SENT}\" is not of type \"number\"")),
+    );
+    emitter.set_structured_output_from_meta(Some(&meta));
+    emitter.on_end("end_turn", "sess-p149", "req-p149", None);
+    let out = captured.text();
+    assert!(!out.contains(SENT), "{out}");
+    assert!(out.contains("<redacted>"), "control: the error is reported: {out}");
+}
+
+/// P149 (S8, Astra r2 #6): the run-level error `on_end` folds into the terminal document is scrubbed too.
+#[test]
+fn a_run_level_error_on_the_terminal_document_is_redacted() {
+    const SENT: &str = "fuigo-p149-SYNTH-on-end-key-000001";
+    let _registry = crate::test_util::sent_credentials_lock();
+    fuigo_telemetry::sent_credentials::record(SENT);
+    for format in [super::OutputFormat::Json, super::OutputFormat::StreamingJson] {
+        let captured = CapturedOut::default();
+        let mut emitter =
+            super::HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+        emitter.on_end("end_turn", "sess-p149", "req-p149", Some(&format!("run failed near {SENT}")));
+        let out = captured.text();
+        assert!(!out.contains(SENT), "{format:?}: {out}");
+        if format == super::OutputFormat::Json {
+            assert!(out.contains("run failed near <redacted>"), "control: {out}");
+        }
     }
 }
 
@@ -1549,6 +1630,7 @@ async fn an_unacknowledged_prompt_aborts_at_the_hard_deadline() {
             &mut ttf_logged,
             Some(PromptAckWatch::new("p-unacked", std::time::Instant::now())),
             &deadlines,
+            &super::InterruptWatch::inert(),
         ),
     )
     .await
@@ -1629,6 +1711,7 @@ async fn an_acknowledged_prompt_disarms_the_watch() {
             &mut ttf_logged,
             Some(PromptAckWatch::new("p-acked", std::time::Instant::now())),
             &deadlines,
+            &super::InterruptWatch::inert(),
         ),
     )
     .await;
@@ -1638,4 +1721,1647 @@ async fn an_acknowledged_prompt_disarms_the_watch() {
         "an acknowledged prompt must keep waiting, not abort: {:?}",
         outcome.map(|o| o.prompt_unacknowledged)
     );
+}
+
+// ── Headless permission denial is a first-class outcome (Contract D) ───────────────────────
+//
+// D.1: a denial that leaves the process exiting 0 is indistinguishable from success to a CI job.
+// D.2.1 gives it a dedicated, stable exit code; D.2.2 requires the reason to be recoverable
+// without parsing English; D.3 forbids both silent approval and a report gated on a TTY.
+// These tests pin the P02a half: the latch, the typed outcome, and the exit-code mapping.
+mod permission_denial {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+
+    use crate::headless::{
+        HeadlessDenial, HeadlessDenialRule, HeadlessEmitter, HeadlessOutcome, OutputFormat,
+        PERMISSION_DENIED_EXIT_CODE, TurnStop, emit_completed_response,
+        connection_closed_error, handle_headless_acp_message, headless_run_outcome,
+    };
+
+    /// A prompt response carrying the shell's own terminal `_meta`, with `cancellationCategory`
+    /// exactly as `fuigo_shell::session::commands::meta_category_str` spells it on the wire.
+    fn response(stop: acp::StopReason, cancellation_category: Option<&str>) -> acp::PromptResponse {
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "sessionId".to_string(),
+            serde_json::Value::String("sess-1".into()),
+        );
+        meta.insert(
+            "requestId".to_string(),
+            serde_json::Value::String("req-1".into()),
+        );
+        if let Some(category) = cancellation_category {
+            meta.insert(
+                crate::app::CANCELLATION_CATEGORY_KEY.to_string(),
+                serde_json::Value::String(category.to_owned()),
+            );
+        }
+        acp::PromptResponse::new(stop).meta(Some(meta))
+    }
+
+    /// Answer one `session/request_permission` offering exactly `kinds`, on `emitter`.
+    fn ask(
+        emitter: &mut HeadlessEmitter,
+        yolo: bool,
+        title: Option<&str>,
+        kinds: &[acp::PermissionOptionKind],
+    ) -> acp::RequestPermissionOutcome {
+        let fields = match title {
+            Some(t) => acp::ToolCallUpdateFields::new().title(Some(t.to_owned())),
+            None => acp::ToolCallUpdateFields::default(),
+        };
+        let options = kinds
+            .iter()
+            .enumerate()
+            .map(|(i, kind)| {
+                acp::PermissionOption::new(
+                    acp::PermissionOptionId::new(format!("opt-{i}").as_str()),
+                    format!("option {i}"),
+                    *kind,
+                )
+            })
+            .collect();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let msg = fuigo_acp_lib::AcpClientMessage::RequestPermission(fuigo_acp_lib::AcpArgs {
+            request: acp::RequestPermissionRequest::new(
+                acp::SessionId::new("sess-1"),
+                acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from("tc-1")), fields),
+                options,
+            ),
+            response_tx: tx,
+        });
+        let mut pending = std::collections::HashSet::new();
+        let mut completed = std::collections::HashSet::new();
+        let mut ttf_logged = false;
+        handle_headless_acp_message(
+            msg.boxed(),
+            emitter,
+            std::time::Instant::now(),
+            &mut ttf_logged,
+            yolo,
+            &mut pending,
+            &mut completed,
+        );
+        rx.try_recv()
+            .expect("a permission request must always be answered, never dropped")
+            .expect("a policy reply, not an ACP error")
+            .outcome
+    }
+
+    /// A `json` emitter whose bytes are captured rather than written to the test runner's stdout.
+    fn emitter() -> HeadlessEmitter {
+        captured_emitter().1
+    }
+
+    fn captured_emitter() -> (super::CapturedOut, HeadlessEmitter) {
+        let captured = super::CapturedOut::default();
+        let emitter = HeadlessEmitter::with_writer(
+            OutputFormat::Json,
+            false,
+            Box::new(captured.clone()),
+        );
+        (captured, emitter)
+    }
+
+    /// The headless default: nobody to ask, so the request is refused — and the refusal is now
+    /// recorded rather than dropped on the floor.
+    #[test]
+    fn headless_denies_and_latches_why() {
+        let mut emitter = emitter();
+        let outcome = ask(
+            &mut emitter,
+            /*yolo=*/ false,
+            Some("Write src/main.rs"),
+            &[
+                acp::PermissionOptionKind::AllowOnce,
+                acp::PermissionOptionKind::RejectOnce,
+            ],
+        );
+        assert!(
+            matches!(outcome, acp::RequestPermissionOutcome::Cancelled),
+            "the ACP outcome stays `Cancelled`; changing the wire is deferred to P00 (packet §3.2)"
+        );
+        let denial = emitter
+            .take_permission_denial()
+            .expect("a headless denial must be latched, not silent");
+        assert_eq!(denial.rule, HeadlessDenialRule::HeadlessNeverApproves);
+        assert_eq!(denial.tool_title.as_deref(), Some("Write src/main.rs"));
+        assert_eq!(denial.tool_call_id, "tc-1");
+    }
+
+    /// P149 (S8, Astra r1 #1): a denied tool call whose title holds a credential this process sent prints that title
+    /// on stderr (`human_line` on exit 3, `notice_line` when the run continued) and puts it in the denial record of
+    /// the terminal document. Every one of them carries `<redacted>` in its place.
+    #[test]
+    fn a_denied_tool_title_holding_a_sent_credential_is_redacted_everywhere_it_is_printed() {
+        const SENT: &str = "fuigo-p149-SYNTH-denial-title-key-01";
+        let _registry = crate::test_util::sent_credentials_lock();
+        fuigo_telemetry::sent_credentials::record(SENT);
+        let (captured, mut emitter) = captured_emitter();
+        let _ = ask(
+            &mut emitter,
+            /*yolo=*/ false,
+            Some(&format!("echo {SENT}")),
+            &[acp::PermissionOptionKind::AllowOnce, acp::PermissionOptionKind::RejectOnce],
+        );
+        let denial = emitter.permission_denial.clone().expect("a headless denial is latched");
+        for (what, text) in [
+            ("human_line", denial.human_line()),
+            ("notice_line", denial.notice_line()),
+            ("wire_record", denial.wire_record(true).to_string()),
+        ] {
+            assert!(!text.contains(SENT), "{what} carries the sent key: {text}");
+            assert!(text.contains("echo <redacted>"), "control: {what}: {text}");
+        }
+        emitter.on_error("turn failed", None);
+        let out = captured.text();
+        assert!(!out.contains(SENT), "the terminal document carries the sent key: {out}");
+    }
+
+    /// `--yolo` auto-approves, so a request it cannot approve is a denial too — the branch the
+    /// original report missed. An allow option was never offered, and the record proves it.
+    #[test]
+    fn yolo_with_no_allow_option_is_also_a_denial() {
+        let mut emitter = emitter();
+        let outcome = ask(
+            &mut emitter,
+            /*yolo=*/ true,
+            None,
+            &[acp::PermissionOptionKind::RejectOnce],
+        );
+        assert!(matches!(outcome, acp::RequestPermissionOutcome::Cancelled));
+        let denial = emitter
+            .take_permission_denial()
+            .expect("yolo with nothing to approve is still a denial");
+        assert_eq!(denial.rule, HeadlessDenialRule::YoloHadNoAllowOption);
+        assert_eq!(
+            denial.offered_option_kinds,
+            vec![
+                serde_json::to_value(acp::PermissionOptionKind::RejectOnce)
+                    .expect("an ACP enum serializes")
+                    .as_str()
+                    .expect("a string enum")
+                    .to_owned()
+            ],
+            "the offered kinds are recorded in their ACP wire spelling, not Rust's Debug form"
+        );
+        assert!(
+            !denial
+                .offered_option_kinds
+                .iter()
+                .any(|kind| kind.starts_with("allow")),
+            "the evidence a consumer needs: no allow option was on offer, got {:?}",
+            denial.offered_option_kinds
+        );
+    }
+
+    /// The counter-test D.3 demands: nothing here turns a denial into an approval, and nothing
+    /// turns an approval into a denial either. A yolo request with an allow option is still allowed
+    /// and latches nothing.
+    #[test]
+    fn yolo_with_an_allow_option_still_approves_and_latches_nothing() {
+        let mut emitter = emitter();
+        let outcome = ask(
+            &mut emitter,
+            /*yolo=*/ true,
+            Some("Read src/main.rs"),
+            &[
+                acp::PermissionOptionKind::RejectOnce,
+                acp::PermissionOptionKind::AllowOnce,
+            ],
+        );
+        assert!(
+            matches!(outcome, acp::RequestPermissionOutcome::Selected(_)),
+            "yolo must still select the allow option, got {outcome:?}"
+        );
+        assert_eq!(
+            emitter.take_permission_denial(),
+            None,
+            "an approval is not a denial"
+        );
+    }
+
+    /// The first denial is the one that blocked the run; later ones are its consequences.
+    #[test]
+    fn the_first_denial_wins() {
+        let mut emitter = emitter();
+        ask(&mut emitter, false, Some("first"), &[]);
+        ask(&mut emitter, true, Some("second"), &[]);
+        let denial = emitter.take_permission_denial().expect("latched");
+        assert_eq!(denial.rule, HeadlessDenialRule::HeadlessNeverApproves);
+        assert_eq!(denial.tool_title.as_deref(), Some("first"));
+    }
+
+    fn denial() -> HeadlessDenial {
+        HeadlessDenial {
+            rule: HeadlessDenialRule::HeadlessNeverApproves,
+            tool_title: Some("Write src/main.rs".to_owned()),
+            tool_call_id: "tc-1".to_owned(),
+            offered_option_kinds: vec!["reject_once".to_owned()],
+            agent_message: None,
+        }
+    }
+
+    /// D.2.1. The code is a compatibility commitment: `0` is success, `1` is a generic error, `2` is
+    /// a managed-policy requirement failure, `130`/`143` are signals. A change here breaks every
+    /// script that branches on it, so it is pinned by value on purpose.
+    #[test]
+    fn the_exit_code_is_dedicated_documented_and_stable() {
+        assert_eq!(PERMISSION_DENIED_EXIT_CODE, 3);
+        assert_eq!(denial().exit_code(), PERMISSION_DENIED_EXIT_CODE);
+        for taken in [0, 1, 2, 126, 127, 130, 143] {
+            assert_ne!(
+                PERMISSION_DENIED_EXIT_CODE, taken,
+                "{taken} already means something else"
+            );
+        }
+    }
+
+    /// D.2.2: the reason must be recoverable without parsing English. The rule id and the remedy are
+    /// data on the record; the prose line is built *from* them, never the other way round.
+    #[test]
+    fn the_reason_is_recoverable_without_parsing_english() {
+        assert_eq!(
+            HeadlessDenialRule::HeadlessNeverApproves.id(),
+            "headless_never_approves"
+        );
+        assert_eq!(
+            HeadlessDenialRule::YoloHadNoAllowOption.id(),
+            "yolo_had_no_allow_option"
+        );
+        for rule in [
+            HeadlessDenialRule::HeadlessNeverApproves,
+            HeadlessDenialRule::YoloHadNoAllowOption,
+        ] {
+            assert!(
+                !rule.remedy().is_empty(),
+                "{} must say what the operator changes",
+                rule.id()
+            );
+        }
+    }
+
+    /// D.2.3: one English line on the exit path, remedy included, naming what was refused.
+    #[test]
+    fn the_human_line_names_the_request_the_rule_and_the_remedy() {
+        let denial = denial();
+        let line = denial.human_line();
+        assert!(line.contains("Write src/main.rs"), "{line}");
+        assert!(line.contains("tc-1"), "{line}");
+        assert!(line.contains("headless_never_approves"), "{line}");
+        assert!(line.contains(denial.rule.remedy()), "{line}");
+        assert!(line.contains("3"), "{line}");
+        assert_eq!(line.lines().count(), 1, "one line, not a paragraph: {line}");
+    }
+
+    /// A denial with no tool title still identifies what was refused.
+    #[test]
+    fn an_untitled_request_is_still_identified() {
+        let untitled = HeadlessDenial {
+            tool_title: None,
+            ..denial()
+        };
+        assert_eq!(untitled.requested(), "tool call tc-1");
+        assert!(untitled.human_line().contains("tc-1"));
+    }
+
+    /// The precedence the exit path commits to, in one test.
+    ///
+    /// P02a had the denial outrank the turn's own error. That is corrected here: an error keeps
+    /// `exit(1)`. D.2.1 asks for a code distinct from a crash, and that is symmetric — a denial
+    /// latched anywhere in the run must not relabel a crash as "permission denied" and send the
+    /// operator off to pre-approve something that was never the problem. A dead stdout still
+    /// outranks everything: nothing can be reported through it.
+    #[test]
+    fn an_error_outranks_a_denial_and_dead_stdout_outranks_both() {
+        let blocked = headless_run_outcome(
+            Ok(TurnStop::PermissionCancelled),
+            None,
+            None,
+            Some(denial()),
+        )
+        .expect("a run that ended at the denial is an outcome, not an error");
+        assert!(matches!(blocked, HeadlessOutcome::PermissionDenied(_)));
+
+        let crashed = headless_run_outcome(
+            Err(anyhow::anyhow!("Connection closed unexpectedly")),
+            None,
+            None,
+            Some(denial()),
+        )
+        .expect_err("a crash after a denial is still a crash");
+        assert!(
+            format!("{crashed:#}").contains("Connection closed unexpectedly"),
+            "the crash must keep its own message: {crashed:#}"
+        );
+
+        let flush_failed = headless_run_outcome(
+            Ok(TurnStop::PermissionCancelled),
+            Some(anyhow::anyhow!("memory flush failed")),
+            None,
+            Some(denial()),
+        )
+        .expect_err("a memory-flush failure is an error, not a denial");
+        assert!(format!("{flush_failed:#}").contains("memory flush failed"));
+
+        let dead_stdout = headless_run_outcome(
+            Ok(TurnStop::PermissionCancelled),
+            None,
+            Some(std::io::Error::other("stdout is gone")),
+            Some(denial()),
+        )
+        .expect_err("a dead stdout outranks everything: nothing can report the denial");
+        assert!(
+            format!("{dead_stdout:#}").contains("stdout write failed"),
+            "got: {dead_stdout:#}"
+        );
+    }
+
+    /// The two things a denial that ended the run may never be: success, or a crash.
+    #[test]
+    fn a_denial_that_ended_the_run_is_neither_success_nor_a_crash() {
+        let outcome = headless_run_outcome(
+            Ok(TurnStop::PermissionCancelled),
+            None,
+            None,
+            Some(denial()),
+        )
+        .expect("a denial is an outcome, not an error");
+        assert_ne!(
+            outcome,
+            HeadlessOutcome::Finished,
+            "a blocked run must never look like a finished one"
+        );
+        let code = outcome
+            .denial()
+            .expect("the record survives to the exit path")
+            .exit_code();
+        assert_ne!(code, 0, "never success");
+        assert_ne!(code, 1, "never the generic error code a crash reports");
+    }
+
+    /// FALSE POSITIVE ON SUCCESS — the first of the two directions P02a got wrong.
+    ///
+    /// A denial can be latched by something that did not end the run. The case verified in this tree
+    /// is the post-turn **memory flush**: `run_single_turn` calls `run_headless_memory_flush` only
+    /// when the turn's outcome is already `Ok`, the terminal document has already been written with
+    /// `end_turn`, and the flush drives the same `handle_headless_acp_message` — so a denial there is
+    /// latched against a turn that succeeded. Anything else that asks after the turn has ended (a
+    /// background task, a subagent whose own turn was cancelled while the parent's continued) lands
+    /// in the same shape. P02a exited 3 on every one of those and told the operator the run was
+    /// blocked.
+    ///
+    /// D.2.1 scopes the code to "a run that **ended** because a permission was denied". This is not
+    /// one, so it exits 0 — and still says so on stderr, because D.3 forbids a denial that is
+    /// indistinguishable from success.
+    #[test]
+    fn a_denial_the_run_recovered_from_exits_zero() {
+        assert_eq!(
+            headless_run_outcome(Ok(TurnStop::Ended), None, None, Some(denial()))
+                .expect("a recovered run is not an error"),
+            HeadlessOutcome::Finished,
+            "a run that was refused something, carried on and finished is a success"
+        );
+        assert!(
+            !denial().notice_line().is_empty(),
+            "the denial is still reported in English, or it is indistinguishable from success (D.3)"
+        );
+        assert!(
+            denial().notice_line().contains(denial().rule.remedy()),
+            "the notice carries the remedy too: {}",
+            denial().notice_line()
+        );
+    }
+
+    /// FALSE POSITIVE ON A CRASH — the second direction.
+    ///
+    /// P02a suppressed the `Connection closed unexpectedly` bail whenever a denial was latched and
+    /// let the denial outrank the turn's error, so a mid-turn crash exited 3 and the stderr line
+    /// told the operator to "pre-approve it before the run". A crash is a crash: exit 1.
+    #[test]
+    fn a_crash_after_a_denial_is_still_a_crash() {
+        for turn_error in [
+            "Connection closed unexpectedly",
+            "max turns reached",
+            "Timed out after 30s waiting for the turn to end",
+        ] {
+            let err = headless_run_outcome(
+                Err(anyhow::anyhow!("{turn_error}")),
+                None,
+                None,
+                Some(denial()),
+            )
+            .expect_err("a latched denial must not downgrade a failure to the denial code");
+            assert!(
+                format!("{err:#}").contains(turn_error),
+                "expected `{turn_error}`, got: {err:#}"
+            );
+        }
+    }
+
+    /// P02j: a denial latched before the mid-turn `Connection closed unexpectedly` bail used to
+    /// vanish, because the bail returned before the outcome fold could write the notice. The error
+    /// keeps exit 1 and the denial line must reach stderr exactly once.
+    #[test]
+    fn a_denial_latched_before_a_closed_connection_reaches_stderr_exactly_once() {
+        let mut emitter = emitter();
+        emitter.record_permission_denial(denial());
+        let mut stderr = Vec::new();
+        let err = connection_closed_error(&mut emitter, &mut stderr);
+        assert!(
+            format!("{err:#}").contains("Connection closed unexpectedly"),
+            "the crash keeps its own error: {err:#}"
+        );
+        let text = String::from_utf8(stderr).expect("utf8");
+        assert_eq!(
+            text,
+            format!("{}\n", denial().notice_line()),
+            "the denial line exactly once, nothing else"
+        );
+        assert!(
+            emitter.take_permission_denial().is_none(),
+            "the latch is consumed, so nothing can print it a second time"
+        );
+    }
+
+    /// Binds the production bail to the helper. The helper's own tests cannot see a revert to a bare
+    /// `bail!` at the call site, and no in-process harness can close the shell mid-turn, so this
+    /// pins the call site's text.
+    #[test]
+    fn the_mid_turn_close_bail_goes_through_the_denial_reporting_helper() {
+        let src = include_str!("headless.rs");
+        assert!(
+            src.contains("return Err(connection_closed_error("),
+            "the connection-closed bail must report a latched denial first"
+        );
+        assert!(
+            !src.contains("anyhow::bail!(\"Connection closed unexpectedly\")"),
+            "a bare bail drops a latched denial (P02j)"
+        );
+    }
+
+    /// With no denial latched a closed connection writes nothing extra.
+    #[test]
+    fn a_closed_connection_without_a_denial_writes_nothing() {
+        let mut emitter = emitter();
+        let mut stderr = Vec::new();
+        let _ = connection_closed_error(&mut emitter, &mut stderr);
+        assert!(stderr.is_empty());
+    }
+
+    /// The discriminator itself, read off the shell's own wire rather than inferred.
+    ///
+    /// `cancelled` is not enough: `--max-turns`, a hook deny, a permission *reject* and a mid-turn
+    /// abort all report `StopReason::Cancelled`. `_meta.cancellationCategory` is what separates them,
+    /// and `PermissionCancelled` is the one this exit code belongs to.
+    #[test]
+    fn only_the_permission_cancelled_category_ends_the_run_at_a_denial() {
+        let mut emitter = emitter();
+        assert_eq!(
+            emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::Cancelled, Some("PermissionCancelled")),
+                &acp::SessionId::new("sess-1"),
+                None,
+            ),
+            TurnStop::PermissionCancelled
+        );
+        assert_eq!(
+            emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::EndTurn, None),
+                &acp::SessionId::new("sess-1"),
+                None,
+            ),
+            TurnStop::Ended
+        );
+        assert_eq!(
+            emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::Cancelled, Some("max_turns_reached")),
+                &acp::SessionId::new("sess-1"),
+                None,
+            ),
+            TurnStop::MaxTurns
+        );
+        for other in ["MidTurnAbort", "HookDenied", "PermissionRejected"] {
+            assert_eq!(
+                emit_completed_response(
+                    &mut emitter,
+                    response(acp::StopReason::Cancelled, Some(other)),
+                    &acp::SessionId::new("sess-1"),
+                    None,
+                ),
+                TurnStop::Ended,
+                "{other} is not a dismissed permission prompt"
+            );
+        }
+    }
+
+    /// The wire constant this whole gate rests on, pinned against the shell that stamps it. If the
+    /// shell renames its category the exit code stops firing, and only this test says so.
+    #[test]
+    fn the_cancellation_category_matches_the_shell_that_stamps_it() {
+        assert_eq!(
+            fuigo_shell::session::commands::PERMISSION_CANCELLED_CATEGORY,
+            "PermissionCancelled"
+        );
+        assert_eq!(crate::app::CANCELLATION_CATEGORY_KEY, "cancellationCategory");
+    }
+
+    /// D.2.2 on the document a machine consumer actually reads: the reason is a field, not prose.
+    #[test]
+    fn the_json_document_carries_the_denial_record() {
+        let (captured, mut emitter) = captured_emitter();
+        ask(
+            &mut emitter,
+            /*yolo=*/ false,
+            Some("Write src/main.rs"),
+            &[acp::PermissionOptionKind::RejectOnce],
+        );
+        let stop = emit_completed_response(
+            &mut emitter,
+            response(acp::StopReason::Cancelled, Some("PermissionCancelled")),
+            &acp::SessionId::new("sess-1"),
+            None,
+        );
+        assert_eq!(stop, TurnStop::PermissionCancelled);
+        let doc: serde_json::Value =
+            serde_json::from_str(&captured.text()).expect("exactly one JSON document, still");
+        assert_eq!(doc["stopReason"], "cancelled");
+        let record = &doc["permissionDenied"];
+        assert_eq!(record["rule"], "headless_never_approves");
+        assert_eq!(record["toolCallId"], "tc-1");
+        assert_eq!(record["toolTitle"], "Write src/main.rs");
+        assert_eq!(record["exitCode"], PERMISSION_DENIED_EXIT_CODE);
+        assert!(
+            record["remedy"].as_str().is_some_and(|r| !r.is_empty()),
+            "the remedy is data too: {doc}"
+        );
+        assert_eq!(record["offeredOptionKinds"], serde_json::json!(["reject_once"]));
+    }
+
+    /// The invariant that makes the narrow gate safe: a latched denial is never silent, whatever the
+    /// run's outcome turns out to be. `main` writes the fuller line on the `PermissionDenied` arm;
+    /// every other path writes the notice from `headless_run_outcome`. Only a dead stdout skips it,
+    /// and there the write error is the louder fact.
+    #[test]
+    fn a_latched_denial_is_never_silent_whatever_the_outcome() {
+        // Exhaustive over the shapes `run_single_turn` can hand the fold, denial always present.
+        let cases: Vec<(&str, anyhow::Result<HeadlessOutcome>)> = vec![
+            (
+                "ended at the denial",
+                headless_run_outcome(Ok(TurnStop::PermissionCancelled), None, None, Some(denial())),
+            ),
+            (
+                "recovered and finished",
+                headless_run_outcome(Ok(TurnStop::Ended), None, None, Some(denial())),
+            ),
+            (
+                "turn failed",
+                headless_run_outcome(Err(anyhow::anyhow!("boom")), None, None, Some(denial())),
+            ),
+            (
+                "memory flush failed",
+                headless_run_outcome(
+                    Ok(TurnStop::Ended),
+                    Some(anyhow::anyhow!("flush boom")),
+                    None,
+                    Some(denial()),
+                ),
+            ),
+        ];
+        for (what, outcome) in cases {
+            match outcome {
+                Ok(HeadlessOutcome::PermissionDenied(d)) => {
+                    assert!(!d.human_line().is_empty(), "{what}: main reports this one")
+                }
+                Ok(HeadlessOutcome::Finished) | Err(_) => { /* notice_line already written */ }
+            }
+        }
+        // And the one exception, stated rather than assumed.
+        assert!(
+            headless_run_outcome(
+                Ok(TurnStop::PermissionCancelled),
+                None,
+                Some(std::io::Error::other("stdout is gone")),
+                Some(denial()),
+            )
+            .is_err(),
+            "a dead stdout is the outcome; the denial cannot be reported through it"
+        );
+    }
+
+    /// Nothing latched means nothing changed: an ordinary run is still `Finished`.
+    #[test]
+    fn a_run_with_no_denial_is_unchanged() {
+        for stop in [TurnStop::Ended, TurnStop::PermissionCancelled] {
+            assert_eq!(
+                headless_run_outcome(Ok(stop), None, None, None).expect("clean run"),
+                HeadlessOutcome::Finished
+            );
+        }
+        assert!(
+            headless_run_outcome(Err(anyhow::anyhow!("boom")), None, None, None).is_err(),
+            "a real error is still a real error"
+        );
+    }
+
+    /// Contract D.4 (P02e): the shell's token-budget denial, as the prompt error the shell sends.
+    fn budget_denied_error(rule: fuigo_shell::acp_error::ExecutionBudgetRule) -> acp::Error {
+        fuigo_shell::acp_error::ExecutionBudgetDenial {
+            rule,
+            total_token_limit: Some(100),
+            total_tokens_used: 120,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        }
+        .to_acp_error()
+    }
+
+    /// A budget denial ends the run through the SAME contract as a permission denial: exit 3, the
+    /// record on the one JSON document, the rule and remedy recoverable without reading prose.
+    #[test]
+    fn a_budget_denied_turn_exits_three_with_the_denial_record() {
+        use fuigo_shell::acp_error::ExecutionBudgetRule;
+        for rule in ExecutionBudgetRule::ALL {
+            let (captured, mut emitter) = captured_emitter();
+            let stop = crate::headless::finish_turn(
+                &mut emitter,
+                Some(Err(budget_denied_error(rule))),
+                false,
+                None,
+                &acp::SessionId::new("sess-1"),
+                false,
+            )
+            .expect("a budget denial is an outcome, not a failed run");
+            assert_eq!(
+                stop,
+                TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudget(rule))
+            );
+            let doc: serde_json::Value = serde_json::from_str(captured.text().trim())
+                .unwrap_or_else(|e| panic!("one JSON document ({e}): {}", captured.text()));
+            assert_eq!(doc["permissionDenied"]["rule"], rule.id(), "{doc}");
+            assert_eq!(doc["permissionDenied"]["remedy"], rule.remedy(), "{doc}");
+            assert_eq!(
+                doc["permissionDenied"]["exitCode"], PERMISSION_DENIED_EXIT_CODE,
+                "{doc}"
+            );
+
+            let outcome =
+                headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
+                    .expect("not a crash");
+            let HeadlessOutcome::PermissionDenied(denial) = outcome else {
+                panic!("a budget-denied run must not exit 0: {outcome:?}");
+            };
+            assert_eq!(denial.rule, HeadlessDenialRule::ExecutionBudget(rule));
+            assert_eq!(denial.exit_code(), 3);
+            let line = denial.human_line();
+            assert!(
+                line.contains(rule.id()) && line.contains(rule.remedy()),
+                "{line}"
+            );
+            assert!(
+                !line.contains("permission denied"),
+                "it was a budget, not a permission: {line}"
+            );
+            assert_eq!(line.lines().count(), 1, "{line}");
+        }
+    }
+
+    /// The budget denial is the outcome the run ENDED at, so it wins over a permission denial
+    /// latched earlier (which still gets its own stderr notice); and any other prompt error is still
+    /// a failed run, `exit(1)`.
+    #[test]
+    fn only_the_budget_denial_code_turns_a_prompt_error_into_a_denial() {
+        use fuigo_shell::acp_error::ExecutionBudgetRule;
+        let (_captured, mut emitter) = captured_emitter();
+        emitter.record_permission_denial(denial());
+        let stop = crate::headless::finish_turn(
+            &mut emitter,
+            Some(Err(budget_denied_error(
+                ExecutionBudgetRule::TokenUsageUnknown,
+            ))),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("an outcome");
+        let outcome = headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
+            .expect("not a crash");
+        assert_eq!(
+            outcome.denial().map(|d| d.rule),
+            Some(HeadlessDenialRule::ExecutionBudget(
+                ExecutionBudgetRule::TokenUsageUnknown
+            ))
+        );
+
+        for other in [
+            fuigo_shell::acp_error::execution_incomplete("Execution stopped with bounded capacity"),
+            acp::Error::invalid_params().data(serde_json::json!({
+                "message": "invalid configuration: execution admission denied or could not be persisted",
+                "error_kind": "api",
+            })),
+        ] {
+            let (_captured, mut emitter) = captured_emitter();
+            assert!(
+                crate::headless::finish_turn(&mut emitter, Some(Err(other)), false, None,
+                    &acp::SessionId::new("sess-1"), false).is_err(),
+                "an error without the denial code is still a failed run"
+            );
+        }
+    }
+
+    /// A newer agent's rule this build does not know is still a denial: the stable `data.code` is
+    /// what decides, so it still exits 3 rather than falling back to `exit(1)`.
+    #[test]
+    fn an_unrecognized_budget_rule_is_still_a_denial() {
+        let mut wire = serde_json::to_value(budget_denied_error(
+            fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+        ))
+        .unwrap();
+        wire["data"]["rule"] = serde_json::json!("execution_wall_clock_budget_exhausted");
+        let err: acp::Error = serde_json::from_value(wire).unwrap();
+        let (_captured, mut emitter) = captured_emitter();
+        let stop = crate::headless::finish_turn(
+            &mut emitter,
+            Some(Err(err)),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("an outcome, not a failed run");
+        assert_eq!(
+            stop,
+            TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudgetUnrecognized)
+        );
+        let outcome = headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
+            .expect("not a crash");
+        assert_eq!(outcome.denial().map(HeadlessDenial::exit_code), Some(3));
+    }
+
+    /// P51: an unrecognized budget rule is reported by `main`'s ONE line, which carries the agent's own
+    /// message (it names the rule and its remedy). `finish_turn` writes nothing of its own in plain, so
+    /// the message must be on the denial the exit path prints; if it were not, collapsing to one line
+    /// would lose the only text that says what refused the run.
+    #[test]
+    fn an_unrecognized_budget_rule_is_reported_on_main_s_one_line() {
+        let mut wire = serde_json::to_value(budget_denied_error(
+            fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+        ))
+        .unwrap();
+        wire["data"]["rule"] = serde_json::json!("execution_wall_clock_budget_exhausted");
+        let err: acp::Error = serde_json::from_value(wire).unwrap();
+        let expected = fuigo_shell::sampling::error::acp_error_text(&err);
+        let captured = super::CapturedOut::default();
+        let mut emitter =
+            HeadlessEmitter::with_writer(OutputFormat::Plain, false, Box::new(captured.clone()));
+        crate::headless::finish_turn(
+            &mut emitter,
+            Some(Err(err)),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("an outcome");
+        assert_eq!(captured.text(), "", "plain writes nothing to stdout");
+        let line = emitter
+            .take_permission_denial()
+            .expect("the denial is latched")
+            .human_line();
+        assert_eq!(line.lines().count(), 1, "one line: {line}");
+        assert!(line.contains(&expected), "the agent's message rides on the line: {line}");
+    }
+
+    /// An interrupt while the turn is driven, after the turn already answered, is ONE document: the
+    /// completed response and the interrupt together, exactly as the `--timeout` cap reports it.
+    #[test]
+    fn an_interrupt_after_a_completed_response_is_one_document_with_the_error() {
+        let captured = super::CapturedOut::default();
+        let mut emitter = HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
+        let err = crate::headless::finish_interrupt(
+            &mut emitter,
+            Some(Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))),
+            130,
+            &acp::SessionId::new("sess-1"),
+        );
+        assert!(err.downcast_ref::<crate::headless::HeadlessInterrupted>().is_some());
+        let doc: serde_json::Value =
+            serde_json::from_str(captured.text().trim()).expect("stdout is exactly one JSON value");
+        assert_eq!(doc["error"], "Interrupted by SIGINT; exiting 130", "{doc}");
+        assert_eq!(doc["stopReason"], "cancelled", "{doc}");
+    }
+
+    /// A signal latched while the turn is driven ends the drive with its exit code (through the same
+    /// drain/reap path as the `--timeout` cap) instead of waiting on a turn that never ends.
+    #[tokio::test]
+    async fn a_latched_interrupt_ends_the_driven_turn_with_its_code() {
+        let (_client_tx, mut acp_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+        let (acp_tx, _agent_rx) =
+            tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+        let session_id = acp::SessionId::new("sess-1");
+        let mut emitter = HeadlessEmitter::new(OutputFormat::Json, false);
+        let mut ttf_logged = false;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            crate::headless::drive_prompt_turn(
+                std::future::pending::<Result<acp::PromptResponse, acp::Error>>(),
+                &mut acp_rx,
+                &acp_tx,
+                &session_id,
+                &mut emitter,
+                &super::timeout_test_options(None),
+                crate::headless::RunDeadline::start(None),
+                std::time::Instant::now(),
+                &mut ttf_logged,
+                None,
+                &crate::app::prompt_ack::PromptAckDeadlines::from_env(None),
+                &crate::headless::InterruptWatch::fixed(Some(130)),
+            ),
+        )
+        .await
+        .expect("an interrupt must end the driven turn");
+        assert_eq!(outcome.interrupted, Some(130));
+        assert!(!outcome.timed_out);
+    }
+
+    /// An interrupted run must not wait forever on a stalled log flush: the bound fires, and an
+    /// unbounded caller still waits for a flush that does complete.
+    #[tokio::test]
+    async fn the_log_flush_after_an_interrupt_is_bounded() {
+        let started = std::time::Instant::now();
+        let finished = crate::headless::await_bounded_if(
+            true,
+            std::time::Duration::from_millis(100),
+            std::future::pending::<()>(),
+        )
+        .await;
+        assert!(!finished, "a stalled flush must hit the cap");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(
+            crate::headless::await_bounded_if(false, std::time::Duration::from_millis(1), async {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            })
+            .await,
+            "an unbounded caller waits for the flush to finish"
+        );
+    }
+
+    /// A signal that arrives while the final log flush is stalled ends the wait at once instead of
+    /// queueing behind it (the interrupt owner stands down until the turn is finalized).
+    #[tokio::test]
+    async fn a_signal_during_a_stalled_flush_is_not_queued_behind_it() {
+        let started = std::time::Instant::now();
+        // Own timeout so a regression (the flush queueing the signal behind itself) is a named failure,
+        // not a hang.
+        let code = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            crate::headless::flush_or_interrupt(
+                false,
+                std::time::Duration::from_secs(60),
+                std::future::pending::<()>(),
+                &crate::headless::InterruptWatch::fixed(Some(143)),
+                None,
+            ),
+        )
+        .await
+        .expect("a signal must end a stalled flush; it queued behind the flush instead");
+        assert_eq!(code, Some(143));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // With no signal, a completing flush reports none.
+        let none = crate::headless::flush_or_interrupt(
+            false,
+            std::time::Duration::from_secs(60),
+            async {},
+            &crate::headless::InterruptWatch::inert(),
+            None,
+        )
+        .await;
+        assert_eq!(none, None);
+    }
+
+    /// P51: a run that ends without a final prompt-level ledger (interrupt, timeout, connection loss)
+    /// still reports what its completed responses were billed, on every format's terminal record, so a
+    /// caller reconciling cost from it never sees zeros for spend that happened.
+    #[test]
+    fn a_terminal_error_record_carries_the_usage_of_completed_responses() {
+        use crate::headless::reducer::StreamEvent;
+        let usage = fuigo_shell::extensions::notification::ResponseUsage {
+            input_tokens: 10,
+            output_tokens: 20,
+            ..Default::default()
+        };
+        for format in [OutputFormat::Json, OutputFormat::StreamingJson, OutputFormat::StreamingMessagesJson] {
+            let captured = super::CapturedOut::default();
+            let mut emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+            for _ in 0..2 {
+                emitter.reduce_and_emit(StreamEvent::ResponseCompleted {
+                    message_id: Some("m".into()),
+                    stop_reason: Some("tool_use".into()),
+                    usage: Some(usage.clone()),
+                    signature: None,
+                    stop_sequence: None,
+                });
+            }
+            let before = captured.text().len();
+            emitter.on_error("Interrupted by SIGINT; exiting 130", Some("cancelled"));
+            let text = captured.text();
+            let terminal: serde_json::Value = serde_json::from_str(
+                text[before..].lines().rev().find(|l| !l.trim().is_empty()).expect("a terminal line"),
+            )
+            .or_else(|_| serde_json::from_str(text[before..].trim()))
+            .expect("terminal json");
+            // Two responses of 10 in / 20 out.
+            assert_eq!(terminal["usage"]["output_tokens"], 40, "{format:?}: {terminal}");
+            assert_eq!(terminal["usage"]["input_tokens"], 20, "{format:?}: {terminal}");
+        }
+    }
+
+    /// The one-line rule survives an agent message with embedded newlines (a multi-line remedy).
+    #[test]
+    fn a_multiline_agent_message_stays_on_one_line() {
+        let mut denial = HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
+        denial.agent_message = Some("rule x refused\n  raise limit y\n\nthen retry".to_string());
+        let line = denial.human_line();
+        assert_eq!(line.lines().count(), 1, "{line}");
+        assert!(line.contains("rule x refused raise limit y then retry"), "{line}");
+    }
+
+    /// An interrupt after the terminal document is out (the post-turn memory flush) writes no second
+    /// document: a machine consumer reads exactly one. Before it, the error line IS the document.
+    #[test]
+    fn an_interrupt_writes_one_terminal_document_at_most() {
+        for format in [OutputFormat::Json, OutputFormat::StreamingJson, OutputFormat::StreamingMessagesJson] {
+            let captured = super::CapturedOut::default();
+            let mut emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+            let before = captured.text();
+            let err = crate::headless::interrupted(&mut emitter, 130);
+            assert!(err.downcast_ref::<crate::headless::HeadlessInterrupted>().is_some());
+            let docs = captured.text().len() - before.len();
+            assert!(docs > 0, "{format:?}: an interrupt before any terminal writes the error document");
+            let after_first = captured.text();
+            let _ = crate::headless::interrupted(&mut emitter, 130);
+            assert_eq!(captured.text(), after_first, "{format:?}: a second terminal document was written");
+        }
+        let captured = super::CapturedOut::default();
+        let mut emitter = HeadlessEmitter::with_writer(OutputFormat::Json, false, Box::new(captured.clone()));
+        emitter.on_end("end_turn", "s", "r", None);
+        let done = captured.text();
+        let _ = crate::headless::interrupted(&mut emitter, 143);
+        assert_eq!(captured.text(), done, "an interrupt after the terminal document writes nothing");
+    }
+
+    /// `--output-format plain`: stdout stays empty and the budget denial writes nothing itself —
+    /// `main` writes its one stderr line — so the run produces exactly one line, not two.
+    #[test]
+    fn a_plain_budget_denial_leaves_the_one_line_to_main() {
+        let captured = super::CapturedOut::default();
+        let mut emitter =
+            HeadlessEmitter::with_writer(OutputFormat::Plain, false, Box::new(captured.clone()));
+        let stop = crate::headless::finish_turn(
+            &mut emitter,
+            Some(Err(budget_denied_error(
+                fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+            ))),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("an outcome");
+        assert!(matches!(stop, TurnStop::BudgetDenied(_)));
+        assert_eq!(captured.text(), "", "plain writes nothing to stdout");
+    }
+}
+
+/// P02b — Contract D.2.2 across all four `--output-format`s: the denial is data on the one terminal
+/// record each format's consumer reads, and that record never contradicts the exit code.
+mod denial_record_per_format {
+    use agent_client_protocol as acp;
+    use std::sync::Arc;
+
+    use super::CapturedOut;
+    use crate::headless::reducer::{StreamEvent, tool_call_event};
+    use crate::headless::{
+        HeadlessDenial, HeadlessDenialRule, HeadlessEmitter, HeadlessOutcome, OutputFormat,
+        PERMISSION_DENIED_EXIT_CODE, TurnStop, emit_completed_response, headless_run_outcome,
+    };
+
+    const ALL: [OutputFormat; 4] = [
+        OutputFormat::Plain,
+        OutputFormat::Json,
+        OutputFormat::StreamingJson,
+        OutputFormat::StreamingMessagesJson,
+    ];
+
+    fn emitter(format: OutputFormat) -> (CapturedOut, HeadlessEmitter) {
+        let captured = CapturedOut::default();
+        let emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+        (captured, emitter)
+    }
+
+    fn denial() -> HeadlessDenial {
+        HeadlessDenial {
+            rule: HeadlessDenialRule::HeadlessNeverApproves,
+            tool_title: Some("Edit src/main.rs".to_owned()),
+            tool_call_id: "tc-1".to_owned(),
+            offered_option_kinds: vec!["allow_once".to_owned(), "reject_once".to_owned()],
+            agent_message: None,
+        }
+    }
+
+    fn response(stop: acp::StopReason, category: Option<&str>) -> acp::PromptResponse {
+        let mut meta = acp::Meta::new();
+        meta.insert("sessionId".into(), serde_json::json!("sess-1"));
+        meta.insert("requestId".into(), serde_json::json!("req-1"));
+        if let Some(category) = category {
+            meta.insert(
+                crate::app::CANCELLATION_CATEGORY_KEY.to_string(),
+                serde_json::json!(category),
+            );
+        }
+        acp::PromptResponse::new(stop).meta(Some(meta))
+    }
+
+    /// Stream the `tool_call` the agent sends before it asks, as the real loop does.
+    fn stream_tool_call(emitter: &mut HeadlessEmitter) {
+        let mut tc =
+            acp::ToolCall::new(acp::ToolCallId::new(Arc::from("tc-1")), "Edit src/main.rs")
+                .kind(acp::ToolKind::Edit);
+        tc.raw_input = Some(serde_json::json!({"file_path": "src/main.rs", "old_string": "a"}));
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "fuigo/tool".into(),
+            serde_json::json!({"name": "search_replace", "kind": "edit"}),
+        );
+        tc.meta = Some(meta);
+        emitter.reduce_and_emit(StreamEvent::ToolCall(tool_call_event(&tc)));
+    }
+
+    /// Run the shape of a blocked turn: the tool call streams, its permission is refused, and the
+    /// shell ends the turn `cancelled` with `PermissionCancelled`.
+    fn blocked_turn(format: OutputFormat) -> (String, TurnStop) {
+        let (captured, mut emitter) = emitter(format);
+        stream_tool_call(&mut emitter);
+        emitter.record_permission_denial(denial());
+        let stop = emit_completed_response(
+            &mut emitter,
+            response(acp::StopReason::Cancelled, Some("PermissionCancelled")),
+            &acp::SessionId::new("sess-1"),
+            None,
+        );
+        (captured.text(), stop)
+    }
+
+    fn ndjson(text: &str) -> Vec<serde_json::Value> {
+        text.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("NDJSON line ({e}): {l}")))
+            .collect()
+    }
+
+    /// The four formats, one assertion block each — the D.5 test, per format: exit `3` and a reason a
+    /// consumer recovers without reading English.
+    #[test]
+    fn every_output_format_represents_a_blocking_denial() {
+        for format in ALL {
+            let (stdout, stop) = blocked_turn(format);
+            assert_eq!(stop, TurnStop::PermissionCancelled, "{format:?}");
+            // Every format exits 3 — never 0 (finished) and never 1 (crashed).
+            let outcome = headless_run_outcome(Ok(stop), None, None, Some(denial())).expect("ok");
+            let HeadlessOutcome::PermissionDenied(d) = outcome else {
+                panic!("{format:?}: a blocked run must be PermissionDenied, got {outcome:?}");
+            };
+            assert_eq!(d.exit_code(), PERMISSION_DENIED_EXIT_CODE);
+            assert_ne!(d.exit_code(), 0);
+            assert_ne!(d.exit_code(), 1);
+            match format {
+                OutputFormat::Plain => {
+                    // Plain's representation is the stderr line `main` writes; stdout stays the
+                    // model's text, with no JSON smuggled into it.
+                    assert!(
+                        !stdout.contains("permissionDenied"),
+                        "plain stdout: {stdout:?}"
+                    );
+                    let line = d.human_line();
+                    assert!(line.contains("headless_never_approves"), "{line}");
+                    assert!(line.contains("Remedy:"), "{line}");
+                    assert!(line.contains("--allow"), "{line}");
+                }
+                OutputFormat::Json => {
+                    let doc: serde_json::Value =
+                        serde_json::from_str(&stdout).expect("exactly one JSON document");
+                    assert_eq!(doc["stopReason"], "cancelled");
+                    let rec = &doc["permissionDenied"];
+                    assert_eq!(rec["rule"], "headless_never_approves");
+                    assert_eq!(rec["toolCallId"], "tc-1");
+                    assert_eq!(rec["endedRun"], true);
+                    assert_eq!(rec["exitCode"], PERMISSION_DENIED_EXIT_CODE);
+                }
+                OutputFormat::StreamingJson => {
+                    let lines = ndjson(&stdout);
+                    let last = lines.last().expect("a terminal line");
+                    assert_eq!(
+                        last["type"], "end",
+                        "the record rides the last line: {stdout}"
+                    );
+                    assert_eq!(
+                        lines.iter().filter(|l| l["type"] == "end").count(),
+                        1,
+                        "still exactly one terminal line: {stdout}"
+                    );
+                    assert_eq!(last["stopReason"], "cancelled");
+                    // The same record, under the same key, as the json document.
+                    assert_eq!(last["permissionDenied"], denial().wire_record(true));
+                    assert_eq!(
+                        last["permissionDenied"]["exitCode"],
+                        PERMISSION_DENIED_EXIT_CODE
+                    );
+                    assert!(
+                        lines.iter().all(|l| l["type"] != "permission_denied"),
+                        "no invented line type: {stdout}"
+                    );
+                }
+                OutputFormat::StreamingMessagesJson => {
+                    let lines = ndjson(&stdout);
+                    let result = lines.last().expect("a terminal line");
+                    assert_eq!(result["type"], "result", "{stdout}");
+                    assert_eq!(result["is_error"], true, "a blocked run is not a success");
+                    assert_eq!(result["subtype"], "error_during_execution");
+                    assert_eq!(result["stop_reason"], "cancelled");
+                    // The schema's own field, in the schema's own entry shape — nothing invented.
+                    assert_eq!(
+                        result["permission_denials"],
+                        serde_json::json!([{
+                            "tool_name": "search_replace",
+                            "tool_use_id": "tc-1",
+                            "tool_input": {"file_path": "src/main.rs", "old_string": "a"},
+                        }]),
+                        "{result}"
+                    );
+                    assert!(
+                        lines.iter().all(|l| [
+                            "system",
+                            "assistant",
+                            "user",
+                            "stream_event",
+                            "result"
+                        ]
+                        .contains(&l["type"].as_str().unwrap_or(""))),
+                        "only Messages wire types: {stdout}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A refusal the turn carried past exits `0`, so no format's record may claim `3`.
+    #[test]
+    fn a_recovered_denial_is_recorded_without_claiming_exit_three() {
+        for format in ALL {
+            let (captured, mut emitter) = emitter(format);
+            stream_tool_call(&mut emitter);
+            emitter.record_permission_denial(denial());
+            let stop = emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::EndTurn, None),
+                &acp::SessionId::new("sess-1"),
+                None,
+            );
+            assert_eq!(
+                headless_run_outcome(Ok(stop), None, None, Some(denial())).expect("ok"),
+                HeadlessOutcome::Finished,
+                "{format:?}"
+            );
+            let stdout = captured.text();
+            match format {
+                OutputFormat::Plain => assert!(!stdout.contains("permissionDenied")),
+                OutputFormat::Json => {
+                    let doc: serde_json::Value = serde_json::from_str(&stdout).expect("json");
+                    assert_eq!(doc["permissionDenied"]["endedRun"], false, "{doc}");
+                    assert!(doc["permissionDenied"].get("exitCode").is_none(), "{doc}");
+                    assert_eq!(doc["permissionDenied"]["rule"], "headless_never_approves");
+                }
+                OutputFormat::StreamingJson => {
+                    let last = ndjson(&stdout).pop().expect("end");
+                    assert_eq!(last["type"], "end");
+                    assert_eq!(last["permissionDenied"], denial().wire_record(false));
+                    assert!(last["permissionDenied"].get("exitCode").is_none(), "{last}");
+                }
+                OutputFormat::StreamingMessagesJson => {
+                    let result = ndjson(&stdout).pop().expect("result");
+                    assert_eq!(result["type"], "result");
+                    assert_eq!(result["is_error"], false, "the run finished: {result}");
+                    assert_eq!(result["permission_denials"][0]["tool_use_id"], "tc-1");
+                }
+            }
+        }
+    }
+
+    /// A failure after a refusal exits `1`; the record still rides the error line, and still does
+    /// not claim `3`. Covers both the error line and the `--timeout` cap folded into the end line.
+    #[test]
+    fn a_failure_after_a_denial_carries_the_record_and_keeps_exit_one() {
+        for format in [
+            OutputFormat::Json,
+            OutputFormat::StreamingJson,
+            OutputFormat::StreamingMessagesJson,
+        ] {
+            let (captured, mut emitter) = emitter(format);
+            stream_tool_call(&mut emitter);
+            emitter.record_permission_denial(denial());
+            emitter.on_error("boom", None);
+            let last = ndjson(&captured.text()).pop().expect("a terminal line");
+            match format {
+                OutputFormat::StreamingMessagesJson => {
+                    assert_eq!(last["is_error"], true);
+                    assert_eq!(
+                        last["permission_denials"][0]["tool_use_id"], "tc-1",
+                        "{last}"
+                    );
+                }
+                _ => {
+                    assert_eq!(last["type"], "error", "{last}");
+                    assert_eq!(last["permissionDenied"]["endedRun"], false, "{last}");
+                    assert!(last["permissionDenied"].get("exitCode").is_none(), "{last}");
+                }
+            }
+        }
+        // The `--timeout` cap lands on a turn that did end at the refusal: still exit 1, so no `3`.
+        for format in [OutputFormat::Json, OutputFormat::StreamingJson] {
+            let (captured, mut emitter) = emitter(format);
+            emitter.record_permission_denial(denial());
+            emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::Cancelled, Some("PermissionCancelled")),
+                &acp::SessionId::new("sess-1"),
+                Some("Timed out after 5s waiting for the turn to end"),
+            );
+            let text = captured.text();
+            let doc: serde_json::Value = match format {
+                OutputFormat::Json => serde_json::from_str(&text).expect("json"),
+                _ => ndjson(&text).pop().expect("end"),
+            };
+            assert_eq!(
+                doc["permissionDenied"]["endedRun"], false,
+                "{format:?}: {doc}"
+            );
+            assert!(
+                doc["permissionDenied"].get("exitCode").is_none(),
+                "{format:?}: {doc}"
+            );
+        }
+    }
+
+    /// Nothing refused, nothing reported: no format grows a denial key on an ordinary run.
+    #[test]
+    fn a_run_with_no_denial_carries_no_record() {
+        for format in ALL {
+            let (captured, mut emitter) = emitter(format);
+            stream_tool_call(&mut emitter);
+            emit_completed_response(
+                &mut emitter,
+                response(acp::StopReason::EndTurn, None),
+                &acp::SessionId::new("sess-1"),
+                None,
+            );
+            let stdout = captured.text();
+            assert!(!stdout.contains("permissionDenied"), "{format:?}: {stdout}");
+            assert!(
+                !stdout.contains("permission_denials"),
+                "{format:?}: {stdout}"
+            );
+        }
+    }
+
+    /// A denial for a tool call that never streamed still produces a Messages entry — from the
+    /// agent's own title — rather than vanishing from the one format most likely machine-read.
+    #[test]
+    fn a_messages_denial_for_an_unstreamed_tool_call_is_not_dropped() {
+        let (captured, mut emitter) = emitter(OutputFormat::StreamingMessagesJson);
+        emitter.record_permission_denial(denial());
+        emit_completed_response(
+            &mut emitter,
+            response(acp::StopReason::Cancelled, Some("PermissionCancelled")),
+            &acp::SessionId::new("sess-1"),
+            None,
+        );
+        let result = ndjson(&captured.text()).pop().expect("result");
+        assert_eq!(
+            result["permission_denials"],
+            serde_json::json!([{"tool_name": "Edit src/main.rs", "tool_use_id": "tc-1", "tool_input": {}}])
+        );
+    }
+
+    /// Contract D.4 through the P02b contract: a token-budget denial arrives as the turn's prompt
+    /// error, ends the run with exit 3, and reports on each format's one terminal line — with
+    /// `endedRun`/`exitCode`, since the run did end there — and never as a tool the model did not call.
+    #[test]
+    fn a_budget_denial_reports_through_every_format() {
+        use fuigo_shell::acp_error::{ExecutionBudgetDenial, ExecutionBudgetRule};
+        let rule = ExecutionBudgetRule::TotalTokensExhausted;
+        let err = ExecutionBudgetDenial {
+            rule,
+            total_token_limit: Some(100),
+            total_tokens_used: 120,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        }
+        .to_acp_error();
+        for format in ALL {
+            let (captured, mut emitter) = emitter(format);
+            let stop = crate::headless::finish_turn(
+                &mut emitter,
+                Some(Err(err.clone())),
+                false,
+                None,
+                &acp::SessionId::new("sess-1"),
+                false,
+            )
+            .expect("a budget denial is an outcome, not a failed run");
+            let outcome =
+                headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
+                    .expect("not a crash");
+            let HeadlessOutcome::PermissionDenied(d) = outcome else {
+                panic!("{format:?}: exit 3, got {outcome:?}");
+            };
+            assert_eq!(d.exit_code(), PERMISSION_DENIED_EXIT_CODE);
+            let stdout = captured.text();
+            let expected = d.wire_record(true);
+            assert_eq!(
+                expected["toolCallId"],
+                serde_json::Value::Null,
+                "no tool call to join on"
+            );
+            assert_eq!(expected["rule"], rule.id());
+            match format {
+                OutputFormat::Plain => assert_eq!(stdout, "", "main writes the one stderr line"),
+                OutputFormat::Json | OutputFormat::StreamingJson => {
+                    let lines = ndjson(&stdout);
+                    assert_eq!(lines.len(), 1, "{format:?}: one terminal line: {stdout}");
+                    assert_eq!(lines[0]["type"], "error", "{stdout}");
+                    assert_eq!(
+                        lines[0]["permissionDenied"], expected,
+                        "{format:?}: {stdout}"
+                    );
+                    assert_eq!(
+                        lines[0]["permissionDenied"]["exitCode"],
+                        PERMISSION_DENIED_EXIT_CODE
+                    );
+                }
+                OutputFormat::StreamingMessagesJson => {
+                    let lines = ndjson(&stdout);
+                    let result = lines.last().expect("a result");
+                    assert_eq!(result["type"], "result", "{stdout}");
+                    assert_eq!(
+                        lines.iter().filter(|l| l["type"] == "result").count(),
+                        1,
+                        "{stdout}"
+                    );
+                    assert_eq!(result["is_error"], true, "{stdout}");
+                    assert_eq!(
+                        result["stop_reason"],
+                        serde_json::Value::Null,
+                        "documented: null for a budget denial: {stdout}"
+                    );
+                    assert!(
+                        result.get("permission_denials").is_none(),
+                        "no tool was refused, so no SDKPermissionDenial is invented: {stdout}"
+                    );
+                    assert!(
+                        result["errors"][0]
+                            .as_str()
+                            .is_some_and(|e| e.contains(rule.id())),
+                        "the agent's message names the rule: {stdout}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The flush's model request would be refused by the same spent budget and relabel the denial's
+    /// exit `3` as a failed run's `1`, so it never runs after one; every other gate is unchanged.
+    #[test]
+    fn the_memory_flush_never_runs_after_a_budget_denial() {
+        use crate::headless::should_run_memory_flush;
+        let budget = TurnStop::BudgetDenied(HeadlessDenialRule::ExecutionBudgetUnrecognized);
+        assert!(!should_run_memory_flush(true, &Ok(budget)));
+        assert!(should_run_memory_flush(true, &Ok(TurnStop::Ended)));
+        assert!(should_run_memory_flush(true, &Ok(TurnStop::PermissionCancelled)));
+        assert!(!should_run_memory_flush(true, &Err(anyhow::anyhow!("boom"))));
+        assert!(!should_run_memory_flush(false, &Ok(TurnStop::Ended)));
+    }
+
+    /// The remedy is data a script may act on, so the flags it names must exist. They are `--allow`
+    /// and `--deny` (`app/cli.rs`); P02a's record named `--allow-rules`/`--deny-rules`, which do not.
+    #[test]
+    fn the_remedies_name_flags_that_exist() {
+        for rule in [
+            HeadlessDenialRule::HeadlessNeverApproves,
+            HeadlessDenialRule::YoloHadNoAllowOption,
+        ] {
+            let remedy = rule.remedy();
+            assert!(!remedy.contains("--allow-rules"), "{remedy}");
+            assert!(!remedy.contains("--deny-rules"), "{remedy}");
+        }
+        assert!(
+            HeadlessDenialRule::HeadlessNeverApproves
+                .remedy()
+                .contains("--allow,")
+        );
+        assert!(
+            HeadlessDenialRule::YoloHadNoAllowOption
+                .remedy()
+                .contains("--deny ")
+        );
+        use clap::CommandFactory as _;
+        let cmd = crate::app::cli::PagerArgs::command();
+        for flag in ["allow", "deny", "permission-mode"] {
+            assert!(
+                cmd.get_arguments().any(|a| a.get_long() == Some(flag)),
+                "--{flag} must be a real flag"
+            );
+        }
+    }
+}
+
+/// P02c — the headless guide is compiled into the binary (`docs.rs` `include_str!`), so what it says
+/// about a denial is a shipped product claim. These pins tie its prose to the code that emits it: a
+/// record field, a rule, a remedy flag or the exit code that changes on one side fails here.
+mod denial_docs_pin {
+    use crate::headless::{HeadlessDenial, HeadlessDenialRule, PERMISSION_DENIED_EXIT_CODE};
+
+    fn guide() -> &'static str {
+        crate::docs::USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "14-headless-mode.md")
+            .expect("the headless guide is bundled")
+            .content
+    }
+
+    /// The `json` example in "The denial record, per format": the first fenced block that carries
+    /// `permissionDenied`.
+    fn documented_record() -> serde_json::Value {
+        let section = guide()
+            .split("#### The denial record, per format")
+            .nth(1)
+            .expect("the per-format section exists");
+        let block = section
+            .split("```json\n")
+            .skip(1)
+            .map(|b| b.split("```").next().unwrap_or_default())
+            .find(|b| b.contains("\"permissionDenied\""))
+            .expect("a json example of the record");
+        let doc: serde_json::Value = serde_json::from_str(block).unwrap_or_else(|e| {
+            panic!("the documented example must be valid JSON ({e}):\n{block}")
+        });
+        doc["permissionDenied"].clone()
+    }
+
+    #[test]
+    fn the_documented_record_has_exactly_the_emitted_fields() {
+        let denial = HeadlessDenial {
+            rule: HeadlessDenialRule::HeadlessNeverApproves,
+            tool_title: Some("Write src/main.rs".into()),
+            tool_call_id: "tc-17".into(),
+            offered_option_kinds: vec!["allow_once".into(), "reject_once".into()],
+            agent_message: None,
+        };
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().expect("an object").keys().cloned().collect();
+            k.sort();
+            k
+        };
+        let documented = documented_record();
+        assert_eq!(keys(&documented), keys(&denial.wire_record(true)));
+        assert_eq!(documented["exitCode"], PERMISSION_DENIED_EXIT_CODE);
+        assert_eq!(documented["endedRun"], true);
+        // Every field of the record has a row in the field table.
+        for key in keys(&denial.wire_record(true)) {
+            assert!(
+                guide().contains(&format!("| `{key}` |")),
+                "the field table must describe `{key}`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guide_lists_every_rule_with_flags_that_exist() {
+        let guide = guide();
+        let budget = fuigo_shell::acp_error::ExecutionBudgetRule::ALL
+            .into_iter()
+            .map(HeadlessDenialRule::ExecutionBudget);
+        for rule in [
+            HeadlessDenialRule::HeadlessNeverApproves,
+            HeadlessDenialRule::YoloHadNoAllowOption,
+            HeadlessDenialRule::ExecutionBudgetUnrecognized,
+        ]
+        .into_iter()
+        .chain(budget)
+        {
+            assert!(
+                guide.contains(&format!("| `{}` |", rule.id())),
+                "the rules table must list `{}`",
+                rule.id()
+            );
+        }
+        assert!(
+            !guide.contains("--allow-rules"),
+            "there is no --allow-rules flag"
+        );
+        assert!(
+            !guide.contains("--deny-rules"),
+            "there is no --deny-rules flag"
+        );
+        // The stderr example is the real line, remedy included, for the documented call.
+        let line = HeadlessDenial {
+            rule: HeadlessDenialRule::HeadlessNeverApproves,
+            tool_title: Some("Write src/main.rs".into()),
+            tool_call_id: "tc-17".into(),
+            offered_option_kinds: vec![],
+            agent_message: None,
+        }
+        .human_line();
+        let documented: String = guide
+            .split("#### The stderr line")
+            .nth(1)
+            .and_then(|s| s.split("```\n").nth(1))
+            .expect("the stderr example")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(
+            documented, line,
+            "the documented stderr line is the emitted one"
+        );
+    }
+
+    #[test]
+    fn the_guide_documents_the_exit_code_and_the_messages_field() {
+        let guide = guide();
+        assert!(
+            guide.contains(&format!(
+                "| `{PERMISSION_DENIED_EXIT_CODE}`  | **Blocked.**"
+            )),
+            "the exit-code table row for the denial code"
+        );
+        assert!(
+            !guide.contains("does not collect permission denials"),
+            "the stale claim that permission_denials is always empty"
+        );
+        assert!(guide.contains("`tool_name`, `tool_use_id`, `tool_input`"));
+    }
+
+    /// The agent-mode guide documents the wire the headless pager decodes (Contract D.4): the stable
+    /// `data.code` and every rule id the shell can send.
+    #[test]
+    fn the_agent_guide_documents_the_budget_denial_wire() {
+        let guide = crate::docs::USER_GUIDE
+            .iter()
+            .find(|d| d.filename == "15-agent-mode.md")
+            .expect("the agent-mode guide is bundled")
+            .content;
+        assert!(guide.contains(&format!(
+            "`data.code: \"{}\"`",
+            fuigo_shell::acp_error::EXECUTION_BUDGET_DENIED_CODE
+        )));
+        for rule in fuigo_shell::acp_error::ExecutionBudgetRule::ALL {
+            assert!(
+                guide.contains(&format!("| `{}` |", rule.id())),
+                "the agent guide must list `{}`",
+                rule.id()
+            );
+        }
+        // Every structured field the shell puts in `data` is described in the field table.
+        let wire = fuigo_shell::acp_error::ExecutionBudgetDenial {
+            rule: fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+            total_token_limit: Some(1),
+            total_tokens_used: 2,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        }
+        .to_acp_error();
+        let data = wire.data.expect("typed data");
+        let section = guide
+            .split("#### Token-budget denials")
+            .nth(1)
+            .expect("the budget-denial section");
+        for key in data.as_object().expect("an object").keys() {
+            if key == "message" || key == "error_kind" {
+                continue; // described by the general Errors table
+            }
+            assert!(
+                section.contains(&format!("`{key}`")),
+                "the budget-denial field table must describe `{key}`"
+            );
+        }
+    }
 }

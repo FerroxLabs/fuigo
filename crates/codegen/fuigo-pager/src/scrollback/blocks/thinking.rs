@@ -593,6 +593,8 @@ mod tests {
 
     #[test]
     fn thinking_quote_line_selection_excludes_bar_prefix() {
+        // the process-global theme is mutated by concurrent set_theme tests; hold the shared lock so every read in this test sees one theme
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::types::{derive_selection_text, line_plain_text};
 
         let mut appearance = AppearanceConfig::default();

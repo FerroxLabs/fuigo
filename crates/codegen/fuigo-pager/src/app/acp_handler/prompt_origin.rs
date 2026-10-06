@@ -46,20 +46,31 @@ pub(crate) fn suppress_replay_marker_for_origin(
 /// retry rail uses ([`fuigo_shell::sampling::error::consumer_subscription_upsell_replacement`]):
 /// this rail deliberately skips the generic "Request failed" formatter, which is what let the
 /// upstream consumer-subscription pitch reach the user verbatim on this path.
+///
+/// P119: the shell's typed `verdicts.consumer_upsell` decides when present (the text may have had a credential replaced,
+/// which must not change whether it is the upsell). Only a terminal without verdicts (an older shell) reads the text.
 pub(super) fn rate_limited_wake_failure_event(
     agent_result: Option<&str>,
+    verdicts: Option<&fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     elapsed: Option<std::time::Duration>,
     is_api_key_auth: bool,
 ) -> crate::scrollback::blocks::SessionEvent {
-    let error = agent_result
-        .map(|detail| {
-            fuigo_shell::sampling::error::consumer_subscription_upsell_replacement(
-                detail,
-                is_api_key_auth,
-            )
-            .map_or_else(|| detail.to_string(), str::to_string)
-        })
-        .unwrap_or_else(|| "rate limited".to_string());
+    let error = match (verdicts, agent_result) {
+        (Some(v), _) if v.consumer_upsell => {
+            fuigo_shell::sampling::error::consumer_upsell_replacement_copy(is_api_key_auth)
+                .to_string()
+        }
+        (Some(_), detail) => detail.map_or_else(|| "rate limited".to_string(), str::to_string),
+        (None, detail) => detail
+            .map(|detail| {
+                fuigo_shell::sampling::error::consumer_subscription_upsell_replacement(
+                    detail,
+                    is_api_key_auth,
+                )
+                .map_or_else(|| detail.to_string(), str::to_string)
+            })
+            .unwrap_or_else(|| "rate limited".to_string()),
+    };
     crate::scrollback::blocks::SessionEvent::TurnFailed { error, elapsed }
 }
 
@@ -127,6 +138,8 @@ pub(super) struct WakeTerminal<'a> {
     pub error_kind: Option<crate::app::error_display::WireErrorType>,
     /// Picks the auth-appropriate replacement when a 429 body has to be suppressed.
     pub is_api_key_auth: bool,
+    /// The shell's typed verdicts for a failed stop (`TurnCompleted.verdicts`); `None` from an older shell.
+    pub verdicts: Option<&'a fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
 }
 
 /// Close out a wake turn. This is the only place that flushes its streamed entries still in flight, because wake turns skip `PromptResponse`.
@@ -143,6 +156,7 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
         cancellation_category,
         error_kind,
         is_api_key_auth,
+        verdicts,
     } = terminal;
 
     let had_output = agent.session.tracker.output_since_last_finish();
@@ -181,11 +195,13 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
                 Some(crate::app::turn_completion::failed_turn_event(
                     error_kind,
                     agent_result,
+                    verdicts,
                     elapsed,
                 ))
             } else {
                 Some(rate_limited_wake_failure_event(
                     agent_result,
+                    verdicts,
                     elapsed,
                     is_api_key_auth,
                 ))
@@ -204,6 +220,7 @@ pub(super) fn finish_wake_turn(agent: &mut AgentView, prompt_id: &str, terminal:
                 // Failures were handled above, so the Error arm is unreachable here
                 error_kind: None,
                 error_banner_present: false,
+                verdicts: None,
             },
         ),
     };

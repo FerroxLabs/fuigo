@@ -15,6 +15,9 @@
 //!
 //! On macOS, recursive FSEvents is cheap so both arms may be close.
 //! On Linux inotify, `recursive_control` scales with directory count; `scoped` stays flat.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

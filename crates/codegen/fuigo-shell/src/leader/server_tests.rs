@@ -162,6 +162,46 @@ fn decide_relaunch_is_idempotent_and_directional() {
     ));
 }
 
+/// P124: `StopForDowngrade` is the mirror of `RelaunchForUpdate`: only a target strictly OLDER than the leader is accepted.
+#[test]
+fn decide_stop_for_downgrade_is_directional_and_idempotent() {
+    let temp = TempDir::new().unwrap();
+    let sock = temp.path().join("leader.sock");
+    let control_state = LeaderServerControlState::new(LeaderServerMetadata {
+        pid: std::process::id(),
+        socket_path: sock.clone(),
+        lock_path: sock.with_extension("lock"),
+        ws_url_suffix: String::new(),
+        leader_binary_version: "0.1.100".to_string(),
+    });
+    let relaunching = AtomicBool::new(false);
+    for not_older in ["0.1.100", "0.2.0", "unknown"] {
+        assert!(
+            matches!(
+                decide_stop_for_downgrade(&control_state, not_older.to_string(), &relaunching),
+                Ok(ControlPayload::RelaunchDeclined { .. })
+            ),
+            "{not_older}"
+        );
+        assert!(!relaunching.load(Ordering::SeqCst), "{not_older}");
+    }
+    assert!(matches!(
+        decide_stop_for_downgrade(&control_state, "0.1.0".to_string(), &relaunching),
+        Ok(ControlPayload::Relaunching { .. })
+    ));
+    assert!(relaunching.load(Ordering::SeqCst));
+    assert!(matches!(
+        decide_stop_for_downgrade(&control_state, "0.0.9".to_string(), &relaunching),
+        Ok(ControlPayload::RelaunchDeclined { .. })
+    ));
+    // The ordinary relaunch keeps its never-downgrade guard.
+    let other = AtomicBool::new(false);
+    assert!(matches!(
+        decide_relaunch_for_update(&control_state, "0.1.0".to_string(), &other),
+        Ok(ControlPayload::RelaunchDeclined { .. })
+    ));
+}
+
 #[derive(Debug)]
 struct TestAuth;
 impl AuthProvider for TestAuth {
@@ -379,6 +419,38 @@ async fn relay_demand_signals_only_on_headless_registration() {
     handle.cancel.cancel();
 }
 
+/// P93: every later headless registration notifies the relay-demand watch again (the value stays `true`), so a leader
+/// that refused a relay nobody had opted in to decides again when the next headless client attaches. A stdio
+/// registration still does not.
+#[tokio::test]
+async fn p93_every_headless_registration_signals_relay_demand() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("relay-demand-p93.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    let mut relay_demand_rx = handle.relay_demand_rx.clone();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _first =
+        connect_and_register_with_mode(&sock_path, "fuigo-headless-1", ClientMode::Headless).await;
+    tokio::time::timeout(Duration::from_secs(5), relay_demand_rx.wait_for(|d| *d))
+        .await
+        .expect("the first headless registration signals demand")
+        .expect("relay demand channel must stay open");
+    let _stdio = connect_and_register_with_mode(&sock_path, "fuigo-tui", ClientMode::Stdio).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !relay_demand_rx.has_changed().expect("open"),
+        "a stdio registration must not signal relay demand"
+    );
+    let _second =
+        connect_and_register_with_mode(&sock_path, "fuigo-headless-2", ClientMode::Headless).await;
+    tokio::time::timeout(Duration::from_secs(5), relay_demand_rx.changed())
+        .await
+        .expect("a later headless registration signals demand again")
+        .expect("relay demand channel must stay open");
+    assert!(*relay_demand_rx.borrow());
+    handle.cancel.cancel();
+}
+
 #[tokio::test]
 async fn client_registration_flow() {
     let temp = TempDir::new().unwrap();
@@ -485,6 +557,41 @@ async fn control_requests_bypass_acp_routing() {
     handle.cancel.cancel();
 }
 
+/// A profiler engine whose `stop` blocks until the test releases it, so "the
+/// stop is still in flight" is a state the test holds open rather than a race
+/// against how long pprof takes to symbolize a large test binary.
+#[derive(Debug)]
+struct GatedProfilerEngine {
+    entered_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release_rx: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    output: PathBuf,
+}
+
+impl crate::cpu_profile::ProfilerEngine for GatedProfilerEngine {
+    fn stop(self: Box<Self>) -> Result<(), ControlError> {
+        if let Some(tx) = self.entered_tx.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        let release = self
+            .release_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("release receiver");
+        release.recv().expect("release signal");
+        std::fs::write(&self.output, "main;work 1\n").unwrap();
+        Ok(())
+    }
+}
+
+/// Shutdown must not finish while a stop that started before it is still
+/// writing the profile, and must finish once that stop completes.
+///
+/// The previous version drove a real pprof profiler and only bounded the
+/// shutdown wait by a 5 s timer: under a loaded full-workspace run the real
+/// `report().build()` (symbolizing a ~1 GB test binary while thousands of
+/// tests run) outlived the timer. It also never checked that shutdown had
+/// actually waited — returning immediately would have passed.
 #[tokio::test]
 async fn shutdown_waits_for_in_flight_cpu_profile_stop() {
     let temp = TempDir::new().unwrap();
@@ -492,28 +599,28 @@ async fn shutdown_waits_for_in_flight_cpu_profile_stop() {
     let output_path = temp.path().join("shutdown-runtime-profile.folded");
     let control_state = default_test_control_state(&sock_path);
 
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
     let stop_handle = {
         let mut manager = control_state.cpu_profile.lock();
-        if !manager.runtime_cpu_profile() {
-            return;
-        }
-        let Ok(_) = manager.start(CpuProfileStartOptions {
-            output: Some(output_path.clone()),
-            frequency_hz: Some(200),
-        }) else {
-            return;
-        };
+        manager
+            .start_with_engine_for_test(
+                CpuProfileStartOptions {
+                    output: Some(output_path.clone()),
+                    frequency_hz: Some(200),
+                },
+                Box::new(GatedProfilerEngine {
+                    entered_tx: std::sync::Mutex::new(Some(entered_tx)),
+                    release_rx: std::sync::Mutex::new(Some(release_rx)),
+                    output: output_path.clone(),
+                }),
+            )
+            .expect("start with gated engine");
         manager.take_stop_handle().unwrap()
     };
 
-    let control_state_for_shutdown = control_state.clone();
-    let shutdown_wait = tokio::spawn(async move {
-        finalize_cpu_profile_on_shutdown(control_state_for_shutdown).await;
-    });
-
     let control_state_for_stop = control_state.clone();
     let in_flight_stop = tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(50)).await;
         let result = tokio::task::spawn_blocking(move || stop_handle.finish())
             .await
             .unwrap()
@@ -521,14 +628,40 @@ async fn shutdown_waits_for_in_flight_cpu_profile_stop() {
         control_state_for_stop.cpu_profile.lock().complete_stop();
         result
     });
-
-    tokio::time::timeout(Duration::from_secs(5), shutdown_wait)
+    entered_rx
         .await
-        .expect("shutdown wait should complete")
-        .unwrap();
-    let stop_result = tokio::time::timeout(Duration::from_secs(5), in_flight_stop)
+        .expect("the in-flight stop reached the engine");
+
+    let control_state_for_shutdown = control_state.clone();
+    let mut shutdown_wait = tokio::spawn(async move {
+        finalize_cpu_profile_on_shutdown(control_state_for_shutdown).await;
+    });
+
+    // While the stop is held open, shutdown must still be waiting. Ten
+    // scheduler turns plus a short sleep give a shutdown that does not wait
+    // every chance to finish; one that does wait cannot finish at all.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !shutdown_wait.is_finished(),
+        "shutdown returned while a CPU profile stop was still in flight"
+    );
+    assert!(matches!(
+        control_state.cpu_profile.lock().status(),
+        CpuProfileStatus::Stopping { .. }
+    ));
+
+    release_tx.send(()).unwrap();
+    // Hang guards only: nothing below is timing-sensitive once released.
+    let stop_result = tokio::time::timeout(Duration::from_secs(60), in_flight_stop)
         .await
         .expect("in-flight stop should complete")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), &mut shutdown_wait)
+        .await
+        .expect("shutdown wait should complete once the stop finishes")
         .unwrap();
 
     assert_eq!(stop_result.svg_path, output_path);
@@ -1637,12 +1770,12 @@ fn extract_model_id_from_set_model_returns_none_for_missing_model() {
 #[test]
 fn patch_initialize_response_patches_current_model_id() {
     let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grok-3","availableModels":[]}}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"grok-3","availableModels":[{"modelId":"grok-3"},{"modelId":"grok-3-fast"}]}}}}"#,
     );
     let default_model = Some("grok-3-fast".to_string());
     assert!(patch_initialize_response_model(&mut json, &default_model));
     assert_eq!(
-        json["result"]["meta"]["modelState"]["currentModelId"],
+        json["result"]["_meta"]["modelState"]["currentModelId"],
         "grok-3-fast"
     );
 }
@@ -1650,28 +1783,25 @@ fn patch_initialize_response_patches_current_model_id() {
 #[test]
 fn patch_initialize_response_preserves_other_fields() {
     let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"fuigoShell":true,"modelState":{"currentModelId":"grok-3","availableModels":[{"modelId":"grok-3"},{"modelId":"grok-3-fast"}]}}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"fuigoShell":true,"modelState":{"currentModelId":"grok-3","availableModels":[{"modelId":"grok-3"},{"modelId":"grok-3-fast"}]}}}}"#,
     );
     let default_model = Some("grok-3-fast".to_string());
     assert!(patch_initialize_response_model(&mut json, &default_model));
-    assert_eq!(json["result"]["meta"]["fuigoShell"], true);
+    assert_eq!(json["result"]["_meta"]["fuigoShell"], true);
     assert_eq!(
-        json["result"]["meta"]["modelState"]["currentModelId"],
+        json["result"]["_meta"]["modelState"]["currentModelId"],
         "grok-3-fast"
     );
     assert_eq!(
-        json["result"]["meta"]["modelState"]["availableModels"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
+        json["result"]["_meta"]["modelState"]["availableModels"],
+        serde_json::json!([{"modelId": "grok-3"}, {"modelId": "grok-3-fast"}])
     );
 }
 
 #[test]
 fn patch_initialize_response_noop_when_no_default_model() {
     let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grok-3"}}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"grok-3"}}}}"#,
     );
     let before = json.clone();
     assert!(!patch_initialize_response_model(&mut json, &None));
@@ -1681,7 +1811,7 @@ fn patch_initialize_response_noop_when_no_default_model() {
 #[test]
 fn patch_initialize_response_noop_when_empty_default_model() {
     let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grok-3"}}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"grok-3"}}}}"#,
     );
     let before = json.clone();
     assert!(!patch_initialize_response_model(
@@ -1694,7 +1824,7 @@ fn patch_initialize_response_noop_when_empty_default_model() {
 #[test]
 fn patch_initialize_response_noop_when_already_matches() {
     let mut json = pv(
-        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grok-3"}}}}"#,
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"grok-3","availableModels":[{"modelId":"grok-3"}]}}}}"#,
     );
     let before = json.clone();
     assert!(!patch_initialize_response_model(
@@ -1706,7 +1836,7 @@ fn patch_initialize_response_noop_when_already_matches() {
 
 #[test]
 fn patch_initialize_response_noop_for_non_initialize_response() {
-    // A session/new response has "models" not "meta.modelState"
+    // A session/new response has "models" not "_meta.modelState"
     let mut json = pv(
         r#"{"jsonrpc":"2.0","id":1,"result":{"session_id":"sess-1","models":{"currentModelId":"grok-3","availableModels":[]}}}"#,
     );
@@ -1715,7 +1845,169 @@ fn patch_initialize_response_noop_for_non_initialize_response() {
         &mut json,
         &Some("grok-3-fast".to_string())
     ));
-    // Unchanged: no meta.modelState path to patch
+    // Unchanged: no _meta.modelState path to patch
+    assert_eq!(json, before);
+}
+
+/// P50: build the response from the real ACP wire type so the key under test is the one serde actually emits (`_meta`), not a hand-written guess.
+#[test]
+fn patch_initialize_response_applies_to_real_acp_wire_shape() {
+    let model_state = agent_client_protocol::SessionModelState::new(
+        "agent-default",
+        vec![
+            agent_client_protocol::ModelInfo::new("agent-default", "A"),
+            agent_client_protocol::ModelInfo::new("client-pick", "B"),
+        ],
+    );
+    let meta = serde_json::json!({
+        "fuigoShell": true,
+        "modelState": model_state,
+    })
+    .as_object()
+    .cloned();
+    let resp = agent_client_protocol::InitializeResponse::new(agent_client_protocol::ProtocolVersion::V1)
+        .meta(meta);
+    let result = serde_json::to_value(&resp).expect("serialize InitializeResponse");
+    assert!(
+        result.get("_meta").is_some() && result.get("meta").is_none(),
+        "ACP wire key must be `_meta`: {result}"
+    );
+    let mut json = serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": result});
+    assert!(patch_initialize_response_model(
+        &mut json,
+        &Some("client-pick".to_string())
+    ));
+    // Round-trip the patched result through the typed wire struct.
+    let patched: agent_client_protocol::InitializeResponse =
+        serde_json::from_value(json["result"].clone()).expect("deserialize patched result");
+    let m = patched.meta.expect("meta survives");
+    assert_eq!(m["fuigoShell"], true);
+    // The patched state must still deserialize as the typed model state, with the catalog intact.
+    let state: agent_client_protocol::SessionModelState =
+        serde_json::from_value(m["modelState"].clone()).expect("typed SessionModelState");
+    assert_eq!(state.current_model_id.0.as_ref(), "client-pick");
+    let ids: Vec<&str> = state
+        .available_models
+        .iter()
+        .map(|mi| mi.model_id.0.as_ref())
+        .collect();
+    assert_eq!(ids, ["agent-default", "client-pick"]);
+}
+
+/// P50 (Astra MED): a client default the agent does not advertise must not replace a valid current model.
+#[test]
+fn patch_initialize_response_noop_when_default_not_available() {
+    let mut json = pv(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"a","availableModels":[{"modelId":"a"}]}}}}"#,
+    );
+    let before = json.clone();
+    assert!(!patch_initialize_response_model(
+        &mut json,
+        &Some("stale".to_string())
+    ));
+    assert_eq!(json, before);
+    // Missing catalog is also a no-op.
+    let mut json = pv(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"_meta":{"modelState":{"currentModelId":"a"}}}}"#,
+    );
+    let before = json.clone();
+    assert!(!patch_initialize_response_model(
+        &mut json,
+        &Some("stale".to_string())
+    ));
+    assert_eq!(json, before);
+}
+
+/// P50: the pending `initialize` patch is disarmed only by the response carrying the same id.
+#[test]
+fn take_initialize_patch_matches_only_the_initialize_id() {
+    let mut pending = Some(serde_json::json!(7));
+    // Unrelated response (different id): stays armed.
+    assert!(!take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":8,"result":{}}"#)
+    ));
+    assert_eq!(pending, Some(serde_json::json!(7)));
+    // Same numeric value but different JSON type: not a match.
+    assert!(!take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":"7","result":{}}"#)
+    ));
+    assert!(pending.is_some());
+    // The matching response disarms it, exactly once.
+    assert!(take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":7,"result":{}}"#)
+    ));
+    assert_eq!(pending, None);
+    assert!(!take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":7,"result":{}}"#)
+    ));
+}
+
+/// P50: an explicit `null` request id is a valid id and still matches its own response.
+#[test]
+fn take_initialize_patch_matches_explicit_null_id() {
+    let mut pending = Some(serde_json::Value::Null);
+    assert!(!take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+    ));
+    assert!(take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":null,"result":{}}"#)
+    ));
+    assert_eq!(pending, None);
+}
+
+/// P50: an ERROR response to `initialize` carrying the matching id disarms the pending patch and is left untouched (no `result`/`_meta` created).
+#[test]
+fn initialize_error_response_disarms_patch_and_is_untouched() {
+    let mut pending = Some(serde_json::json!(7));
+    let mut resp = pv(
+        r#"{"jsonrpc":"2.0","id":7,"error":{"code":-32603,"message":"boom"}}"#,
+    );
+    let before = resp.clone();
+    // Mirrors the leader's response path: disarm on id match, then patch.
+    if take_initialize_patch_if_matches(&mut pending, &resp) {
+        assert!(!patch_initialize_response_model(
+            &mut resp,
+            &Some("client-pick".to_string())
+        ));
+    } else {
+        panic!("matching error response must disarm the pending patch");
+    }
+    assert_eq!(pending, None, "pending patch must be cleared by the error");
+    assert_eq!(resp, before, "error response must be left untouched");
+}
+
+/// P50: string ids (the other JSON-RPC id shape) match too, and an unarmed state never matches.
+#[test]
+fn take_initialize_patch_handles_string_ids_and_unarmed() {
+    let mut pending = Some(serde_json::json!("init-1"));
+    assert!(take_initialize_patch_if_matches(
+        &mut pending,
+        &pv(r#"{"jsonrpc":"2.0","id":"init-1","result":{}}"#)
+    ));
+    let mut none: Option<serde_json::Value> = None;
+    assert!(!take_initialize_patch_if_matches(
+        &mut none,
+        &pv(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#)
+    ));
+}
+
+/// P50: the legacy un-prefixed `meta` key is not a wire key; it must not be patched or created.
+#[test]
+fn patch_initialize_response_ignores_unprefixed_meta_key() {
+    let mut json = pv(
+        r#"{"jsonrpc":"2.0","id":1,"result":{"meta":{"modelState":{"currentModelId":"grok-3","availableModels":[{"modelId":"grok-3"},{"modelId":"grok-3-fast"}]}}}}"#,
+    );
+    let before = json.clone();
+    assert!(!patch_initialize_response_model(
+        &mut json,
+        &Some("grok-3-fast".to_string())
+    ));
     assert_eq!(json, before);
 }
 
@@ -2144,7 +2436,7 @@ fn version_mismatch_notification_contains_correct_fields() {
     let payload = make_version_mismatch_notification("0.1.157", "0.1.150")
         .expect("should produce notification");
     let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!(json["method"], "fuigo/leader/version_mismatch");
+    assert_eq!(json["method"], "_fuigo/leader/version_mismatch");
     assert_eq!(json["params"]["clientVersion"], "0.1.157");
     assert_eq!(json["params"]["leaderVersion"], "0.1.150");
     assert!(
@@ -2161,6 +2453,46 @@ fn version_mismatch_notification_is_none_when_versions_match() {
     assert!(
         make_version_mismatch_notification("0.1.150", "0.1.150").is_none(),
         "matching versions must not produce a notification"
+    );
+}
+
+/// P151 (F17): a leader stamped "<version> (<commit>)" and a client that sends the plain version are the same release.
+#[test]
+fn version_mismatch_compares_the_semantic_version_only() {
+    assert!(
+        make_version_mismatch_notification("1.0.21", "1.0.21 (abcdef123456)").is_none(),
+        "a commit stamp on the leader must not make a same-version client warn"
+    );
+    assert!(
+        make_version_mismatch_notification("1.0.21 (abcdef123456)", "1.0.21").is_none(),
+        "a commit stamp on the client must not make it warn either"
+    );
+    assert!(
+        make_version_mismatch_notification("1.0.21+build.7", "1.0.21").is_none(),
+        "semver build metadata is not a different release"
+    );
+    assert!(
+        make_version_mismatch_notification("1.0.20", "1.0.21 (abcdef123456)").is_some(),
+        "an older client still warns against a stamped leader"
+    );
+    assert!(
+        make_version_mismatch_notification("1.0.21-rc.3", "1.0.21").is_some(),
+        "a pre-release is a different release"
+    );
+}
+
+/// P151 (F17): the production leader (no test override) knows its own version, so the warning is reachable.
+/// It used `VERSION_WITH_COMMIT`, which only the pager binary's build script sets, so it was always "unknown".
+#[test]
+fn production_leader_version_is_the_shipping_version() {
+    assert_eq!(LEADER_VERSION, fuigo_version::VERSION);
+    assert!(
+        make_version_mismatch_notification("0.0.1", LEADER_VERSION).is_some(),
+        "an older client must be warned by the production leader"
+    );
+    assert!(
+        make_version_mismatch_notification(fuigo_version::VERSION, LEADER_VERSION).is_none(),
+        "a same-version client (pager/agent send fuigo_version::VERSION) must never be warned"
     );
 }
 
@@ -4939,4 +5271,632 @@ async fn leader_client_id_dropped_when_target_disconnected() {
     assert!(matches!(msg, ServerMessage::Acp { .. }));
 
     cancel.cancel();
+}
+
+#[test]
+fn ipv6_loopback_hub_url_allows_insecure_ws_like_ipv4() {
+    let allows = |u: &str| super::hub_url_allows_insecure_ws(&url::Url::parse(u).unwrap());
+    assert!(
+        allows("ws://[::1]:9988/v1/tools"),
+        "the ::1 arm was dead before"
+    );
+    assert!(allows("ws://127.0.0.1:9988/v1/tools"));
+    assert!(allows("ws://localhost:9988/v1/tools"));
+    assert!(
+        !allows("wss://[::1]:9988/v1/tools"),
+        "only plaintext ws needs the exemption"
+    );
+    assert!(!allows("ws://[::2]:9988/v1/tools"));
+    assert!(!allows("ws://hub.example.com/v1/tools"));
+}
+
+/// P47: the leader hands the hub its credential on every connect, so a hub URL the service-endpoint trust class
+/// refuses (a `--hub-url` off the configured hub's origin, `ws://`, loopback) fails before anything connects,
+/// naming the remedy.
+#[tokio::test]
+async fn p47_workspace_start_refuses_a_hub_the_service_trust_class_refuses() {
+    crate::agent::config::Config::install_test_trusted_origins();
+    let configured = "wss://hub.example.test/v1/tools";
+    for hostile in [
+        "ws://hub.example.test/v1/tools",
+        "ws://127.0.0.1:9/ws",
+        "wss://127.0.0.1:9/ws",
+        "wss://localhost/ws",
+        "wss://other-hub.example/v1/tools",
+    ] {
+        let state = default_test_control_state(Path::new("/tmp/fuigo-p47-hub.sock"))
+            .with_default_hub_url(Some(configured.to_string()));
+        state.workspace.auth.send_replace(Some(Arc::new(TestAuth)));
+        let err = handle_workspace_start(
+            state,
+            Some(hostile.to_string()),
+            "/tmp".to_string(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.message.contains("The request was not made"),
+            "{hostile}: {}",
+            err.message
+        );
+        assert!(!err.message.contains("test-token"), "{}", err.message);
+    }
+    // Positive control: the configured hub (and another path on its origin) gets past the URL resolution and reaches
+    // the auth wait, which is cancelled here (the per-credential check follows the auth wait).
+    for admitted in [None, Some("wss://hub.example.test/other/path".to_string())] {
+        let cancel = CancellationToken::new();
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            canceller.cancel();
+        });
+        let state = default_test_control_state(Path::new("/tmp/fuigo-p47-hub.sock"))
+            .with_default_hub_url(Some(configured.to_string()));
+        let err = handle_workspace_start(state, admitted.clone(), "/tmp".to_string(), cancel)
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("shutting down"),
+            "{admitted:?} must pass the gate and wait for auth: {}",
+            err.message
+        );
+    }
+}
+
+/// P47: the guard the hub SDK asks before EVERY socket (`AuthProvider::destination_permits`; the SDK's
+/// `p47_destination_refused_on_reconnect_opens_no_socket_and_stops` proves a refusal opens no socket and is terminal).
+/// Decided on the exact credential: the configured hub admits the session token; a static `AuthMode::ApiKey`
+/// credential keeps its own rules even for a loopback `ws://` hub; once the manager's credential is a session token,
+/// the next connect to that hub is refused.
+#[test]
+fn p47_hub_destination_guard_decides_each_connect_by_value() {
+    crate::agent::config::Config::install_test_trusted_origins();
+    let dir = tempfile::tempdir().unwrap();
+    let am = Arc::new(AuthManager::new(dir.path(), crate::auth::FuigoComConfig::default()));
+    am.hot_swap(crate::auth::FuigoAuth {
+        key: "p47-static-api-key".into(),
+        auth_mode: crate::auth::AuthMode::ApiKey,
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    let guard = HubDestinationGuard {
+        inner: Arc::new(LeaderAuthProvider {
+            auth_manager: am.clone(),
+            refresh_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }),
+        auth_manager: Some(am.clone()),
+        configured_hub: Some("wss://hub.example.test/v1/tools".to_string()),
+    };
+    let loopback = url::Url::parse("ws://127.0.0.1:9/ws").unwrap();
+    let configured = url::Url::parse("wss://hub.example.test/other").unwrap();
+    assert!(guard.destination_permits(&loopback, &guard.current()).is_ok(), "static API key: its own rules");
+    am.hot_swap(crate::auth::FuigoAuth {
+        key: "p47-session-token".into(),
+        auth_mode: crate::auth::AuthMode::Oidc,
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    let session = guard.current();
+    let refused = guard
+        .destination_permits(&loopback, &session)
+        .expect_err("the session token may not go to a loopback ws:// hub");
+    assert!(refused.contains("The request was not made"), "{refused}");
+    assert!(!refused.contains("p47-session-token"), "{refused}");
+    assert!(guard.destination_permits(&configured, &session).is_ok(), "the configured hub admits it");
+}
+
+/// P77: what the hub learns at registration depends on who operates it. FluxRouter-operated (`wss` to the FluxRouter
+/// API host): the host-derived id and `hostname`, unchanged. Anything else, or anything unclassifiable: no `hostname`,
+/// and the per-destination pseudonym of the host-derived id.
+#[test]
+fn p77_registration_identity_is_gated_by_hub_operator() {
+    use fuigo_extra_ca::fluxrouter::destination_pseudonym;
+    let cwd = Path::new("/work/proj");
+    let host = "My_Laptop.local";
+    let host_id = "my_laptop-local";
+
+    // The host-derived id is what it was before P77 (a FluxRouter hub keeps seeing the same server): lower-cased,
+    // everything but `[a-z0-9_-]` becomes `-`, leading and trailing `-` trimmed, `fuigo-workspace` when nothing is left.
+    for (name, id) in [
+        (host, host_id),
+        ("--Edge--.", "edge"),
+        ("a.b c", "a-b-c"),
+        ("a--b", "a--b"),
+        ("a..b", "a--b"),
+        ("h\u{e9}llo", "h-llo"),
+        ("_x_", "_x_"),
+        ("Node123", "node123"),
+        ("42", "42"),
+        ("\u{212a}box", "box"),
+        ("", "fuigo-workspace"),
+        ("...", "fuigo-workspace"),
+    ] {
+        assert_eq!(host_derived_server_id(name), id, "{name:?}");
+    }
+    let (id, meta) = hub_registration_identity("wss://api.fluxrouter.ai/v1/tools", cwd, "--Edge--.");
+    assert_eq!((id.as_str(), &meta["hostname"]), ("edge", &serde_json::json!("--Edge--.")));
+    // FluxRouter-operated hub: unchanged.
+    for url in ["wss://api.fluxrouter.ai/v1/tools", "WSS://API.FLUXROUTER.AI./hub"] {
+        let (id, meta) = hub_registration_identity(url, cwd, host);
+        assert_eq!(id, host_id, "{url}");
+        assert_eq!(meta["hostname"], host, "{url}");
+        assert_eq!(meta["source"], "fuigo-workspace");
+        assert_eq!(meta["cwd"], "/work/proj");
+        // Byte for byte the pre-P77 metadata (key order included).
+        assert_eq!(
+            meta.to_string(),
+            r#"{"source":"fuigo-workspace","hostname":"My_Laptop.local","cwd":"/work/proj"}"#,
+            "{url}"
+        );
+    }
+    // Every other hub, and every unclassifiable one (fail closed): no hostname, a pseudonym, never the host id.
+    for url in [
+        "wss://hub.example.test/v1/tools",
+        "ws://api.fluxrouter.ai/v1/tools",
+        "wss://api.fluxrouter.ai.evil.example/v1/tools",
+        "wss://evil.example/api.fluxrouter.ai",
+        "ws://127.0.0.1:9/ws",
+        "not a url",
+        "",
+    ] {
+        let (id, meta) = hub_registration_identity(url, cwd, host);
+        assert!(meta.get("hostname").is_none(), "{url}: {meta}");
+        assert_eq!(meta.to_string(), r#"{"source":"fuigo-workspace","cwd":"/work/proj"}"#, "{url}");
+        assert_ne!(id, host_id, "{url}");
+        assert_eq!(id, destination_pseudonym(url, host_id), "{url}");
+        assert!(!meta.to_string().to_lowercase().contains("laptop"), "{url}: {meta}");
+        assert!(!id.contains("laptop"), "{url}: {id}");
+        assert_eq!(id.len(), 36, "{url}: UUID-shaped so the hub's id parser accepts it");
+    }
+    // Stable per machine at one origin (reconnect and dedupe keep working), unlinkable across origins and machines.
+    let at = |url: &str, h: &str| hub_registration_identity(url, cwd, h).0;
+    assert_eq!(at("wss://hub-a.test/x", host), at("wss://hub-a.test/other", host));
+    assert_ne!(at("wss://hub-a.test/x", host), at("wss://hub-b.test/x", host));
+    assert_ne!(at("wss://hub-a.test/x", host), at("wss://hub-a.test/x", "other-box"));
+}
+
+/// P77, on the wire: a mock hub (loopback `ws://`, which is not FluxRouter-operated) receives the registration from
+/// the real `handle_workspace_start` path and ACKNOWLEDGES it, so the start completes. The parsed `hello` carries no
+/// host name anywhere and the pseudonymous server id; a pause and resume re-register under the SAME id (reconnect keeps
+/// working at that hub). Runs in its own process with every home it can reach (`FUIGO_HOME`, `FUIGO_WORKSPACE_HOME`,
+/// `HOME`, `FUIGO_AUTH_PATH`) in a temp dir: startup purges the workspace upload queue, reads folder trust and the
+/// auth store, and leaves a detached worktree-GC task behind.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn p77_mock_hub_receives_no_hostname_and_the_pseudonymous_server_id() {
+    use futures::{SinkExt as _, StreamExt as _};
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // Alone in this process from here on. The redirects are installed for the REST of the process and never restored
+    // (the guards are forgotten): startup spawns a detached worktree-GC task that resolves `FUIGO_HOME` whenever it
+    // happens to run, which can be after this body has returned or panicked. A restored environment would hand it the
+    // real home.
+    let home = tempfile::tempdir().unwrap();
+    let auth_path = home.path().join("auth.json");
+    for (key, value) in [
+        ("FUIGO_HOME", home.path().to_path_buf()),
+        ("FUIGO_WORKSPACE_HOME", home.path().join("workspace")),
+        ("HOME", home.path().join("user")),
+        ("USERPROFILE", home.path().join("user")),
+        ("FUIGO_AUTH_PATH", auth_path.clone()),
+    ] {
+        std::mem::forget(fuigo_test_support::env::EnvGuard::set(key, value));
+    }
+    std::mem::forget(fuigo_test_support::env::EnvGuard::unset("FUIGO_AUTH"));
+    std::fs::create_dir_all(home.path().join("user")).unwrap();
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        while let Ok((sock, _)) = listener.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(sock).await else { return };
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Ok(text) = msg.into_text() else { continue };
+                    let text = text.to_string();
+                    let is_hello = serde_json::from_str::<serde_json::Value>(&text)
+                        .is_ok_and(|v| v.get("protocol_version").is_some());
+                    let _ = tx.send(text);
+                    if is_hello {
+                        let ack = serde_json::json!({
+                            "connection_id": "conn-p77",
+                            "user_id": "user-p77",
+                            "computer_hub_version": "mock",
+                            "supported_protocol_versions": [fuigo_tool_protocol::PROTOCOL_VERSION],
+                        });
+                        let _ = ws
+                            .send(tokio_tungstenite::tungstenite::Message::Text(ack.to_string().into()))
+                            .await;
+                    }
+                }
+            });
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    // The store path is given explicitly: `AuthManager::new` would follow an inherited `FUIGO_AUTH_PATH`.
+    let am = Arc::new(AuthManager::new_at_path(auth_path, crate::auth::FuigoComConfig::default()));
+    am.hot_swap(crate::auth::FuigoAuth {
+        key: "p77-static-api-key".into(),
+        auth_mode: crate::auth::AuthMode::ApiKey,
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+        ..crate::auth::FuigoAuth::test_default()
+    });
+    let state = default_test_control_state(Path::new("/tmp/fuigo-p77-hub.sock"));
+    state.workspace.set_auth_manager(am);
+    let hub_url = format!("ws://127.0.0.1:{port}/ws");
+    let cwd = dir.path().display().to_string();
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        handle_workspace_start(state.clone(), Some(hub_url.clone()), cwd.clone(), CancellationToken::new()),
+    )
+    .await
+    .expect("start completes against the acknowledging mock hub")
+    .expect("start succeeds");
+    // Reconnect: pause drops the socket, resume registers again.
+    handle_workspace_pause(state.clone()).await.expect("pause");
+    handle_workspace_resume(state.clone()).await.expect("resume");
+    // Both hellos are already queued: the mock records a hello before it acknowledges it, and start and resume each
+    // return only after their acknowledgement.
+    let host_id = host_derived_server_id(&hostname);
+    let pseudonym = fuigo_extra_ca::fluxrouter::destination_pseudonym(&hub_url, &host_id);
+    assert_ne!(pseudonym, host_id);
+    let mut hellos = 0;
+    let mut rest = Vec::new();
+    let mut all = String::new();
+    while let Ok(Some(f)) = tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+        all.push_str(&f);
+        all.push('\n');
+        // A frame that is not JSON (a close reason, a ping payload) is kept as one string, so it is checked too.
+        let mut v: serde_json::Value =
+            serde_json::from_str(&f).unwrap_or_else(|_| serde_json::Value::String(f.clone()));
+        if v.get("protocol_version").is_some() {
+            // The registration, whole: every field the hello can have is asserted against its exact expected value,
+            // so nothing in it can carry the host name: the pseudonymous id, and a metadata object with exactly the two
+            // non-identity keys. Only the free-text `description` (not sent today) is left for the generic walk.
+            hellos += 1;
+            let hello = v.as_object_mut().unwrap();
+            assert_eq!(
+                hello.remove("protocol_version"),
+                Some(serde_json::json!(fuigo_tool_protocol::PROTOCOL_VERSION)),
+                "{f}"
+            );
+            assert_eq!(hello.remove("kind"), Some(serde_json::json!("tool_server")), "{f}");
+            assert_eq!(hello.remove("server_id"), Some(serde_json::json!(pseudonym)), "{f}");
+            assert_eq!(
+                hello.remove("metadata"),
+                Some(serde_json::json!({ "source": "fuigo-workspace", "cwd": cwd })),
+                "{f}"
+            );
+            let left: Vec<&String> = hello.keys().filter(|k| *k != "description").collect();
+            assert!(left.is_empty(), "unexpected hello fields {left:?}: {f}");
+        }
+        rest.push(v);
+    }
+    assert!(hellos >= 2, "positive control: start and resume each registered: {all}");
+    // Everything else on the wire (today: nothing but what is left of the hellos), structurally: no `hostname` key at
+    // any depth, and no key or string value that is the host name or the host-derived id, or, for a secret long
+    // enough not to occur by chance, that contains it. (`fuigo-workspace` is the id's fallback for an empty host name
+    // and names no host.) The unit test above makes the whole-payload check with a controlled host name on every
+    // machine.
+    fn walk(v: &serde_json::Value, keys: &mut Vec<String>, strings: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => strings.push(s.to_lowercase()),
+            serde_json::Value::Array(items) => items.iter().for_each(|i| walk(i, keys, strings)),
+            serde_json::Value::Object(map) => map.iter().for_each(|(k, i)| {
+                keys.push(k.to_lowercase());
+                walk(i, keys, strings);
+            }),
+            _ => {}
+        }
+    }
+    let (mut keys, mut strings) = (Vec::new(), Vec::new());
+    rest.iter().for_each(|f| walk(f, &mut keys, &mut strings));
+    assert!(!keys.iter().any(|k| k == "hostname"), "{all}");
+    let mut secrets = vec![hostname.to_lowercase()];
+    if host_id != "fuigo-workspace" {
+        secrets.push(host_id.clone());
+    }
+    secrets.retain(|s| !s.is_empty());
+    for secret in &secrets {
+        for seen in keys.iter().chain(&strings) {
+            assert_ne!(seen, secret, "{secret:?} is on the wire: {all}");
+            assert!(secret.len() < 8 || !seen.contains(secret.as_str()), "{secret:?} leaked on the wire: {all}");
+        }
+    }
+}
+
+/// P77 source pin: the only place the hub registration gets a host name or a host-derived id is
+/// `hub_registration_identity`, and `handle_workspace_start` takes `server_id` and `metadata` from it.
+#[test]
+fn p77_registration_identity_has_one_source() {
+    let src = include_str!("server.rs");
+    let prod = src.split("\n#[cfg(test)]").next().unwrap();
+    assert_eq!(prod.matches("\"hostname\"").count(), 2, "the field and its removal; another would bypass the gate");
+    assert_eq!(prod.matches("host_derived_server_id(").count(), 2, "definition + the one gated use");
+    assert_eq!(prod.matches("server_id: Some(").count(), 1);
+    // The call, whole: the gate is asked about the URL that is parsed and connected to, and gets the host name as the
+    // OS reports it (a FluxRouter hub must keep receiving it unchanged); its two results are what is registered.
+    let flat = prod.split_whitespace().collect::<Vec<_>>().join(" ");
+    for pinned in [
+        "let url = url::Url::parse(&url_str)",
+        "let (server_id, metadata) = hub_registration_identity( &url_str, &cwd_path, \
+         &gethostname::gethostname().to_string_lossy(), );",
+        "fuigo_workspace::connect_local_workspace( cwd_path.clone(), url, auth,",
+        "metadata: Some(metadata), server_id: Some(server_id),",
+    ] {
+        assert!(flat.contains(pinned), "{pinned}");
+    }
+    assert_eq!(prod.matches("gethostname::gethostname()").count(), 1, "only the call that feeds the gate");
+}
+
+/// P125: a client that registers after the leader refused a relay is told at once (which relay, why, how to trust it);
+/// a client attached when the refusal is published is told too; the same refusal published again is not repeated.
+#[tokio::test]
+async fn p125_interactive_clients_are_told_the_leaders_relay_refusal() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("relay-refusal.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let board = handle.control_state.relay_refusal_board();
+    let line = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "_fuigo/relay/refused",
+        "params": { "origin": "https://relay.example", "use": "bridge", "message": "refused: trust it" },
+    })
+    .to_string();
+
+    let (mut headless, _headless_w) =
+        connect_and_register_with_mode(&sock_path, "fuigo-headless", ClientMode::Headless).await;
+    // Attached before the refusal: told when it is published.
+    let (mut early, _early_w) =
+        connect_and_register_with_mode(&sock_path, "fuigo-tui", ClientMode::Stdio).await;
+    board.publish(Some(line.clone()));
+    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut early))
+        .await
+        .expect("an attached interactive client is told of the refusal")
+        .unwrap();
+    assert!(matches!(&msg, ServerMessage::Acp { payload } if payload == &line), "{msg:?}");
+
+    // Registering after the refusal: told at once.
+    let (mut late, _late_w) =
+        connect_and_register_with_mode(&sock_path, "fuigo-ide", ClientMode::Stdio).await;
+    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut late))
+        .await
+        .expect("a client that registers later is told of the refusal")
+        .unwrap();
+    assert!(matches!(&msg, ServerMessage::Acp { payload } if payload == &line), "{msg:?}");
+
+    // The same refusal again tells nobody again.
+    board.publish(Some(line.clone()));
+    let again = tokio::time::timeout(
+        Duration::from_millis(300),
+        read_message::<_, ServerMessage>(&mut early),
+    )
+    .await;
+    assert!(again.is_err(), "a repeated refusal was sent again: {again:?}");
+
+    // The user opts in: every interactive client is told the refusal is over.
+    board.publish(None);
+    for (who, reader) in [("early", &mut early), ("late", &mut late)] {
+        let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(reader))
+            .await
+            .unwrap_or_else(|_| panic!("the {who} client is told the refusal is over"))
+            .unwrap();
+        assert!(
+            matches!(&msg, ServerMessage::Acp { payload } if payload.contains("_fuigo/relay/refusal_cleared")),
+            "{who}: {msg:?}"
+        );
+    }
+
+    // A headless client (attached before the refusal) refuses the relay itself and is not sent it.
+    let none = tokio::time::timeout(
+        Duration::from_millis(300),
+        read_message::<_, ServerMessage>(&mut headless),
+    )
+    .await;
+    assert!(none.is_err(), "a headless client was sent the refusal: {none:?}");
+    handle.cancel.cancel();
+}
+
+/// Control: with no refusal published, a registering client is sent nothing.
+#[tokio::test]
+async fn p125_no_refusal_means_no_notice() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("no-refusal.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (mut reader, _w) =
+        connect_and_register_with_mode(&sock_path, "fuigo-tui", ClientMode::Stdio).await;
+    let none = tokio::time::timeout(
+        Duration::from_millis(300),
+        read_message::<_, ServerMessage>(&mut reader),
+    )
+    .await;
+    assert!(none.is_err(), "{none:?}");
+    handle.cancel.cancel();
+}
+
+/// P125 (Astra r3): a client that asks for the refusal state is told "cleared" when it registers and the leader
+/// refuses nothing, so a reconnect cannot keep a refusal the user has since fixed; a client that did not ask is not.
+#[tokio::test]
+async fn p125_a_registering_client_that_asks_is_told_the_refusal_state() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("refusal-state.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let stream = LeaderStream::connect(&sock_path).await.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_message(
+        &mut writer,
+        &ClientMessage::Register {
+            client_type: "fuigo-tui".into(),
+            mode: ClientMode::Stdio,
+            capabilities: ClientCapabilities {
+                relay_refusal_state: true,
+                ..ClientCapabilities::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _: ServerMessage = read_message(&mut reader).await.unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(2), read_message::<_, ServerMessage>(&mut reader))
+        .await
+        .expect("the client is told the refusal state")
+        .unwrap();
+    assert!(
+        matches!(&msg, ServerMessage::Acp { payload } if payload.contains("_fuigo/relay/refusal_cleared")),
+        "{msg:?}"
+    );
+    handle.cancel.cancel();
+}
+
+/// P142: register a client that does (or does not) show the leader's process notices.
+async fn p142_register(
+    sock_path: &std::path::Path,
+    client_type: &str,
+    leader_notices: bool,
+) -> (
+    tokio::io::ReadHalf<LeaderStream>,
+    tokio::io::WriteHalf<LeaderStream>,
+) {
+    let stream = LeaderStream::connect(sock_path).await.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_message(
+        &mut writer,
+        &ClientMessage::Register {
+            client_type: client_type.into(),
+            mode: ClientMode::Stdio,
+            capabilities: ClientCapabilities {
+                leader_notices,
+                ..ClientCapabilities::default()
+            },
+        },
+    )
+    .await
+    .unwrap();
+    let _: ServerMessage = read_message(&mut reader).await.unwrap();
+    (reader, writer)
+}
+
+/// P142: how many `_fuigo/leader/notice` notifications carrying exactly `text` reach `reader` within `wait`. Other
+/// messages (another test's notices included: the notice list is per process) are skipped.
+async fn p142_notices_of(
+    reader: &mut tokio::io::ReadHalf<LeaderStream>,
+    text: &str,
+    wait: Duration,
+) -> usize {
+    let deadline = tokio::time::Instant::now() + wait;
+    let mut seen = 0;
+    while let Ok(Ok(msg)) =
+        tokio::time::timeout_at(deadline, read_message::<_, ServerMessage>(reader)).await
+    {
+        if let ServerMessage::Acp { payload } = msg {
+            let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            if json["method"] == "_fuigo/leader/notice" && json["params"]["message"] == text {
+                assert!(json.get("id").is_none(), "a notification, not a request: {payload}");
+                seen += 1;
+            }
+        }
+    }
+    seen
+}
+
+/// P142 (e2e A1 T1): a notice the leader's process printed before any client that shows notices was attached (the
+/// leader's stderr is `leader.log`) is sent to the first such client, once, and to no client after it.
+#[tokio::test]
+async fn p142_a_notice_recorded_before_a_client_attaches_goes_to_the_first_one_once() {
+    let before_start = format!("p142 held before start {}", uuid::Uuid::new_v4());
+    fuigo_file_utils::destination_gate::announce_notice(&before_start);
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("notice-held.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A client that does not show notices (a raw ACP client, an older Fuigo) is sent none and does not use them up.
+    let (mut raw, _raw_w) = p142_register(&sock_path, "fuigo-ide", false).await;
+    let while_raw = format!("p142 held while a raw client is attached {}", uuid::Uuid::new_v4());
+    fuigo_file_utils::destination_gate::announce_notice(&while_raw);
+    assert_eq!(p142_notices_of(&mut raw, &before_start, Duration::from_millis(300)).await, 0);
+    assert_eq!(p142_notices_of(&mut raw, &while_raw, Duration::from_millis(300)).await, 0);
+
+    let (mut first, _first_w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    let (mut held_a, mut held_b) = (0, 0);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while let Ok(Ok(msg)) =
+        tokio::time::timeout_at(deadline, read_message::<_, ServerMessage>(&mut first)).await
+    {
+        if let ServerMessage::Acp { payload } = msg {
+            let json: serde_json::Value = serde_json::from_str(&payload).unwrap();
+            if json["method"] == "_fuigo/leader/notice" {
+                held_a += usize::from(json["params"]["message"] == before_start.as_str());
+                held_b += usize::from(json["params"]["message"] == while_raw.as_str());
+            }
+        }
+        if held_a > 0 && held_b > 0 {
+            break;
+        }
+    }
+    assert_eq!((held_a, held_b), (1, 1), "both held notices reach the first client that shows notices, once");
+    assert_eq!(p142_notices_of(&mut first, &before_start, Duration::from_millis(300)).await, 0, "not twice");
+
+    let (mut second, _second_w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    assert_eq!(
+        p142_notices_of(&mut second, &before_start, Duration::from_millis(500)).await,
+        0,
+        "a notice is replayed once overall, not once per client"
+    );
+    assert_eq!(p142_notices_of(&mut raw, &while_raw, Duration::from_millis(100)).await, 0);
+    handle.cancel.cancel();
+}
+
+/// P142: a notice printed while clients that show notices are attached reaches each of them at once (one delivery),
+/// never a client that did not ask, and never a client that attaches later.
+#[tokio::test]
+async fn p142_a_notice_recorded_while_clients_are_attached_reaches_them_at_once() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("notice-live.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (mut tui_a, _a_w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    let (mut tui_b, _b_w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    let (mut raw, _raw_w) = p142_register(&sock_path, "fuigo-ide", false).await;
+
+    let live = format!("p142 live {}", uuid::Uuid::new_v4());
+    fuigo_file_utils::destination_gate::announce_notice(&live);
+    assert_eq!(p142_notices_of(&mut tui_a, &live, Duration::from_secs(1)).await, 1);
+    assert_eq!(p142_notices_of(&mut tui_b, &live, Duration::from_millis(300)).await, 1);
+    assert_eq!(p142_notices_of(&mut raw, &live, Duration::from_millis(300)).await, 0);
+
+    let (mut late, _late_w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    assert_eq!(p142_notices_of(&mut late, &live, Duration::from_millis(500)).await, 0);
+    handle.cancel.cancel();
+}
+
+/// P142: the withheld-upload notice (S4) is one of the notices the leader forwards.
+#[tokio::test]
+async fn p142_the_withheld_upload_notice_reaches_an_attached_client() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("notice-withheld.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (mut tui, _w) = p142_register(&sock_path, "fuigo-tui", true).await;
+    let _ = fuigo_file_utils::destination_gate::gate_proxy_url("https://third.example/v1", "p142/a.tar.gz");
+    // At most once per process: another test may have printed it first, and then this server's cursor (from 0)
+    // still sends it to this client, which is the first one of this server that shows notices.
+    assert_eq!(
+        p142_notices_of(
+            &mut tui,
+            fuigo_file_utils::destination_gate::WITHHELD_NOTICE,
+            Duration::from_secs(1)
+        )
+        .await,
+        1
+    );
+    handle.cancel.cancel();
 }

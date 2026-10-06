@@ -354,12 +354,10 @@ fn read_modify_write(summary_path: &Path, patch: &SummaryPatch) -> io::Result<bo
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    crate::session::storage::owner_only::open(
+        OpenOptions::new().read(true).write(true).create(true).truncate(false),
+        path,
+    )
 }
 
 fn read_summary(path: &Path) -> io::Result<Summary> {

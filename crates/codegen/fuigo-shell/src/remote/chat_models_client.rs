@@ -85,6 +85,9 @@ pub enum ChatModelsError {
     Http { status: u16 },
     #[error("parse error: {0}")]
     Parse(#[from] serde_json::Error),
+    /// P47: the destination may not receive the session token, so the request was not made.
+    #[error("{0}")]
+    SessionDestinationRefused(String),
 }
 
 impl From<fuigo_extra_ca::dispatch::DispatchError> for ChatModelsError {
@@ -133,8 +136,13 @@ impl ChatModelsClient {
         let base = self.base()?;
 
         let url = format!("{}/rest/modes", base);
+        // P47: the session token goes only where the service-endpoint trust class admits `url`.
+        crate::auth::session_delivery::service_session_gate(&auth, &url, Some(base), "chat_models")
+            .map_err(|refused| ChatModelsError::SessionDestinationRefused(refused.to_string()))?;
         let body = serde_json::json!({ "locale": locale });
-        let mut builder = self
+        // P43: identity only to a FluxRouter-operated destination.
+        let identity = super::account_identity_headers(&url, &auth.user_id, auth.email.as_deref());
+        let builder = self
             .http
             .post(&url)
             .json(&body)
@@ -143,20 +151,12 @@ impl ChatModelsClient {
                 "X-XAI-Token-Auth",
                 self.auth.fuigo_com_config().token_header.clone(),
             )
-            .header("x-userid", &auth.user_id)
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                "x-fuigo-client-identifier",
-                crate::http::process_client_identifier(),
-            )
+            .headers(identity)
             .header(
                 crate::http::CLIENT_MODE_HEADER,
                 crate::http::process_client_mode(),
             )
             .header(reqwest::header::ACCEPT, "application/json");
-        if let Some(email) = &auth.email {
-            builder = builder.header("x-email", email);
-        }
         let builder = fuigo_file_utils::trace_context::inject_trace_context_into_request(builder);
 
         let response = builder.send_checked().await?;
@@ -175,6 +175,25 @@ impl ChatModelsClient {
 
 #[cfg(test)]
 mod tests {
+    /// P43 hostile: a chat_models host that is not FluxRouter-operated gets no identity.
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_models_requests_send_no_identity_to_a_non_fluxrouter_host() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "remote::chat_models_client::tests::chat_models_requests_send_no_identity_to_a_non_fluxrouter_host",
+        ) else {
+            return;
+        };
+        // Alone in its process: install the issuer no other test happened to install here.
+        crate::auth::set_test_oauth2_issuer(crate::auth::GROK_OAUTH2_ISSUER);
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+            let base = front.front_service(&base);
+        let mut client = ChatModelsClient::new(crate::remote::skills_client::tests::test_auth_manager());
+        client.base_url = Some(base);
+        let _ = client.list_modes("en").await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "chat_models");
+    }
     use super::*;
 
     #[test]

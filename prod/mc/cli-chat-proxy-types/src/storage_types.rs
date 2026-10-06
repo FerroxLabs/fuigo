@@ -20,7 +20,7 @@ pub struct BatchExistsResponse {
 /// completely bypassing the proxy for the data transfer.  This avoids nginx /
 /// Cloudflare body-size limits that would otherwise cause 413 errors on large
 /// payloads (e.g. session share data).
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SignedUploadUrlResponse {
     /// Pre-signed GCS PUT URL. Upload the object body here with a simple PUT.
@@ -34,6 +34,28 @@ pub struct SignedUploadUrlResponse {
     pub content_type: String,
     /// Validity window in seconds.
     pub expires_in_secs: u64,
+}
+
+/// Hand-written `Debug` (P70a): a pre-signed URL is a bearer capability (whoever holds it may write the object), so
+/// it prints as `<redacted>`. The destructure is exhaustive, so a new field fails to compile here until its Debug
+/// output is decided.
+impl std::fmt::Debug for SignedUploadUrlResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            signed_url: _,
+            bucket,
+            path,
+            content_type,
+            expires_in_secs,
+        } = self;
+        f.debug_struct("SignedUploadUrlResponse")
+            .field("signed_url", &"<redacted>")
+            .field("bucket", bucket)
+            .field("path", path)
+            .field("content_type", content_type)
+            .field("expires_in_secs", expires_in_secs)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +236,22 @@ mod tests {
             deserialized.files[1].content_type,
             "application/octet-stream"
         );
+    }
+
+    /// P70a (Astra r1): a pre-signed upload URL never reaches a `{:?}`.
+    #[test]
+    fn signed_upload_url_response_debug_redacts_the_signed_url() {
+        let response = SignedUploadUrlResponse {
+            signed_url: "https://storage.p70.invalid/b/o?X-Goog-Signature=p70sg-FAKE-4c5d6e7f".into(),
+            bucket: "p70-bucket".into(),
+            path: "p70/object".into(),
+            content_type: "application/json".into(),
+            expires_in_secs: 60,
+        };
+        for out in [format!("{response:?}"), format!("{response:#?}")] {
+            assert!(out.contains("<redacted>") && out.contains("p70-bucket"), "control: {out}");
+            assert!(!out.contains("p70sg-FAKE") && !out.contains("storage.p70.invalid"), "Debug holds the URL: {out}");
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@ use fuigo_sampling_types::messages::{
     ContentBlock, MessageDeltaBody, MessageDeltaUsage, MessagesResponse, MessagesUsage,
     StreamDelta, StreamError,
 };
+use fuigo_sampling_types::serde_helpers::Open;
 
 fn rid() -> RequestId {
     RequestId::from("msg-test")
@@ -35,17 +36,17 @@ fn message_start() -> MessageStreamEvent {
 fn text_block_start(index: u32) -> MessageStreamEvent {
     MessageStreamEvent::ContentBlockStart {
         index,
-        content_block: ContentBlock::Text {
+        content_block: Open::Known(ContentBlock::Text {
             text: String::new(),
             cache_control: None,
-        },
+        }),
     }
 }
 
 fn text_delta(index: u32, text: &str) -> MessageStreamEvent {
     MessageStreamEvent::ContentBlockDelta {
         index,
-        delta: StreamDelta::TextDelta { text: text.into() },
+        delta: Open::Known(StreamDelta::TextDelta { text: text.into() }),
     }
 }
 
@@ -156,22 +157,22 @@ async fn text_block_assembles_into_completed_response() {
 async fn thinking_block_emits_reasoning_channel_and_preserved_in_response() {
     let thinking_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::Thinking {
+        content_block: Open::Known(ContentBlock::Thinking {
             thinking: String::new(),
             signature: String::new(),
-        },
+        }),
     };
     let thinking_delta = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::ThinkingDelta {
+        delta: Open::Known(StreamDelta::ThinkingDelta {
             thinking: "let me think...".into(),
-        },
+        }),
     };
     let sig_delta = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::SignatureDelta {
+        delta: Open::Known(StreamDelta::SignatureDelta {
             signature: "abc123".into(),
-        },
+        }),
     };
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
@@ -219,22 +220,22 @@ async fn multiple_thinking_blocks_emit_per_block_signatures_in_order() {
         vec![
             Ok(MessageStreamEvent::ContentBlockStart {
                 index,
-                content_block: ContentBlock::Thinking {
+                content_block: Open::Known(ContentBlock::Thinking {
                     thinking: String::new(),
                     signature: String::new(),
-                },
+                }),
             }),
             Ok(MessageStreamEvent::ContentBlockDelta {
                 index,
-                delta: StreamDelta::ThinkingDelta {
+                delta: Open::Known(StreamDelta::ThinkingDelta {
                     thinking: text.into(),
-                },
+                }),
             }),
             Ok(MessageStreamEvent::ContentBlockDelta {
                 index,
-                delta: StreamDelta::SignatureDelta {
+                delta: Open::Known(StreamDelta::SignatureDelta {
                     signature: sig.into(),
-                },
+                }),
             }),
             Ok(block_stop(index)),
         ]
@@ -268,25 +269,25 @@ async fn multiple_thinking_blocks_emit_per_block_signatures_in_order() {
 async fn tool_use_block_assembles_into_tool_call() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::ToolUse {
+        content_block: Open::Known(ContentBlock::ToolUse {
             id: "call_xyz".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
             // Set: a parser matching only the absent case must fail here.
             cache_control: Some(fuigo_sampling_types::messages::CacheControl::ephemeral()),
-        },
+        }),
     };
     let arg_delta_1 = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::InputJsonDelta {
+        delta: Open::Known(StreamDelta::InputJsonDelta {
             partial_json: "{\"x\":".into(),
-        },
+        }),
     };
     let arg_delta_2 = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::InputJsonDelta {
+        delta: Open::Known(StreamDelta::InputJsonDelta {
             partial_json: "1}".into(),
-        },
+        }),
     };
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
@@ -454,18 +455,18 @@ async fn max_tokens_text_only_completes_with_length_stop() {
 async fn max_tokens_with_tool_use_keeps_length_stop() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::ToolUse {
+        content_block: Open::Known(ContentBlock::ToolUse {
             id: "call_cut".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
             cache_control: None,
-        },
+        }),
     };
     let arg_delta = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::InputJsonDelta {
+        delta: Open::Known(StreamDelta::InputJsonDelta {
             partial_json: "{\"x\": \"trunc".into(),
-        },
+        }),
     };
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
@@ -493,12 +494,12 @@ async fn max_tokens_with_tool_use_keeps_length_stop() {
 async fn max_tokens_tool_use_without_arg_deltas_collects_empty_arguments() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::ToolUse {
+        content_block: Open::Known(ContentBlock::ToolUse {
             id: "call_no_args".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
             cache_control: None,
-        },
+        }),
     };
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
@@ -555,18 +556,18 @@ async fn model_context_window_exceeded_completes_with_length_stop() {
 async fn refusal_after_tool_use_blocks_keeps_tool_calls_stop_reason() {
     let tool_start = MessageStreamEvent::ContentBlockStart {
         index: 0,
-        content_block: ContentBlock::ToolUse {
+        content_block: Open::Known(ContentBlock::ToolUse {
             id: "call_refused".into(),
             name: "do_thing".into(),
             input: serde_json::json!({}),
             cache_control: None,
-        },
+        }),
     };
     let arg_delta = MessageStreamEvent::ContentBlockDelta {
         index: 0,
-        delta: StreamDelta::InputJsonDelta {
+        delta: Open::Known(StreamDelta::InputJsonDelta {
             partial_json: "{}".into(),
-        },
+        }),
     };
     let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
         Ok(message_start()),
@@ -798,4 +799,372 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
     assert_eq!(usage.prompt_tokens, 2500);
     assert_eq!(usage.cached_prompt_tokens, 2500);
     assert_eq!(usage.total_tokens, 2501);
+}
+
+/// Tolerating an unmodelled content block must not hand a stalled turn an unlimited extension:
+/// an unknown block is never "meaningful content", so the content clock still runs down on it.
+/// This is the trap a forward-compatibility fix creates -- the naive version appends the new
+/// variant to the `=> true` list and a provider streaming junk then holds the turn open forever.
+#[test]
+fn unmodelled_content_blocks_are_never_meaningful_content() {
+    let unknown_block = MessageStreamEvent::ContentBlockStart {
+        index: 0,
+        content_block: Open::Unknown(serde_json::json!({"type":"server_tool_use","id":"s1"})),
+    };
+    let unknown_delta = MessageStreamEvent::ContentBlockDelta {
+        index: 0,
+        delta: Open::Unknown(serde_json::json!({"type":"citations_delta","citation":{}})),
+    };
+    assert!(!messages_event_has_meaningful_content(&unknown_block));
+    assert!(!messages_event_has_meaningful_content(&unknown_delta));
+    // …while the modelled forms still are.
+    assert!(messages_event_has_meaningful_content(&text_block_start(0)));
+    assert!(messages_event_has_meaningful_content(&text_delta(0, "hi")));
+    // And `ping`, the real heartbeat, remains non-content.
+    assert!(!messages_event_has_meaningful_content(
+        &MessageStreamEvent::Ping
+    ));
+}
+
+/// THE regression this packet was reopened for.
+///
+/// An unmodelled `content_block_delta` is dropped instead of failing the parse -- but the block it
+/// belongs to stays open, so `content_block_stop` used to finalize a `ToolCall` out of whatever
+/// fragments survived, and the turn reported `StopReason::ToolCalls`: success.
+///
+/// The dangerous position is the MIDDLE of the argument sequence, not the tail. A tail drop leaves
+/// invalid JSON, which is loud at the tool boundary. A middle drop concatenates
+/// `{"a":1,` + <dropped> + `"c":3}` into `{"a":1,"c":3}` -- syntactically valid, one parameter gone.
+/// Substitute a real tool and it is an `Edit` that lost `old_string`, or a `Write` that lost part of
+/// `content`, executing with arguments the model never sent while everything reports fine.
+///
+/// So: the turn must FAIL. This asserts both halves -- that it fails, and that no tool call with
+/// altered arguments ever reaches a consumer.
+#[tokio::test]
+async fn mid_sequence_unmodelled_delta_on_a_tool_use_block_fails_the_turn() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: Open::Known(ContentBlock::ToolUse {
+                id: "call_edit".into(),
+                name: "Edit".into(),
+                input: serde_json::json!({}),
+                cache_control: None,
+            }),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "{\"a\":1,".into(),
+            }),
+        }),
+        // The provider ships a delta type this client does not model, in the middle of the
+        // arguments. Whatever it carried is now unrecoverable.
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({
+                "type": "input_json_patch_delta",
+                "patch": [{"op": "add", "path": "/b", "value": 2}],
+            })),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "\"c\":3}".into(),
+            }),
+        }),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::ToolUse)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    // No completed turn, and above all no tool call built from the mutilated arguments.
+    for ev in &evs {
+        if let SamplingEvent::Completed { response, .. } = ev {
+            panic!(
+                "the turn completed with tool_calls {:?} after a delta was silently dropped from \
+                 the middle of its arguments; `{{\"a\":1,\"c\":3}}` is valid JSON missing a \
+                 parameter the model sent, and executing it is the whole defect",
+                response.tool_calls()
+            );
+        }
+    }
+
+    match evs.last().expect("at least one event") {
+        SamplingEvent::Failed { error, .. } => {
+            // Same classification the pre-packet abort had: a parse-level failure, never retried.
+            assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+            assert!(!error.is_retryable, "resending cannot un-drop the delta");
+            // The diagnostic must name the unmodelled type and the tool, or the next incident is
+            // unreadable -- "no diagnostic at all" is what the design note calls strictly worse.
+            assert!(
+                error.message.contains("input_json_patch_delta"),
+                "the failure must name the unmodelled delta type, got: {}",
+                error.message
+            );
+            assert!(
+                error.message.contains("Edit"),
+                "the failure must name the tool whose arguments were lost, got: {}",
+                error.message
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+}
+
+/// The same guard must not depend on WHERE the drop landed. A trailing drop happens to leave
+/// invalid JSON, so the tool boundary would have caught it -- but correctness cannot rest on the
+/// provider's chunk boundaries, so this fails for the same reason and by the same path.
+#[tokio::test]
+async fn trailing_unmodelled_delta_on_a_tool_use_block_also_fails_the_turn() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: Open::Known(ContentBlock::ToolUse {
+                id: "call_write".into(),
+                name: "Write".into(),
+                input: serde_json::json!({}),
+                cache_control: None,
+            }),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "{\"path\":\"/tmp/x\"".into(),
+            }),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({"type": "future_delta"})),
+        }),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::ToolUse)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    assert!(
+        !evs.iter()
+            .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+        "a tool_use block that lost a delta must never complete the turn"
+    );
+    assert!(matches!(evs.last(), Some(SamplingEvent::Failed { .. })));
+}
+
+/// The asymmetry, asserted rather than assumed: a dropped delta on a TEXT block is tolerated.
+///
+/// Nothing executes prose. The gap is visible to the reader and warned about in the log, and failing
+/// the turn over it would discard a complete, already-billed response -- the exact harm this packet
+/// exists to prevent. Only arguments that a program will act on are worth a dead turn. If this test
+/// ever has to change, the cost is a whole class of turns dying over cosmetic drift.
+#[tokio::test]
+async fn unmodelled_delta_on_a_text_block_is_tolerated_and_the_turn_completes() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "first ")),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({"type": "citations_delta", "citation": {}})),
+        }),
+        Ok(text_delta(0, "second")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().expect("at least one event") {
+        SamplingEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant item present");
+            assert_eq!(a.content.as_ref(), "first second");
+            assert_eq!(response.stop_reason, Some(StopReason::Stop));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// A tool_use block is judged on ITS OWN dropped delta, not another block's. A text block losing a
+/// delta earlier in the same turn must not poison a well-formed tool call that follows -- the guard
+/// is per-block state, and a whole-stream flag would over-fire and kill good turns.
+#[tokio::test]
+async fn a_dropped_delta_on_one_block_does_not_fail_another_blocks_tool_call() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(text_block_start(0)),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({"type": "citations_delta"})),
+        }),
+        Ok(text_delta(0, "hi")),
+        Ok(block_stop(0)),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 1,
+            content_block: Open::Known(ContentBlock::ToolUse {
+                id: "call_ok".into(),
+                name: "Read".into(),
+                input: serde_json::json!({}),
+                cache_control: None,
+            }),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 1,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "{\"path\":\"/tmp/y\"}".into(),
+            }),
+        }),
+        Ok(block_stop(1)),
+        Ok(message_delta_with_stop(messages::StopReason::ToolUse)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().expect("at least one event") {
+        SamplingEvent::Completed { response, .. } => {
+            let calls = response.tool_calls();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].arguments.as_ref(), "{\"path\":\"/tmp/y\"}");
+            assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// An unmodelled delta addressed to an index with no open block is still harmless: no block state
+/// exists, so nothing can be finalized from it and no later block inherits the drop.
+#[tokio::test]
+async fn unmodelled_delta_for_an_unopened_block_does_not_fail_the_turn() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        // An unmodelled content BLOCK opens no state, by design.
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: Open::Unknown(
+                serde_json::json!({"type": "server_tool_use", "id": "s1"}),
+            ),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({"type": "server_tool_use_delta"})),
+        }),
+        Ok(block_stop(0)),
+        Ok(text_block_start(1)),
+        Ok(text_delta(1, "ok")),
+        Ok(block_stop(1)),
+        Ok(message_delta_with_stop(messages::StopReason::EndTurn)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    match evs.last().expect("at least one event") {
+        SamplingEvent::Completed { response, .. } => {
+            let a = response.assistant().expect("assistant item present");
+            assert_eq!(a.content.as_ref(), "ok");
+            assert!(response.tool_calls().is_empty());
+        }
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+/// An unmodelled `stop_reason` that names a token limit maps to `Length`, not `Stop`.
+///
+/// The Messages backend's `StopReason::Unknown` arm predates this packet (it is in the `2eb306e`
+/// baseline), so this is a pre-existing silent-wrong rather than a P12b regression -- but it is the
+/// identical defect: a gateway fronting this backend spells the same stop `MAX_TOKENS` or `length`,
+/// and `Length` is what drives truncation handling and compaction.
+#[tokio::test]
+async fn unmodelled_token_limit_stop_reason_maps_to_length() {
+    for wire in ["MAX_TOKENS", "max_tokens", "length", "length_limit"] {
+        let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+            Ok(message_start()),
+            Ok(text_block_start(0)),
+            Ok(text_delta(0, "truncated tai")),
+            Ok(block_stop(0)),
+            Ok(message_delta_with_stop(messages::StopReason::Unknown(
+                wire.to_owned(),
+            ))),
+            Ok(MessageStreamEvent::MessageStop),
+        ];
+        let raw = stream::iter(events).boxed();
+        let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+        match evs.last().expect("at least one event") {
+            SamplingEvent::Completed { response, .. } => assert_eq!(
+                response.stop_reason,
+                Some(StopReason::Length),
+                "`{wire}` names a token limit; reporting Stop presents a truncated tail as the \
+                 model's final answer"
+            ),
+            other => panic!("expected Completed for `{wire}`, got {other:?}"),
+        }
+    }
+}
+
+/// The guard keys on "this delta is not modelled", not on "a tag could be read off it".
+///
+/// `Open::deserialize` only ever produces `Unknown` for a payload that HAS a string `type`, so this
+/// shape cannot arrive from the wire today. It can arrive from a refactor: anything that constructs
+/// `Open::Unknown` by hand, or a future `Open` that tolerates a tagless variant, would otherwise
+/// find the one path where a dropped delta is not recorded and a tool call is finalized from
+/// mutilated arguments again. Keyed on `known().is_none()`, there is no such path.
+#[tokio::test]
+async fn an_untagged_unknown_delta_on_a_tool_use_block_still_fails_the_turn() {
+    let events: Vec<Result<MessageStreamEvent, SamplingError>> = vec![
+        Ok(message_start()),
+        Ok(MessageStreamEvent::ContentBlockStart {
+            index: 0,
+            content_block: Open::Known(ContentBlock::ToolUse {
+                id: "call_bash".into(),
+                name: "Bash".into(),
+                input: serde_json::json!({}),
+                cache_control: None,
+            }),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "{\"command\":\"ls\",".into(),
+            }),
+        }),
+        // No `type` at all -- still a delta this client did not model and did not apply.
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Unknown(serde_json::json!({"patch": []})),
+        }),
+        Ok(MessageStreamEvent::ContentBlockDelta {
+            index: 0,
+            delta: Open::Known(StreamDelta::InputJsonDelta {
+                partial_json: "\"timeout\":5}".into(),
+            }),
+        }),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_stop(messages::StopReason::ToolUse)),
+        Ok(MessageStreamEvent::MessageStop),
+    ];
+    let raw = stream::iter(events).boxed();
+    let evs = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+
+    assert!(
+        !evs.iter()
+            .any(|e| matches!(e, SamplingEvent::Completed { .. })),
+        "an unrecorded drop is the whole defect; a tagless unknown delta must not be the exception"
+    );
+    match evs.last().expect("at least one event") {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, crate::events::SamplingErrorKind::Serialization);
+            assert!(
+                error.message.contains("<untagged>"),
+                "the diagnostic must say the delta carried no type, got: {}",
+                error.message
+            );
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
 }

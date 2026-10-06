@@ -63,7 +63,7 @@ fn t05_known_names_and_policy_precedence() {
             ..Default::default()
         };
         let mut input = vars(&[("PATH", "/bin"), ("BENIGN", "ok")]);
-        for name in super::PROVIDER_CREDENTIAL_NAMES {
+        for name in super::credential_env_names() {
             input.push((name.to_string(), "fake-t05".into()));
             input.push((name.to_ascii_lowercase(), "fake-t05".into()));
         }
@@ -211,40 +211,140 @@ fn allows_with_inherit_honors_inherit() {
     assert!(!all.allows_with_inherit("AWS_SECRET"));
 }
 
+/// The credential denylist on its own, with the policy's `exclude` list EMPTY: the default
+/// `exclude` also names `FUIGO_API_KEY`/`FUIGO_CODE_API_KEY`, so a test on the default policy
+/// passed even with the denylist switched off (the audit's mutant M4). Names are literal, so
+/// emptying the denylist cannot empty the test.
 #[test]
 fn default_shell_policy_excludes_fuigo_credentials() {
-    let policy = ShellEnvironmentPolicy::default();
-    let env = create_env_from_vars(
-        vars(&[
-            ("PATH", "/bin"),
-            ("FUIGO_API_KEY", "secret"),
-            ("FUIGO_CODE_API_KEY", "legacy-secret"),
-            ("OTHER_VAR", "keep"),
-        ]),
-        &policy,
-    );
-    assert!(!env.contains_key("FUIGO_API_KEY"));
-    assert!(!env.contains_key("FUIGO_CODE_API_KEY"));
-    assert!(!policy.allows("FUIGO_API_KEY"));
+    let policy = ShellEnvironmentPolicy {
+        exclude: Vec::new(),
+        ..Default::default()
+    };
+    let credentials = [
+        "FUIGO_API_KEY",
+        "FUIGO_CODE_API_KEY",
+        "FLUX_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+    ];
+    let mut input = vars(&[("PATH", "/bin"), ("OTHER_VAR", "keep")]);
+    for name in credentials {
+        input.push((name.to_string(), "secret".into()));
+        input.push((name.to_ascii_lowercase(), "secret".into()));
+    }
+    let env = create_env_from_vars(input, &policy);
+    for name in credentials {
+        assert!(!env.contains_key(name), "{name} reached the child env");
+        assert!(
+            !env.contains_key(&name.to_ascii_lowercase()),
+            "{name} (lowercase) reached the child env"
+        );
+        assert!(!policy.allows(name), "{name} passes the layered-env filter");
+    }
     assert_eq!(env.get("OTHER_VAR").map(String::as_str), Some("keep"));
+    assert_eq!(env.get("PATH").map(String::as_str), Some("/bin"));
 }
 
+/// The credentials are in the PARENT's own environment (a fresh test process, see
+/// [`super::p86_parent_env`]) and the child is spawned through the production entry point the
+/// hooks, stdio MCP servers, static shells and toolset probes use. The old version set the key on
+/// the command, which `env_clear` wipes whatever the denylist says, so it could not fail.
 #[cfg(unix)]
 #[tokio::test]
 async fn default_shell_policy_keeps_credentials_out_of_child_processes() {
+    if super::p86_parent_env("default_shell_policy_keeps_credentials_out_of_child_processes") {
+        return;
+    }
+    let no_excludes = ShellEnvironmentPolicy {
+        exclude: Vec::new(),
+        ..Default::default()
+    };
     let default_policy = ShellEnvironmentPolicy::default();
-    for policy in [Some(&default_policy), None] {
+    for policy in [None, Some(&default_policy), Some(&no_excludes)] {
         let mut cmd = tokio::process::Command::new("/bin/sh");
-        cmd.args([
-            "-c",
-            "test -z \"${FUIGO_API_KEY+x}\" && test -z \"${FUIGO_CODE_API_KEY+x}\"",
-        ]);
-        cmd.env("FUIGO_API_KEY", "stored-test-credential");
-        cmd.env("FUIGO_CODE_API_KEY", "legacy-test-credential");
+        let check = super::P86_CHILD_CHECK;
+        cmd.args(["-c", &format!("{check} && /bin/sh -c '{check}'")]);
         apply_shell_environment_policy(&mut cmd, policy);
         assert!(
             cmd.status().await.unwrap().success(),
-            "the child must not receive either Fuigo credential"
+            "a child (or grandchild) saw a parent credential, or lost the benign variable"
         );
     }
+}
+
+/// P86: a name the config loader registers joins the denylist (case-insensitively), and names that
+/// would break every child or are not variable names are never registered.
+#[test]
+fn p86_registered_names_join_the_denylist_and_core_names_never_do() {
+    super::register_credential_env_names([
+        "P86_UNIT_corp_key",
+        " P86_UNIT_SPACED ",
+        "",
+        "PATH",
+        "user",
+        "P86_UNIT_A=B",
+        "P86_UNIT_\0NUL",
+    ]);
+    assert!(super::is_provider_credential("P86_UNIT_CORP_KEY"));
+    assert!(super::is_provider_credential("p86_unit_corp_key"));
+    // Kept exactly: the configured name (spaces included) is the variable that is read.
+    assert!(super::is_provider_credential(" P86_UNIT_SPACED "));
+    assert!(!super::is_provider_credential("P86_UNIT_SPACED"));
+    // A blank-only name is a valid Unix variable name that `env_key` would read: denied too.
+    super::register_credential_env_names(["   "]);
+    assert!(super::is_provider_credential("   "));
+    assert!(!super::is_provider_credential(""));
+    // Neither platform's core variables can be registered.
+    super::register_credential_env_names(super::CORE_ENV_VARS);
+    for core in super::CORE_ENV_VARS {
+        assert!(!super::is_provider_credential(core), "{core}");
+    }
+    for never in [
+        "PATH",
+        "USER",
+        "user",
+        "P86_UNIT_A=B",
+        "P86_UNIT_A",
+        "P86_UNIT_\0NUL",
+    ] {
+        assert!(!super::is_provider_credential(never), "{never:?}");
+    }
+    let names = super::credential_env_names();
+    assert!(names.iter().any(|name| name == "P86_UNIT_CORP_KEY"));
+    assert!(names.iter().any(|name| name == "FLUX_API_KEY"));
+    assert!(names.iter().any(|name| name == "ANTHROPIC_AUTH_TOKEN"));
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.is_empty() || name.contains('='))
+    );
+    let policy = ShellEnvironmentPolicy {
+        exclude: Vec::new(),
+        ..Default::default()
+    };
+    let env = create_env_from_vars(
+        vars(&[
+            ("P86_UNIT_CORP_KEY", "secret"),
+            (" P86_UNIT_SPACED ", "secret"),
+            ("PATH", "/bin"),
+            ("USER", "me"),
+        ]),
+        &policy,
+    );
+    assert!(!env.contains_key("P86_UNIT_CORP_KEY"));
+    assert!(!env.contains_key(" P86_UNIT_SPACED "));
+    assert_eq!(env.get("PATH").map(String::as_str), Some("/bin"));
+    assert_eq!(env.get("USER").map(String::as_str), Some("me"));
+    // The user's explicit `set` still delivers a registered name.
+    let mut explicit = ShellEnvironmentPolicy::default();
+    explicit
+        .set
+        .insert("P86_UNIT_CORP_KEY".into(), "chosen".into());
+    let env = create_env_from_vars(vars(&[("P86_UNIT_CORP_KEY", "ambient")]), &explicit);
+    assert_eq!(
+        env.get("P86_UNIT_CORP_KEY").map(String::as_str),
+        Some("chosen")
+    );
 }

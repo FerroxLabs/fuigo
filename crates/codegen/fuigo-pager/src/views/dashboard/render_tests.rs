@@ -141,6 +141,7 @@ fn workspace_dashboard_renders_snapshot_member_without_delete_control() {
 /// The empty state with no agents renders the single hint line (never a fully blank screen).
 #[test]
 fn render_empty_state_paints_hint_line() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     render_empty_state(&mut buf, Rect::new(0, 0, 80, 10), &theme, false);
@@ -258,6 +259,7 @@ fn render_dashboard_hover_shows_delete_x_only_for_settled_rows() {
 /// While the local session roster is still loading the empty body shows a loading hint instead of the "no agents" copy.
 #[test]
 fn render_empty_state_paints_loading_hint() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     render_empty_state(&mut buf, Rect::new(0, 0, 80, 10), &theme, true);
@@ -275,6 +277,7 @@ fn render_empty_state_paints_loading_hint() {
 /// The hint still paints on a 1-row area (the `y_offset` collapses to 0 instead of overflowing the rect).
 #[test]
 fn render_empty_state_paints_on_single_row_area() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 1));
     let theme = Theme::current();
     render_empty_state(&mut buf, Rect::new(0, 0, 80, 1), &theme, false);
@@ -294,6 +297,7 @@ fn render_empty_state_paints_on_single_row_area() {
 /// the foreground color.
 #[test]
 fn render_dashboard_session_overlay_paints_bordered_frame_chrome() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     let chrome = render_dashboard_session_overlay(
@@ -372,6 +376,7 @@ fn render_dashboard_session_overlay_paints_bordered_frame_chrome() {
 /// It omits the position indicator and both cycle chips.
 #[test]
 fn render_dashboard_session_overlay_omits_cycle_chips_when_position_is_none() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     let chrome = render_dashboard_session_overlay(
@@ -398,6 +403,7 @@ fn render_dashboard_session_overlay_omits_cycle_chips_when_position_is_none() {
 /// There is nowhere to walk to, so the chips would be dead clicks.
 #[test]
 fn render_dashboard_session_overlay_omits_cycle_chips_when_total_is_one() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     let chrome = render_dashboard_session_overlay(
@@ -427,6 +433,7 @@ fn render_dashboard_session_overlay_omits_cycle_chips_when_total_is_one() {
 /// Background is always `bg_base` (no button fill).
 #[test]
 fn render_dashboard_session_overlay_highlights_hovered_affordance() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let theme = Theme::current();
     let chrome = render_dashboard_session_overlay(
@@ -470,6 +477,7 @@ fn render_dashboard_session_overlay_highlights_hovered_affordance() {
 /// The `[+ New Agent]` header button paints green (`accent_success`) when focused so the cursor is obvious, and dim gray otherwise.
 #[test]
 fn header_new_agent_button_focused_is_green() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let rows: Vec<DashboardRow> = Vec::new();
     let area = Rect::new(0, 0, 120, 1);
@@ -514,6 +522,7 @@ fn header_new_agent_button_focused_is_green() {
 /// The `hovered` flag, which the mouse-move handler flips via `HitArea::update_hover`, drives the styling.
 #[test]
 fn header_new_agent_button_hover_brightens_text() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let rows: Vec<DashboardRow> = Vec::new();
     let area = Rect::new(0, 0, 120, 1);
@@ -575,6 +584,7 @@ fn header_new_agent_button_hover_brightens_text() {
 /// The header must follow `state.cwd` to show where dispatches will run.
 #[test]
 fn header_location_renders_from_staged_cwd() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let rows: Vec<DashboardRow> = Vec::new();
     // Wide area so the path isn't width-truncated.
@@ -601,6 +611,7 @@ fn header_location_renders_from_staged_cwd() {
 /// It reads `[+ New Agent]` otherwise (off, or armed outside a git repo, where the mode can't take effect).
 #[test]
 fn header_button_label_reflects_worktree_mode() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let rows: Vec<DashboardRow> = Vec::new();
     let area = Rect::new(0, 0, 120, 1);
@@ -644,6 +655,7 @@ fn header_button_label_reflects_worktree_mode() {
 /// Tiny areas return `None` so the caller falls back to a chromeless render.
 #[test]
 fn render_dashboard_session_overlay_returns_none_on_tiny_area() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 12, 3));
     let theme = Theme::current();
     let chrome = render_dashboard_session_overlay(
@@ -663,6 +675,7 @@ fn render_dashboard_session_overlay_returns_none_on_tiny_area() {
 /// It populates the affordance hit rects, hands back a full-width `content` rect beneath the header band, and paints NO border frame.
 #[test]
 fn render_dashboard_session_header_paints_padded_top_bar_without_border() {
+    let _theme = crate::theme::cache::pin_theme();
     const PAD_LEFT: u16 = 2;
     const PAD_RIGHT: u16 = 2;
     const PAD_TOP: u16 = 1;
@@ -743,6 +756,7 @@ fn render_dashboard_session_header_paints_padded_top_bar_without_border() {
 /// Narrow-mode rendering truncates labels and still registers row_rects.
 #[test]
 fn render_narrow_mode_registers_row_rects() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     let mut buf = Buffer::empty(Rect::new(0, 0, 30, 5));
     let mut state = DashboardState::new();
@@ -774,6 +788,7 @@ fn render_narrow_mode_registers_row_rects() {
 /// Hover/click never falls into a dead zone between items.
 #[test]
 fn render_rows_hit_rects_leave_no_dead_zones() {
+    let _theme = crate::theme::cache::pin_theme();
     let rows = vec![
         header_test_row(1, RowState::Working, "alpha"),
         header_test_row(2, RowState::Working, "beta"),
@@ -850,6 +865,7 @@ fn render_rows_hit_rects_leave_no_dead_zones() {
 /// A row with a secondary line stays top-aligned (2 lines cannot center in 3 cells).
 #[test]
 fn render_row_centers_title_only_content() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let mut state = DashboardState::new();
 
@@ -874,6 +890,7 @@ fn render_row_centers_title_only_content() {
 /// Empty area is a quick exit.
 #[test]
 fn render_empty_state_zero_area_is_no_op() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 10, 10));
     let theme = Theme::current();
     render_empty_state(&mut buf, Rect::new(0, 0, 0, 0), &theme, false);
@@ -883,6 +900,7 @@ fn render_empty_state_zero_area_is_no_op() {
 /// The no-match branch renders the filter feedback.
 #[test]
 fn render_no_match_paints_filter_hint() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 5));
     let theme = Theme::current();
     render_no_match(
@@ -1021,6 +1039,7 @@ fn popup_rect_collapses_banner_on_tiny_terminal() {
 /// This test paints the chrome plus a "fake agent" pattern in the inner rect and verifies the divider's `─` glyph survives the inner paint.
 #[test]
 fn render_popup_overlay_divider_survives_inner_paint() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 20));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1054,6 +1073,7 @@ fn render_popup_overlay_divider_survives_inner_paint() {
 /// The popup paints a `[✗]` close affordance and registers its hit rect on `DashboardState` so `handle_mouse` can dispatch a popup close on click.
 #[test]
 fn render_popup_overlay_registers_close_hit_rect() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 10));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1087,6 +1107,7 @@ fn render_popup_overlay_registers_close_hit_rect() {
 /// It never leaves the user staring at an empty popup.
 #[test]
 fn render_popup_overlay_small_area_paints_fallback_hint() {
+    let _theme = crate::theme::cache::pin_theme();
     // 4 rows of height (below `picker::render_bordered_frame`'s 5-row minimum) triggers the fallback path
     let mut buf = Buffer::empty(Rect::new(0, 0, 40, 4));
     let theme = Theme::current();
@@ -1115,6 +1136,7 @@ fn render_popup_overlay_small_area_paints_fallback_hint() {
 /// This stops a regression where the footer dropped it behind a feature flag or omitted it during a conditional rebuild.
 #[test]
 fn render_footer_surfaces_shortcuts_link() {
+    let _theme = crate::theme::cache::pin_theme();
     // Trailing shortcuts chip must match the registry primary key.
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
@@ -1150,6 +1172,7 @@ fn render_footer_surfaces_shortcuts_link() {
 /// Its footer must surface the `i search` hint there (and hide it in input mode / when vim is off).
 #[test]
 fn location_picker_footer_shows_i_hint_in_vim_nav() {
+    let _theme = crate::theme::cache::pin_theme();
     use super::super::state::LocationPickerState;
     let make = || {
         LocationPickerState::new(
@@ -1229,6 +1252,7 @@ fn dashboard_shortcuts_help_action_opens_modal() {
 /// RenameDraft sanitation keeps control characters out of both render paths.
 #[test]
 fn sanitized_rename_draft_is_safe_in_both_render_paths() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     let id = DashboardRowId::TopLevel(AgentId(7));
     let row = DashboardRow {
@@ -1292,6 +1316,7 @@ fn sanitized_rename_draft_is_safe_in_both_render_paths() {
 /// Rename rendering preserves row chrome and title alignment in both layouts.
 #[test]
 fn render_rename_overlay_aligns_with_title_and_keeps_icon() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     let id = DashboardRowId::TopLevel(AgentId(7));
     let row = DashboardRow {
@@ -1393,6 +1418,7 @@ fn render_rename_overlay_aligns_with_title_and_keeps_icon() {
 
 #[test]
 fn rename_viewport_handles_long_unicode_in_wide_and_narrow_rows() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 
@@ -1485,6 +1511,7 @@ fn rename_viewport_handles_long_unicode_in_wide_and_narrow_rows() {
 /// The text row contains the `❯` prefix.
 #[test]
 fn render_dispatch_paints_rounded_box_chrome() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 3));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1505,6 +1532,7 @@ fn render_dispatch_paints_rounded_box_chrome() {
 
 #[test]
 fn render_search_mode_uses_textarea_cursor_not_text_end() {
+    let _theme = crate::theme::cache::pin_theme();
     let area = Rect::new(0, 0, 40, 3);
     let mut buffer = Buffer::empty(area);
     let theme = Theme::current();
@@ -1523,6 +1551,7 @@ fn render_search_mode_uses_textarea_cursor_not_text_end() {
 
 #[test]
 fn render_search_mode_clips_prefix_and_cursor_at_widths_one_through_nine() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     for width in 1..=9 {
         let full = Rect::new(0, 0, 14, 1);
@@ -1551,6 +1580,7 @@ fn render_search_mode_clips_prefix_and_cursor_at_widths_one_through_nine() {
 
 #[test]
 fn render_dispatch_keeps_generic_paste_preview_but_suppresses_image_preview() {
+    let _theme = crate::theme::cache::pin_theme();
     let area = Rect::new(0, 17, 80, 3);
     let overlay = Rect::new(0, 0, 80, 17);
     let theme = Theme::current();
@@ -1583,6 +1613,7 @@ fn render_dispatch_keeps_generic_paste_preview_but_suppresses_image_preview() {
 /// On a 1-row rect the dispatch falls back to a bare `❯ {text}` line (no chrome) so the input stays usable on terminals too short for the box.
 #[test]
 fn render_dispatch_falls_back_to_single_line_on_short_area() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 60, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1608,6 +1639,7 @@ fn render_dispatch_falls_back_to_single_line_on_short_area() {
 /// The dispatch input always spawns a new session.
 #[test]
 fn render_dispatch_placeholder_paints_only_when_unfocused() {
+    let _theme = crate::theme::cache::pin_theme();
     // Unfocused input (list focused): placeholder shows
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
     let theme = Theme::current();
@@ -1624,6 +1656,7 @@ fn render_dispatch_placeholder_paints_only_when_unfocused() {
 /// Focused input (the default) suppresses the placeholder: the visible caret is the affordance; the text area stays clear.
 #[test]
 fn render_dispatch_placeholder_hidden_when_focused() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1647,6 +1680,7 @@ fn render_dispatch_placeholder_hidden_when_focused() {
 /// This is the regression guard for the "stuck replying to the same agent" trap.
 #[test]
 fn render_dispatch_placeholder_stays_new_session_when_row_selected() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1672,6 +1706,7 @@ fn render_dispatch_placeholder_stays_new_session_when_row_selected() {
 /// The placeholder itself stays the plain new-session text.
 #[test]
 fn render_dispatch_paints_feedback_badge_on_top_border() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -1705,6 +1740,7 @@ fn render_dispatch_paints_feedback_badge_on_top_border() {
 /// No `✗` is prepended (regression guard for the `✗ ✓ …` doubling).
 #[test]
 fn feedback_badge_renders_verbatim_in_neutral_color() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 3));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -2061,6 +2097,7 @@ fn idle_overflow_is_focusable_when_capped() {
 /// The pinned rows are NOT counted in the state-group headers.
 #[test]
 fn render_rows_emits_pinned_section_at_top() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 30));
     let mut state = DashboardState::new();
     assert_eq!(state.grouping, Grouping::State);
@@ -2103,6 +2140,7 @@ fn render_rows_emits_pinned_section_at_top() {
 /// A textless divider (a horizontal rule, no label) separates the pinned block from the rest; no state headers are emitted either.
 #[test]
 fn render_rows_groups_off_uses_divider_not_pinned_header() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 30));
     let mut state = DashboardState::new();
     state.grouping = Grouping::Directory; // groups off (Ctrl+G)
@@ -2144,6 +2182,7 @@ fn render_rows_groups_off_uses_divider_not_pinned_header() {
 /// The previous full-row `── Label (N) ────────────────` chrome was dropped (the trailing dashes felt visually obnoxious).
 #[test]
 fn render_rows_emits_group_headers_in_state_order() {
+    let _theme = crate::theme::cache::pin_theme();
     // Rows are 3 cells tall, headers 2 cells; 5 of each needs 25 cells of vertical room
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 30));
     let mut state = DashboardState::new();
@@ -2207,6 +2246,7 @@ fn render_rows_emits_group_headers_in_state_order() {
 /// The row content is byte-for-byte identical whether or not the scrollbar shows (no layout shift).
 #[test]
 fn render_rows_scrollbar_is_thick_overlay_without_layout_shift() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     // 6 working rows: 1 header (2 cells) + 6 rows (3 cells) = 20 cells
     let rows: Vec<_> = (0..6)
@@ -2273,6 +2313,7 @@ fn render_rows_scrollbar_is_thick_overlay_without_layout_shift() {
 /// - Right edge: age column (`{n}s/m/h`).
 #[test]
 fn render_row_two_line_layout_paints_title_and_secondary() {
+    let _theme = crate::theme::cache::pin_theme();
     use std::path::PathBuf;
     use std::time::SystemTime;
     let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
@@ -2354,6 +2395,7 @@ fn render_row_two_line_layout_paints_title_and_secondary() {
 /// Both states are pinned in one test so a regression that flipped either direction would fail.
 #[test]
 fn render_row_selected_brightens_secondary_text() {
+    let _theme = crate::theme::cache::pin_theme();
     use std::path::PathBuf;
     use std::time::SystemTime;
     let theme = Theme::current();
@@ -2417,6 +2459,7 @@ fn render_row_selected_brightens_secondary_text() {
 /// The `[needs input]` badge is suppressed, and the `Pending:` subtitle prefix is painted yellow.
 #[test]
 fn render_row_needs_input_yellow_blink_no_badge_pending_prefix() {
+    let _theme = crate::theme::cache::pin_theme();
     use std::path::PathBuf;
     use std::time::SystemTime;
     let theme = Theme::current();
@@ -2501,6 +2544,7 @@ fn render_row_needs_input_yellow_blink_no_badge_pending_prefix() {
 /// The `New session #<id>` fallback title is painted two-tone: the `New session` head in the primary colour and the ` #id` suffix dim.
 #[test]
 fn render_row_new_session_fallback_label_is_two_tone() {
+    let _theme = crate::theme::cache::pin_theme();
     use std::path::PathBuf;
     use std::time::SystemTime;
     let mut buf = Buffer::empty(Rect::new(0, 0, 100, 2));
@@ -2552,6 +2596,7 @@ fn render_row_new_session_fallback_label_is_two_tone() {
 /// The title-only row centers its title, so the title sits 3 rows below the header in this fixture.
 #[test]
 fn render_group_header_leads_with_disclosure_glyph() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
     let mut state = DashboardState::new();
     let rows = vec![header_test_row(1, RowState::Idle, "session 019e5d9f")];
@@ -2597,6 +2642,7 @@ fn render_group_header_leads_with_disclosure_glyph() {
 /// The `(count)` parenthesis pattern is the specific fingerprint for a state header.
 #[test]
 fn render_rows_skips_headers_when_grouping_is_directory() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let mut state = DashboardState::new();
     state.grouping = Grouping::Directory;
@@ -2627,6 +2673,7 @@ fn render_rows_skips_headers_when_grouping_is_directory() {
 /// The test looks for `Working (` instead of `── Working` as the header fingerprint.
 #[test]
 fn render_rows_skips_headers_when_filter_is_state() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 10));
     let mut state = DashboardState::new();
     state.filter = Filter::State(RowState::Working);
@@ -2656,6 +2703,7 @@ fn render_rows_skips_headers_when_filter_is_state() {
 /// A `Working` parent followed by `Completed` and `Failed` subagents must emit only the parent's `Working` header, not extra ones for the subagents.
 #[test]
 fn render_rows_subagents_do_not_trigger_their_own_headers() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     let mut buf = Buffer::empty(Rect::new(0, 0, 80, 20));
     let mut state = DashboardState::new();
@@ -2706,6 +2754,7 @@ fn render_rows_subagents_do_not_trigger_their_own_headers() {
 /// Narrow mode emits a compact `Done 12` header (no bullet, no parens, no trailing rule; narrow terminals don't have the width budget).
 #[test]
 fn render_narrow_rows_emits_compact_group_headers() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 30, 10));
     let mut state = DashboardState::new();
     let rows = vec![
@@ -2736,6 +2785,7 @@ fn render_narrow_rows_emits_compact_group_headers() {
 /// Here the second group's "Idle" header lands below a 5-line viewport, so it is off-screen at offset 0 and must be scrolled in once selected.
 #[test]
 fn render_narrow_viewport_follows_selected_section_header() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut rows = Vec::new();
     for i in 0..6 {
         rows.push(header_test_row(i + 1, RowState::Working, "wrk"));
@@ -2785,6 +2835,7 @@ fn render_narrow_viewport_follows_selected_section_header() {
 /// The default-empty buffer would otherwise already show the right colour.
 #[test]
 fn render_dashboard_paints_full_area_background() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 20);
     let mut buf = Buffer::empty(area);
@@ -2858,6 +2909,7 @@ fn cwd_basename() -> String {
 /// The header pairs the location label (cwd and git info) on the left with right-aligned state-count chips.
 #[test]
 fn render_header_paints_label_and_state_chips() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     // Wide rect so the location label never truncates regardless of how deep the test machine's checkout path is
     let area = Rect::new(0, 0, 400, 1);
@@ -2901,6 +2953,7 @@ fn render_header_paints_label_and_state_chips() {
 /// The header records a click target for the location label so the mouse handler can open the location picker.
 #[test]
 fn render_header_sets_location_click_target() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 120, 1);
     let mut buf = Buffer::empty(area);
@@ -2915,6 +2968,7 @@ fn render_header_sets_location_click_target() {
 /// On hover the location label underlines only its text; the leading inset space (and other whitespace padding) stays un-underlined.
 #[test]
 fn render_header_hover_underlines_only_text() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 400, 1);
     let mut buf = Buffer::empty(area);
@@ -3008,6 +3062,7 @@ fn underline_location_on_hover_excludes_branch_icon() {
 /// The location picker modal paints its title and candidate rows and records the content hit areas for mouse handling.
 #[test]
 fn render_location_picker_shows_candidates() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = Buffer::empty(area);
@@ -3044,10 +3099,13 @@ fn render_location_picker_shows_candidates() {
 /// In a git repo the path row paints a worktree toggle reflecting the modal's `worktree_mode`, and records its hit rect for click handling.
 #[test]
 fn render_location_picker_shows_worktree_toggle_in_repo() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     // A temp dir with a `.git` child so the toggle is eligible (hermetic, unlike depending on the test's real cwd being a repo)
-    let repo = std::env::temp_dir().join("fuigo-loc-wt-toggle-repo-test");
+    // It is this test's own directory: under a fixed name in the shared temp dir, another suite on the host finishing this same test removed `.git` mid-render ("off-state button missing", P78).
+    let repo_dir = tempfile::tempdir().expect("temp dir");
+    let repo = repo_dir.path().to_path_buf();
     std::fs::create_dir_all(repo.join(".git")).expect("mk .git");
     let mut modal =
         LocationPickerState::new(vec![], repo.clone(), std::collections::HashMap::new());
@@ -3095,12 +3153,12 @@ fn render_location_picker_shows_worktree_toggle_in_repo() {
         Some(theme.text_primary),
         "hovered button must brighten the label text",
     );
-    let _ = std::fs::remove_dir_all(&repo);
 }
 
 /// Outside a git repo the worktree toggle is hidden (and no hit rect is recorded) so dispatch proceeds as a normal session.
 #[test]
 fn render_location_picker_hides_worktree_toggle_outside_repo() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     let mut modal = LocationPickerState::new(
@@ -3124,6 +3182,7 @@ fn render_location_picker_hides_worktree_toggle_outside_repo() {
 /// Worktree directories render a styled `worktree: <name>` badge.
 #[test]
 fn render_location_picker_tags_worktree() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = Buffer::empty(area);
@@ -3148,6 +3207,7 @@ fn render_location_picker_tags_worktree() {
 /// Truncation priority: the directory name (label) is shown in full and the path (right label) is truncated first.
 #[test]
 fn render_location_picker_truncates_path_not_label() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 54, 20);
     let mut buf = Buffer::empty(area);
@@ -3176,6 +3236,7 @@ fn render_location_picker_truncates_path_not_label() {
 /// The path input echoes what the user types, even when it matches no candidate (the list then shows "No matches").
 #[test]
 fn render_location_picker_echoes_typed_path() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let area = Rect::new(0, 0, 80, 24);
     let mut buf = Buffer::empty(area);
@@ -3201,6 +3262,7 @@ fn render_location_picker_echoes_typed_path() {
 /// Zero-count states are suppressed.
 #[test]
 fn render_header_suppresses_zero_count_chips() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
     let mut state = DashboardState::new();
@@ -3230,6 +3292,7 @@ fn render_header_suppresses_zero_count_chips() {
 /// Inactive (roster-only) rows get no header chip; only the section header carries their count.
 #[test]
 fn render_header_has_no_inactive_chip() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let mut buf = Buffer::empty(Rect::new(0, 0, 120, 1));
     let mut state = DashboardState::new();
@@ -3259,6 +3322,7 @@ fn render_header_has_no_inactive_chip() {
 /// The left title is the current location (cwd display), shown with and without agent rows, mirroring the session views' top-bar location line.
 #[test]
 fn render_header_shows_location_label() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     // Wide rect so the location label never truncates regardless of how deep the test machine's checkout path is
     let area = Rect::new(0, 0, 400, 1);
@@ -3289,6 +3353,7 @@ fn render_header_shows_location_label() {
 /// It never paints over the chips or the `[+ New Agent]` button.
 #[test]
 fn render_header_location_label_never_overlaps_chips() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     // Narrow enough that any realistic checkout path overflows the label budget once three chips and the button are reserved
     let area = Rect::new(0, 0, 70, 1);
@@ -3313,6 +3378,7 @@ fn render_header_location_label_never_overlaps_chips() {
 /// Footer chips use the shared `ShortcutsBar` styling (`Key:label` separated by ` │ `).
 #[test]
 fn render_footer_uses_shared_shortcuts_bar_styling() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let state = DashboardState::new();
@@ -3343,6 +3409,7 @@ fn render_footer_uses_shared_shortcuts_bar_styling() {
 /// The ↑/↓ nav chip is no longer shown (dropped to save space), and no send / send+open chip is shown because there's nothing to send.
 #[test]
 fn render_footer_default_compact_hints() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let state = DashboardState::new();
@@ -3409,6 +3476,7 @@ fn dispatch_text_rows_grows_with_newlines() {
 /// Neither the vim `j/k` nor the arrow nav is advertised; the action chips (open) remain.
 #[test]
 fn render_footer_list_focused_vim_on_omits_nav() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -3442,6 +3510,7 @@ fn render_footer_list_focused_vim_on_omits_nav() {
 /// Overview list focused with vim off: the nav chip is likewise dropped (no arrow nav advertised), saving bottom-bar space for the action chips.
 #[test]
 fn render_footer_list_focused_vim_off_omits_nav() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -3468,6 +3537,7 @@ fn render_footer_list_focused_vim_off_omits_nav() {
 
 #[test]
 fn render_footer_peek_mode_shows_peek_hints() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let state = DashboardState::new();
@@ -3505,6 +3575,7 @@ fn render_footer_peek_mode_shows_peek_hints() {
 /// Peek footer flips to send affordances once the reply has text and is focused: `enter:send · ctrl+s:send+open · esc:back`.
 #[test]
 fn render_footer_peek_with_reply_text_shows_send() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_vim_mode(false);
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
@@ -3545,6 +3616,7 @@ fn render_footer_peek_with_reply_text_shows_send() {
 /// Vim with an unfocused peek: Enter focuses the reply (`input`), not open/send.
 #[test]
 fn render_footer_vim_unfocused_peek_enter_shows_input() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_vim_mode(true);
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
@@ -3595,6 +3667,7 @@ fn render_footer_vim_unfocused_peek_enter_shows_input() {
 /// Non-vim unfocused peek with a typed draft: Esc clears the draft first (`back`), not New Agent.
 #[test]
 fn render_footer_peek_unfocused_with_draft_esc_is_back() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_vim_mode(false);
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
@@ -3643,6 +3716,7 @@ fn render_footer_peek_unfocused_with_draft_esc_is_back() {
 /// None of the non-answer states show `answer`.
 #[test]
 fn render_footer_peek_question_focus_flips_answer_vs_open() {
+    let _theme = crate::theme::cache::pin_theme();
     crate::appearance::cache::set_vim_mode(false);
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
@@ -3766,6 +3840,7 @@ fn render_footer_peek_question_focus_flips_answer_vs_open() {
 /// Every row's detail view is the answer surface for any user-input state, including `NeedsInput`.
 #[test]
 fn render_footer_row_selected_empty_prompt_shows_enter_open() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -3799,6 +3874,7 @@ fn render_footer_row_selected_empty_prompt_shows_enter_open() {
 
 #[test]
 fn render_footer_inactive_row_shows_delete() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
 
@@ -3859,6 +3935,7 @@ fn render_footer_inactive_row_shows_delete() {
 
 #[test]
 fn render_footer_stop_label_follows_state() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
     let mut state = DashboardState::new();
@@ -3923,6 +4000,7 @@ fn render_footer_stop_label_follows_state() {
 /// It omits the stop chip (no session under a header).
 #[test]
 fn render_footer_section_selected_shows_toggle_no_stop() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
 
@@ -3978,6 +4056,7 @@ fn render_footer_section_selected_shows_toggle_no_stop() {
 /// The generic row chips (`open` / `stop`) would lie: Enter toggles the section, and there's no session to stop.
 #[test]
 fn render_footer_list_focused_section_shows_toggle() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
     let mut state = DashboardState::new();
@@ -4019,6 +4098,7 @@ fn render_footer_list_focused_section_shows_toggle() {
 /// The collapse toggle is gone (it only fires on an empty prompt).
 #[test]
 fn render_footer_section_selected_with_prompt_shows_dispatch_chips() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
     let mut state = DashboardState::new();
@@ -4057,6 +4137,7 @@ fn render_footer_section_selected_with_prompt_shows_dispatch_chips() {
 /// Rename mode shows only save and cancel actions.
 #[test]
 fn render_footer_rename_shows_save_and_cancel() {
+    let _theme = crate::theme::cache::pin_theme();
     use crate::app::agent::AgentId;
     let theme = Theme::current();
     let registry = crate::actions::ActionRegistry::defaults();
@@ -4094,6 +4175,7 @@ fn render_footer_rename_shows_save_and_cancel() {
 /// The footer surfaces both chips so the chord is discoverable.
 #[test]
 fn render_footer_row_selected_with_prompt_shows_send_and_send_open() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -4128,6 +4210,7 @@ fn render_footer_row_selected_with_prompt_shows_send_and_send_open() {
 /// The stop chip is suppressed because the button has no underlying session to close.
 #[test]
 fn render_footer_button_focused_with_prompt_shows_send_and_send_open_no_stop() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -4167,6 +4250,7 @@ fn render_footer_button_focused_with_prompt_shows_send_and_send_open_no_stop() {
 /// Multiline compose swaps the submit chord in the footer, matching how Enter and Shift/Alt+Enter swap in the agent view's keybar.
 #[test]
 fn render_footer_multiline_mode_send_uses_shift_or_alt_enter() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -4202,6 +4286,7 @@ fn render_footer_multiline_mode_send_uses_shift_or_alt_enter() {
 /// Empty draft under multiline: create is on the submit chord, not bare Enter.
 #[test]
 fn render_footer_multiline_empty_create_uses_shift_or_alt_enter() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -4233,6 +4318,7 @@ fn render_footer_multiline_empty_create_uses_shift_or_alt_enter() {
 /// Delete-confirm armed while the input is focused routes through `ShortcutsBar::with_pending` ("press Ctrl+x again to delete").
 #[test]
 fn render_footer_delete_confirm_uses_pending_hint() {
+    let _theme = crate::theme::cache::pin_theme();
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
     let mut state = DashboardState::new();
@@ -4264,6 +4350,7 @@ fn render_footer_delete_confirm_uses_pending_hint() {
 /// Regular hints render instead (e.g. after a mouse click moved the selection without a keypress to disarm the confirm).
 #[test]
 fn render_footer_expired_delete_confirm_shows_regular_hints() {
+    let _theme = crate::theme::cache::pin_theme();
     use std::time::{Duration, Instant};
     let mut buf = Buffer::empty(Rect::new(0, 0, 200, 1));
     let theme = Theme::current();
@@ -4299,6 +4386,7 @@ fn render_footer_expired_delete_confirm_shows_regular_hints() {
 /// The header counts top-level rows only.
 #[test]
 fn render_header_counts_top_level_rows_only() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let mut buf = Buffer::empty(Rect::new(0, 0, 160, 1));
     let mut state = DashboardState::new();

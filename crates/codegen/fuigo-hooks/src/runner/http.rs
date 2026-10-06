@@ -1013,6 +1013,31 @@ mod tests {
         }
     }
 
+    /// P70a follow-up (decision after Astra f1 #2, f2 #6, f3 #2, f8 #2, f9 #1, f10 #1): an HTTP hook URL is NOT filled
+    /// with the key the user saved, directly or through its `env` map. A URL is an identifier that Fuigo and its HTTP
+    /// stack record (`HttpInfo`, validation and DNS errors, the connector's own debug log), so the reference stays as
+    /// written; only an exported key expands there, as before. (A command hook does get the key: `runner::command`.)
+    #[tokio::test]
+    async fn run_http_hook_url_is_not_filled_with_the_saved_key() {
+        crate::test_support::install_p70a_key_resolver();
+        let key = crate::test_support::P70A_TEST_KEY;
+        let json = serde_json::json!({ "hooks": { "PreToolUse": [ { "hooks": [
+            { "type": "http", "url": "https://10.0.0.1/hook?k=${FUIGO_API_KEY}" },
+            { "type": "http", "url": "https://10.0.0.1/hook?k=${TOKEN}", "env": { "TOKEN": "${FUIGO_API_KEY}" } },
+        ] } ] } })
+        .to_string();
+        let (specs, errors) = crate::config::parse_hook_file_with_key_naming(&json, std::path::Path::new("/tmp/p70a-http-hooks.json"), true);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(specs.len(), 2);
+        for spec in &specs {
+            let (result, _, info, _) =
+                run_http_hook(spec, &http_pre_tool_use_envelope(), &http_test_ctx(), GateKind::Tool).await;
+            let info = info.expect("HttpInfo is present on the SSRF block path");
+            assert_eq!(info.expanded_url, "https://10.0.0.1/hook?k=${FUIGO_API_KEY}", "{}", spec.name);
+            assert!(!format!("{info:?} {result:?}").contains(key), "the saved key reached an HTTP hook record");
+        }
+    }
+
     #[tokio::test]
     async fn run_http_hook_uses_post_expansion_url_for_ssrf() {
         let mut extra_env = std::collections::HashMap::new();

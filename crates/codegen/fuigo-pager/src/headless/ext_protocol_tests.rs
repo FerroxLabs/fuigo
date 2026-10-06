@@ -638,3 +638,66 @@ fn headless_memory_flush_notifications_decode() {
         _ => panic!("expected MemoryFlushCompleted"),
     }
 }
+
+/// Real leader bytes through the real ACP decode path into the headless handler: the warn log must appear.
+#[cfg(unix)]
+#[tokio::test]
+async fn real_leader_version_mismatch_reaches_headless_handler() {
+    let mut leader =
+        crate::acp::leader_bridge::real_leader_harness::bridge_to_real_leader("0.1.157", "0.1.150")
+            .await;
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), leader.bridge.channel.rx.recv())
+        .await
+        .expect("version-mismatch notice never reached the headless pager: the ACP decoder rejected the wire method")
+        .expect("bridge channel closed");
+    let fuigo_acp_lib::AcpClientMessageBox::ExtNotification(notif) = msg.boxed() else {
+        panic!("expected an ExtNotification");
+    };
+    let mut is_none = false;
+    let logs = capture_logs(|| {
+        is_none = matches!(handle_ext_notification(&notif), ExtEvent::None);
+    });
+    assert!(is_none, "version mismatch is log-only in headless");
+    let banner = crate::glyphs::sanitize_toast_message(
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart fuigo to match",
+    );
+    assert!(logs.contains(banner.as_ref()), "log carries the exact banner: {logs}");
+}
+
+#[test]
+fn headless_version_mismatch_accepts_prefixed_method() {
+    let notif = make_raw_ext_notif(
+        "_fuigo/leader/version_mismatch",
+        serde_json::json!({ "clientVersion": "0.1.157", "leaderVersion": "0.1.150" }),
+    );
+    let logs = capture_logs(|| {
+        assert!(matches!(handle_ext_notification(&notif), ExtEvent::None));
+    });
+    let banner = crate::glyphs::sanitize_toast_message(
+        "⚠ Version mismatch: client 0.1.157, leader 0.1.150. Restart fuigo to match",
+    );
+    assert!(logs.contains(banner.as_ref()), "{logs}");
+}
+
+/// P133: a refused reference to the saved API key reaches headless output, as a notice line on stderr for `plain` and a
+/// typed line for `streaming-json`; it used to reach only the log.
+#[test]
+fn headless_config_notice_decodes_and_is_worded_as_a_warning() {
+    use crate::headless::reducer::Lifecycle;
+
+    let notice = make_ext_notif(
+        "fuigo/session/update",
+        serde_json::json!({
+            "sessionUpdate": "config_notice",
+            "message": "/w/repo/.fuigo/config.toml: `mcp_servers.s.env.T` names FUIGO_API_KEY, the saved API key, and was ignored."
+        }),
+    );
+    match handle_ext_notification(&notice) {
+        ExtEvent::Lifecycle(l @ Lifecycle::ConfigNotice { .. }) => {
+            let line = l.plain_message();
+            assert!(line.starts_with("warning: /w/repo/.fuigo/config.toml"), "{line}");
+            assert!(line.contains("FUIGO_API_KEY"), "{line}");
+        }
+        _ => panic!("expected ConfigNotice"),
+    }
+}

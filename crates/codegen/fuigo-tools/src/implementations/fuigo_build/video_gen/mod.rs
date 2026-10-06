@@ -754,7 +754,7 @@ fn is_http_url(raw: &str) -> bool {
 /// client may resolve its credential from a live provider at operation time.
 ///
 /// [`ImageGenConfig`]: super::image_gen::ImageGenConfig
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub enum VideoGenConfig {
     #[default]
     Disabled,
@@ -774,6 +774,25 @@ pub enum VideoGenConfig {
         /// instead of being silently dropped.
         zdr_restricted: bool,
     },
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for VideoGenConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disabled => f.write_str("Disabled"),
+            Self::Enabled { api_key: _, base_url, extra_headers, zdr_video_output_s3, tier_restricted, zdr_restricted } => f
+                .debug_struct("Enabled")
+                .field("api_key", &"<redacted>")
+                .field("base_url", &fuigo_auth::redact_url(base_url))
+                .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+                .field("zdr_video_output_s3", zdr_video_output_s3)
+                .field("tier_restricted", tier_restricted)
+                .field("zdr_restricted", zdr_restricted)
+                .finish(),
+        }
+    }
 }
 
 impl VideoGenConfig {

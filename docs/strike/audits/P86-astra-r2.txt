@@ -1,0 +1,43 @@
+# P86 Astra round 2 -- final report (gpt-6-astra, read-only; brief: P86-astra-r2-brief.md; raw transcript on Hetzner /root/fuigo-builds/p86/logs/astra/)
+
+Audited `84569ea8..8f9a1ea3` read-only. No Cargo commands or Rust tests were run. The worktree remains clean. Credential leaks and an explicit-key regression remain.
+
+1. **MEDIUM — Persistent mode removes explicitly supplied credentials.**  
+   [shell_state.rs:291](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:291), [terminal.rs:850](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:850).  
+   `[shell_environment_policy] set = { FLUX_API_KEY = "…" }` supplies the key when spawning, but `after_restore` then removes it unconditionally. Persistent commands lose the documented explicit override. A source-derived Zsh wrapper probe confirmed the child received no key. **Tests miss this:** the explicit-delivery assertion uses the default, non-persistent backend. Preserve explicit overrides across restoration.
+
+2. **MEDIUM — Scrubbed credentials remain readable in snapshot buffers.**  
+   [shell_state.rs:502](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:502), [shell_state.rs:167](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:167).  
+   After registering a previously captured key, the wrapper removes its named variable but retains the entire old snapshot in `$snap`. A model command can print and decode that snapshot. Zsh additionally retains decoded `fuigo_snap_ENV_VARS_B64`. The Zsh probe confirmed `$snap` remained readable after the named key disappeared. Furthermore, replay restores credential exports before subsequent `base64` decoder processes run; the later scrub cannot prevent that inheritance. **The new late-registration test misses these paths:** it checks only the original variable in the user command and its grandchild.
+
+3. **MEDIUM — Readonly variables defeat the scrub or abort commands.**  
+   [shell_state.rs:281](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:281), [shell_state.rs:291](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:291).  
+   Capture an exported, readonly `CORP_KEY` before registering it. Bash preserves the readonly attribute in the snapshot; the new `unset … || true` ignores failure, leaving the credential available to the user command and children. The focused Bash scrub probe reproduced this. Zsh instead terminated with status 1 before executing the user command. A readonly exported `__fuigo_env_name` also survives the Bash cleanup and reaches children; Zsh aborts on its assignment. **No added test covers readonly credentials or the loop variable.**
+
+4. **MEDIUM — Restored `IFS` can bypass Bash credential enumeration.**  
+   [shell_state.rs:277](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:277).  
+   A snapshot containing `export IFS=:` makes `for … in $(builtin compgen -e)` treat the newline-separated names as one word. Credential patterns consequently miss individual variables. The focused probe passed the fake credential to a child. The dump scrub uses the same enumeration, so subsequent snapshots can retain it too. **Tests use ordinary `IFS`.** Enumeration must be independent of restored field-splitting settings.
+
+5. **MEDIUM — Campaign-provided credentials retain the reload race.**  
+   [reloader.rs:292](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/config/reloader.rs:292), [config.rs:732](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/agent/config.rs:732).  
+   One edit adds a top-level MCP server and an active campaign containing `[campaigns.model.corp] env_key = "CORP_KEY"`. Early registration scans only the raw top-level model/provider tables. Campaign patches are applied by the later effective-config load, after `McpServersChanged` has been sent. A receiver can therefore spawn the server before registration. **Existing tests cover neither campaign registration nor notification ordering.** Register the effective configuration before publishing restart notifications.
+
+6. **MEDIUM — Blank-only names remain a registration/lookup mismatch.**  
+   [shell_env_policy.rs:219](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:219), [config.rs:137](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/agent/config.rs:137).  
+   `env_key = "   "` is accepted and read using that exact name, while registration rejects it. Such an environment name is valid on Unix; a fake-only probe confirmed Bash passes it through to a grandchild. **Tests exercise registration rejection, not credential resolution followed by spawning.** Reject these names consistently at lookup/config parsing, or register their exact identity.
+
+7. **LOW — The rc-only fixture is not guaranteed to be rc-only.**  
+   [shell_env_policy.rs:459](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:459).  
+   The fresh test process inherits the runner’s environment without removing `GROQ_API_KEY`. If the runner already exports it, login layering’s independent “already present in parent” check can mask missing rc filtering. The sentinel and `.bash_profile` corrections are useful, but **no assertion establishes the key’s absence from the parent**. Remove that variable explicitly when constructing the fixture.
+
+The full Zsh wrapper parsed successfully. Normal `allexport` and `nounset` probes preserved the selected exit status and kept `__fuigo_env_name` out of child environments. An empty configured registry cannot produce an empty pattern because the built-in provider groups remain populated.
+
+**Pre-existing platform limitation:** Apple Bash 3.2 rejects the dump’s `case` inside command substitution at [shell_state.rs:114](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:114). I reproduced this against both the base and candidate; it is not introduced by P86. The read-only sandbox also blocked serializer temporary files, so the probes do not establish complete snapshot round-trip success. Current dump scripts exclude `errexit`; forced restoration of it did not establish any new P86-specific failure.
+
+The provider registry wiring, exact nonblank names, core-variable protection, and explicit hook/MCP/LSP overrides look correct. No lock-poisoning panic, shell-pattern injection, or demonstrated ordinary-load performance defect was found. Project config does not support model settings, so its missing registration call alone is not a demonstrated credential defect.
+
+Release selections resolve to **9 P86 unit tests, 2 default-policy tests, 1 config integration test, 7 extra-ca redirect tests, 1 sampler redirect test, and 6 MCP HTTP-policy tests**—source counts, not execution results. The shell credential probes force Bash and do not qualify Zsh.
+
+No checked-in first-party hook, MCP server, or plugin dependency on these inherited keys was found. The nested [`fuigo agent leader` spawn](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/leader/mod.rs:1734) can require inherited credentials for environment-only authentication; it remains outside this scrub path.
+
+DO-NOT-LAND

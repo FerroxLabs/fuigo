@@ -11,20 +11,22 @@ use crate::app::PagerArgs;
 pub fn run(shell: Shell) {
     // Ensure the script always uses the public "fuigo" name (matches historical behavior and what the installers and docs expect)
     let mut cmd = PagerArgs::command().name("fuigo");
+    // Always generate into memory: clap_complete `expect`s on its writer, so handing it stdout
+    // panics (SIGABRT under `panic = "abort"`) when `fuigo completions bash | …` lost its reader.
+    // The buffered script then goes out best-effort like every other CLI print.
+    let mut buf = Vec::new();
+    generate(shell, &mut cmd, "fuigo", &mut buf);
     if shell != Shell::Zsh {
-        generate(shell, &mut cmd, "fuigo", &mut std::io::stdout());
+        let _ = fuigo_tty_utils::best_effort_stdout::print_bytes(&buf);
         return;
     }
     // zsh needs post-processing (see fix_zsh_root_prompt_positional).
-    let mut buf = Vec::new();
-    generate(shell, &mut cmd, "fuigo", &mut buf);
     match String::from_utf8(buf) {
-        Ok(script) => print!("{}", fix_zsh_root_prompt_positional(&script)),
+        Ok(script) => fuigo_tty_utils::cli_print!("{}", fix_zsh_root_prompt_positional(&script)),
         // clap_complete output is generated from Rust strings, so this arm is unreachable in practice
         // But the installers run this command, so emit the unmodified script rather than panic
         Err(e) => {
-            use std::io::Write as _;
-            let _ = std::io::stdout().write_all(e.as_bytes());
+            let _ = fuigo_tty_utils::best_effort_stdout::print_bytes(e.as_bytes());
         }
     }
 }

@@ -616,6 +616,8 @@ pub(crate) struct PendingTurnEnd {
     /// Typed kind of a failed stop from the broadcast, parsed at the wire
     /// ingress (`MaxTokensTruncation` picks the truncation copy).
     pub error_kind: Option<crate::app::error_display::WireErrorType>,
+    /// The broadcast's typed verdicts for a failed stop (`None` from an older shell).
+    pub verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     /// When the broadcast arrived; the reconcile fires after
     /// [`super::dispatch::TURN_END_RECONCILE_GRACE`].
     pub received_at: std::time::Instant,
@@ -729,6 +731,8 @@ pub(crate) struct ReplayRebuiltState {
     pub(crate) workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
     pub(crate) workflow_run_revisions: std::collections::HashMap<String, u64>,
     pub(crate) cleared_workflow_runs: std::collections::HashSet<String>,
+    /// The ids of the hook events the taken rows (and the tracker's held batches) show; see `AgentView::applied_hook_event_ids`.
+    pub(crate) applied_hook_event_ids: std::collections::HashSet<String>,
 }
 /// Lifecycle of the inline plugin CTA. `Hidden`/`Matched` cover the idle and
 /// prompt-matched states; `Installing`/`Installed`/`Error` cover an in-TUI
@@ -898,6 +902,14 @@ pub struct AgentView {
     /// highwater via `max` so later ordinary updates on the cursor tail stay
     /// deduped.
     pub last_applied_fuigo_event_seq: Option<u64>,
+    /// Child views only: the `eventId`s of the hook events (`HookExecution` / `HookAnnotation`) this view shows.
+    /// One event can reach a child view twice (re-delivered live, or replayed from disk by a hydration and then applied live), and a
+    /// second apply would double its runs on the row. Exact ids, not a counter highwater: a resumed child's copied transcript keeps its
+    /// source session's ids, whose counters need not be comparable with the child's live ones.
+    /// The set travels with the rows and the tracker's held batches in [`ReplayRebuiltState`]: a rebuild that detaches them starts
+    /// empty (so the replay's own events apply), and a replay into a view that kept them (an empty running view whose tracker may
+    /// hold a batch for a row not yet shown) still drops events it already holds.
+    pub applied_hook_event_ids: HashSet<String>,
     /// Raw `eventId` of the most recent update APPLIED to this root session,
     /// replay or live, on both the ACP and Ferrox Labs paths; dropped updates (dedup,
     /// promptId gate, unexpected replay) don't move it. Sent as `_meta.cursor`
@@ -1057,12 +1069,6 @@ pub struct AgentView {
     /// Unlike `chat_kind`, stays `false` for a `/chat` one-shot session in
     /// a Build process, whose picker still lists local sessions.
     pub app_chat_mode: bool,
-    /// Durable workspace mode for the in-session status indicator (`--chat`).
-    #[cfg(feature = "local-workspace")]
-    pub workspace_mode: crate::views::welcome::WelcomeWorkspaceMode,
-    /// True when CLI/env locked local workspace at startup for this session.
-    #[cfg(feature = "local-workspace")]
-    pub workspace_mode_cli_locked: bool,
     /// Mocked credit balance for the status bar indicator.
     pub credit_balance: Option<crate::views::credit_bar::CreditBalance>,
     /// Auto top-up rule paired with `credit_balance` for the prompt warning.
@@ -1519,6 +1525,9 @@ pub struct AgentView {
     /// Hovered permission option index (visual highlight only, like question view).
     pub(crate) hovered_permission_item: Option<usize>,
     pub(crate) last_permission_click: Option<(Instant, usize)>,
+    /// The card (`PermissionRequestState::id`) and time a plain text key last arrived at its option rows (P152). Keys inside such a burst are the
+    /// user's next message typed straight through the prompt, so they must not answer it (see `permission_typing_guard`).
+    pub(crate) permission_typed_at: Option<(usize, Instant)>,
     /// Queue of pending permission requests. Only the front request is rendered
     /// and interactive. Subsequent requests wait until the front is resolved.
     /// Matches the TUI's `VecDeque<PermissionRequest>` behavior.
@@ -1888,6 +1897,29 @@ fn worktree_choice_from_index(
         _ => None,
     }
 }
+/// The option a typed ("Other") answer to the first question names (P152): its label, case-insensitive, or `y` / `n`
+/// for a "Yes" / "No" option. `None` when no typed answer was given or it names no option.
+fn typed_option_index(qv: &crate::views::question_view::QuestionViewState) -> Option<usize> {
+    if !qv.per_question_freeform_selected.first().copied().unwrap_or(false) {
+        return None;
+    }
+    let answer = qv
+        .per_question_freeform
+        .first()?
+        .trim()
+        .trim_end_matches(['.', '!'])
+        .to_lowercase();
+    let label = match answer.as_str() {
+        "y" => "yes",
+        "n" => "no",
+        other => other,
+    };
+    qv.questions
+        .first()?
+        .options
+        .iter()
+        .position(|o| o.label.trim().eq_ignore_ascii_case(label))
+}
 /// Translate a local-question submission into an [`InputOutcome`].
 ///
 /// Returns `InputOutcome::Action(...)` so the event loop dispatches the
@@ -1904,6 +1936,31 @@ fn translate_local_submit(
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
     if skipped {
         return InputOutcome::Changed;
+    }
+    // P152 (e2e lane M #3): the worktree questions take a typed answer too ("no", "n", "Yes", "never worktree").
+    // One that names no option answers nothing (the safe outcome); it never falls through to the focused "Yes".
+    if matches!(
+        kind,
+        LocalQuestionKind::Fork { .. } | LocalQuestionKind::NewSession
+    ) && !matches!(qv.selections.first(), Some(QuestionSelection::Single(Some(_))))
+    {
+        let Some(idx) = typed_option_index(qv) else {
+            return InputOutcome::Changed;
+        };
+        let Some((worktree, persist_mode)) = worktree_choice_from_index(idx) else {
+            return InputOutcome::Changed;
+        };
+        return InputOutcome::Action(match kind {
+            LocalQuestionKind::Fork { directive } => Action::ForkAnswered {
+                worktree,
+                directive,
+                persist_mode,
+            },
+            _ => Action::NewSessionAnswered {
+                worktree,
+                persist_mode,
+            },
+        });
     }
     let Some(QuestionSelection::Single(Some(idx))) = qv.selections.first() else {
         if let LocalQuestionKind::FeedbackTrace { report, images } = kind {
@@ -3596,6 +3653,7 @@ pub(crate) mod test_fixtures {
     }
     #[test]
     fn follow_up_chip_click_maps_to_suggestion_text() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut agent = make_agent();
         agent.apply_follow_ups("resp-1".into(), vec!["First".into(), "Second".into()]);
         let area = ratatui::layout::Rect::new(0, 0, 60, 1);
@@ -3700,6 +3758,7 @@ mod dropdown_chrome_tests {
     /// `top` saturates at 0 and ratatui's `Clear` panics on the overhang.
     #[test]
     fn above_anchor_clamps_to_short_screen() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = crate::theme::Theme::current();
         let layout_cfg = crate::appearance::LayoutConfig::default();
         let area = Rect::new(0, 0, 100, 6);
@@ -3788,6 +3847,7 @@ mod prompt_input_mode_tests {
     }
     #[test]
     fn accent_color_returns_expected_for_each_variant() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         assert_eq!(PromptInputMode::Normal.accent_color(&theme), None);
         assert_eq!(
@@ -3801,6 +3861,7 @@ mod prompt_input_mode_tests {
     }
     #[test]
     fn prefix_override_returns_expected_for_each_variant() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         assert_eq!(PromptInputMode::Normal.prefix_override(&theme), None);
         assert_eq!(

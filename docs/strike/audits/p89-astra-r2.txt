@@ -1,0 +1,24 @@
+Astra round 2 (codex 0.160.0, model gpt-6-astra, read-only) on 84569ea8..58f38645 -- final report only.
+Raw transcript (17747 lines) not committed (kept in the Hetzner lane, logs/astra-r2.raw.txt); sha256 c11cdd9d29234972321495abe564bc2dfd6c0bca4731b8d11fe8c3ade6dd31c2
+
+Audited `84569ea8..58f38645f82dbea870df5300b00840bf537600f2`. Static inspection only; no builds, tests, or modifications.
+
+1. **HIGH — Optional attempts still bypass unknown-usage protection. Round-1 finding 1 is not fully fixed.**  
+   [execution_state.rs:137](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:137) excludes every optional attempt, including ones that can never settle. Concrete scenario: a goal’s title request times out at [title_refresh.rs:154](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_impl/title_refresh.rs:154), leaving its dispatched attempt pending with no usage. A later main request settles, then the user cancels at a tool permission prompt. Resume succeeds: `Reopen` preserves the optional pending ID, but neither charges its unknown spend nor blocks subsequent admissions. Aborted recaps and cancelled background-child attempts have the same exposure. Optionality determines whether work must finish; it does not make its tokens free. The predicate exempts these attempts under both total and output limits.
+
+2. **HIGH — Superseded attempts can hide unknown usage from the reopen check. Pre-existing accounting defect, still accepted by P89.**  
+   [execution_state.rs:597](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:597) removes a superseded attempt from `pending` without setting `unknown_usage` when usage is absent. Concrete scenario: a dispatched request loses its stream before usage arrives, a retry supersedes it, the retry settles, and the turn subsequently ends through a permission cancellation. The terminal record passes `exhaustion()` and reopens despite the first request’s unaccounted spend. The abandoned-attempt sweep also invokes supersession with `None`. A retry’s usage does not include the failed attempt’s bill. This behavior predates the audited range, but prevents the new guard from guaranteeing D.4.
+
+3. **HIGH — No-output cancellation can bypass the terminal guard entirely. Pre-existing cancellation gap left uncovered.**  
+   [cancel.rs:219](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_impl/cancel.rs:219) deliberately skips terminalization for `RewindIfNoOutput`. Cancel after dispatch but before the first output: the required attempt remains pending, while the registered execution remains `Working` with `terminal_issued == false`. `/goal resume` accepts that state, and [execution_state.rs:1035](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:1035) adopts it without checking unresolved previous-turn usage. Further requests can therefore run under the token budget. This is a continuation bypass rather than a `Change::Reopen` bypass.
+
+4. **LOW — Round-1 finding 4 remains partially unfixed.**  
+   [goal_latch_tests.rs:372](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_tests/turn/goal_latch_tests.rs:372) still calls `emit_turn_completed` directly, bypassing actual cancellation and its rewind branch. The new ownership test correctly covers two instances, but [execution_state.rs:2665](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:2665) exercises sequential handoff; restoring the original unlock-before-sampler-release race would survive that test. Removing the output-only clause from the new unknown-usage guard would also survive the added total-budget-only regression.
+
+**Round-1 findings 2 and 3 are fixed by inspection.** Ownership locking now spans sampler reserve/release operations; I found no lock-order cycle in the inspected production paths. An explicit failed `Reopen` returns its reservation. The authoritative transition returns a typed refusal, and the persistence actor preserves the `io::Error` payload through to ACP mapping.
+
+The required-pending guard correctly covers output-only budgets and required child attempts. I found no counter reset or reopening of the supplied P03 crash fixtures.
+
+**Trade-off:** refusing continuation while spend remains unknown is sound. Permanent refusal is not inherently necessary: terminal records already accept late settlement. Resumption can become safe after authoritative usage arrives, or after charging a trustworthy worst-case amount reserved before dispatch. Streamed estimates and successful retries cannot establish the missing usage.
+
+**Verdict: HIGH issues remain; no BLOCKER identified.**

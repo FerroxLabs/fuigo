@@ -197,6 +197,16 @@ pub fn fail_closed_policy_armed_at(home: &Path) -> bool {
     }
 }
 
+/// Whether the sync marker in `home` records that the last sync served `file` (`managed_config.toml` or
+/// `requirements.toml`), i.e. that Fuigo wrote the file there (P147). An absent, unreadable or corrupt marker, or one
+/// whose sync did not serve that file, records nothing.
+pub fn managed_marker_records_file(home: &Path, file: &str) -> bool {
+    read_managed_config_cache(home).is_some_and(|cache| {
+        (file == crate::loader::MANAGED_CONFIG_FILENAME && cache.had_managed_config)
+            || (file == crate::loader::REQUIREMENTS_FILENAME && cache.had_requirements)
+    })
+}
+
 /// The sync marker, or `None` if absent, unreadable, or corrupt.
 /// An unreadable or corrupt marker is treated as absent: a read blip or torn write mustn't lock out a managed user.
 /// Both cases are logged (a corruption that disarms isn't silent) and self-heal on the next sync.

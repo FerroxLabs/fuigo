@@ -635,6 +635,9 @@ mod tests {
 
     #[test]
     fn skill_with_args_only_command_is_teal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::skill("/pr-workflow create a ticket for this");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -650,6 +653,9 @@ mod tests {
 
     #[test]
     fn skill_without_args_all_teal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::skill("/pr-workflow");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 1);
@@ -663,6 +669,9 @@ mod tests {
 
     #[test]
     fn skill_multiline_only_first_token_teal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::skill("/foo bar\nbaz");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert_eq!(lines.len(), 2);
@@ -683,6 +692,9 @@ mod tests {
 
     #[test]
     fn mid_text_token_only_token_is_teal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let text = "great /pr-workflow all good now";
         let block = UserPromptBlock::with_skill_tokens(text, vec![6..18]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -701,6 +713,9 @@ mod tests {
 
     #[test]
     fn mid_text_multiple_tokens_each_teal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let text = "run /commit then /review please";
         let block = UserPromptBlock::with_skill_tokens(text, vec![4..11, 17..24]);
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -719,6 +734,9 @@ mod tests {
 
     #[test]
     fn mid_text_token_on_second_logical_line() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let text = "first line\nthen /model here";
         // "/model" starts after "first line\nthen " = 16 bytes.
         let block = UserPromptBlock::with_skill_tokens(text, vec![16..22]);
@@ -741,6 +759,9 @@ mod tests {
 
     #[test]
     fn invalid_token_ranges_are_dropped() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let text = "héllo /model now"; // 'é' is 2 bytes: "/model" = 7..13
         let block = UserPromptBlock::with_skill_tokens(
             text,
@@ -768,6 +789,9 @@ mod tests {
 
     #[test]
     fn all_token_ranges_invalid_renders_plain() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::with_skill_tokens("plain text", vec![100..200]);
         assert!(block.skill_token_ranges.is_empty());
         let lines = block.wrap_prompt_lines(80, None, true, false);
@@ -788,6 +812,9 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_straddling_token() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         // "/pr-workflow" (bytes 8..20) is wider than the content width, so it straddles the last visible row and the hidden continuation
         // The truncating re-wrap must keep the visible head teal
         let text = "one\ntwo\n/pr-workflow tail";
@@ -807,6 +834,9 @@ mod tests {
 
     #[test]
     fn collapsed_truncation_keeps_teal_on_token_within_last_line() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         // "/do-it" (bytes 8..14) fits fully on the truncated last line even at the ellipsis-reduced width, so it must survive whole and teal
         let text = "one\ntwo\n/do-it more words here";
         let block = UserPromptBlock::with_skill_tokens(text, vec![8..14]);
@@ -828,6 +858,9 @@ mod tests {
 
     #[test]
     fn narrow_wrap_keeps_teal_on_both_rows_of_split_token() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         // Expanded (no max_lines): the 12-wide token cannot fit at width 8, so the wrapper splits it mid-token; every piece must stay teal
         let text = "aa /pr-workflow zz";
         let block = UserPromptBlock::with_skill_tokens(text, vec![3..15]);
@@ -880,6 +913,9 @@ mod tests {
 
     #[test]
     fn test_selected_prompt_uses_accent_color() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, true);
         let expected = format!("{}hello", crate::glyphs::prompt_arrow());
@@ -901,6 +937,9 @@ mod tests {
 
     #[test]
     fn test_unselected_prompt_still_uses_accent_pointer() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::new("hello");
         let lines = block.wrap_prompt_lines(80, None, true, false);
 
@@ -1087,6 +1126,9 @@ mod tests {
 
     #[test]
     fn user_prompt_bold_only_in_minimal() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
         let (prefix, body, skill) = UserPromptBlock::prompt_styles(&theme, true);
         assert!(prefix.add_modifier.contains(Modifier::BOLD));
@@ -1141,6 +1183,9 @@ mod tests {
     /// Does not toggle the process-global native lock.
     #[test]
     fn user_prompt_band_is_semantic_not_panel() {
+        // `Theme::current()` is process-global and `terminal_theme_prompt_is_bold_and_bandless`
+        // switches it to the terminal theme under this lock: hold it so render and assert agree.
+        let _theme = crate::theme::cache::pin_theme();
         let block = UserPromptBlock::new("scan me");
         let lines = block.wrap_prompt_lines(80, None, true, false);
         assert!(

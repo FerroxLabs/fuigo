@@ -1,0 +1,43 @@
+{
+  "name": "murage_model_state_golden",
+  "description": "Contract E.7 pin: the initialize response's _meta.modelState exactly as the live wire carried it. Captured (not hand-written) from the raw stdout of `fuigo --permission-mode default --no-memory agent --no-leader -m murage-model-b --reasoning-effort high stdio` at strike/integration 14cab7e7 (P00 parent), served the two-model MockInferenceServer catalog that murage_conformance_acp.rs configures. Murage reads _meta.modelState.currentModelId (core.ts:2433). Compared as serde_json::Value, so key order is irrelevant; any added, removed or renamed key is a contract change.",
+  "modelState": {
+    "currentModelId": "murage-model-b",
+    "availableModels": [
+      {
+        "modelId": "murage-model-a",
+        "name": "murage-model-a",
+        "_meta": {
+          "totalContextTokens": 256000,
+          "agentType": "fuigo-build-plan",
+          "supportsReasoningEffort": true,
+          "reasoningEffort": "high",
+          "reasoningEfforts": [
+            {
+              "id": "low",
+              "value": "low",
+              "label": "Low",
+              "description": null,
+              "default": false
+            },
+            {
+              "id": "high",
+              "value": "high",
+              "label": "High",
+              "description": null,
+              "default": false
+            }
+          ]
+        }
+      },
+      {
+        "modelId": "murage-model-b",
+        "name": "murage-model-b",
+        "_meta": {
+          "totalContextTokens": 256000,
+          "agentType": "fuigo-build-plan"
+        }
+      }
+    ]
+  }
+}

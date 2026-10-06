@@ -129,6 +129,49 @@ pub fn create_dir_all_owner_only(dir: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Make `options` create its file 0600 on Unix (P150, S14): a session file holds what the model saw, and a mode set at
+/// creation leaves no window (a umask can only remove bits). A no-op elsewhere (Windows ACLs are applied by the
+/// session store itself).
+pub fn owner_only_file_options(options: &mut std::fs::OpenOptions) -> &mut std::fs::OpenOptions {
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(options, 0o600);
+    options
+}
+
+/// Tighten an open file to 0600 when it has any other mode (Unix; one an older version created looser). Best effort:
+/// a filesystem without modes must not stop the write, so a failure is logged at debug and ignored.
+pub fn tighten_file_owner_only(file: &std::fs::File, path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if file
+            .metadata()
+            .is_ok_and(|meta| meta.permissions().mode() & 0o777 != 0o600)
+            && let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        {
+            tracing::debug!(?e, path = %path.display(), "failed to chmod session file owner-only");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (file, path);
+}
+
+/// Create (truncate) `path` owner-only (0600 on Unix, tightened if it existed looser) and return it for writing.
+pub fn create_file_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let file = owner_only_file_options(
+        std::fs::OpenOptions::new().write(true).create(true).truncate(true),
+    )
+    .open(path)?;
+    tighten_file_owner_only(&file, path);
+    Ok(file)
+}
+
+/// `std::fs::write`, owner-only (see [`create_file_owner_only`]).
+pub fn write_file_owner_only(path: &std::path::Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write as _;
+    create_file_owner_only(path)?.write_all(bytes.as_ref())
+}
+
 /// Build the CWD-level session directory path: `fuigo_home()/sessions/{encode_cwd_dirname(cwd)}`.
 /// Does **not** create the directory on disk; use [`ensure_sessions_cwd_dir`] when the directory must exist.
 pub fn sessions_cwd_dir(cwd: &str) -> PathBuf {
@@ -161,7 +204,7 @@ pub fn ensure_sessions_cwd_dir_in(
     // O_CREAT|O_EXCL via create_new avoids TOCTOU races with parallel session starts
     if encoded_name != urlencoding::encode(cwd).as_ref() {
         let cwd_file = dir.join(".cwd");
-        match std::fs::File::create_new(&cwd_file) {
+        match owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true)).open(&cwd_file) {
             Ok(mut f) => {
                 std::io::Write::write_all(&mut f, cwd.as_bytes())?;
                 // Fsync the write-capable create_new handle before drop.
@@ -356,6 +399,7 @@ mod tests {
         let dir = ensure_sessions_cwd_dir_in(home.path(), &long_cwd).unwrap();
         assert_eq!(unix_mode(&dir), 0o700);
         assert_eq!(std::fs::read_to_string(dir.join(".cwd")).unwrap(), long_cwd);
+        assert_eq!(unix_mode(&dir.join(".cwd")), 0o600, "P150: the .cwd marker is owner-only");
     }
 
     #[test]
@@ -372,4 +416,20 @@ mod tests {
     fn slugify_truncates() {
         assert_eq!(slugify(&"a".repeat(100), 10).len(), 10);
     }
+}
+
+/// P150 (S14): the owner-only file helpers create 0600 and tighten a looser existing file.
+#[cfg(all(test, unix))]
+#[test]
+fn p150_write_file_owner_only_creates_and_tightens() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("f");
+    write_file_owner_only(&path, b"a").unwrap();
+    assert_eq!(mode(&path), 0o600);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    write_file_owner_only(&path, b"b").unwrap();
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(std::fs::read(&path).unwrap(), b"b");
 }

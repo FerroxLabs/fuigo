@@ -1,0 +1,30 @@
+P64 Astra audit (gpt-6-astra, codex exec --sandbox read-only < /dev/null), diff 57e0b6d0..7e36f78d. Final report:
+
+P64 fixes the two targeted methods. No BLOCKER/HIGH/MEDIUM findings.
+
+- **LOW — existing registration gap:** [manager.rs:1586](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1586) returns disk credentials without registration through `read_disk_auth_with_state` and its `read_disk_auth` wrapper. The private `read_disk_auth_silent` at line 1537 also returns unregistered credentials. Thus the broader invariant remains incomplete, though inspected adoption paths register through `hot_swap` or persistence before returning usable credentials. This predates P64 and does not block this scoped fix.
+
+Verified by source inspection:
+
+- **Return coverage:** [manager.rs:1064](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1064) registers the sole disk-return branch in `update_unless_superseded`; line 1099 registers every successfully returned disk edit. Write failures return errors; memory fallbacks already register.
+- **Memory and locks:** [manager.rs:919](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:919) only inserts a bearer digest—no `inner` write. The only bearer-set lock sites are insertion and lookup; neither acquires another lock while holding it. Taking it under `auth_state_lock` introduces no lock cycle.
+- **Regression sensitivity:** Without the respective additions, the assertions at [cross_process_race_tests.rs:878](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:878) and line 897 would fail: the fixture explicitly establishes the disk bearer is unknown, and intervening operations register only the distinct memory bearer. Both tests also assert memory retains its original key.
+
+Read-only review of `57e0b6d0..7e36f78d`; no Cargo or tests executed.
+
+VERDICT: LAND
+
+==== ROUND 2: diff 57e0b6d0..d2ce97eb (delta 7e36f78d..d2ce97eb). Final report:
+
+No BLOCKER/HIGH/MEDIUM/LOW findings. Reviewed both diffs at `d2ce97eb83b885c84c682b135c9e02fae7c11d13`.
+
+References below are under `crates/codegen/fuigo-shell/src/auth/`.
+
+- **Registration complete:** `manager.rs:1064`, `:1099`, and `:1589` register disk-returned session bearers without replacing memory. Other disk adoption/load paths register through construction or `with_inner_write`; static API keys remain intentionally exempt.
+- **Silent callers hand out no credential:** `manager.rs:2188` produces an internal verdict-comparison key; its consumers compare or record verdict scope. `manager.rs:2261` reduces the disk result to a refreshability boolean.
+- **No lock-order issue found:** `manager.rs:1603` releases `disk_state` before registration. The bearer mutex is confined to lookup/insertion (`manager.rs:916`, `:923`), with no reverse acquisition of auth-state, memory, or disk-state locks.
+- **Tests discriminate each fix:** the fixture establishes an unknown sibling bearer (`cross_process_race_tests.rs:864`). Removing each corresponding registration would fail its assertion at `:878`, `:897`, or `:913`; the other fixes cannot mask those failures. Each test also checks that memory retains its original bearer.
+
+Read-only source confirmation only: no Cargo or tests executed. These regression tests are Unix-gated (`mod.rs:7`).
+
+VERDICT: LAND

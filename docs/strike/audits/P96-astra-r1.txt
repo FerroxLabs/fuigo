@@ -1,0 +1,35 @@
+Audited `fe16738c..fada4869af5585aefc380dcce955daf6432be61b`. Read-only source review; no Cargo or tests run.
+
+1. **HIGH — A directory is accepted as a successful backup.**  
+   [load_repair.rs:46](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs:46)  
+   `try_exists()` accepts a directory at `chat_history.jsonl.pre-repair`. The code returns `AlreadyPresent`, permits the destructive rewrite, and tells the user an earlier backup exists. No backup file was created. This also releases `rewrite_gate` after an earlier backup failure.  
+   **Existing tests:** Do not catch it. Both failure fixtures obstruct `.pre-repair.tmp`; the existing-backup test supplies a regular file.
+
+2. **HIGH — The residency check does not protect repair from concurrent writers.**  
+   [session_setup.rs:885](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/agent/mvp_agent/session_setup.rs:885), [load_repair.rs:183](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs:183)  
+   `!is_resident` is a point-in-time check, without ownership held across reading, backing up, and rewriting. `begin_session_load` records attachment state; it does not serialize loads. Two overlapping cold loads can both qualify, and a delayed rewrite can land after the other load starts its actor. A live actor in another process is also invisible to this check. Messages appended after the backup but before the replacement can disappear from both files. The existing turn-owner lock is not acquired around this repair.  
+   **Existing tests:** Do not catch it. Scenario 6 reconnects sequentially after registration; it does not overlap loads or an append with repair.
+
+3. **HIGH — Backup publication does not enforce “first copy wins.”**  
+   [load_repair.rs:44](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs:44)  
+   The existence check, copy, and rename are separate operations, using one shared staging filename. On macOS/Linux, the final rename can replace an existing backup. Concrete interleaving: loader A observes no backup and pauses; loader B publishes the original backup and rewrites history; A resumes, copies the repaired file, and replaces B’s original backup. The first preserved copy is lost.  
+   **Existing tests:** Do not catch it. `an_existing_backup_is_never_overwritten` only covers a backup already present before the check.
+
+4. **MEDIUM — Clean cold loads still rewrite history.**  
+   [spawn.rs:1311](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/acp_session_impl/spawn.rs:1311), [acp_session.rs:1493](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/acp_session.rs:1493)  
+   Actor startup unconditionally writes a synchronous snapshot and then requests another replacement through `replace_conversation`. A clean file is absent from `BACKUP_OWED`, so the new gate permits both. Even identical serialization replaces the file; valid JSONL containing extra whitespace or legacy fields also changes bytes. This is a pre-existing path that P96 leaves active, contrary to the stated whole-load guarantee.  
+   **Existing tests:** The ACP clean scenario compares bytes only, so it cannot detect an identical rewrite. The unit test calls the repair helper without actor startup.
+
+5. **MEDIUM — The backup is published without a durability barrier.**  
+   [load_repair.rs:50](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs:50)  
+   `copy` followed by `rename` does not durably flush the backup’s contents before allowing replacement of the original. A power failure can therefore leave repaired history committed while the backup contains incomplete data. The repository’s atomic-write helper explicitly flushes file contents before rename; this backup bypasses that protection.  
+   **Existing tests:** Do not catch it. Immediate read-back checks cannot establish crash durability.
+
+6. **MEDIUM — The failure notice can contradict the completed load.**  
+   [load_repair.rs:144](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/storage/jsonl/load_repair.rs:144), [persistence.rs:3003](/Volumes/Mando/WaylandBots/Fuigo/wt-p96/crates/codegen/fuigo-shell/src/session/persistence.rs:3003)  
+   The notice is constructed before actor startup. If the initial backup fails transiently but startup’s `rewrite_gate` retry succeeds, the file is backed up and rewritten before the queued notice is delivered. The user nevertheless receives “left unchanged on disk” and “this run only,” without the newly created backup path.  
+   **Existing tests:** Do not catch it. The ACP fixture keeps the obstruction present; the unit recovery test does not check the notice after retry success.
+
+The ordinary sequential repair and notification paths are wired through production code, but the backup and writer-ownership guarantees need correction before landing.
+
+DO-NOT-LAND

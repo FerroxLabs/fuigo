@@ -307,6 +307,9 @@ fn write_lines(lines: &[u8]) {
         return;
     }
 
+    // P70b: a log sink. Credentials this process sent upstream are replaced (exact match) before the bytes land.
+    let scrubbed = fuigo_secrets::sent_credentials::scrub_record(lines);
+    let lines = scrubbed.as_deref().unwrap_or(lines);
     if let Err(e) = writer.file.write_all(lines) {
         tracing::warn!("[unified_log] write failed: {e}");
     }
@@ -535,6 +538,30 @@ mod tests {
             "the shared file must live under the temp dir, not fuigo_home(): {}",
             log_path().display()
         );
+    }
+
+    /// P70b: the unified log is a log sink. A credential the sampler sent upstream and the upstream echoed back into
+    /// error text lands in `unified.jsonl` replaced, in the message and in the context, even when it needs JSON escapes.
+    #[test]
+    fn a_credential_sent_upstream_is_scrubbed_from_the_unified_log() {
+        let plain = "p70b-unified-cred-0123456789";
+        let quoted = r#"p70b"unified\cred-9876"#;
+        fuigo_secrets::sent_credentials::record(plain);
+        fuigo_secrets::sent_credentials::record(quoted);
+        warn(
+            &format!("upstream said: Incorrect API key {plain}"),
+            Some("p70b-sid"),
+            Some(serde_json::json!({ "message": format!("bad key {quoted} / {plain}") })),
+        );
+        let text = String::from_utf8_lossy(&snapshot_log().expect("snapshot")).into_owned();
+        let line = text
+            .lines()
+            .find(|l| l.contains("p70b-sid"))
+            .unwrap_or_else(|| panic!("the record was written: {text}"));
+        assert!(!line.contains("p70b-unified-cred"), "{line}");
+        assert!(!line.contains("unified\\\\cred"), "{line}");
+        assert!(line.contains("Incorrect API key <redacted>"), "{line}");
+        assert!(line.contains("bad key <redacted> / <redacted>"), "{line}");
     }
 
     #[test]

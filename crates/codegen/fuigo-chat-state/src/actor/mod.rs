@@ -132,6 +132,7 @@ impl ChatStateActor {
             | ChatStateCommand::UpdateCredentials { .. }
             | ChatStateCommand::RecordAgentEditedPath { .. }
             | ChatStateCommand::ReplaceConversation { .. }
+            | ChatStateCommand::ReplaceConversationPersisted { .. }
             | ChatStateCommand::RepairHistory { .. }
             | ChatStateCommand::StripConversationImages { .. }
             | ChatStateCommand::ReplaceSystemHead { .. }
@@ -290,6 +291,21 @@ impl ChatStateActor {
                 is_compaction,
             } => {
                 self.replace_conversation(items, is_compaction);
+            }
+            ChatStateCommand::ReplaceConversationPersisted { items, reply } => {
+                // Hold serialization through the disk acknowledgement, as CommitCompaction does.
+                let result = match self.persistence.replace_history_and_ack(&items).await {
+                    Ok(result) => result,
+                    Err(_) => Err(std::io::Error::other(
+                        "chat history replacement acknowledgement lost",
+                    )),
+                };
+                // `Err` means the stored history is still the previous one (a replacement that reached the file
+                // acknowledges `Ok`, see `ChatPersistence::replace_history_and_ack`), so memory stays as it is.
+                if result.is_ok() {
+                    self.apply_replaced_conversation(items, false);
+                }
+                let _ = reply.send(result);
             }
             ChatStateCommand::RepairHistory {
                 dry_run,

@@ -182,7 +182,7 @@ pub fn collect_specs_from_sources(
     let mut all_errors = Vec::new();
 
     for source in global_sources {
-        let (mut specs, errors) = load_from_source(source);
+        let (mut specs, errors) = load_from_source(source, true);
         for spec in &mut specs {
             spec.name = format!("{}{}", crate::config::GLOBAL_HOOK_PREFIX, spec.name);
         }
@@ -196,7 +196,7 @@ pub fn collect_specs_from_sources(
     }
 
     for source in project_sources {
-        let (mut specs, errors) = load_from_source(source);
+        let (mut specs, errors) = load_from_source(source, false);
         for spec in &mut specs {
             spec.name = format!("{}{}", crate::config::PROJECT_HOOK_PREFIX, spec.name);
         }
@@ -276,15 +276,30 @@ pub fn load_hooks(
     load_hooks_from_sources(&global, &project)
 }
 
-fn load_from_source(source: &HookSource<'_>) -> (Vec<HookSpec>, Vec<HookError>) {
+/// `may_name_saved_key`: project sources never name the saved API key (P118); a global source's FILE may only when its
+/// real path is under `$FUIGO_HOME/hooks/` (P147, S16/B32).
+fn load_from_source(source: &HookSource<'_>, may_name_saved_key: bool) -> (Vec<HookSpec>, Vec<HookError>) {
+    load_from_source_in(source, may_name_saved_key, fuigo_config::user_fuigo_home().as_deref())
+}
+
+/// [`load_from_source`] with the user's fuigo home given.
+pub(crate) fn load_from_source_in(
+    source: &HookSource<'_>,
+    may_name_saved_key: bool,
+    user_home: Option<&Path>,
+) -> (Vec<HookSpec>, Vec<HookError>) {
+    // P147: trust is decided per hook FILE by its real path, never by the source it was listed under: a global
+    // `~/.claude/settings.json`, a `hooks-paths` target outside `$FUIGO_HOME/hooks`, a symlink in `$FUIGO_HOME/hooks`
+    // that points outside it, and anything resolving into `worktrees/` or `plugins/` are all refused.
+    let may_name = |file: &Path| may_name_saved_key && fuigo_config::key_naming::hook_file_may_name_saved_key_in(file, user_home);
     match source {
-        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path),
-        HookSource::Directory(dir) => load_hooks_from_directory(dir),
+        HookSource::SettingsFile(path) => load_hooks_from_settings_file(path, may_name(path)),
+        HookSource::Directory(dir) => load_hooks_from_directory(dir, &may_name),
     }
 }
 
 /// A missing file or absent `hooks` key returns empty results, not an error.
-fn load_hooks_from_settings_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
+fn load_hooks_from_settings_file(path: &Path, may_name_saved_key: bool) -> (Vec<HookSpec>, Vec<HookError>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
@@ -301,14 +316,14 @@ fn load_hooks_from_settings_file(path: &Path) -> (Vec<HookSpec>, Vec<HookError>)
         }
     };
 
-    let (specs, errors) = config::parse_hook_file(&content, path);
+    let (specs, errors) = config::parse_hook_file_with_key_naming(&content, path, may_name_saved_key);
     for err in &errors {
         tracing::warn!("hook loading from settings file: {err}");
     }
     (specs, errors)
 }
 
-fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
+fn load_hooks_from_directory(dir: &Path, may_name_saved_key: &dyn Fn(&Path) -> bool) -> (Vec<HookSpec>, Vec<HookError>) {
     let mut specs = Vec::new();
     let mut errors = Vec::new();
 
@@ -363,7 +378,7 @@ fn load_hooks_from_directory(dir: &Path) -> (Vec<HookSpec>, Vec<HookError>) {
             }
         };
 
-        let (file_specs, file_errors) = config::parse_hook_file(&content, &path);
+        let (file_specs, file_errors) = config::parse_hook_file_with_key_naming(&content, &path, may_name_saved_key(&path));
         for err in &file_errors {
             tracing::warn!("hook loading: {err}");
         }

@@ -173,8 +173,12 @@ fn merge_auto_mode_config(
     }
 }
 
-/// Full Auto-mode config for the classifier-wiring read (overlay-free).
-pub(crate) fn resolve_auto_mode_config_from_disk() -> crate::agent::config::AutoModeConfig {
+/// Full Auto-mode config for the classifier-wiring read (overlay-free), plus the
+/// `classifier_model` the user set in a config file (`None` when it is unset there, so any
+/// classifier model came from remote settings).
+/// P90 F6: only a classifier the user chose keeps its own route during a subscription session.
+pub(crate) fn resolve_auto_mode_config_from_disk_with_provenance()
+-> (crate::agent::config::AutoModeConfig, Option<String>) {
     let config = match crate::config::ConfigLayers::load() {
         Ok(layers) => auto_mode_config_overlay_free(&layers),
         Err(_) => crate::agent::config::AutoModeConfig::default(),
@@ -184,7 +188,15 @@ pub(crate) fn resolve_auto_mode_config_from_disk() -> crate::agent::config::Auto
         .ok()
         .and_then(|g| g.clone())
         .unwrap_or_default();
-    merge_auto_mode_config(config, remote)
+    merge_auto_mode_config_with_provenance(config, remote)
+}
+
+fn merge_auto_mode_config_with_provenance(
+    config: crate::agent::config::AutoModeConfig,
+    remote: crate::agent::config::AutoModeConfig,
+) -> (crate::agent::config::AutoModeConfig, Option<String>) {
+    let explicit_classifier = config.classifier_model.clone();
+    (merge_auto_mode_config(config, remote), explicit_classifier)
 }
 
 pub(crate) fn auto_mode_classify_timeout(
@@ -445,6 +457,35 @@ mod auto_permission_mode_gate_tests {
         let cfg = auto_mode_config_overlay_free(&overlay_only);
         assert_eq!(cfg.enabled, None);
         assert_eq!(cfg.classifier_model, None);
+    }
+
+    /// P90 F6: a classifier model from a config file is the user's choice; one from remote
+    /// settings is not, so only the former keeps its own route in a subscription session.
+    #[test]
+    fn auto_mode_classifier_provenance_is_the_config_file_value() {
+        use crate::agent::config::{AutoModeConfig, HelperModelChoice};
+        let remote = AutoModeConfig {
+            classifier_model: Some("remote-model".into()),
+            ..AutoModeConfig::default()
+        };
+        let (merged, explicit) =
+            merge_auto_mode_config_with_provenance(AutoModeConfig::default(), remote.clone());
+        assert_eq!(merged.classifier_model.as_deref(), Some("remote-model"));
+        assert_eq!(explicit, None);
+        assert_eq!(
+            HelperModelChoice::of(explicit.as_deref(), "remote-model"),
+            HelperModelChoice::Default
+        );
+        let local = AutoModeConfig {
+            classifier_model: Some("local-model".into()),
+            ..AutoModeConfig::default()
+        };
+        let (merged, explicit) = merge_auto_mode_config_with_provenance(local, remote);
+        assert_eq!(merged.classifier_model.as_deref(), Some("local-model"));
+        assert_eq!(
+            HelperModelChoice::of(explicit.as_deref(), "local-model"),
+            HelperModelChoice::Explicit
+        );
     }
 
     #[test]

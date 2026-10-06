@@ -3221,6 +3221,11 @@ mod tests {
 
 /// Session-start discovery must be bounded, must not pin a tokio worker, and must not be repaid
 /// by every later session in the same process.
+///
+/// Every test that discovers holds `serial(home_env)`: the cache key carries `fuigo_home()`, which
+/// follows `$HOME`, and the fingerprint stamps HOME-relative vendor roots, while the crate's
+/// `home_env` tests repoint `$HOME` process-wide. One of those running between two discoveries
+/// turns a cache hit into a miss and a second scan (R070).
 #[cfg(test)]
 mod discovery_budget_tests {
     use super::*;
@@ -3259,6 +3264,34 @@ mod discovery_budget_tests {
         skills.iter().any(|s| s.name == name)
     }
 
+    /// Wait for the scan in flight for `discover(_, cwd)`'s key to land, bounded by `deadline`;
+    /// `true` once its result is in the cache. The owner signals the in-flight channel after
+    /// writing the cache, so the signal is the landing itself. With no scan in flight it must
+    /// already have landed, and the cache entry is checked instead, which also proves the key
+    /// built here is the one discovery used (a mismatch would otherwise pass vacuously).
+    async fn overrun_scan_landed(cwd: &str, deadline: Duration) -> bool {
+        let key = SkillDiscoveryKey::new(
+            Some(cwd),
+            &SkillsConfig::default(),
+            CompatConfig::default(),
+            /*project_trusted*/ true,
+        );
+        let in_flight = SKILL_DISCOVERY_INFLIGHT
+            .lock()
+            .expect("in-flight registry")
+            .get(&key)
+            .cloned();
+        if let Some(mut done) = in_flight
+            && !matches!(
+                tokio::time::timeout(deadline, done.wait_for(|landed| *landed)).await,
+                Ok(Ok(_))
+            )
+        {
+            return false;
+        }
+        cached_skills(&key).is_some()
+    }
+
     #[test]
     fn timeout_override_parses_and_falls_back() {
         assert_eq!(
@@ -3283,6 +3316,7 @@ mod discovery_budget_tests {
     /// filesystem pins the worker, so no timeout around it can ever fire and `session/new` waits
     /// out the whole walk.
     #[tokio::test(flavor = "current_thread")]
+    #[serial_test::serial(home_env)]
     async fn slow_scan_neither_pins_the_runtime_nor_outlives_its_timeout() {
         let (_tmp, cwd) = project_with_skill("slow-skill");
         test_hooks::set_delay(&cwd, Duration::from_secs(5));
@@ -3301,6 +3335,7 @@ mod discovery_budget_tests {
 
     /// A capped-out scan must never be cached *as empty*: the next session still gets the skills.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn a_scan_that_overran_is_not_cached_as_empty() {
         let (_tmp, cwd) = project_with_skill("retry-skill");
         test_hooks::set_delay(&cwd, Duration::from_millis(600));
@@ -3322,7 +3357,14 @@ mod discovery_budget_tests {
     /// anyway. Throwing its result away made the slow-filesystem case — the one the cache exists
     /// for — the one case that never cached: every session paid another full scan, and every one
     /// of those scans outlived its cap on a live blocking thread.
+    ///
+    /// `serial(home_env)`: the cache key carries `fuigo_home()`, which follows `$HOME`, and the
+    /// fingerprint stamps the HOME-relative vendor roots (`~/.claude`, `~/.agents`, …). The
+    /// `home_env` tests in this crate repoint `$HOME` process-wide, so one of them running between
+    /// the two discoveries below turned the second into a cache miss and a second scan
+    /// ("left: 2, right: 1" in a loaded gate). Holding the same lock keeps `$HOME` still.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn an_overrun_scan_still_populates_the_cache_for_the_next_session() {
         let (_tmp, cwd) = project_with_skill("slow-cached-skill");
         test_hooks::set_delay(&cwd, Duration::from_millis(600));
@@ -3331,8 +3373,12 @@ mod discovery_budget_tests {
             &discover(Duration::from_millis(100), &cwd).await,
             "slow-cached-skill"
         ));
-        // Let the scan that overran land.
-        tokio::time::sleep(Duration::from_millis(1200)).await;
+        // Wait for the scan that overran to land: its completion signal, not a guess at how long
+        // a 600 ms scan takes on a loaded host (it was a fixed 1200 ms sleep).
+        assert!(
+            overrun_scan_landed(&cwd, Duration::from_secs(60)).await,
+            "the overrun scan never finished"
+        );
         assert_eq!(
             skill_discovery_scan_count(Some(&cwd)),
             before + 1,
@@ -3353,6 +3399,7 @@ mod discovery_budget_tests {
     /// Sessions that start while a scan is already running must join it, not launch their own walk
     /// of the same slow tree.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn concurrent_session_starts_share_one_scan() {
         let (_tmp, cwd) = project_with_skill("shared-skill");
         test_hooks::set_delay(&cwd, Duration::from_millis(400));
@@ -3379,6 +3426,7 @@ mod discovery_budget_tests {
     /// `MAX_SKILL_WALK_DEPTH` levels, so a skill added below the first level changed no stamped
     /// directory and was never picked up again for the life of the process.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn a_skill_nested_below_the_first_level_invalidates_the_cache() {
         let (tmp, cwd) = project_with_skill("top-skill");
         let group = tmp
@@ -3402,6 +3450,7 @@ mod discovery_budget_tests {
     /// Editing a description in place changes no directory: the stamp carries the file's mtime and
     /// length so an in-place edit is seen too.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn an_edited_skill_description_invalidates_the_cache() {
         let (tmp, cwd) = project_with_skill("edited-skill");
         let dir = tmp
@@ -3437,6 +3486,7 @@ mod discovery_budget_tests {
     /// `server_skill_dirs`/`bundled_skill_dirs` are scanned but were never fingerprinted, so an
     /// embedded host that syncs new bundled skills to disk was served the pre-sync list forever.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn injected_server_and_bundled_dirs_are_fingerprinted() {
         for (label, pick) in [
             (
@@ -3481,6 +3531,7 @@ mod discovery_budget_tests {
     /// A previously discovered list beats nothing: when the cap fires on a cached key, serve what
     /// the last scan found rather than telling the session it has no skills.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn an_overrun_refresh_falls_back_to_the_cached_list() {
         let (_tmp, cwd) = project_with_skill("sticky-skill");
         assert!(has(
@@ -3503,6 +3554,7 @@ mod discovery_budget_tests {
 
     /// The second `session/new` in one process pays nothing: same roots, same answer, no rescan.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn second_session_start_hits_the_cache() {
         let (_tmp, cwd) = project_with_skill("cached-skill");
         let before = skill_discovery_scan_count(Some(&cwd));
@@ -3524,6 +3576,7 @@ mod discovery_budget_tests {
 
     /// The cache is not sticky: adding a skill changes a root's mtime and forces a rescan.
     #[tokio::test]
+    #[serial_test::serial(home_env)]
     async fn a_new_skill_invalidates_the_cache() {
         let (tmp, cwd) = project_with_skill("first-skill");
         let before = skill_discovery_scan_count(Some(&cwd));

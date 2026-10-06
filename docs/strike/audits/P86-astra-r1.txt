@@ -1,0 +1,35 @@
+# P86 Astra round 1 -- final report (gpt-6-astra, read-only; brief: P86-astra-r1-brief.md; raw transcript kept on Hetzner /root/fuigo-builds/p86/logs/astra/)
+
+Audited `84569ea8..32f32fd3` read-only. No Cargo commands or Rust tests were run. Three credential-boundary defects remain.
+
+1. **MEDIUM — Persistent snapshots retain credentials registered later.**  
+   [shell_state.rs:245](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:245), [shell_state.rs:479](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:479).  
+   Start a persistent terminal while `CORP_KEY` is unregistered, then load a config declaring it as `env_key`. Subsequent process environments are filtered, but snapshot replay restores the captured credential before executing the command. Additionally, the snapshot captures `dump_bash_state` itself through `declare -f`, overwriting the newly generated scrub function with its older denylist. The credential can therefore survive further commands. **Tests do not catch this:** registration always precedes terminal initialization. Scrub replayed state before user execution and prevent snapshots from restoring obsolete internal dump functions.
+
+2. **MEDIUM — MCP hot reload can spawn before credential registration.**  
+   [reloader.rs:301](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/config/reloader.rs:301), [reloader.rs:392](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/config/reloader.rs:392).  
+   One config edit adds both a model’s `env_key = "CORP_KEY"` and a stdio MCP server. The reloader sends `McpServersChanged` **before** loading/parsing the effective config that registers `CORP_KEY`. The multithreaded runtime can process that notification and start the server first; MCP configuration loading itself does not perform credential registration. That server retains the inherited key after registration completes. **No added test exercises concurrent reload.** Register the new effective config’s names before publishing child-restart notifications.
+
+3. **MEDIUM — Trimming changes the credential’s identity.**  
+   [shell_env_policy.rs:204](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:204), [config.rs:137](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/agent/config.rs:137).  
+   `env_key = " CORP_KEY "` reads the exact whitespace-bearing environment name, but registration stores `CORP_KEY`. Filtering therefore permits the actual credential variable. `env_http_headers` has the same mismatch. A fake-only OS probe confirmed that such a name survives Bash into its grandchild. **Tests miss this:** the registration test expects trimming but never checks the original variable. Preserve exact names, or reject/normalize them consistently before both lookup and registration.
+
+4. **MEDIUM — The startup-file test can pass without exercising startup-file protection.**  
+   [shell_env_policy.rs:437](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:437), [terminal.rs:3450](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:3450).  
+   The fixture exports `P86_RC_BENIGN`, but never asserts it arrived. Capture can fail or return empty and the probe still passes. Its rc credential, `FLUX_API_KEY`, also exists in the parent; login layering independently skips names already present there. For persistent Bash, the fixture creates only `.bashrc`, whereas initialization uses an interactive **login** shell. **Existing assertions do not establish successful rc capture.** Use an rc-only credential, assert the rc sentinel, and provide the appropriate login profile.
+
+5. **LOW — Windows “core” variables are not all protected from registration.**  
+   [shell_env_policy.rs:170](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:170), [shell_env_policy.rs:277](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:277).  
+   `NEVER_CREDENTIAL_NAMES` omits Windows core entries including `APPDATA`, `LOCALAPPDATA`, `SYSTEMDRIVE`, and `HOMEPATH`. A header mapping such as `X-Profile = "APPDATA"` permanently removes that variable from implicit child environments, including `inherit = "core"`, breaking helpers that require it. **Tests protect only a small subset, chiefly `PATH` and `USER`.** Derive protection from the platform core list.
+
+6. **LOW — Documentation overstates coverage.**  
+   [18-sandbox.md:248](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md:248).  
+   “Every variable” named by `env_key`/`env_http_headers` is inaccurate even after the defects above are fixed: reserved names such as `USER` are deliberately retained. For example, `X-User = "USER"` remains visible. Document that exception and the registry’s process-lifetime persistence. **No documentation assertion catches this.**
+
+The provider registry wiring, explicit hook/MCP/LSP environment overrides, and policy `set` ordering look correct. I found no shell-syntax injection through the identifier filter, lock-poisoning panic, lock-order deadlock, or demonstrated ordinary-load performance defect.
+
+The release additions select real tests: **7** extra-ca redirects, **1** sampler redirect, **6** MCP HTTP-policy tests, **8** P86 unit tests, **2** default-policy tests, and **1** config integration test. These are source-derived counts, not execution results.
+
+For first-party dependencies: I found no checked-in hook, MCP server, or plugin implementation requiring these inherited credentials. The nested [`fuigo agent leader` launch](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/leader/mod.rs:1734) **can depend on inherited configured credentials** for environment-only authentication; its bootstrap spawn does not apply this scrub policy, so P86 preserves that behavior. Subagents execute within the agent runtime rather than launching another scrubbed `fuigo` executable.
+
+DO-NOT-LAND

@@ -988,6 +988,29 @@ serve({
     )
 }
 
+/// Python `dump(name, obj)`: publish `obj` as JSON next to the script, atomically.
+///
+/// A test finds a dump by polling for the file's EXISTENCE and then parses it.
+/// A plain `open(dest, "w")` followed by `json.dump` creates the file empty and
+/// fills it afterwards, so a reader that looked in between parsed nothing
+/// ("EOF while parsing a value at line 1 column 0", seen on loaded hosts).
+/// Writing a sibling file and renaming it into place leaves no such moment: a
+/// reader sees either no file or the whole one.
+/// `dump_never_shows_a_reader_a_partial_file` holds the writer in that window.
+pub(super) const ATOMIC_DUMP_PY: &str = r#"
+import json, os
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+def dump(name, obj):
+    dest = os.path.join(HERE, name)
+    tmp = dest + ".part"
+    with open(tmp, "w") as f:
+        json.dump(obj, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, dest)
+"#;
+
 /// A server that behaves like Roslyn on file watching: if the client advertised
 /// `didChangeWatchedFiles`, it registers a NuGet-cache glob (the registration
 /// that would otherwise become tens of thousands of inotify watches) and
@@ -996,14 +1019,9 @@ serve({
 pub(super) fn write_file_watch_server() -> (tempfile::TempDir, PathBuf) {
     write_python_server(
         "file_watch_lsp.py",
-        r#"
-import os
-HERE = os.path.dirname(os.path.abspath(__file__))
-
-def dump(name, obj):
-    with open(os.path.join(HERE, name), "w") as f:
-        json.dump(obj, f)
-
+        &[
+            ATOMIC_DUMP_PY,
+            r#"
 while True:
     msg = read_message()
     if msg is None:
@@ -1043,5 +1061,7 @@ while True:
     elif method is None and "id" in msg:
         dump("register_reply.json", msg)
 "#,
+        ]
+        .concat(),
     )
 }

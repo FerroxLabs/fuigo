@@ -251,13 +251,20 @@ fn validate_before_daemonize(args: &Args) -> anyhow::Result<Url> {
         .map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))
 }
 fn main() -> anyhow::Result<()> {
+    // P149 (S14/K16): every storage upload this server makes sends its text through the upload scrub.
+    fuigo_file_utils::payload_filter::install(fuigo_workspace::workspace_upload_scrub);
     let mut args = Args::parse();
     if args.capabilities {
-        println!("{}", serde_json::to_string(&CAPABILITIES)?);
+        // Best-effort: a raw `println!` aborts (`panic = "abort"`) when stdout is gone; a reader
+        // that went away is not an error, a hard write failure is (R060, R077).
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&CAPABILITIES)?);
+        if fuigo_tty_utils::best_effort_stdout::hard_failure() {
+            std::process::exit(1);
+        }
         return Ok(());
     }
     if let Some(msg) = args.server_id.as_deref().and_then(server_id_startup_error) {
-        eprintln!("{msg}");
+        fuigo_tty_utils::cli_eprintln!("{msg}");
         std::process::exit(EXIT_SERVER_ID_INVALID);
     }
     let cwd = match args.cwd {

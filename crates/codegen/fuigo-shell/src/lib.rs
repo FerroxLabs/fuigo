@@ -6,6 +6,11 @@
     dead_code
 )]
 #![warn(unreachable_pub)]
+// Diagnostics go through `fuigo_tty_utils::cli_eprintln!`/`cli_eprint!`: a raw `eprintln!` (or
+// `dbg!`) panics when fd 2 is a dead pipe, a closed pane or a full disk, and `panic = "abort"`
+// makes that a SIGABRT (R070). Crate-wide, which covers the CLI printer modules that deny
+// `print_stdout`; outside tests, where a failed harness stderr is not a shipped crash.
+#![cfg_attr(not(test), deny(clippy::print_stderr, clippy::dbg_macro))]
 #[cfg(all(test, feature = "dhat-heap"))]
 #[global_allocator]
 static DHAT_ALLOC: dhat::Alloc = dhat::Alloc;

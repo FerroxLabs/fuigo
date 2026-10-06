@@ -59,6 +59,13 @@ impl Update {
 #[derive(Debug, Clone, Default)]
 pub struct Documents {
     inner: Arc<RwLock<HashMap<String, Tracked>>>,
+    /// The version of a notification that is being put on the wire right now, per document,
+    /// between [`Self::begin_send`] and [`Self::commit`]/[`Self::abandon_send`].
+    ///
+    /// The server can answer that notification before the sender gets to `commit` -- the
+    /// reply is read on the connection's own task -- so a push naming the new version must
+    /// not be capped at the old one. See [`Self::push_version_cap`].
+    sending: Arc<RwLock<HashMap<String, i32>>>,
 }
 
 impl Documents {
@@ -85,6 +92,17 @@ impl Documents {
         }
     }
 
+    /// Note that `version` of `uri` is about to be sent. Call before the send; follow with
+    /// [`Self::commit`] once it is out, or [`Self::abandon_send`] if it failed.
+    pub fn begin_send(&self, uri: &str, version: i32) {
+        self.sending_write().insert(uri.to_string(), version);
+    }
+
+    /// The send begun by [`Self::begin_send`] did not go out.
+    pub fn abandon_send(&self, uri: &str) {
+        self.sending_write().remove(uri);
+    }
+
     /// Record a notification that is on the wire.
     pub fn commit(&self, uri: &str, version: i32, language_id: &str, end: Position) {
         self.write()
@@ -98,6 +116,34 @@ impl Documents {
                 language_id: language_id.to_string(),
                 end,
             });
+        // Cleared only AFTER the committed version has advanced: a reader that finds nothing in
+        // flight is then guaranteed to find the new version committed.
+        let mut sending = self.sending_write();
+        if sending
+            .get(uri)
+            .is_some_and(|in_flight| *in_flight <= version)
+        {
+            sending.remove(uri);
+        }
+    }
+
+    /// The newest version a pushed report can be about: the newest version we have sent, or are
+    /// in the middle of sending. It caps a push that names its version, and is the arrival-order
+    /// credit for one that does not.
+    ///
+    /// The server can receive a notification, analyze it and publish before the sender has
+    /// recorded it as sent (the reply is read on the connection's own task). Using the committed
+    /// version alone credited that report to the previous revision -- or, on a first open, to no
+    /// revision at all -- so it never settled the edit it answered and the reader got nothing for
+    /// that edit. Crediting from the moment the send begins rather than the moment it returns
+    /// moves the arrival-order credit point by only the duration of the send call: a report about
+    /// the old text arriving just after the commit was always equally indistinguishable.
+    pub fn push_version_cap(&self, uri: &str) -> Option<i32> {
+        // In-flight first, committed second; `commit` writes in the opposite order, so a send
+        // that completes between the two reads is still seen.
+        let in_flight = self.sending_read().get(uri).copied();
+        let committed = self.version(uri);
+        in_flight.max(committed)
     }
 
     /// The version the server has, or `None` if it has never been told about
@@ -134,12 +180,22 @@ impl Documents {
 
     /// Forget everything, returning what was open so it can be closed.
     pub fn take_all(&self) -> Vec<String> {
+        self.sending_write().clear();
         std::mem::take(&mut *self.write()).into_keys().collect()
     }
 
     /// Forget one document. Returns whether it was open.
     pub fn take(&self, uri: &str) -> bool {
+        self.sending_write().remove(uri);
         self.write().remove(uri).is_some()
+    }
+
+    fn sending_read(&self) -> RwLockReadGuard<'_, HashMap<String, i32>> {
+        self.sending.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn sending_write(&self) -> RwLockWriteGuard<'_, HashMap<String, i32>> {
+        self.sending.write().unwrap_or_else(|e| e.into_inner())
     }
 
     fn read(&self) -> RwLockReadGuard<'_, HashMap<String, Tracked>> {
@@ -173,6 +229,42 @@ mod tests {
     use super::*;
 
     const A: &str = "file:///a.cs";
+
+    /// A push that names the version being sent is credited with it, before the sender commits.
+    #[test]
+    fn a_version_in_flight_caps_a_named_push() {
+        let documents = Documents::new();
+        // First open, answered before the sender commits.
+        documents.begin_send(A, FIRST_VERSION);
+        assert_eq!(documents.version(A), None, "nothing committed yet");
+        assert_eq!(documents.push_version_cap(A), Some(FIRST_VERSION));
+        documents.commit(A, FIRST_VERSION, "csharp", Position::default());
+        assert_eq!(documents.push_version_cap(A), Some(FIRST_VERSION));
+
+        // A change, answered before the sender commits.
+        documents.begin_send(A, 2);
+        assert_eq!(documents.version(A), Some(FIRST_VERSION));
+        assert_eq!(documents.push_version_cap(A), Some(2));
+        documents.commit(A, 2, "csharp", Position::default());
+        assert_eq!(documents.push_version_cap(A), Some(2));
+        assert!(
+            documents.sending_read().get(A).is_none(),
+            "a committed send leaves no in-flight claim behind"
+        );
+    }
+
+    /// A send that failed leaves no claim behind.
+    #[test]
+    fn an_abandoned_send_does_not_raise_the_cap() {
+        let documents = Documents::new();
+        documents.commit(A, FIRST_VERSION, "csharp", Position::default());
+        documents.begin_send(A, 2);
+        documents.abandon_send(A);
+        assert_eq!(documents.push_version_cap(A), Some(FIRST_VERSION));
+        documents.begin_send(A, 2);
+        assert!(documents.take(A));
+        assert_eq!(documents.push_version_cap(A), None);
+    }
 
     #[test]
     fn an_unknown_document_is_opened_above_the_no_version_marker() {

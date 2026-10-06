@@ -58,8 +58,9 @@ mod tests {
 
     /// The fail-closed property — that nothing is trusted before
     /// `set_trusted_api_origins` runs — is NOT assertable here. The registry is
-    /// a process-wide `OnceLock` and other tests in this binary install
-    /// origins, so what is trusted depends on test ordering. It is pinned in
+    /// process-wide (a `RwLock<Option<..>>` whose seed is first-write-wins) and
+    /// other tests in this binary install origins, so what is trusted depends on
+    /// test ordering. It is pinned in
     /// its own single-purpose process instead:
     /// `fuigo-shell-base/tests/trust_fails_closed.rs`.
     ///

@@ -318,8 +318,16 @@ fn replay_inherited_updates(
                     .session
                     .handle_update(update, &meta, &mut child_view.scrollback);
             }
-            ReplayedUpdate::Fuigo(update) => {
-                crate::app::acp_handler::apply_child_view_session_event(child_view, &update, false);
+            ReplayedUpdate::Fuigo(update, meta) => {
+                let meta = crate::acp::meta::NotificationMeta::from_json(
+                    meta.as_ref().and_then(|v| v.as_object()),
+                );
+                crate::app::acp_handler::apply_child_view_session_event(
+                    child_view,
+                    &update,
+                    meta.event_id.as_deref(),
+                    false,
+                );
             }
         }
     });

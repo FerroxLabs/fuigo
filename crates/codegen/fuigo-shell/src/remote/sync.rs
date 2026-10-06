@@ -29,6 +29,8 @@ const DROP_BATCH_SIZE: usize = 64;
 
 enum SyncMsg {
     Queue(Box<acp::SessionNotification>),
+    /// An already-serialized upload message (a compaction checkpoint), kept in order with the queued notifications.
+    QueueRaw(Box<ExportedMessage>),
     Flush,
     SetTitle {
         title: String,
@@ -59,6 +61,20 @@ impl RemoteSync {
         (Self { tx }, observed_rx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_raw_observer() -> (Self, mpsc::UnboundedReceiver<ExportedMessage>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (observed_tx, observed_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let SyncMsg::QueueRaw(raw) = message {
+                    let _ = observed_tx.send(*raw);
+                }
+            }
+        });
+        (Self { tx }, observed_rx)
+    }
+
     /// Metadata is included on every flush to keep the backend session row current.
     pub(crate) fn new(
         session_id: String,
@@ -72,6 +88,13 @@ impl RemoteSync {
 
     pub fn queue(&self, notification: acp::SessionNotification) {
         let _ = self.tx.send(SyncMsg::Queue(Box::new(notification)));
+    }
+
+    /// Queue a compaction checkpoint upload, ordered after everything queued before it.
+    pub(crate) fn queue_checkpoint(&self, message: ExportedMessage) {
+        let _ = self.tx.send(SyncMsg::QueueRaw(Box::new(message)));
+        // A compaction can be the last thing a session does; do not leave its checkpoint buffered until the next flush.
+        let _ = self.tx.send(SyncMsg::Flush);
     }
 
     pub fn flush(&self) {
@@ -105,7 +128,7 @@ async fn do_flush(
     client: &BackendClient,
     session_id: &str,
     metadata: &ExportedMetadata,
-    pending: &mut Vec<acp::SessionNotification>,
+    pending: &mut Vec<Pending>,
 ) -> bool {
     if pending.is_empty() {
         return true;
@@ -113,7 +136,10 @@ async fn do_flush(
 
     let messages: Vec<ExportedMessage> = pending
         .iter()
-        .map(ExportedMessage::from_notification)
+        .map(|p| match p {
+            Pending::Notification(n) => ExportedMessage::from_notification(n),
+            Pending::Raw(m) => (**m).clone(),
+        })
         .collect();
 
     match client
@@ -141,33 +167,46 @@ async fn do_flush(
     }
 }
 
+enum Pending {
+    Notification(Box<acp::SessionNotification>),
+    Raw(Box<ExportedMessage>),
+}
+
+/// Before buffering another message: past [`MAX_PENDING`], try an emergency flush, and drop the oldest batch if it fails.
+async fn make_room(
+    client: &BackendClient,
+    session_id: &str,
+    metadata: &mut ExportedMetadata,
+    pending: &mut Vec<Pending>,
+) {
+    if pending.len() < MAX_PENDING {
+        return;
+    }
+    tracing::warn!(pending = pending.len(), "Writeback: buffer full, attempting emergency flush");
+    metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
+    if !do_flush(client, session_id, metadata, pending).await {
+        let dropped = pending.drain(0..DROP_BATCH_SIZE.min(pending.len())).count();
+        tracing::error!(dropped = dropped, "Writeback: emergency flush failed, dropping oldest messages");
+    }
+}
+
 async fn sync_task(
     session_id: String,
     mut metadata: ExportedMetadata,
     client: BackendClient,
     mut rx: mpsc::UnboundedReceiver<SyncMsg>,
 ) {
-    let mut pending: Vec<acp::SessionNotification> = Vec::new();
+    let mut pending: Vec<Pending> = Vec::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
             SyncMsg::Queue(n) => {
-                if pending.len() >= MAX_PENDING {
-                    tracing::warn!(
-                        pending = pending.len(),
-                        "Writeback: buffer full, attempting emergency flush"
-                    );
-
-                    metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
-                    if !do_flush(&client, &session_id, &metadata, &mut pending).await {
-                        let dropped = pending.drain(0..DROP_BATCH_SIZE.min(pending.len())).count();
-                        tracing::error!(
-                            dropped = dropped,
-                            "Writeback: emergency flush failed, dropping oldest messages"
-                        );
-                    }
-                }
-                pending.push(*n);
+                make_room(&client, &session_id, &mut metadata, &mut pending).await;
+                pending.push(Pending::Notification(n));
+            }
+            SyncMsg::QueueRaw(m) => {
+                make_room(&client, &session_id, &mut metadata, &mut pending).await;
+                pending.push(Pending::Raw(m));
             }
             SyncMsg::Flush => {
                 metadata.updated_at = Some(chrono::Utc::now().to_rfc3339());
@@ -220,5 +259,20 @@ async fn sync_task(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_flush_tests {
+    use super::*;
+
+    /// A compaction can be the last thing a session does, so queueing its checkpoint must also schedule a flush.
+    #[test]
+    fn queued_checkpoint_is_followed_by_a_flush() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sync = RemoteSync { tx };
+        sync.queue_checkpoint(ExportedMessage { content: "{}".into(), timestamp: None });
+        assert!(matches!(rx.try_recv(), Ok(SyncMsg::QueueRaw(_))));
+        assert!(matches!(rx.try_recv(), Ok(SyncMsg::Flush)), "checkpoint left buffered without a flush");
     }
 }

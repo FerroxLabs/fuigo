@@ -897,6 +897,8 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
                     ToolCallBlock::SentMessage(_) => Some("Message"),
                     ToolCallBlock::Skill(_) => Some("Skill"),
                     ToolCallBlock::Other(_) => Some("Tool"),
+                    // Lifecycle events aren't real tool calls; keep scanning
+                    ToolCallBlock::Lifecycle(_) => None,
                 };
                 if let Some(label) = label {
                     return label.to_string();
@@ -1103,6 +1105,7 @@ mod tests {
     /// Paint must not steal the body row for a breathing blank.
     #[test]
     fn render_peek_tight_pin_shows_current_turn_body() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::block::RenderBlock;
         use crate::scrollback::entry::ScrollbackEntry;
         use crate::scrollback::state::ScrollbackState;
@@ -1151,6 +1154,7 @@ mod tests {
     /// While the agent is working the "Working" status label renders in the secondary colour; other status labels stay dim chrome.
     #[test]
     fn render_peek_working_status_uses_secondary_colour() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let theme = Theme::current();
@@ -1196,6 +1200,7 @@ mod tests {
     /// They render in both summary mode and pending-question (approval) mode.
     #[test]
     fn render_peek_shows_model_and_auto_approve_on_bottom_border() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let theme = Theme::current();
@@ -1308,6 +1313,7 @@ mod tests {
     /// Without this, voice started with a row selected (peek replaces the dispatch box) would show no indicator at all.
     #[test]
     fn render_peek_paints_record_badge_and_interim_when_listening() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let theme = Theme::current();
@@ -1377,6 +1383,7 @@ mod tests {
     /// The bottom footer hints (rendered by `render_footer` outside the box) carry the `space:close` / `enter:open` affordances.
     #[test]
     fn render_peek_paints_rounded_box_with_summary_and_reply_input() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
@@ -1443,6 +1450,7 @@ mod tests {
     /// The reply input renders the typed draft (not the dim placeholder) and reports a caret position.
     #[test]
     fn render_peek_shows_typed_reply_and_caret() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
@@ -1481,6 +1489,7 @@ mod tests {
     /// An unfocused panel (Tab) hides the caret (`render_peek_panel` returns `None`) while still painting the draft text.
     #[test]
     fn render_peek_unfocused_hides_caret() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
@@ -1521,6 +1530,7 @@ mod tests {
     /// A focused one keeps the row clear; the caret is the affordance, mirroring the dispatch box.
     #[test]
     fn render_peek_unfocused_empty_reply_paints_placeholder() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
@@ -1562,6 +1572,7 @@ mod tests {
     /// At least one interior cell's fg is faded toward bg relative to the focused render.
     #[test]
     fn render_peek_unfocused_simple_panel_dims_content() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let theme = Theme::current();
@@ -1614,6 +1625,7 @@ mod tests {
     /// The 1-9 keys still answer the permission via `peek_number_key`.
     #[test]
     fn render_peek_paints_permission_question_with_options() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1666,6 +1678,7 @@ mod tests {
     /// The highlighted option (`selected_option`) is marked with `▸` and the others with a plain indent, so `↑`/`↓` navigation is visible.
     #[test]
     fn render_peek_highlights_selected_option() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1718,6 +1731,7 @@ mod tests {
     /// Every option renders with the plain indent, never the `▸` marker.
     #[test]
     fn render_peek_unfocused_question_has_no_selected_option() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1774,6 +1788,7 @@ mod tests {
     /// It hides the `❯ reply` row and reports a caret into the feedback.
     #[test]
     fn render_peek_reject_option_shows_inline_feedback() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1837,6 +1852,7 @@ mod tests {
     /// An ask-tool question (no `request_id`) shows the "Other" free-text row with the ask placeholder rather than the permission one.
     #[test]
     fn render_peek_ask_other_uses_ask_placeholder() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1892,6 +1908,7 @@ mod tests {
     /// With no feedback typed yet, the highlighted reject option shows a dim "(type to add feedback)" hint.
     #[test]
     fn render_peek_reject_option_shows_feedback_hint() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 8));
@@ -1945,6 +1962,7 @@ mod tests {
     /// The chip renders on the reply row.
     #[test]
     fn render_peek_reply_folds_long_paste_into_chip() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         let mut buf = Buffer::empty(Rect::new(0, 0, 80, 5));
@@ -1985,6 +2003,7 @@ mod tests {
     /// Without an overlay the chip alone is shown (the dashboard historically had no preview).
     #[test]
     fn render_peek_reply_paste_preview_uses_overlay() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         crate::appearance::cache::set_vim_mode(false);
@@ -2058,6 +2077,7 @@ mod tests {
     /// The returned `reply_rect` spans every reply row, and each line of the draft is painted.
     #[test]
     fn render_peek_grows_reply_for_multiline_draft() {
+        let _theme = crate::theme::cache::pin_theme();
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
         // Tall box so the grown reply isn't clamped.

@@ -33,6 +33,8 @@ struct TraceResult {
 }
 
 pub async fn run(args: TraceArgs, agent_config: &AgentConfig) -> Result<()> {
+    // P149 (S14/K16): what this command uploads goes through the trace-upload scrub.
+    fuigo_shell::upload::install_upload_scrub();
     if args.local {
         return run_export(
             &args.session_id,
@@ -49,11 +51,11 @@ pub async fn run(args: TraceArgs, agent_config: &AgentConfig) -> Result<()> {
             "trace_cmd: trace uploads disabled in config"
         );
         if !args.json {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "Trace uploads disabled. Set [telemetry] trace_upload = true in {}",
                 crate::util::display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME)
             );
-            eprintln!("Falling back to local export.");
+            fuigo_tty_utils::cli_eprintln!("Falling back to local export.");
         }
         return run_export(
             &args.session_id,
@@ -211,7 +213,7 @@ fn append_bytes<W: std::io::Write>(archive: &mut tar::Builder<W>, path: &str, da
     set_mtime(&mut header);
     if let Err(e) = archive.append_data(&mut header, path, data) {
         tracing::warn!(error = %e, "trace_cmd: failed to add file to archive");
-        eprintln!("  Warning: failed to add {path}: {e}");
+        fuigo_tty_utils::cli_eprintln!("  Warning: failed to add {path}: {e}");
     }
 }
 
@@ -222,6 +224,29 @@ fn set_mtime(header: &mut tar::Header) {
             .unwrap_or_default()
             .as_secs(),
     );
+}
+
+/// P149 (S14/K16, live lane C2 D2): a session file as the trace export packs it. The export is built to leave the
+/// machine (`fuigo trace` uploads it; a local bundle is made to be handed on), so every TEXT file gets the `/feedback`
+/// archive's scrub (`fuigo_shell::upload::scrub_upload_text`: the credentials this process holds or sent, credential
+/// shapes, private-key blocks). A file is text when its extension says so (`.jsonl`, `.log` for terminal output, ...),
+/// or when it has no extension and is UTF-8 that is not a PDF. Everything else (an image, a video, a PDF, an archive,
+/// any unknown format) is packed byte for byte: replacing bytes inside a format with lengths and offsets would
+/// corrupt it (Astra r1, r2). The session directory itself is not changed (K16: local history keeps it).
+fn scrub_export_file(path: &Path, data: Vec<u8>) -> Vec<u8> {
+    const TEXT: &[&str] = &[
+        "json", "jsonl", "ndjson", "txt", "log", "md", "toml", "yaml", "yml", "csv", "tsv", "xml", "html", "htm",
+        "sh", "patch", "diff", "lock", "pem", "key", "crt", "cer", "csr", "pub", "env", "cfg", "conf", "ini",
+        "properties", "netrc", "npmrc", "pypirc", "gitconfig", "py", "js", "ts", "rs", "go", "rb",
+    ];
+    let text = match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => TEXT.iter().any(|t| t.eq_ignore_ascii_case(ext)),
+        None => std::str::from_utf8(&data).is_ok() && !data.starts_with(b"%PDF"),
+    };
+    if !text {
+        return data;
+    }
+    fuigo_shell::upload::scrub_upload_text(data)
 }
 
 /// Returns the number of files added.
@@ -245,6 +270,7 @@ fn add_directory_to_tar<W: std::io::Write>(
         } else if path.is_file() {
             match std::fs::read(&path) {
                 Ok(data) => {
+                    let data = scrub_export_file(&path, data);
                     append_bytes(archive, &archive_path, &data);
                     count += 1;
                 }
@@ -254,7 +280,11 @@ fn add_directory_to_tar<W: std::io::Write>(
                         error = %e,
                         "trace_cmd: failed to read file for archive"
                     );
-                    eprintln!("  Warning: failed to read {}: {}", path.display(), e);
+                    fuigo_tty_utils::cli_eprintln!(
+                        "  Warning: failed to read {}: {}",
+                        path.display(),
+                        e
+                    );
                 }
             }
         }
@@ -266,18 +296,6 @@ fn add_directory_to_tar<W: std::io::Write>(
 // ---------------------------------------------------------------------------
 // Upload method diagnostics
 // ---------------------------------------------------------------------------
-
-/// Show first and last `n` chars with `***` in between. Char-safe (no byte-boundary panics).
-/// Returns the full string if it's short enough that redacting would be pointless.
-fn redact_middle(s: &str, n: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= n * 2 + 3 {
-        return s.to_owned();
-    }
-    let prefix: String = chars[..n].iter().collect();
-    let suffix: String = chars[chars.len() - n..].iter().collect();
-    format!("{prefix}***{suffix}")
-}
 
 pub struct UploadMethodDisplay<'a> {
     pub method: &'a UploadMethod,
@@ -304,12 +322,11 @@ impl std::fmt::Display for UploadMethodDisplay<'_> {
                 deployment_key,
                 ..
             } => {
-                let deploy = deployment_key
-                    .as_deref()
-                    .map(|k| redact_middle(k, 4))
-                    .unwrap_or_else(|| "none".to_string());
+                // P70: no characters of the key (the old head/tail print showed eight, or all of a short key).
+                let deploy = if deployment_key.is_some() { "configured" } else { "none" };
                 writeln!(f, "  Method:   Proxy")?;
-                writeln!(f, "  Proxy:    {proxy_base_url}")?;
+                // P149 (S12): location only (a base URL can carry a password or a query secret).
+                writeln!(f, "  Proxy:    {}", fuigo_auth::redact_url(proxy_base_url))?;
                 write!(f, "  Deploy:   {deploy}")
             }
             UploadMethod::S3 {
@@ -320,7 +337,9 @@ impl std::fmt::Display for UploadMethodDisplay<'_> {
                 credentials_file,
                 ..
             } => {
-                let endpoint = endpoint_url.as_deref().unwrap_or("(default AWS)");
+                let endpoint = endpoint_url
+                    .as_deref()
+                    .map_or_else(|| "(default AWS)".to_owned(), fuigo_auth::redact_url);
                 let creds = if credentials_content.is_some() {
                     "inline credentials"
                 } else if credentials_file.is_some() {
@@ -392,8 +411,8 @@ async fn run_export(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        eprintln!("Found session at: {}", session_dir.display());
-        eprintln!("Building session trace archive...");
+        fuigo_tty_utils::cli_eprintln!("Found session at: {}", session_dir.display());
+        fuigo_tty_utils::cli_eprintln!("Building session trace archive...");
     }
 
     let archive = build_session_tar(&session_dir, session_id, agent_config)?;
@@ -407,12 +426,12 @@ async fn run_export(
             local_path: Some(output_path.display().to_string()),
             error: None,
         };
-        println!("{}", serde_json::to_string(&result)?);
+        fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&result)?);
     } else {
         let size_kb = archive.len() / 1024;
-        eprintln!("Session trace exported ({size_kb} KB):");
-        eprintln!("  {}", output_path.display());
-        println!("{}", output_path.display());
+        fuigo_tty_utils::cli_eprintln!("Session trace exported ({size_kb} KB):");
+        fuigo_tty_utils::cli_eprintln!("  {}", output_path.display());
+        fuigo_tty_utils::cli_println!("{}", output_path.display());
     }
     Ok(())
 }
@@ -430,10 +449,10 @@ async fn run_upload(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        eprintln!("Found session at: {}", session_dir.display());
+        fuigo_tty_utils::cli_eprintln!("Found session at: {}", session_dir.display());
     }
 
-    let upload_method = resolve_upload_method(agent_config).await;
+    let (upload_method, upload_auth) = resolve_upload_method(agent_config).await;
     let upload_method = match upload_method {
         Some(method) => method,
         None => {
@@ -450,7 +469,7 @@ async fn run_upload(
     };
 
     if !json {
-        eprintln!("Building session trace archive...");
+        fuigo_tty_utils::cli_eprintln!("Building session trace archive...");
     }
     let archive = build_session_tar(&session_dir, session_id, agent_config)?;
     let archive_size = archive.len();
@@ -499,10 +518,14 @@ async fn run_upload(
     );
     if !json {
         let size_kb = archive_size / 1024;
-        eprintln!("Uploading session trace ({size_kb} KB)...");
-        eprintln!("{method_desc}");
+        fuigo_tty_utils::cli_eprintln!("Uploading session trace ({size_kb} KB)...");
+        fuigo_tty_utils::cli_eprintln!("{method_desc}");
     }
 
+    // P47: the credential's kind travels with the upload, so a static API key keeps its own rules and a session
+    // token is checked against the proxy base.
+    let upload_config =
+        fuigo_shell::upload::gcs::ClassifiedProxyUpload::new(upload_config, upload_auth.as_ref());
     match upload_with_retries(&upload_config, &object_path, &archive).await {
         Ok(url) => {
             tracing::info!(session_id = %session_id, url = %url, "trace_cmd: upload succeeded");
@@ -514,12 +537,12 @@ async fn run_upload(
                     local_path: None,
                     error: None,
                 };
-                println!("{}", serde_json::to_string(&result)?);
+                fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&result)?);
             } else {
-                eprintln!();
-                eprintln!("Session trace uploaded successfully.");
-                eprintln!("  {url}");
-                println!("{url}");
+                fuigo_tty_utils::cli_eprintln!();
+                fuigo_tty_utils::cli_eprintln!("Session trace uploaded successfully.");
+                fuigo_tty_utils::cli_eprintln!("  {url}");
+                fuigo_tty_utils::cli_println!("{url}");
             }
             Ok(())
         }
@@ -556,7 +579,7 @@ impl UploadAttempt<'_> {
 
         let export_path = save_local_bundle(self.archive, self.session_id, self.output)
             .unwrap_or_else(|write_err| {
-                eprintln!("Failed to save local bundle: {write_err}");
+                fuigo_tty_utils::cli_eprintln!("Failed to save local bundle: {write_err}");
                 export_dir.join(format!("{}.tar.gz", self.session_id))
             });
 
@@ -570,14 +593,14 @@ impl UploadAttempt<'_> {
                 local_path: Some(export_path.display().to_string()),
                 error: Some(format!("{error}")),
             };
-            println!("{}", serde_json::to_string(&result).unwrap_or_default());
+            fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&result).unwrap_or_default());
         } else {
-            eprintln!();
-            eprintln!("Trace upload failed: {error}");
-            eprintln!("  Bundle: {}", export_path.display());
-            eprintln!("  Log:    {}", log_path.display());
-            eprintln!("  Retry:  fuigo trace {}", self.session_id);
-            println!("{}", export_path.display());
+            fuigo_tty_utils::cli_eprintln!();
+            fuigo_tty_utils::cli_eprintln!("Trace upload failed: {error}");
+            fuigo_tty_utils::cli_eprintln!("  Bundle: {}", export_path.display());
+            fuigo_tty_utils::cli_eprintln!("  Log:    {}", log_path.display());
+            fuigo_tty_utils::cli_eprintln!("  Retry:  fuigo trace {}", self.session_id);
+            fuigo_tty_utils::cli_println!("{}", export_path.display());
         }
 
         anyhow::anyhow!("Trace upload failed for session {}", self.session_id)
@@ -605,12 +628,17 @@ impl UploadAttempt<'_> {
         let _ = writeln!(log, "Upload configuration:");
         let _ = writeln!(log, "{}", self.method_desc);
         let _ = writeln!(log);
-        let _ = writeln!(log, "Error:\n  {error}");
+        // P149 (S12, Astra r3 #5): a transport error quotes its request URL; location only.
+        let _ = writeln!(log, "Error:\n  {}", fuigo_auth::redact_urls_in_text(&error.to_string()));
         let _ = writeln!(log);
-        let _ = writeln!(log, "Full error chain:\n  {error:?}");
+        let _ = writeln!(
+            log,
+            "Full error chain:\n  {}",
+            fuigo_auth::redact_urls_in_text(&format!("{error:?}"))
+        );
 
         if let Err(e) = std::fs::write(&log_path, &log) {
-            eprintln!("  Warning: failed to write debug log: {e}");
+            fuigo_tty_utils::cli_eprintln!("  Warning: failed to write debug log: {e}");
         }
         log_path
     }
@@ -622,8 +650,8 @@ impl UploadAttempt<'_> {
 
 const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
-async fn upload_with_retries(
-    config: &fuigo_shell::session::repo_changes::TraceExportConfig,
+async fn upload_with_retries<C: fuigo_file_utils::gcs::StorageConfig + Sync>(
+    config: &C,
     object_path: &str,
     archive: &[u8],
 ) -> anyhow::Result<String> {
@@ -643,9 +671,11 @@ async fn upload_with_retries(
         .map_err(|_| anyhow::anyhow!("Upload timed out after {}s", UPLOAD_TIMEOUT.as_secs()))?
     })
     .retry(backoff)
+    // P47 / P71: a refused destination sent nothing and cannot change on retry.
+    .when(|err| !fuigo_shell::upload::gcs::is_destination_refusal(err))
     .notify(|err, dur| {
         tracing::warn!(error = %err, retry_in = ?dur, "trace_cmd: upload attempt failed, retrying");
-        eprintln!("  Upload failed, retrying in {}s...", dur.as_secs());
+        fuigo_tty_utils::cli_eprintln!("  Upload failed, retrying in {}s...", dur.as_secs());
     })
     .await
 }
@@ -654,7 +684,10 @@ async fn upload_with_retries(
 // Upload method resolution
 // ---------------------------------------------------------------------------
 
-pub async fn resolve_upload_method(agent_config: &AgentConfig) -> Option<UploadMethod> {
+/// The upload method, and the credential it was resolved from (P47: its kind decides the destination rule).
+pub async fn resolve_upload_method(
+    agent_config: &AgentConfig,
+) -> (Option<UploadMethod>, Option<fuigo_shell::auth::FuigoAuth>) {
     // On login failure, fall back to ambient creds rather than erroring.
     let auth_token = fuigo_shell::auth::ensure_authenticated_or_noninteractive(
         &agent_config.fuigo_com_config,
@@ -666,12 +699,259 @@ pub async fn resolve_upload_method(agent_config: &AgentConfig) -> Option<UploadM
         |e| tracing::info!(error = %e, "trace_cmd: auth failed, trying ambient credentials"),
     )
     .ok()
-    .flatten()
-    .map(|auth| auth.key);
+    .flatten();
 
-    let method = agent_config.endpoints.resolve_upload_method(auth_token);
+    // P47: the credential's kind decides whether the trace-upload URL is checked (a session token is; a static API
+    // key keeps its own rules).
+    let method = agent_config
+        .endpoints
+        .resolve_upload_method_for_auth(auth_token.as_ref());
     if method.is_none() {
         tracing::warn!("trace_cmd: no upload method available");
     }
-    method
+    (method, auth_token)
+}
+
+#[cfg(test)]
+mod p71_gate_tests {
+    use super::*;
+    use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+
+    const ARCHIVE: &[u8] = b"P71-PAGER-TRACE-ARCHIVE account user-123 /home/rowan/work";
+
+    fn config_for(base: &str) -> fuigo_file_utils::TraceExportConfig {
+        fuigo_file_utils::TraceExportConfig {
+            bucket_url: None,
+            service_account_key: None,
+            upload_method: fuigo_file_utils::UploadMethod::Proxy {
+                proxy_base_url: base.to_string(),
+                user_token: String::new(),
+                deployment_key: Some("p71-deployment-key".to_string()),
+                alpha_test_key: None,
+            },
+            prefix_dir: None,
+            gcs_prefix: None,
+            absolute_paths: false,
+            archive_name_override: None,
+        }
+    }
+
+    /// A config that counts how often an upload attempt asks it for its destination. A refused attempt
+    /// asks exactly once (the gate, then it returns), so the count is the number of attempts.
+    struct CountingConfig {
+        inner: fuigo_file_utils::TraceExportConfig,
+        asked: std::sync::atomic::AtomicUsize,
+    }
+    impl fuigo_file_utils::gcs::StorageConfig for CountingConfig {
+        fn bucket_url(&self) -> &str {
+            fuigo_file_utils::gcs::StorageConfig::bucket_url(&self.inner)
+        }
+        fn upload_method(&self) -> &fuigo_file_utils::UploadMethod {
+            self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            &self.inner.upload_method
+        }
+    }
+
+    /// `fuigo trace`: a third-party storage proxy receives no byte, and the refusal is attempted once, never
+    /// retried (counted, not timed); a FluxRouter-class proxy receives the archive unchanged.
+    #[tokio::test]
+    async fn trace_archive_goes_only_to_fluxrouter_class_or_operator_destinations() {
+        let third_party = RecordingEndpoint::third_party().await;
+        let config = CountingConfig {
+            inner: config_for(&third_party.proxy_base_url()),
+            asked: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let err = upload_with_retries(&config, "sess-1/trace_export.tar.gz", ARCHIVE)
+            .await
+            .expect_err("a third-party proxy must not receive the archive");
+        assert!(fuigo_shell::upload::gcs::is_destination_refusal(&err), "{err:#}");
+        assert_eq!(
+            config.asked.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a withheld upload was retried"
+        );
+        third_party.settle(std::time::Duration::from_millis(300)).await;
+        assert_eq!(third_party.connections(), 0, "the trace archive reached a third-party proxy");
+
+        let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+        let _ = upload_with_retries(&config_for(&fluxrouter_class.proxy_base_url()), "sess-1/trace_export.tar.gz", ARCHIVE).await;
+        assert!(fluxrouter_class.received_contains(ARCHIVE), "FluxRouter-class proxy did not receive the archive unchanged");
+        assert!(fluxrouter_class.received_contains(b"sess-1/trace_export.tar.gz"));
+    }
+}
+
+#[cfg(test)]
+mod p70_deploy_key_display {
+    use super::*;
+
+    /// P70: the trace-upload method summary (printed to stderr) holds no run of four characters of the deployment key,
+    /// short or long (the old `redact_middle` printed eight of them, or all of a key of 11 characters or fewer).
+    #[test]
+    fn upload_method_display_shows_no_deployment_key_material() {
+        for key in ["dkFAKE7", "p70dk-FAKE-9b8c7d6e5f4a3b2c"] {
+            let method = UploadMethod::Proxy {
+                proxy_base_url: "https://proxy.p70.invalid".into(),
+                user_token: "p70ut-FAKE-1a2b3c4d".into(),
+                deployment_key: Some(key.into()),
+                alpha_test_key: None,
+            };
+            let shown = UploadMethodDisplay { method: &method, bucket_url: "gs://p70" }.to_string();
+            assert!(shown.contains("Deploy:   configured"), "control: {shown}");
+            let chars: Vec<char> = key.chars().collect();
+            for w in chars.windows(4) {
+                let frag: String = w.iter().collect();
+                assert!(!shown.contains(&frag), "the summary holds {frag:?} of the deployment key: {shown}");
+            }
+            assert!(!format!("{method:?}").contains(key), "Debug holds the deployment key");
+        }
+    }
+
+    /// P70 (Astra r7): `fuigo serve` arguments: the secret, and credentials in the remote / headless URLs.
+    #[test]
+    fn serve_args_debug_redacts_secret_and_url_credentials() {
+        let args = crate::app::cli::ServeArgs {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            secret: Some("p70sv-FAKE-1d2e3f4a".into()),
+            remote: Some("wss://u:p70rp-FAKE-5b6c7d8e@host/ws?token=p70rq-FAKE-9f0a1b2c".into()),
+            headless: crate::app::cli::HeadlessArgs {
+                fuigo_ws_url: Some("wss://host/ws?token=p70hw-FAKE-3d4e5f6a".into()),
+                ..Default::default()
+            },
+        };
+        for out in [format!("{args:?}"), format!("{args:#?}")] {
+            assert!(out.contains("<redacted>"), "control: {out}");
+            for secret in ["p70sv-FAKE-1d2e3f4a", "p70rp-FAKE-5b6c7d8e", "p70rq-FAKE-9f0a1b2c", "p70hw-FAKE-3d4e5f6a"] {
+                assert!(!out.contains(secret), "Debug holds {secret}: {out}");
+            }
+        }
+    }
+
+    /// P70a (Astra r1): `fuigo agent` arguments: credentials in the two base-URL overrides.
+    #[test]
+    fn agent_args_debug_redacts_url_credentials() {
+        let args = crate::app::cli::AgentArgs {
+            reauthenticate: false,
+            model: Some("p70-model".into()),
+            reasoning_effort: None,
+            yolo: false,
+            agent_profile: None,
+            plugin_dirs: Vec::new(),
+            leader: false,
+            no_leader: false,
+            headless: crate::app::cli::HeadlessArgs::default(),
+            cli_chat_proxy_base_url: Some("https://proxy.p70.invalid/v1?key=p70cq-FAKE-7a8b9c0d".into()),
+            fuigo_api_base_url: Some("https://u:p70ap-FAKE-1e2f3a4b@api.p70.invalid/v1".into()),
+            mode: None,
+        };
+        for out in [format!("{args:?}"), format!("{args:#?}")] {
+            assert!(out.contains("<redacted>") && out.contains("p70-model"), "control: {out}");
+            assert!(out.contains("proxy.p70.invalid") && out.contains("api.p70.invalid"), "control: hosts print: {out}");
+            for secret in ["p70cq-FAKE-7a8b9c0d", "p70ap-FAKE-1e2f3a4b"] {
+                assert!(!out.contains(secret), "Debug holds {secret}: {out}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod p149_export_scrub {
+    use super::*;
+
+    const SENT: &str = "fuigo-p149-SYNTH-trace-export-key-01";
+    const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+    const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
+
+    fn unpacked(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive));
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().to_string_lossy().into_owned();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            out.push((name, data));
+        }
+        out
+    }
+
+    /// P149 (S14/K16, live lane C2 D2): `fuigo trace <sid>` packed the session's files as written, so the uploaded
+    /// `trace_export.tar.gz` held the sent FUIGO_API_KEY ten times and a PEM private key. The export now carries
+    /// `<redacted>` for every credential the process sent or holds, every credential shape and every private-key
+    /// block, in JSON-lines records and in plain terminal logs alike; an image is packed byte for byte; the session
+    /// directory on disk is unchanged.
+    #[test]
+    fn the_trace_export_archive_is_scrubbed_and_the_session_dir_is_not() {
+        let _registry = crate::test_util::sent_credentials_lock();
+        fuigo_telemetry::sent_credentials::record(SENT);
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("sess-p149");
+        std::fs::create_dir_all(session.join("terminal")).unwrap();
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n{PEM_BODY}\n-----END PRIVATE KEY-----\n");
+        let updates = format!(
+            "{}\n",
+            serde_json::json!({"tool": "run_terminal_command", "command": format!("echo {SENT}; echo {GHP}"),
+                "output": format!("{SENT}\n{pem}")})
+        );
+        std::fs::write(session.join("updates.jsonl"), &updates).unwrap();
+        let terminal = format!("$ echo $FUIGO_API_KEY\n{SENT}\n$ cat key.pem\n{pem}$ echo {GHP}\n{GHP}\n");
+        std::fs::write(session.join("terminal").join("cmd-1.log"), &terminal).unwrap();
+        let image: Vec<u8> = [&[0x89u8, b'P', b'N', b'G'][..], SENT.as_bytes()].concat();
+        std::fs::write(session.join("shot.png"), &image).unwrap();
+        let pdf = format!("%PDF-1.4\n1 0 obj << /Length 60 >> stream\n{SENT}\nendstream\nstartxref\n420\n%%EOF\n");
+        std::fs::write(session.join("report.pdf"), &pdf).unwrap();
+        // Astra r3 #3: a key file is text and must be scrubbed.
+        std::fs::write(session.join("deploy.pem"), &pem).unwrap();
+
+        let archive = build_session_tar(&session, "sess-p149", &AgentConfig::default()).unwrap();
+        let files = unpacked(&archive);
+        let mut seen = 0;
+        for (name, data) in &files {
+            let text = String::from_utf8_lossy(data);
+            if name.ends_with("deploy.pem") {
+                seen += 1;
+                assert!(!text.contains(PEM_BODY), "{name} carries the private key: {text}");
+            }
+            if name.ends_with("updates.jsonl") || name.ends_with("cmd-1.log") {
+                seen += 1;
+                for secret in [SENT, GHP, PEM_BODY] {
+                    assert!(!text.contains(secret), "{name} carries {secret}: {text}");
+                }
+                assert!(text.contains("<redacted>"), "control: {name}: {text}");
+            }
+            if name.ends_with("updates.jsonl") {
+                serde_json::from_str::<serde_json::Value>(text.trim()).expect("still one JSON record");
+            }
+            if name.ends_with("shot.png") {
+                seen += 1;
+                assert_eq!(data, &image, "an image is packed as it is");
+            }
+            if name.ends_with("report.pdf") {
+                seen += 1;
+                assert_eq!(data, pdf.as_bytes(), "an ASCII PDF is packed as it is (offsets must stay valid)");
+            }
+        }
+        assert_eq!(seen, 5, "control: the five files were packed: {:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
+        assert_eq!(std::fs::read_to_string(session.join("updates.jsonl")).unwrap(), updates, "local file changed");
+        assert_eq!(std::fs::read_to_string(session.join("terminal").join("cmd-1.log")).unwrap(), terminal);
+    }
+
+    /// P149 (S12, Astra r1 #4): the upload-method summary `fuigo trace` prints (and writes into its failure log)
+    /// names a proxy or S3 endpoint by location only.
+    #[test]
+    fn the_upload_method_summary_names_endpoints_by_location_only() {
+        const PASS: &str = "fuigo-p149-SYNTH-proxypass";
+        const QUERY: &str = "fuigo-p149-SYNTH-proxyquery";
+        let url = format!("https://p149u:{PASS}@proxy.p149.invalid/v1?key={QUERY}");
+        let proxy = UploadMethod::Proxy {
+            proxy_base_url: url.clone(),
+            user_token: String::new(),
+            deployment_key: None,
+            alpha_test_key: None,
+        };
+        let shown = UploadMethodDisplay { method: &proxy, bucket_url: "gs://p149" }.to_string();
+        assert!(shown.contains("proxy.p149.invalid/v1"), "control: {shown}");
+        for secret in [PASS, QUERY] {
+            assert!(!shown.contains(secret), "{secret} shown: {shown}");
+        }
+    }
 }

@@ -2,7 +2,7 @@
 //! Mutations go through `refresh_chain` or `update`; lock and enrichment helpers live in submodules.
 
 use chrono::{Duration, Utc};
-use fuigo_auth::bearer_suffix;
+use fuigo_auth::bearer_fingerprint;
 use parking_lot::RwLock;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,8 +91,14 @@ impl DiskTokenDecline {
     }
 }
 
+/// How far a sibling machine's clock may stamp a genuinely newer rotation before ours (see `try_use_disk_token`).
+/// Matches `PROVIDER_TOKEN_EXPIRY_SKEW`.
+const DISK_MINT_SKEW_TOLERANCE: Duration = Duration::seconds(60);
+
 /// Timeout for acquiring the advisory `auth.json.lock` file lock.
-/// Used by advisory (non-critical) lock sites: `flow.rs`, `enrichment.rs`, `recovery.rs`.
+/// Used by advisory (non-critical) lock sites: `flow.rs`, `enrichment.rs`, `recovery.rs`; and it bounds every
+/// `auth.json` writer's wait (`update`, `save_without_enrichment`, the devbox purge, the API-key writers), none of which
+/// writes without the lock.
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 /// Lock timeout for `refresh_chain`, held across the IdP call to prevent refresh-token reuse.
@@ -167,9 +173,65 @@ impl std::fmt::Debug for AuthManager {
     }
 }
 
+/// P42: set of session-bearer digests (see [`AuthManager::is_session_bearer`]).
+///
+/// Digests come from a per-process randomly keyed SipHash, so the set holds no
+/// token material. A collision can only make a non-session key look like a
+/// session key, which withholds that key from a destination the session may
+/// not reach (a 401); it can never let a session token through.
+///
+/// Deliberately unbounded: evicting a digest would make a token still sitting in
+/// some session's buffer deliverable again. The cost is 8 bytes (plus set
+/// overhead) per distinct bearer the process ever held — a bearer rotates at
+/// most every few minutes, so even weeks of uptime stay in the tens of KiB.
+///
+/// Only session-mode credentials are recorded: an `AuthMode::ApiKey` entry is a
+/// static key the user may legitimately send elsewhere, not a session token.
+#[derive(Debug)]
+pub(crate) struct HeldSessionBearers {
+    hasher: std::collections::hash_map::RandomState,
+    set: std::collections::HashSet<u64>,
+}
+
+impl HeldSessionBearers {
+    fn seeded(key: Option<&str>) -> Self {
+        let mut held = Self {
+            hasher: std::collections::hash_map::RandomState::new(),
+            set: std::collections::HashSet::new(),
+        };
+        if let Some(key) = key {
+            held.insert(key);
+        }
+        held
+    }
+
+    fn is_session_mode(auth: &FuigoAuth) -> bool {
+        crate::auth::session_delivery::is_session_credential(auth)
+    }
+
+    fn digest(&self, key: &str) -> u64 {
+        use std::hash::BuildHasher;
+        self.hasher.hash_one(key)
+    }
+
+    fn insert(&mut self, key: &str) {
+        if !key.is_empty() {
+            let d = self.digest(key);
+            self.set.insert(d);
+        }
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        !key.is_empty() && self.set.contains(&self.digest(key))
+    }
+}
+
 /// Single source of truth for `auth.json` and the in-memory bearer.
 ///
 /// Lock order: `refresh_lock` (async), then the sync locks (`inner` / `refresher` / `permanent_failure` / `manual_auth`), never co-held.
+/// The one exception is the process-wide [`crate::auth::storage::auth_state_lock`], which is outermost: it may be held while
+/// `inner` / `permanent_failure` are taken, and nothing that holds another lock takes it. The `auth.json` file lock, when
+/// held, is always taken before it, never after.
 /// `permanent_failure()` reads `permanent_failure` first, then `inner` (via `attempted_verdict_key`, when a verdict is stored), never co-held.
 /// Never hold a `parking_lot` guard across `.await`.
 /// Refreshers return [`RefreshOutcome`] for `refresh_chain` to apply.
@@ -190,6 +252,18 @@ pub struct AuthManager {
     /// Serializes concurrent refresh attempts (async, held across .await).
     refresh_lock: tokio::sync::Mutex<()>,
     permanent_failure: RwLock<Option<ScopedRefreshFailure>>,
+    /// Spawned `/user` enrichment tasks that have run to completion (any outcome), so a test can wait for them instead of a clock.
+    #[cfg(test)]
+    enrichments_finished: std::sync::atomic::AtomicU32,
+    /// Test-only: writes that had to wait for the `auth.json` file lock while an enrichment was parked.
+    #[cfg(test)]
+    update_lock_waits: std::sync::atomic::AtomicU32,
+    /// Test-only: an enrichment of this manager is parked at an `EnrichmentGate`.
+    #[cfg(test)]
+    pub(super) enrichment_parked: std::sync::atomic::AtomicBool,
+    /// Test-only: park the next enrichment at a fixed point of its merge, to force an interleaving (see `EnrichmentGate`).
+    #[cfg(test)]
+    pub(super) enrichment_gate: parking_lot::Mutex<Option<enrichment::EnrichmentGate>>,
     /// Loop-body iteration count; catches busy-loops where the back-off gate fails to fire.
     #[cfg(test)]
     proactive_iter_count: std::sync::atomic::AtomicU32,
@@ -238,6 +312,9 @@ pub struct AuthManager {
     /// Bounds the deferral to [`sleep_gate::DARK_WAKE_DEFER_MAX`] so a machine stuck reporting dark wake can't defer refresh forever.
     /// See [`AuthManager::should_defer_for_dark_wake`].
     dark_wake_defer_since: parking_lot::RwLock<Option<DualClock>>,
+    /// P42: digests of every session bearer this manager has held or handed out.
+    /// See [`Self::is_session_bearer`].
+    held_session_bearers: parking_lot::Mutex<HeldSessionBearers>,
     /// Test-only override for [`AuthManager::is_dark_wake`].
     /// `Some(_)` forces the dark-wake decision so the refresh-deferral path is unit-testable without a real macOS dark wake.
     /// `None` means consult the OS.
@@ -335,6 +412,26 @@ impl AuthManager {
             tracing::warn!("FUIGO_AUTH set but failed to parse as JSON, falling back to file");
         }
 
+        Self::load_from_file(path, scope, fuigo_com_config, proxy_base_url)
+    }
+
+    /// Test-only: a manager on exactly `auth_path`, never redirected by `FUIGO_AUTH_PATH` or `FUIGO_AUTH` (other tests
+    /// in the process may set those briefly, and an inherited one could name a real credential store).
+    #[cfg(test)]
+    pub(crate) fn new_at_path(auth_path: PathBuf, fuigo_com_config: FuigoComConfig) -> Self {
+        let scope = ActiveAuthBackend::default().scope_key(&fuigo_com_config);
+        let proxy_base_url =
+            crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
+        Self::load_from_file(auth_path, scope, fuigo_com_config, proxy_base_url)
+    }
+
+    /// The file-backed half of [`Self::new`]: load `path`, prune stale inherited scopes, enforce the team pin.
+    fn load_from_file(
+        path: PathBuf,
+        scope: String,
+        fuigo_com_config: FuigoComConfig,
+        proxy_base_url: String,
+    ) -> Self {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
@@ -347,7 +444,7 @@ impl AuthManager {
                     "found": found.is_some(),
                     "auth_mode": found.as_ref().map(|a| format!("{:?}", a.auth_mode)),
                     "is_expired": found.as_ref().map(is_expired),
-                    "key_prefix": found.as_ref().map(|a| bearer_suffix(&a.key).to_owned()),
+                    "key_prefix": found.as_ref().map(|a| bearer_fingerprint(&a.key)),
                 });
                 let state = if found.is_some() {
                     DiskAuthState::Ok
@@ -414,10 +511,25 @@ impl AuthManager {
             tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
             return;
         };
-
-        let mut cleaned = map.clone();
+        // Re-read under both locks: `map` was read before them, and writing it back would erase whatever another
+        // writer committed in between (a login, an API key). Prune only from the fresh read.
+        let _state = super::storage::auth_state_lock();
+        let Ok(mut cleaned) = read_auth_json(path) else {
+            return;
+        };
+        let mut pruned = false;
         for scope in stale {
-            cleaned.remove(scope);
+            // Still a WebLogin entry in the fresh read; anything a writer replaced it with stays.
+            if cleaned
+                .get(scope)
+                .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
+            {
+                cleaned.remove(scope);
+                pruned = true;
+            }
+        }
+        if !pruned {
+            return;
         }
         let _ = write_auth_json(path, &cleaned);
         tracing::debug!("auth: removed stale WebLogin scope from auth.json");
@@ -435,6 +547,10 @@ impl AuthManager {
         proxy_base_url: String,
         disk_state: Option<DiskAuthState>,
     ) -> Self {
+        let inner_key = inner
+            .as_ref()
+            .filter(|a| HeldSessionBearers::is_session_mode(a))
+            .map(|a| a.key.clone());
         Self {
             inner: Arc::new(RwLock::new(inner)),
             path,
@@ -446,6 +562,14 @@ impl AuthManager {
             proactive_started: std::sync::atomic::AtomicBool::new(false),
             refresh_lock: tokio::sync::Mutex::new(()),
             permanent_failure: RwLock::new(None),
+            #[cfg(test)]
+            enrichments_finished: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            update_lock_waits: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            enrichment_parked: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            enrichment_gate: parking_lot::Mutex::new(None),
             #[cfg(test)]
             proactive_iter_count: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
@@ -464,6 +588,7 @@ impl AuthManager {
             manual_auth: Default::default(),
             first_party_env_api_key_ok: std::sync::atomic::AtomicBool::new(true),
             dark_wake_defer_since: parking_lot::RwLock::new(None),
+            held_session_bearers: parking_lot::Mutex::new(HeldSessionBearers::seeded(inner_key.as_deref())),
             #[cfg(test)]
             dark_wake_override: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -516,8 +641,12 @@ impl AuthManager {
     }
 
     fn remove_scope_impl(&self, scope: &str) -> std::io::Result<()> {
-        let disk_mutation = if let Some(_lock) = lock::try_lock_auth_file_nonblocking(&self.path) {
-            self.write_scope_removal(scope)? // lock released on drop
+        // Disk removal and the in-memory drop happen together under the auth-state lock (after the file lock, per its order),
+        // so an enrichment merge can neither interleave with the removal nor resurrect the dropped credential.
+        let _flock = lock::try_lock_auth_file_nonblocking(&self.path);
+        let _state = super::storage::auth_state_lock();
+        let disk_mutation = if _flock.is_some() {
+            self.write_scope_removal(scope)?
         } else {
             ScopeRemoval::SkippedLockUnavailable
         };
@@ -561,6 +690,7 @@ impl AuthManager {
     /// Sticky `RefreshTokenRejected` still short-circuits with no live credential until a wire-valid login.
     /// Non-sticky verdicts read absent once their scoped key is gone.
     fn clear_inner(&self) {
+        let _state = super::storage::auth_state_lock();
         *self.inner.write() = None;
     }
 
@@ -593,7 +723,7 @@ impl AuthManager {
                 // Healthy entry on disk: regular swap
                 // Do NOT clear the permanent_failure here; the token may just be a re-export of the same broken refresh_token
                 DiskAuthState::Ok => {
-                    *self.inner.write() = auth;
+                    self.with_inner_write(|inner| *inner = auth);
                     // A re-read (e.g. relay reconnect) can adopt a wrong-team token a sibling wrote; clear it here, mirroring `new()`.
                     self.enforce_pin_on_loaded_token();
                     return;
@@ -628,7 +758,7 @@ impl AuthManager {
                 None,
                 Some(serde_json::json!({
                     "disk_state": format!("{last_state:?}"),
-                    "retained_key_prefix": bearer_suffix(&a.key),
+                    "retained_key_prefix": bearer_fingerprint(&a.key),
                     "was_expired": is_expired(&a),
                 })),
             );
@@ -652,7 +782,7 @@ impl AuthManager {
                 None,
                 Some(serde_json::json!({
                     "reason": reason,
-                    "dropped_key_prefix": bearer_suffix(&d.key),
+                    "dropped_key_prefix": bearer_fingerprint(&d.key),
                     "had_refresh_token": d.refresh_token.is_some(),
                     "was_expired": is_expired(&d),
                     "disk_state": (*self.disk_state.read()).map(|s| format!("{s:?}")),
@@ -726,6 +856,7 @@ impl AuthManager {
     /// The direct reads left elsewhere compare token keys or look at `expires_at`, and hand out nothing.
     fn owned_inner(&self) -> Option<FuigoAuth> {
         let auth = self.with_inner_read(|inner| inner.cloned())?;
+        self.note_session_bearer(Some(&auth));
         if !crate::auth::backend::AuthBackend::owns(
             &crate::auth::backend::ActiveAuthBackend::default(),
             &auth,
@@ -758,8 +889,39 @@ impl AuthManager {
     /// Prefer this over `self.inner.write()`.
     #[inline]
     pub(crate) fn with_inner_write<R>(&self, f: impl FnOnce(&mut Option<FuigoAuth>) -> R) -> R {
+        // Every in-memory credential write is ordered against the enrichment merge (see `auth_state_lock`).
+        let _state = super::storage::auth_state_lock();
         let mut guard = self.inner.write();
-        f(&mut guard)
+        let out = f(&mut guard);
+        // P42: whatever the closure stored is now a session bearer of this manager.
+        self.note_session_bearer(guard.as_ref());
+        out
+    }
+
+    /// P42: whether `key` is a session bearer this manager has held or handed out.
+    ///
+    /// This is how a send path recognises a session token by its value, not by
+    /// a label. `fuigo_chat_state::Credentials::auth_type` cannot be trusted
+    /// for this: several writers store a session token without relabelling it,
+    /// and others (a subagent under a session-based method) label a
+    /// `FUIGO_API_KEY` as `SessionToken`. Stripping by label would either leak
+    /// the session token or strip a legitimate key.
+    ///
+    /// Every value that has been in `inner` is recorded (construction, every
+    /// [`Self::with_inner_write`], the disk reload) and so is every value read
+    /// out through [`Self::owned_inner`], which every credential accessor uses.
+    /// Rotated-out bearers stay recognised, so a stale token buffered by an
+    /// earlier turn is still caught after a refresh. Only a digest is kept.
+    pub(crate) fn is_session_bearer(&self, key: &str) -> bool {
+        self.held_session_bearers.lock().contains(key)
+    }
+
+    fn note_session_bearer(&self, auth: Option<&FuigoAuth>) {
+        if let Some(auth) = auth
+            && HeldSessionBearers::is_session_mode(auth)
+        {
+            self.held_session_bearers.lock().insert(&auth.key);
+        }
     }
 
     /// Closure-scoped read counterpart to [`Self::with_inner_write`].
@@ -846,11 +1008,154 @@ impl AuthManager {
     ///
     /// Invariants:
     /// - **Disk write before any network I/O** (else a sibling process can reuse the not-yet-rotated RT and the IdP returns `invalid_grant`).
-    /// - **Caller holds the `auth.json` file lock** (production callers: `refresh_chain` Success arm, `flow::run_auth_flow`).
+    /// - **The read-modify-write runs under the cross-process `auth.json` lock**, which this takes itself (bounded by
+    ///   [`AUTH_LOCK_TIMEOUT`]). Without it a sibling process's write landing between our read and our write would be
+    ///   rolled back. A caller that already holds the lock (the refresh chain) calls [`Self::update_holding_lock`]
+    ///   instead: flock is per open file, so taking it again here would wait on the caller's own hold.
+    /// - **Never writes unlocked.** If the lock cannot be had, memory still takes the credential (as when the disk write
+    ///   fails), disk is left alone, no enrichment is spawned, and the error is returned.
     ///
     /// Returns the input `FuigoAuth` BEFORE enrichment lands; callers needing the post-enrichment view re-read `current()`.
     pub(crate) async fn update(self: &Arc<Self>, auth: FuigoAuth) -> std::io::Result<FuigoAuth> {
+        let flock = match self.lock_for_write().await {
+            Ok(flock) => flock,
+            Err(e) => return Err(self.keep_in_memory_after_lock_failure(auth, e, "update")),
+        };
+        self.update_holding_lock(auth, &flock)
+    }
+
+    /// [`Self::update`] for a caller re-persisting a credential it read earlier (to have its profile enriched).
+    /// Under the lock, if the stored entry or the in-memory credential has since moved to other tokens that were not
+    /// minted before the caller's copy (a sibling's refresh or login on disk; this process's own refresh in memory, even
+    /// one whose persist failed), that copy is newer: nothing is written and it is returned instead. Writing the old copy
+    /// would put back a spent refresh token. A copy minted before the caller's lags it, and the caller's copy is written
+    /// as by `update`.
+    pub(crate) async fn update_unless_superseded(
+        self: &Arc<Self>,
+        auth: FuigoAuth,
+    ) -> std::io::Result<FuigoAuth> {
+        let flock = self.lock_for_write().await?;
+        // One auth-state section from the decision through the write, so memory cannot move in between.
+        let _state = super::storage::auth_state_lock();
+        let stored = read_auth_json(&self.path)
+            .ok()
+            .and_then(|map| map.get(&self.scope).cloned());
+        // Either copy can be ahead of the caller's: disk after a sibling's rotation, memory after this process's own
+        // refresh whose persist failed. A copy that differs counts as newer unless it was minted before the caller's
+        // (then it lags it), by minting time with `try_use_disk_token`'s skew tolerance.
+        let newer = [self.current_or_expired(), stored]
+            .into_iter()
+            .flatten()
+            .find(|c| {
+                (c.key != auth.key || c.refresh_token != auth.refresh_token)
+                    && c.create_time + DISK_MINT_SKEW_TOLERANCE >= auth.create_time
+            });
+        if let Some(newer) = newer {
+            fuigo_telemetry::unified_log::info(
+                "auth update skipped (a newer credential superseded the caller's copy)",
+                None,
+                Some(serde_json::json!({
+                    "caller_key_prefix": bearer_fingerprint(&auth.key),
+                    "newer_key_prefix": bearer_fingerprint(&newer.key),
+                })),
+            );
+            // P42: a credential handed to the caller is a session bearer of this manager, even one only on disk
+            // (a sibling's). Recorded only; memory keeps its own (possibly fresher) credential.
+            self.note_session_bearer(Some(&newer));
+            return Ok(newer);
+        }
+        self.update_holding_lock(auth, &flock)
+    }
+
+    /// Applies `edit` (a change to non-token fields, e.g. the privacy opt-out) to this scope's credential, under the
+    /// cross-process lock, for callers that hold only an older copy. The edit lands on each copy in place: the entry on
+    /// disk as read under the lock (a sibling's rotation is kept) and the in-memory credential (a fresher mint whose
+    /// persist failed is kept). Tokens never move between the two, and the caller's copy is never written, so a
+    /// snapshot cannot restore spent tokens in either place. Memory takes the edit even when the lock or the disk write
+    /// fails (the error is still returned). Returns the edited disk entry, else the edited memory one.
+    pub(crate) async fn edit_stored_credential(
+        &self,
+        edit: impl Fn(&mut FuigoAuth),
+    ) -> std::io::Result<Option<FuigoAuth>> {
+        let flock = self.lock_for_write().await;
+        let _state = super::storage::auth_state_lock();
+        // Memory first and unconditionally: the change is already acknowledged (e.g. by the server), so this process
+        // must act on it even when the lock or the disk write fails below.
+        let in_memory = self.with_inner_write(|inner| {
+            inner.as_mut().map(|auth| {
+                edit(auth);
+                auth.clone()
+            })
+        });
+        let _flock = flock?;
+        let mut on_disk = None;
+        if let Ok(mut map) = read_auth_json(&self.path)
+            && let Some(entry) = map.get_mut(&self.scope)
+        {
+            edit(entry);
+            let edited = entry.clone();
+            write_auth_json(&self.path, &map)?;
+            // P42: the disk entry (possibly a sibling's) is returned below; record its bearer without touching memory.
+            self.note_session_bearer(Some(&edited));
+            on_disk = Some(edited);
+        }
+        Ok(on_disk.or(in_memory))
+    }
+
+    /// Takes the cross-process `auth.json` lock for one of this manager's read-modify-writes.
+    async fn lock_for_write(&self) -> std::io::Result<AuthFileLock> {
+        // A custom `FUIGO_AUTH_PATH` may point into a directory that does not exist yet; the lock file lives beside it.
+        if let Some(parent) = self.path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Some(flock) = lock::try_lock_auth_file_nonblocking(&self.path) {
+            return Ok(flock);
+        }
+        // Counted only while one of this manager's enrichments is parked at a test gate (see `update_lock_waits`).
+        #[cfg(test)]
+        if self
+            .enrichment_parked
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.update_lock_waits
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        try_lock_auth_file_async(&self.path, AUTH_LOCK_TIMEOUT, lock::Heartbeat::Skip)
+            .await
+            .into_io_result()
+    }
+
+    /// A writer that could not get the lock: the credential still serves this process from memory, disk is untouched.
+    fn keep_in_memory_after_lock_failure(
+        &self,
+        auth: FuigoAuth,
+        error: std::io::Error,
+        writer: &'static str,
+    ) -> std::io::Error {
+        fuigo_telemetry::unified_log::error(
+            "auth disk write skipped (auth.json lock unavailable)",
+            None,
+            Some(serde_json::json!({
+                "writer": writer,
+                "error": error.to_string(),
+                "key_prefix": bearer_fingerprint(&auth.key),
+            })),
+        );
+        let _state = super::storage::auth_state_lock();
+        *self.permanent_failure.write() = None;
+        self.with_inner_write(|inner| *inner = Some(auth));
+        error
+    }
+
+    /// [`Self::update`] for a caller that already holds the cross-process `auth.json` lock; `_flock` proves it.
+    pub(crate) fn update_holding_lock(
+        self: &Arc<Self>,
+        auth: FuigoAuth,
+        _flock: &AuthFileLock,
+    ) -> std::io::Result<FuigoAuth> {
         let update_started = std::time::Instant::now();
+        // Held from the read to the in-memory write; see `auth_state_lock`. No `.await` below until it drops.
+        let rmw = super::storage::auth_state_lock();
         let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
             Ok(map) => map,
             Err(e) => {
@@ -862,6 +1167,7 @@ impl AuthManager {
                     Some(serde_json::json!({ "error": e.to_string() })),
                 );
                 self.with_inner_write(|inner| *inner = Some(auth.clone()));
+                drop(rmw);
                 self.spawn_user_info_enrichment(auth.clone());
                 return Ok(auth);
             }
@@ -877,8 +1183,8 @@ impl AuthManager {
                 "auth update disk written",
                 None,
                 Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
-                    "key_prefix": bearer_suffix(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_fingerprint),
+                    "key_prefix": bearer_fingerprint(&auth.key),
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
@@ -896,6 +1202,7 @@ impl AuthManager {
         // Keeping the stale/dead token in memory would leave the user completely stuck
         *self.permanent_failure.write() = None;
         self.with_inner_write(|inner| *inner = Some(auth.clone()));
+        drop(rmw);
 
         // Fire-and-forget enrichment, off the critical path
         // A slow `/user` would otherwise widen the sibling-process `invalid_grant` race window
@@ -906,11 +1213,34 @@ impl AuthManager {
     }
 
     /// Persist to disk and cache without spawning the background `/user` task (already merged inline, or a stale fetch must not race a fresh write).
+    /// Takes the cross-process `auth.json` lock for the read-modify-write, with [`Self::update`]'s rules: bounded, never
+    /// writes unlocked, and on a lock failure memory still takes the credential and the error is returned.
     pub(crate) async fn save_without_enrichment(
         &self,
         auth: FuigoAuth,
     ) -> std::io::Result<FuigoAuth> {
+        let flock = match self.lock_for_write().await {
+            Ok(flock) => flock,
+            Err(e) => {
+                return Err(self.keep_in_memory_after_lock_failure(
+                    auth,
+                    e,
+                    "save_without_enrichment",
+                ));
+            }
+        };
+        self.save_without_enrichment_holding_lock(auth, &flock)
+    }
+
+    /// [`Self::save_without_enrichment`] for a caller that already holds the cross-process `auth.json` lock.
+    fn save_without_enrichment_holding_lock(
+        &self,
+        auth: FuigoAuth,
+        _flock: &AuthFileLock,
+    ) -> std::io::Result<FuigoAuth> {
         let started = std::time::Instant::now();
+        // See `auth_state_lock`; held to the end of this function, which has no `.await`.
+        let _rmw = super::storage::auth_state_lock();
         let map = match read_auth_json_or_empty_recovering_corrupt(&self.path) {
             Ok(map) => map,
             Err(e) => {
@@ -935,8 +1265,8 @@ impl AuthManager {
                 "auth update disk written (no enrichment)",
                 None,
                 Some(serde_json::json!({
-                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_suffix),
-                    "key_prefix": bearer_suffix(&auth.key),
+                    "rt_prefix": auth.refresh_token.as_deref().map(bearer_fingerprint),
+                    "key_prefix": bearer_fingerprint(&auth.key),
                     "elapsed_ms": elapsed_ms,
                 })),
             ),
@@ -954,6 +1284,15 @@ impl AuthManager {
         self.with_inner_write(|inner| *inner = Some(auth.clone()));
         write_result?;
         Ok(auth)
+    }
+
+    /// Devbox recovery's purge: delete auth.json and save `auth` as its only entry, all under the cross-process lock.
+    /// Never purges unlocked; a lock it cannot get is an error and leaves both disk and memory untouched.
+    pub(super) async fn purge_and_save(&self, auth: FuigoAuth) -> std::io::Result<FuigoAuth> {
+        let flock = self.lock_for_write().await?;
+        let _ = std::fs::remove_file(&self.path);
+        self.clear_inner();
+        self.save_without_enrichment_holding_lock(auth, &flock)
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
@@ -1060,7 +1399,6 @@ impl AuthManager {
         // Fail toward adoption within the window
         // A wrong adopt self-corrects via a 401 driving ServerRejected; a wrong mint burns the refresh-token family
         // The 60s window matches PROVIDER_TOKEN_EXPIRY_SKEW
-        const DISK_MINT_SKEW_TOLERANCE: Duration = Duration::seconds(60);
         // `current_or_expired()`, not `current()`: adoption runs exactly when the live bearer needs a refresh
         // That is canonically inside the five-minute early-invalidation buffer, which `current()` hides
         // Reading through `current()` skipped this guard in precisely the window that routes callers here
@@ -1089,7 +1427,7 @@ impl AuthManager {
         // Reading it afterwards always yielded `None` / `key_changed: true`, corrupting the prev/adopted attribution this log exists to capture
         let prev = self
             .current_or_expired()
-            .map(|a| bearer_suffix(&a.key).to_owned());
+            .map(|a| bearer_fingerprint(&a.key));
         let refreshed = match self.try_use_disk_token(disk_auth.as_ref(), reason) {
             Ok(refreshed) => refreshed,
             // `Missing` / `Expired` are the steady state at every refresh-chain callsite (usually there is no sibling token to adopt)
@@ -1105,21 +1443,21 @@ impl AuthManager {
                         "decline": decline.as_str(),
                         "refresh_reason": format!("{reason:?}"),
                         "prev_key_prefix": prev,
-                        "disk_key_prefix": disk_auth.as_ref().map(|a| bearer_suffix(&a.key)),
+                        "disk_key_prefix": disk_auth.as_ref().map(|a| bearer_fingerprint(&a.key)),
                     })),
                 );
                 return None;
             }
             Err(_) => return None,
         };
-        let adopted = bearer_suffix(&refreshed.key);
+        let adopted = bearer_fingerprint(&refreshed.key);
         fuigo_telemetry::unified_log::info(
             msg,
             None,
             Some(serde_json::json!({
                 "adopted_key_prefix": adopted,
                 "prev_key_prefix": prev,
-                "key_changed": prev.as_deref() != Some(adopted),
+                "key_changed": prev.as_deref() != Some(adopted.as_str()),
             })),
         );
         Some(refreshed)
@@ -1193,7 +1531,9 @@ impl AuthManager {
         self.read_disk_auth_with_state().0
     }
 
-    /// Disk read for the configured scope with NO observation side effects (no `disk_state` write, no transition telemetry).
+    /// Disk read for the configured scope with NO observation side effects (no `disk_state` write, no transition telemetry,
+    /// no P42 bearer registration). Only for comparing keys; anything that hands the credential out uses
+    /// [`Self::read_disk_auth`], which registers it.
     /// For side-effect-free getters like [`Self::attempted_verdict_key`].
     /// Prefer [`Self::read_disk_auth`] when the read should drive transition logging.
     fn read_disk_auth_silent(&self) -> Option<FuigoAuth> {
@@ -1245,6 +1585,8 @@ impl AuthManager {
             }
         };
         self.observe_disk_state(state, auth.as_ref(), err_detail);
+        // P42: this hands the disk credential (possibly a sibling's) to the caller; record its bearer. Memory is untouched.
+        self.note_session_bearer(auth.as_ref());
         (auth, state)
     }
 
@@ -1272,7 +1614,7 @@ impl AuthManager {
             "path": self.path.display().to_string(),
             "scope": &self.scope,
             "error": err_detail,
-            "key_prefix": auth.map(|a| bearer_suffix(&a.key).to_owned()),
+            "key_prefix": auth.map(|a| bearer_fingerprint(&a.key)),
             "has_refresh_token": auth.map(|a| a.refresh_token.is_some()),
             "is_expired": auth.map(is_expired),
         });
@@ -1340,6 +1682,21 @@ impl AuthManager {
         use std::sync::atomic::Ordering;
         *self.refresher.write() = Some(refresher);
         self.refresher_configured.store(true, Ordering::SeqCst);
+    }
+
+    /// Test-only: `update` / `save_without_enrichment` calls on this manager that had to wait for the `auth.json` file
+    /// lock while one of its enrichments was parked at a gate.
+    #[cfg(test)]
+    pub(crate) fn update_lock_waits(&self) -> u32 {
+        self.update_lock_waits
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test-only: spawned `/user` enrichment tasks that have finished, whatever their outcome.
+    #[cfg(test)]
+    pub(crate) fn enrichments_finished(&self) -> u32 {
+        self.enrichments_finished
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -1554,10 +1911,9 @@ impl AuthManager {
             })?;
 
         // Purge auth.json so we start clean; removes any corrupted, revoked, or legacy entries that caused the failure
-        let _ = tokio::fs::remove_file(&self.path).await;
-        self.clear_inner();
-
-        let auth = self.save_without_enrichment(new_auth).await.map_err(|e| {
+        // The purge and the save are one write under the cross-process lock: unlocked, the purge could delete a sibling's
+        // just-rotated tokens mid-write, or land between a sibling's read and its write.
+        let auth = self.purge_and_save(new_auth).await.map_err(|e| {
             tracing::warn!(error = %e, "auth: devbox recovery save failed");
             AuthError::transient_source(e)
         })?;
@@ -1586,7 +1942,7 @@ impl AuthManager {
     // ── Refresh chain (single mutation point) ─────────────────────────
 
     /// The only mutation point: persists on success, records the verdict on failure.
-    /// `_lock` type-enforces that the persisting `update()` runs under the file lock.
+    /// `_lock` type-enforces that the persisting `update_holding_lock()` runs under the file lock.
     async fn apply_refresh_outcome(
         self: &Arc<Self>,
         outcome: RefreshOutcome,
@@ -1594,19 +1950,19 @@ impl AuthManager {
         attempted_key: Option<String>,
         _lock: &AuthFileLock,
     ) -> Result<FuigoAuth, AuthError> {
-        let pre_key_suffix = attempted_key.as_deref().map(bearer_suffix);
+        let pre_key_suffix = attempted_key.as_deref().map(bearer_fingerprint);
         match outcome {
-            RefreshOutcome::Success(new_auth) => match self.update(*new_auth).await {
+            RefreshOutcome::Success(new_auth) => match self.update_holding_lock(*new_auth, _lock) {
                 Ok(auth) => {
-                    let new_suffix = bearer_suffix(&auth.key);
+                    let new_suffix = bearer_fingerprint(&auth.key);
                     fuigo_telemetry::unified_log::info(
                         "auth.refresh.success",
                         None,
                         Some(serde_json::json!({
                             "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
+                            "key_changed": pre_key_suffix.as_deref() != Some(new_suffix.as_str()),
                             "old_key_prefix": pre_key_suffix,
                             "new_key_prefix": new_suffix,
-                            "key_changed": pre_key_suffix != Some(new_suffix),
                         })),
                     );
                     tracing::info!(expires_at = ?auth.expires_at, "auth.refresh.success");
@@ -1680,8 +2036,8 @@ impl AuthManager {
                                 "reason": format!("{failed_reason:?}"),
                                 "tried_rt_prefix": tried_refresh_token
                                     .as_deref()
-                                    .map(bearer_suffix),
-                                "disk_rt_prefix": disk_rt.map(bearer_suffix),
+                                    .map(bearer_fingerprint),
+                                "disk_rt_prefix": disk_rt.map(bearer_fingerprint),
                             })),
                         );
                         return Err(AuthError::transient(format!(
@@ -1773,9 +2129,9 @@ impl AuthManager {
                     "auth: pick_up_sibling_token adopted",
                     None,
                     Some(serde_json::json!({
-                        "adopted_key_prefix": bearer_suffix(&adopted.key),
+                        "adopted_key_prefix": bearer_fingerprint(&adopted.key),
                         "expires_at": adopted.expires_at.map(|e| e.to_rfc3339()),
-                        "rt_prefix": adopted.refresh_token.as_deref().map(bearer_suffix),
+                        "rt_prefix": adopted.refresh_token.as_deref().map(bearer_fingerprint),
                     })),
                 );
                 true
@@ -2105,7 +2461,7 @@ impl AuthManager {
                 // Combined with jitter, the first process to wake refreshes; later processes adopt the result here
                 let adopted_from_sibling = this.pick_up_sibling_token();
                 if this.current().is_some() {
-                    let adopted = this.current().map(|a| bearer_suffix(&a.key).to_owned());
+                    let adopted = this.current().map(|a| bearer_fingerprint(&a.key));
                     let expires_at = this
                         .inner
                         .read()
@@ -2146,7 +2502,7 @@ impl AuthManager {
                             None,
                             Some(serde_json::json!({
                                 "result": "success",
-                                "key_prefix": bearer_suffix(&auth.key),
+                                "key_prefix": bearer_fingerprint(&auth.key),
                                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                             })),
                         );
@@ -2388,7 +2744,9 @@ impl AuthManager {
     /// Resolve the session/global credential without consulting the process
     /// model key. Auxiliary services are owned by their destination, not by the
     /// currently selected inference model.
-    async fn live_destination_key(self: &Arc<Self>) -> Option<String> {
+    /// `session_allowed`: P42 — whether the destination may receive the session token
+    /// (`session_delivery::session_may_reach`). When it may not, only the static key is offered.
+    async fn live_destination_key(self: &Arc<Self>, session_allowed: bool) -> Option<String> {
         let static_key = || {
             if self.fuigo_com_config.api_key_auth_disabled()
                 || matches!(
@@ -2403,6 +2761,15 @@ impl AuthManager {
         };
         if prefers_static_api_key(self) {
             return static_key();
+        }
+        if !session_allowed {
+            // The destination may not receive a SESSION token; a static API key the manager holds
+            // (`AuthMode::ApiKey`) is not one, and keeps the precedence it had before P42.
+            return self
+                .current_or_expired()
+                .filter(|a| !crate::auth::session_delivery::is_session_credential(a))
+                .and_then(|a| non_empty_key(Some(a.key)))
+                .or_else(static_key);
         }
         self.get_valid_token().await.ok().or_else(static_key)
     }
@@ -2450,11 +2817,7 @@ impl AuthManager {
                 ) else {
                     return CredentialResolution::Denied;
                 };
-                if !credential_recipient_matches(
-                    &route.base_url,
-                    recipient,
-                    explicitly_paired,
-                ) {
+                if !credential_recipient_matches(&route.base_url, recipient, explicitly_paired) {
                     return CredentialResolution::Denied;
                 }
 
@@ -2462,7 +2825,9 @@ impl AuthManager {
                 // then apply that live value through the same model resolver.
                 drop(models);
                 drop(cfg);
-                let live_destination_key = self.live_destination_key().await;
+                // The live key feeds `resolve_web_search_sampling_config` as its `session_key`, where the strict
+                // `resolve_credentials` session check decides delivery for the route's own base URL.
+                let live_destination_key = self.live_destination_key(true).await;
                 let cfg = match crate::agent::config::Config::new_from_toml_cfg(&raw) {
                     Ok(cfg) => cfg,
                     Err(_) => return CredentialResolution::Denied,
@@ -2489,11 +2854,7 @@ impl AuthManager {
                 ) else {
                     return CredentialResolution::Denied;
                 };
-                if !credential_recipient_matches(
-                    &search.base_url,
-                    recipient,
-                    explicitly_paired,
-                ) {
+                if !credential_recipient_matches(&search.base_url, recipient, explicitly_paired) {
                     return CredentialResolution::Denied;
                 }
                 search
@@ -2515,7 +2876,9 @@ impl AuthManager {
                     return CredentialResolution::Denied;
                 }
                 drop(cfg);
-                self.live_destination_key()
+                // P42: `credential_recipient_matches` admits a configured https LOOPBACK origin; the session
+                // token additionally needs the one delivery predicate.
+                self.live_destination_key(crate::auth::session_delivery::session_may_reach(recipient))
                     .await
                     .map(CredentialResolution::Resolved)
                     .unwrap_or(CredentialResolution::Denied)

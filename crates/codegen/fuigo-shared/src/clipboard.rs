@@ -389,10 +389,11 @@ pub fn set_text_osc52(text: &str, tmux_passthrough: bool) -> anyhow::Result<()> 
 /// Returns `true` when the process appears to be running inside a remote SSH session (with or without a multiplexer like tmux/screen).
 ///
 /// Checks for `SSH_CONNECTION`, `SSH_TTY`, or `SSH_CLIENT` environment variables set by the OpenSSH server on the remote side.
+/// An empty value does not count, the same rule `terminal_context().is_ssh` applies.
 pub fn is_remote_session() -> bool {
-    std::env::var_os("SSH_CONNECTION").is_some()
-        || std::env::var_os("SSH_TTY").is_some()
-        || std::env::var_os("SSH_CLIENT").is_some()
+    ["SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"]
+        .iter()
+        .any(|k| std::env::var_os(k).is_some_and(|v| !v.is_empty()))
 }
 
 /// Returns `true` when the process appears to be running inside a container (Docker, Podman, Kubernetes, etc.) without a display server.
@@ -1127,10 +1128,32 @@ mod platform {
 
     /// Memoized read of the `FUIGO_CLIPBOARD_NO_DATA_CONTROL` kill switch.
     /// Both gates (the data-control probe and the arboard bypass) read this one site, so they can never drift apart.
+    ///
+    /// `WAYLAND_DEBUG=1|client` trips it too: wayland-backend then traces every protocol message
+    /// to stderr with raw `eprint!`/`eprintln!`, which panic when fd 2 is a dead pipe or a full
+    /// disk (SIGABRT under `panic = "abort"`, R077; e.g. `fuigo doctor 2>/dev/full`). The
+    /// in-process Wayland legs stand down and copies ride the CLI tools, whose traces land on
+    /// their own stderr.
     #[cfg(target_os = "linux")]
     fn data_control_kill_switch_set() -> bool {
         static SET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        *SET.get_or_init(|| std::env::var_os("FUIGO_CLIPBOARD_NO_DATA_CONTROL").is_some())
+        *SET.get_or_init(|| {
+            kill_switch_from(
+                std::env::var_os("FUIGO_CLIPBOARD_NO_DATA_CONTROL").as_deref(),
+                std::env::var_os("WAYLAND_DEBUG").as_deref(),
+            )
+        })
+    }
+
+    /// [`data_control_kill_switch_set`] over explicit values of `FUIGO_CLIPBOARD_NO_DATA_CONTROL`
+    /// and `WAYLAND_DEBUG`. wayland-backend 0.3 traces client-side protocol for `WAYLAND_DEBUG`
+    /// `"1"` or `"client"` (its own test).
+    #[cfg(target_os = "linux")]
+    fn kill_switch_from(
+        no_data_control: Option<&std::ffi::OsStr>,
+        wayland_debug: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        no_data_control.is_some() || matches!(wayland_debug, Some(v) if v == "1" || v == "client")
     }
 
     /// True when the arboard leg must be skipped entirely, so copies and pastes ride the CLI tools instead.
@@ -1139,12 +1162,30 @@ mod platform {
     fn arboard_wayland_bypassed() -> bool {
         #[cfg(target_os = "linux")]
         {
-            data_control_kill_switch_set() && env_present("WAYLAND_DISPLAY")
+            arboard_bypass_from(
+                data_control_kill_switch_set(),
+                std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+            )
         }
         #[cfg(not(target_os = "linux"))]
         {
             false
         }
+    }
+
+    /// [`arboard_wayland_bypassed`] over explicit inputs.
+    ///
+    /// The `WAYLAND_DISPLAY` test is arboard's own (3.6.1 `platform/linux/mod.rs`:
+    /// `var_os("WAYLAND_DISPLAY").is_some()`), NOT the non-empty test used elsewhere in this module.
+    /// An empty-but-set `WAYLAND_DISPLAY` still sends arboard to Wayland, and wayland-client connects
+    /// through an inherited `WAYLAND_SOCKET` before it ever reads the display name. A stricter
+    /// predicate here would let that session through the kill switch (R077, Astra r5).
+    #[cfg(target_os = "linux")]
+    fn arboard_bypass_from(
+        kill_switch_set: bool,
+        wayland_display: Option<&std::ffi::OsStr>,
+    ) -> bool {
+        kill_switch_set && wayland_display.is_some()
     }
 
     /// Deadline for opening an in-process display connection, shared by the data-control probe and arboard `Clipboard::new()` (the same connect).
@@ -2126,6 +2167,34 @@ mod platform {
     #[cfg(all(test, target_os = "linux"))]
     mod linux_tests {
         use super::*;
+
+        /// R077: the values that turn on wayland-backend's raw-print protocol trace stand the
+        /// in-process Wayland legs down, as the explicit kill switch does.
+        #[test]
+        fn wayland_debug_trace_values_trip_the_data_control_kill_switch() {
+            use std::ffi::OsStr;
+            let on = |v: &str| kill_switch_from(None, Some(OsStr::new(v)));
+            assert!(on("1"));
+            assert!(on("client"));
+            assert!(!on("0"));
+            assert!(!on("server"));
+            assert!(!on(""));
+            assert!(!kill_switch_from(None, None));
+            assert!(kill_switch_from(Some(OsStr::new("1")), None));
+        }
+
+        /// R077 (Astra r5): the bypass tests `WAYLAND_DISPLAY` the way arboard does. Set-but-empty
+        /// still selects arboard's Wayland backend, so it must still be bypassed.
+        #[test]
+        fn arboard_bypass_matches_arboards_own_wayland_display_test() {
+            use std::ffi::OsStr;
+            assert!(arboard_bypass_from(true, Some(OsStr::new("wayland-0"))));
+            assert!(arboard_bypass_from(true, Some(OsStr::new(""))));
+            assert!(!arboard_bypass_from(true, None));
+            assert!(!arboard_bypass_from(false, Some(OsStr::new("wayland-0"))));
+            assert!(!arboard_bypass_from(false, Some(OsStr::new(""))));
+            assert!(!arboard_bypass_from(false, None));
+        }
         use crate::clipboard::WaylandDataControlProbe;
 
         #[test]
@@ -3095,5 +3164,32 @@ mod tests {
         );
         let empty: [&[u8]; 0] = [];
         assert_eq!(native_image_type_from_types(&empty), None);
+    }
+
+    /// `is_remote_session` reads the process environment, so the shell that started the suite must not decide the outcome.
+    /// Each case runs this test again in a child whose SSH variables are set explicitly; the child asserts the expectation the parent passed.
+    #[test]
+    fn is_remote_session_tracks_each_ssh_variable() {
+        use fuigo_test_support::reexec::{SSH_VARS, child_payload, run_self_in_child};
+        if let Some(expect) = child_payload() {
+            assert_eq!(is_remote_session(), expect == "remote", "{expect}");
+            return;
+        }
+        let none: Vec<(&str, Option<&str>)> = SSH_VARS.iter().map(|k| (*k, None)).collect();
+        let only = |k: &'static str, v: &'static str| {
+            let mut env = none.clone();
+            env.iter_mut().find(|(n, _)| *n == k).unwrap().1 = Some(v);
+            env
+        };
+        run_self_in_child("local", &none);
+        for k in SSH_VARS {
+            run_self_in_child("remote", &only(k, "198.51.100.1 50000 198.51.100.2 22"));
+            // An empty value is not a session (matches `terminal_context().is_ssh`).
+            run_self_in_child("local", &only(k, ""));
+        }
+        // One empty variable must not mask a real one.
+        let mut mixed = only("SSH_TTY", "");
+        mixed.iter_mut().find(|(n, _)| *n == "SSH_CLIENT").unwrap().1 = Some("198.51.100.1 50000 22");
+        run_self_in_child("remote", &mixed);
     }
 }

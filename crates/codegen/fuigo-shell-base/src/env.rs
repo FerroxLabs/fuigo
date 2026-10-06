@@ -12,8 +12,7 @@ pub use fuigo_env::{
     FuigoBuildEnvironment, PROD_ASSET_SERVER_URL, PROD_CLI_CHAT_PROXY_BASE_URL,
     PROD_GATEWAY_WS_URL, PROD_RELAY_WS_URL, PROD_WS_ORIGIN,
 };
-/// Computer Hub WebSocket URL used by the local-workspace supervisor when
-/// `agent_config.hub.url` is unset. **Empty: Fuigo operates no Computer Hub.**
+/// Computer Hub WebSocket URL used when `agent_config.hub.url` is unset. **Empty: Fuigo operates no Computer Hub.**
 ///
 /// This used to default to `wss://computer-hub.grok.com/v1/tools`, so a plain
 /// `fuigo workspace start` opened a websocket to xAI infrastructure. It escaped

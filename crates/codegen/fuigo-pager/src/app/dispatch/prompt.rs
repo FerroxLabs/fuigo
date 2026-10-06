@@ -1087,6 +1087,7 @@ pub(super) fn handle_prompt_response(
     agent_id: AgentId,
     result: Result<acp::PromptResponse, String>,
     http_status: Option<u16>,
+    verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
     // A server-authoritative queued prompt may have drained into the running slot while this turn was still finishing
@@ -1143,6 +1144,24 @@ pub(super) fn handle_prompt_response(
                     } else {
                         app.pending_running_adoptions.insert(agent_id, p);
                     }
+                }
+                // P152 (Astra r2 #2): a queued prompt the leader connection lost was never delivered. Its error is the
+                // bridge's transport-loss answer; say so (with the text, so it can be resent) instead of dropping it.
+                if let Err(message) = &result
+                    && crate::acp::leader_bridge::is_transport_loss_error(message)
+                {
+                    let text = agent
+                        .shared_queue
+                        .iter()
+                        .find(|e| e.id == response_pid)
+                        .map(|e| e.text.trim().to_string())
+                        .filter(|t| !t.is_empty());
+                    // "may not have": the request can have reached a leader that keeps running it (Astra r3 M3).
+                    let line = match text {
+                        Some(text) => format!("A queued message may not have been sent: {message}\n{text}"),
+                        None => format!("A queued message may not have been sent: {message}"),
+                    };
+                    agent.scrollback.push_block(RenderBlock::system(line));
                 }
                 // This prompt's RPC resolved without becoming the running turn (removed, cancelled, rewound)
                 // Retire its optimistic echo so a later `fuigo/queue/changed` broadcast can't re-pin a stale placeholder and reorder the queue
@@ -1216,7 +1235,13 @@ pub(super) fn handle_prompt_response(
             || result
                 .as_ref()
                 .err()
-                .is_some_and(|e| fuigo_shell::sampling::error::is_free_usage_exhausted_error(e));
+                .is_some_and(|e| {
+                    // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
+                    verdicts.as_ref().map_or_else(
+                        || fuigo_shell::sampling::error::is_free_usage_exhausted_error(e),
+                        |v| v.free_usage,
+                    )
+                });
         let model_incompatible = agent.session.model_incompatible;
         // Context overflow: the RetryState handler already pushed the actionable block, so the generic TurnFailed and error toast are redundant
         // Derived from the scrollback (mirrors reauth), not a session flag
@@ -1224,7 +1249,13 @@ pub(super) fn handle_prompt_response(
         let disk_full_from_error = result
             .as_ref()
             .err()
-            .is_some_and(|e| crate::app::effects::is_disk_full_error(e));
+            .is_some_and(|e| {
+                // P119: the shell's verdict decides; the words of `e` only for a reply without one (older shell)
+                verdicts.as_ref().map_or_else(
+                    || crate::app::effects::is_disk_full_error(e),
+                    |v| v.disk_full,
+                )
+            });
         if disk_full_from_error && !scrollback_has_recent_disk_full(&agent.scrollback) {
             agent
                 .scrollback
@@ -1236,10 +1267,14 @@ pub(super) fn handle_prompt_response(
         // Covers races where the retry notification arrives after the PromptResponse
         // The error text is already banner-formatted ("Request failed (402): …"), so recover the status from it when the field is absent
         let credit_limit_blocked = agent.session.credit_limit_blocked
-            || result.as_ref().err().is_some_and(|e| {
-                let status =
-                    http_status.or_else(|| crate::app::error_display::parse_http_status(e));
-                is_credit_limit_error(status, e)
+            || result.as_ref().err().is_some_and(|e| match verdicts.as_ref() {
+                // P119: decided by the shell from the unscrubbed text
+                Some(v) => v.credit_limit,
+                None => {
+                    let status =
+                        http_status.or_else(|| crate::app::error_display::parse_http_status(e));
+                    is_credit_limit_error(status, e)
+                }
             });
         // A 401/auth failure already showed an actionable `ReAuthRequired` prompt via the RetryState handler (which runs before this PromptResponse)
         // Suppress the redundant "Turn failed" block and error toast so only the prompt shows
@@ -1247,7 +1282,10 @@ pub(super) fn handle_prompt_response(
         let reauth_prompted = scrollback_has_recent_reauth_prompt(&agent.scrollback)
             || (http_status == Some(401)
                 && result.as_ref().err().is_some_and(|e| {
-                    e.contains(fuigo_shell::extensions::notification::HTTP_401_NEEDLE)
+                    // With verdicts the typed status alone decides: the banner always carries a typed status
+                    // as its headline, so the needle was redundant and would read scrubbed text
+                    verdicts.is_some()
+                        || e.contains(fuigo_shell::extensions::notification::HTTP_401_NEEDLE)
                 }));
         let request_failed_shown = scrollback_has_recent_request_failed(&agent.scrollback);
         // A dedicated prompt/modal/banner replaces the generic TurnFailed marker and error toast
@@ -1343,6 +1381,7 @@ pub(super) fn handle_prompt_response(
                         // Ok-path marker: the Error arm is unreachable here.
                         error_kind: None,
                         error_banner_present: false,
+                        verdicts: None,
                     },
                 )
             }

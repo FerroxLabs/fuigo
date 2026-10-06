@@ -1,11 +1,14 @@
+// PTY test harness: never shipped; its stdout/stderr are the harness's report channel, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
-use serde::Serialize;
 use fuigo_pager_pty_harness::{ContentController, PtyExitPoll, PtyHarness};
+use serde::Serialize;
 
 const WELCOME_SENTINEL: &str = "Quit";
 const COMPOSER_PROBE_KEYS: &str = "zzx";

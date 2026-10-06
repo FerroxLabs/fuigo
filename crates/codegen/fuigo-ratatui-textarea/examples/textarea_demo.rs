@@ -9,6 +9,9 @@
 //! - Bracketed paste → creates paste elements
 //! - Elements render as styled chips, cursor skips over them atomically
 //! - Display projection: cursor column accounts for display width, not buffer width
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::HashMap;
 use std::io::{self, stdout};

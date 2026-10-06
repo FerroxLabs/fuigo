@@ -1,0 +1,26 @@
+# P78 Astra round 6 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..61f51f8c
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `37a5b9d4..61f51f8c` using git and file reads only. No builds, tests, or edits.
+
+1. **MEDIUM — NEW: whitespace removal defeats the new token-boundary check.** [theme_pin_guard_tests.rs:487](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:487)  
+   An unserialized test containing `if dashboard_enabled() { ... }` now passes the scanner: `strip_ws` produces `ifdashboard_enabled()`, whose preceding `f` rejects the match. The previous `contains` check caught it. `while dashboard_enabled()` and `return dispatch_open_dashboard(...)` have the same problem. Existing self-tests do **not** cover these forms. Preserve token separation when checking boundaries. The requested `crate::`, `super::`, `.`, `!`, `=`, and `(` prefixes still match correctly.
+
+2. **LOW — Remaining indirect flag readers are outside the guard’s coverage.** [agent_view/session.rs:1280](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/agent_view/session.rs:1280), [theme_pin_guard_tests.rs:469](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:469)  
+   Session creation/loading calls `apply_app_scoped_gates`, which reads `dashboard_enabled()` without the serial key. Concrete unguarded callers, relative to `crates/codegen/fuigo-pager/src/`:
+
+   - `app/dispatch/tests/session/lifecycle.rs:929` — `/new` → new-session creation.
+   - `app/dispatch/tests/session/lifecycle.rs:267` — worktree-session creation.
+   - `app/dispatch/tests/session/load.rs:29` — ordinary session loading.
+   - `app/dispatch/tests/session/load.rs:397` — loading with restore.
+   - `app/dispatch/tests/session/fork.rs:570` — resolved fork creation.
+   - `app/dispatch/tests/session/lifecycle.rs:130` — `SessionCreated` → `session_switch_hint_command` → flag read.
+
+   While a setter holds the environment at `0`, these paths can observe disabled dashboard visibility/hints and still pass the scanner. Their existing assertions do **not** check that flag-dependent state. This is a pre-existing coverage limitation; I found no additional unguarded dashboard-opening test with an assertion failure attributable to it.
+
+3. **LOW — RETAINED: conservative reader-pin scanning rejects unrelated bindings.** [theme_pin_guard_tests.rs:577](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:577)  
+   After `let _theme = pin_theme();`, a nested `fn helper(_theme: ()) {}` falsely triggers the guard-use rejection. Existing self-tests do **not** cover this case. This remains deliberately documented and affects none of the four listed readers.
+
+The six serial annotations address the reported dashboard race; no nested same-key acquisition was found. Matcher, gutter, atomic-dump, and modal-isolation fixes remain supported; no weakened assertions, silent matcher waits, or protected-test changes found. Compilation, Clippy, and runtime remain unverified.
+
+LAND-WITH-FOLLOWUPS

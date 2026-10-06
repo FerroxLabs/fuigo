@@ -751,6 +751,9 @@ impl WorkspaceRpcHandler {
                         .unwrap_or(Value::Array(vec![])),
                 )
                 .map_err(|e| WorkspaceError::HubError(format!("invalid mcp_servers: {e}")))?;
+                // P133: a hub client's servers carry no provenance the user vouched for, so they may not name the
+                // saved API key (fuigo-mcp would bind it at spawn).
+                let configs = refuse_saved_key_in_configured_servers(configs);
                 let result = async {
                     if self.workspace.session(session_id).is_none() {
                         tracing::info!(
@@ -1312,6 +1315,24 @@ impl ToolServerHandler for WorkspaceRpcHandler {
         self.workspace.activity_tracker().set_shutting_down();
     }
 }
+/// The servers a hub client configures (`workspace.configure_mcp`) with every reference to the saved API key removed
+/// (P133): such a client carries no provenance the user vouched for, and fuigo-mcp binds the key to a reference at spawn.
+/// A server whose cleaned definition cannot be rebuilt is dropped.
+pub(crate) fn refuse_saved_key_in_configured_servers(
+    configs: Vec<agent_client_protocol::McpServer>,
+) -> Vec<agent_client_protocol::McpServer> {
+    configs
+        .into_iter()
+        .filter_map(|s| {
+            fuigo_config::key_naming::refuse_key_references_in_server_value(s, "configured over the workspace RPC")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "hub_server_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "hub_server_p133_tests.rs"]
+mod p133_tests;

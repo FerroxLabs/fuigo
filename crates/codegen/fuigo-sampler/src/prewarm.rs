@@ -68,7 +68,7 @@ pub async fn prewarm_transport(base_url: &str) -> PrewarmReport {
         origin,
     };
     let Some(origin) = endpoint_origin(base_url) else {
-        tracing::debug!(%base_url, "sampler transport prewarm skipped: no dialable origin");
+        tracing::debug!(base_url = %fuigo_auth::redact_url(base_url), "sampler transport prewarm skipped: no dialable origin");
         return report(PrewarmOutcome::NoOrigin, None);
     };
     let client = match crate::shared_http::pooled_client() {

@@ -15,6 +15,12 @@ fn test_cfg() -> ProactiveRefreshConfig {
     }
 }
 
+/// How long a test polls for something that SHOULD happen.
+/// A poll returns the moment its condition holds, so a generous budget costs nothing on a quiet host, while a tight one turns host load into a failure: under a loaded box the timers, the IdP stub and the refresh task are all starved at once.
+fn poll_budget(secs: u64) -> Duration {
+    fuigo_test_support::scaled(Duration::from_secs(secs * 8))
+}
+
 fn identity(user_id: &str) -> AuthIdentity {
     AuthIdentity {
         user_id: user_id.to_owned(),
@@ -386,7 +392,7 @@ async fn wait_auth_json_field(
     field: &str,
     expected: &str,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + poll_budget(3);
     loop {
         if let Ok(raw) = std::fs::read_to_string(path)
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
@@ -406,7 +412,7 @@ async fn wait_auth_json_changed(
     field: &str,
     not_eq: &str,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + poll_budget(3);
     loop {
         if let Ok(raw) = std::fs::read_to_string(path)
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw)
@@ -446,7 +452,8 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
     let dir = tempfile::tempdir().unwrap();
     let auth_path = write_auth_json(dir.path());
     let persist_path = auth_path.clone();
-    let mut params = provider_params(base, Some(Utc::now() + chrono::TimeDelta::seconds(5)));
+    let seed_expiry = Utc::now() + chrono::TimeDelta::seconds(5);
+    let mut params = provider_params(base, Some(seed_expiry));
     params.on_refresh = Some(Arc::new(move |event: &RefreshEvent| {
         crate::hub_auth::write_refreshed_token(&persist_path, "oidc", event).unwrap();
     }));
@@ -457,7 +464,7 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
         other => panic!("expected Bearer, got {other:?}"),
     }
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + poll_budget(8);
     loop {
         match provider.current() {
             AuthCredential::Bearer { token } if token == "fresh-access" => break,
@@ -468,6 +475,8 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
         }
     }
 
+    // The refresh happened before this instant, so the old token's remaining life at refresh is at least `seed_expiry - observed_at`.
+    let observed_at = Utc::now();
     let updated = wait_auth_json_field(&auth_path, "refresh_token", "fresh-refresh").await;
     assert_eq!(updated["oidc"]["key"], "fresh-access");
     assert_eq!(updated["oidc"]["refresh_token"], "fresh-refresh");
@@ -476,9 +485,11 @@ async fn background_refresh_updates_snapshot_against_mock_idp() {
     let new_leads = lead_sample_count() - lead_before;
     assert_eq!(new_leads, 1);
     let lead = (lead_sample_sum() - lead_sum_before) / new_leads as f64;
-    // The lead is the old token's remaining lifetime after a ~3s wait on a 5s token, not the new expires_in=5
+    // The lead is the old token's remaining lifetime when the refresh ran, not the new expires_in=5.
+    // Bounds: below, what was left when we first saw the refresh landed (negative on a starved host, which keeps the sign check honest); above, short of the new TTL.
+    let floor = (seed_expiry - observed_at).num_milliseconds() as f64 / 1000.0 - 1.0;
     assert!(
-        (0.0..4.5).contains(&lead),
+        (floor..4.5).contains(&lead),
         "lead={lead} looks like the new TTL rather than old remaining"
     );
     assert!(duration_sample_count() > duration_before);
@@ -524,87 +535,116 @@ fn lead_histogram_separates_negative_from_small_positive() {
     );
 }
 
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn failed_refresh_retries_faster_than_min_interval_then_exhausts() {
-    let _metrics = lock_metrics();
-    let retry_before = refresh_count(OUTCOME_FAILED_RETRY);
-    let exhausted_before = refresh_count(OUTCOME_FAILED_EXHAUSTED);
-
-    let hits = Arc::new(AtomicU32::new(0));
-    let times = Arc::new(Mutex::new(Vec::<Instant>::new()));
+/// A mock IdP whose token endpoint always 500s, recording when each attempt lands.
+async fn spawn_failing_idp(hits: Arc<AtomicU32>, times: Arc<Mutex<Vec<Instant>>>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base = format!("http://{addr}");
     let token_endpoint = format!("{base}/token");
-    let times_h = times.clone();
-    let hits_h = hits.clone();
-    let app =
-        axum::Router::new()
-            .route(
-                "/.well-known/openid-configuration",
-                axum::routing::get({
-                    let token_endpoint = token_endpoint.clone();
-                    move || {
-                        let token_endpoint = token_endpoint.clone();
-                        async move {
-                            axum::Json(serde_json::json!({ "token_endpoint": token_endpoint }))
-                        }
-                    }
-                }),
-            )
-            .route(
-                "/token",
-                axum::routing::post(move || {
-                    let times = times_h.clone();
-                    let hits = hits_h.clone();
-                    async move {
-                        hits.fetch_add(1, Ordering::SeqCst);
-                        times.lock().push(Instant::now());
-                        (
-                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({"error": "temporarily_unavailable"})),
-                        )
-                    }
-                }),
-            );
+    let app = axum::Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            axum::routing::get(move || {
+                let token_endpoint = token_endpoint.clone();
+                async move { axum::Json(serde_json::json!({ "token_endpoint": token_endpoint })) }
+            }),
+        )
+        .route(
+            "/token",
+            axum::routing::post(move || {
+                let times = times.clone();
+                let hits = hits.clone();
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    times.lock().push(Instant::now());
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        axum::Json(serde_json::json!({"error": "temporarily_unavailable"})),
+                    )
+                }
+            }),
+        );
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
     tokio::task::yield_now().await;
+    base
+}
 
-    let provider = ProactiveOidcAuthProvider::new(provider_params(
-        base,
-        Some(Utc::now() + chrono::TimeDelta::seconds(3)),
-    ));
+// These two tests replace one that seeded a 3 s token lifetime and needed BOTH the first failed
+// attempt to finish before expiry (else the next retry is `RETRY_CAP` = 30 s away, by design) AND
+// exhaustion to follow within seconds. On a loaded full-workspace run the first attempt (client
+// build + discovery + token POST) took over 2 s, so only one attempt landed inside the window.
+// Each property now gets a window that does not depend on how long an attempt takes.
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+/// Before expiry, a failed refresh retries on the capped exponential backoff, NOT on
+/// `min_refresh_interval` (set to an hour here so flooring would be unmistakable).
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn failed_refresh_retries_faster_than_min_interval() {
+    let _metrics = lock_metrics();
+    let retry_before = refresh_count(OUTCOME_FAILED_RETRY);
+    let hits = Arc::new(AtomicU32::new(0));
+    let times = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let base = spawn_failing_idp(hits.clone(), times.clone()).await;
+
+    // 120 s lifetime, 119 s safety margin: the first refresh is due ~1 s in, and an attempt has
+    // ~2 minutes before a failure lands past expiry.
+    let mut params = provider_params(base, Some(Utc::now() + chrono::TimeDelta::seconds(120)));
+    params.refresh.safety_margin = Duration::from_secs(119);
+    params.refresh.min_refresh_interval = Duration::from_secs(3600);
+    let provider = ProactiveOidcAuthProvider::new(params);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
     while hits.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let recorded = times.lock().clone();
     assert!(
         recorded.len() >= 2,
-        "expected at least two retries, got {}",
+        "expected at least two attempts, got {}",
         recorded.len()
     );
     let gap = recorded[1].saturating_duration_since(recorded[0]);
     assert!(
         gap < Duration::from_secs(60),
-        "failure retry was floored to success-path interval: {gap:?}"
+        "failure retry was floored to the success-path interval: {gap:?}"
     );
+    assert!(refresh_count(OUTCOME_FAILED_RETRY) > retry_before);
+    match provider.current() {
+        AuthCredential::Bearer { token } => assert_eq!(token, "stale-access"),
+        other => panic!("expected stale Bearer, got {other:?}"),
+    }
+}
 
-    let exhaust_deadline = Instant::now() + Duration::from_secs(6);
-    while refresh_count(OUTCOME_FAILED_EXHAUSTED) == exhausted_before
-        && Instant::now() < exhaust_deadline
-    {
+/// A failure at or after expiry records `failed_exhausted` and keeps serving the stale token.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn failed_refresh_past_expiry_exhausts() {
+    let _metrics = lock_metrics();
+    let exhausted_before = refresh_count(OUTCOME_FAILED_EXHAUSTED);
+    let hits = Arc::new(AtomicU32::new(0));
+    let times = Arc::new(Mutex::new(Vec::<Instant>::new()));
+    let base = spawn_failing_idp(hits.clone(), times).await;
+
+    // Already expired: the refresh is due immediately and any failure lands past expiry.
+    let provider = ProactiveOidcAuthProvider::new(provider_params(
+        base,
+        Some(Utc::now() - chrono::TimeDelta::seconds(1)),
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while refresh_count(OUTCOME_FAILED_EXHAUSTED) == exhausted_before && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    assert!(
+        hits.load(Ordering::SeqCst) >= 1,
+        "the refresh must have been attempted"
+    );
     assert!(
         refresh_count(OUTCOME_FAILED_EXHAUSTED) > exhausted_before,
         "failed_exhausted was not recorded"
     );
-    assert!(refresh_count(OUTCOME_FAILED_RETRY) >= retry_before);
     match provider.current() {
         AuthCredential::Bearer { token } => assert_eq!(token, "stale-access"),
         other => panic!("expected stale Bearer, got {other:?}"),
@@ -636,7 +676,7 @@ async fn huge_expires_in_is_a_refresh_failure() {
         Some(Utc::now() + chrono::TimeDelta::seconds(4)),
     ));
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + poll_budget(8);
     while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -645,7 +685,7 @@ async fn huge_expires_in_is_a_refresh_failure() {
         "refresh never reached IdP"
     );
 
-    let fail_deadline = Instant::now() + Duration::from_secs(3);
+    let fail_deadline = Instant::now() + poll_budget(3);
     while refresh_count(OUTCOME_FAILED_RETRY) == retry_before
         && refresh_count(OUTCOME_FAILED_EXHAUSTED) == exhausted_before
         && Instant::now() < fail_deadline
@@ -751,7 +791,7 @@ async fn invalid_expires_in_keeps_rotated_refresh_token() {
     }));
     let provider = ProactiveOidcAuthProvider::new(params);
 
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + poll_budget(8);
     loop {
         match provider.current() {
             AuthCredential::Bearer { token } if token == "fresh-2" => break,
@@ -791,7 +831,7 @@ async fn drop_aborts_background_task() {
     let params = provider_params(base, Some(Utc::now() + chrono::TimeDelta::seconds(2)));
     let provider = ProactiveOidcAuthProvider::new(params);
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + poll_budget(5);
     while hits.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -838,14 +878,15 @@ async fn expired_seed_refreshes_without_min_interval_delay() {
     };
     let provider = ProactiveOidcAuthProvider::new(params);
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    // Deliberately NOT scaled: the regression is a wait of the 60 s default minimum, so the bound must stay below it whatever the scale.
+    let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match provider.current() {
             AuthCredential::Bearer { token } if token == "fresh-access" => break,
             _ if Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            _ => panic!("expired seed was not refreshed promptly (waited 3s; default min is 60s)"),
+            _ => panic!("expired seed was not refreshed promptly (default min is 60s)"),
         }
     }
     assert!(hits.load(Ordering::SeqCst) >= 1);
@@ -871,7 +912,7 @@ async fn invalid_grant_stops_the_loop() {
     };
     let _provider = ProactiveOidcAuthProvider::new(params);
 
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + poll_budget(3);
     while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -906,7 +947,7 @@ async fn rate_limit_429_retries_and_honors_retry_after() {
     };
     let _provider = ProactiveOidcAuthProvider::new(params);
 
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + poll_budget(4);
     while hits.load(Ordering::SeqCst) < 2 && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -938,6 +979,11 @@ async fn rate_limit_429_zero_retry_after_uses_backoff() {
     };
     let _provider = ProactiveOidcAuthProvider::new(params);
 
+    // Wait for the first attempt (however late a loaded host starts it), then watch a fixed window for a hot loop.
+    let deadline = Instant::now() + poll_budget(4);
+    while hits.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     tokio::time::sleep(Duration::from_millis(700)).await;
     let n = hits.load(Ordering::SeqCst);
     assert!(n >= 1, "first 429 attempt should still run (hits={n})");
@@ -1030,4 +1076,53 @@ async fn spawn_rate_limited_idp(hits: Arc<AtomicU32>, retry_after: &'static str)
     });
     tokio::task::yield_now().await;
     base
+}
+
+/// CB-3: a discovery document that names a token endpoint on another origin never receives the
+/// refresh token. The refusal is a local policy denial (the loop stops and keeps the stored
+/// credentials), the foreign origin is never contacted and the snapshot is unchanged.
+#[tokio::test]
+async fn discovered_token_endpoint_on_another_origin_is_a_policy_denial() {
+    use axum::Router;
+    use axum::routing::get;
+    let collector = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    collector.set_nonblocking(true).unwrap();
+    let foreign = format!("http://{}/token", collector.local_addr().unwrap());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/.well-known/openid-configuration",
+        get(move || {
+            let foreign = foreign.clone();
+            async move { axum::Json(serde_json::json!({ "token_endpoint": foreign })) }
+        }),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let provider = ProactiveOidcAuthProvider::new(provider_params(
+        base,
+        Some(Utc::now() + chrono::TimeDelta::hours(1)),
+    ));
+    let error = match do_refresh(&provider.inner, "refresh-tok").await {
+        Err(error) => error,
+        Ok(_) => panic!("a foreign token endpoint must be refused"),
+    };
+    server.abort();
+    assert!(error.is_policy_denial(), "{error}");
+    assert!(!error.terminal);
+    assert!(error.new_refresh_token.is_none());
+    assert!(
+        format!("{error:#}").contains("issuer's origin"),
+        "{error:#}"
+    );
+    assert_eq!(
+        collector.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the foreign token endpoint was contacted"
+    );
+    match provider.current() {
+        AuthCredential::Bearer { token } => assert_eq!(token, "stale-access"),
+        other => panic!("expected Bearer, got {other:?}"),
+    }
 }

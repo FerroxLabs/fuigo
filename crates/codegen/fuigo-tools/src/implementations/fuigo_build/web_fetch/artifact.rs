@@ -36,13 +36,16 @@ impl WebFetchArtifactWriter {
 }
 
 fn save_locked(dir: &Path, data: &[u8], extension: &str) -> anyhow::Result<PathBuf> {
-    let mut allocation = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(ALLOCATION_FILE))
+    let mut allocation = fuigo_config::owner_only_file_options(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(dir.join(ALLOCATION_FILE))
         .context("open allocation file")?;
+    fuigo_config::tighten_file_owner_only(&allocation, &dir.join(ALLOCATION_FILE));
     allocation
         .lock_exclusive()
         .context("lock allocation file")?;

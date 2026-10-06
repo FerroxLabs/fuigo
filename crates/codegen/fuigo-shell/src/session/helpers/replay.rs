@@ -74,6 +74,34 @@ pub fn find_latest_compaction_checkpoint(
     Ok(latest)
 }
 
+/// The text-only rebuild 1.0.10-1.0.19's `load_light` substituted for `chat_history.jsonl` on every resume, under
+/// exactly its eligibility rule: the latest compaction marker's checkpoint is schema 1, carries a resolved prefix
+/// (`inherited_prefix_len`; legacy checkpoints do not), and is still the active compaction after replaying the whole
+/// transcript (no later rewind abandoned it). `None` when the rule does not apply.
+///
+/// P88 stopped applying it on resume (it drops tool calls). It remains for the two places whose own history is not
+/// the model's record: a point-in-time copy (`copy_session_data`) and a `chat_history.jsonl` rebuilt from updates
+/// after a rewind (`chat_rebuild`). Both keep their previous result whenever it returns `None` or an error.
+pub(crate) fn replay_if_latest_compaction_active(
+    updates_path: &Path,
+    session_dir: &Path,
+) -> io::Result<Option<Vec<ConversationItem>>> {
+    let Some(latest) = find_latest_compaction_checkpoint(updates_path)? else {
+        return Ok(None);
+    };
+    let bytes = crate::extensions::notification::read_contained_checkpoint(session_dir, &latest.checkpoint_file)?;
+    let file: CompactionCheckpointFile =
+        serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    if file.schema_version != 1 || latest.schema_version != 1 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
+    }
+    if file.inherited_prefix_len.is_none() {
+        return Ok(None);
+    }
+    let replay = replay_to_prompt(updates_path, session_dir, usize::MAX)?;
+    Ok((replay.last_compaction_prompt_index == Some(file.prompt_index_at_compaction)).then_some(replay.conversation))
+}
+
 /// Replay `updates.jsonl` to reconstruct the conversation at `target_prompt_index`.
 ///
 /// This handles:
@@ -280,8 +308,8 @@ impl ReplayState {
             // But the checkpoint is still required for original_user_info
             // That is the historical User(user_info) the model saw for these pre-compaction turns
             // Without it we'd use the post-compaction rebuilt user_info, which is wrong data
-            let checkpoint_path = session_dir.join(&info.checkpoint_file);
-            let bytes = match std::fs::read(&checkpoint_path) {
+            let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &info.checkpoint_file);
+            let bytes = match crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     tracing::error!(
@@ -331,8 +359,8 @@ impl ReplayState {
             );
             Ok(ReplayAction::Continue)
         } else {
-            let checkpoint_path = session_dir.join(&info.checkpoint_file);
-            let bytes = match std::fs::read(&checkpoint_path) {
+            let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &info.checkpoint_file);
+            let bytes = match crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file) {
                 Ok(b) => b,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     tracing::error!(
@@ -784,6 +812,173 @@ mod tests {
         }
     }
 
+    /// P88: rebuilding a lost `chat_history.jsonl` (missing or empty cache, remote pull) starts from the checkpoint's
+    /// projection, then keeps the post-compaction tool call and result the transcript records.
+    #[test]
+    fn chat_rebuild_starts_from_the_checkpoint_projection_and_keeps_tools() {
+        let dir = TempDir::new().unwrap();
+        let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
+        write_checkpoint_file(dir.path(), "cp", 1, projection.clone());
+        let tool_call = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new("test"),
+            acp::SessionUpdate::ToolCall(
+                acp::ToolCall::new(acp::ToolCallId::new("call-1"), "rm -rf build"),
+            ),
+        )));
+        let tool_done = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new("test"),
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new("call-1"),
+                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+            )),
+        )));
+        let _ = replay_updates(
+            &[
+                make_user_update_pi("test", "P0", 0),
+                make_agent_update("test", "A0"),
+                make_checkpoint("cp", 1, None),
+                make_user_update_pi("test", "P1", 1),
+                make_agent_update("test", "Deleting it. "),
+                tool_call,
+                tool_done,
+                make_agent_update("test", "Done."),
+            ],
+            dir.path(),
+            usize::MAX,
+        );
+        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        let rebuilt: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(rebuilt[..2], serde_json::to_value(&projection).unwrap().as_array().unwrap()[..]);
+        let text = serde_json::to_string(&rebuilt).unwrap();
+        assert!(!text.contains("\"P0\""), "pre-compaction turns are replaced by the projection: {text}");
+        assert!(text.contains("call-1"), "the post-compaction tool call survives the rebuild: {text}");
+    }
+
+    /// P88: the rebuild keeps two prompts with no response between them (the first cancelled before any output) as two
+    /// user items, each with its prompt index, as the live history has them.
+    #[test]
+    fn chat_rebuild_keeps_consecutive_prompts_apart_with_their_indexes() {
+        let dir = TempDir::new().unwrap();
+        let _ = replay_updates(
+            &[
+                make_user_update_pi("test", "P2", 2),
+                make_user_update_pi("test", "P3", 3),
+                make_agent_update("test", "A3"),
+            ],
+            dir.path(),
+            usize::MAX,
+        );
+        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        let mut expected = Vec::new();
+        for (text, index) in [("P2", 2), ("P3", 3)] {
+            let mut item = ConversationItem::user(text);
+            item.set_prompt_index(index);
+            expected.push(item);
+        }
+        expected.push(ConversationItem::assistant("A3"));
+        let rebuilt: Vec<serde_json::Value> = std::fs::read_to_string(dir.path().join("chat_history.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(serde_json::Value::Array(rebuilt), serde_json::to_value(expected).unwrap());
+    }
+
+    /// P88: a prompt the model answered with a tool call and no text first is rebuilt before that call, not after it.
+    #[test]
+    fn chat_rebuild_puts_a_prompt_before_the_tool_call_it_caused() {
+        let dir = TempDir::new().unwrap();
+        let tool = |update| SessionUpdate::Acp(Box::new(acp::SessionNotification::new(acp::SessionId::new("test"), update)));
+        let _ = replay_updates(
+            &[
+                make_user_update_pi("test", "P0", 0),
+                tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new("call-0"), "read"))),
+                tool(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new("call-0"),
+                    acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                ))),
+                make_agent_update("test", "Done."),
+            ],
+            dir.path(),
+            usize::MAX,
+        );
+        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
+        let (prompt, call, done) = (text.find("P0").unwrap(), text.find("call-0").unwrap(), text.find("Done.").unwrap());
+        assert!(prompt < call && call < done, "{text}");
+    }
+
+    /// P88: the rebuild reducer does not apply rewinds; after a rewind that follows the latest compaction it uses the
+    /// rewind-aware replay, so the abandoned branch does not come back.
+    #[test]
+    fn chat_rebuild_after_a_post_compaction_rewind_drops_the_abandoned_branch() {
+        let dir = TempDir::new().unwrap();
+        let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of P0")];
+        write_resolved_checkpoint_file(dir.path(), "cp", 1, projection.clone());
+        let _ = replay_updates(
+            &[
+                make_user_update_pi("test", "P0", 0),
+                make_agent_update("test", "A0"),
+                make_checkpoint("cp", 1, None),
+                make_user_update_pi("test", "P1-old", 1),
+                make_agent_update("test", "A1-old"),
+                make_rewind_marker(1),
+                make_user_update_pi("test", "P1-new", 1),
+                make_agent_update("test", "A1-new"),
+            ],
+            dir.path(),
+            usize::MAX,
+        );
+        crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
+        assert!(text.contains("summary of P0") && text.contains("P1-new") && text.contains("A1-new"), "{text}");
+        assert!(!text.contains("P1-old") && !text.contains("A1-old"), "abandoned branch came back: {text}");
+    }
+
+    /// P88: when the rewind abandons the compaction itself, its projection is dropped and the reducer's tail (with its
+    /// tool call) is kept, as this rebuild did before P88; a legacy checkpoint (no resolved prefix) is never replayed.
+    #[test]
+    fn chat_rebuild_after_a_rewind_that_abandons_the_compaction_keeps_the_tail_tools() {
+        for resolved in [true, false] {
+            let dir = TempDir::new().unwrap();
+            let projection = vec![ConversationItem::system("sys"), ConversationItem::user("summary of the abandoned branch")];
+            if resolved {
+                write_resolved_checkpoint_file(dir.path(), "cp", 2, projection);
+            } else {
+                write_checkpoint_file(dir.path(), "cp", 2, projection);
+            }
+            let tool = |update| SessionUpdate::Acp(Box::new(acp::SessionNotification::new(acp::SessionId::new("test"), update)));
+            let _ = replay_updates(
+                &[
+                    make_user_update_pi("test", "P0-old", 0),
+                    make_agent_update("test", "A0-old"),
+                    make_user_update_pi("test", "P1-old", 1),
+                    make_agent_update("test", "A1-old"),
+                    make_checkpoint("cp", 2, None),
+                    make_rewind_marker(0),
+                    make_user_update_pi("test", "P0-new", 0),
+                    make_agent_update("test", "Reading. "),
+                    tool(acp::SessionUpdate::ToolCall(acp::ToolCall::new(acp::ToolCallId::new("call-new"), "read"))),
+                    tool(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                        acp::ToolCallId::new("call-new"),
+                        acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+                    ))),
+                    make_agent_update("test", "Done."),
+                ],
+                dir.path(),
+                usize::MAX,
+            );
+            crate::session::storage::chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            let text = std::fs::read_to_string(dir.path().join("chat_history.jsonl")).unwrap();
+            assert!(text.contains("P0-new") && text.contains("call-new"), "resolved={resolved}: {text}");
+            assert!(!text.contains("abandoned branch"), "resolved={resolved}: abandoned summary kept: {text}");
+        }
+    }
+
     fn make_checkpoint(
         checkpoint_id: &str,
         prompt_index_at_compaction: usize,
@@ -823,6 +1018,20 @@ mod tests {
         };
         let bytes = serde_json::to_vec_pretty(&file).unwrap();
         std::fs::write(dir.join(format!("{checkpoint_id}.json")), bytes).unwrap();
+    }
+
+    /// A checkpoint as written since 1.0.10 (with a resolved prefix), which the pre-P88 load-time rebuild applied to.
+    fn write_resolved_checkpoint_file(
+        session_dir: &Path,
+        checkpoint_id: &str,
+        prompt_index_at_compaction: usize,
+        compacted_history: Vec<ConversationItem>,
+    ) {
+        write_checkpoint_file(session_dir, checkpoint_id, prompt_index_at_compaction, compacted_history);
+        let path = session_dir.join("compaction_checkpoints").join(format!("{checkpoint_id}.json"));
+        let mut file: CompactionCheckpointFile = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        file.inherited_prefix_len = Some(0);
+        std::fs::write(&path, serde_json::to_vec_pretty(&file).unwrap()).unwrap();
     }
 
     /// Helper: write a sequence of updates to a JSONL file and replay to a target.

@@ -6,6 +6,11 @@
 # TODO: remove after https://github.com/hyperium/tonic/issues/2253 fixed.
 large-error-threshold = 256
 
+# Printing macros are denied workspace-wide (Cargo.toml [workspace.lints.clippy]: a failed write
+# panics, and release is panic=abort). A test harness's own stdout/stderr is not a shipped stream.
+allow-print-in-tests = true
+allow-dbg-in-tests = true
+
 # Ban raw canonicalize: on Windows it returns verbatim `\\?\C:\...` paths that
 # break external tools, leak into prompts, and poison path-equality keys.
 # `dunce::canonicalize` keeps the verbatim form for paths it cannot simplify

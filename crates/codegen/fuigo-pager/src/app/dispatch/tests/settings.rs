@@ -219,6 +219,7 @@ fn cancel_before_first_activity_resets_state_and_discards_orphan_response() {
                     .cloned(),
             )),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1467,6 +1468,7 @@ fn pr13_set_show_tips_toast_includes_restart_marker() {
 /// Flips the setting to a non-default value so the round-trip dispatch has an observable effect.
 /// Otherwise the assertion would pass vacuously when current == default.
 /// Dispatches theme-mutating actions for the theme keys; callers must hold the theme test lock (wrap the test in [`with_theme_test_env`]).
+// theme-pin: caller holds (both callers run inside `with_theme_test_env`)
 fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::SettingKey) {
     match key {
         "compact_mode" => {
@@ -3585,4 +3587,49 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
         Some("Mouse reporting on"),
     );
     reset_mouse_capture_enabled(true);
+}
+
+/// P152 (Astra r1 #1): with nothing configured the previous value is the effective default, allow once. A failed write
+/// rolls back to it (never to always-approve), and choosing always-approve from the unset state is a real change.
+#[test]
+fn p152_default_selected_permission_rollback_is_the_safe_default() {
+    let mut app = test_app();
+    app.current_ui.default_selected_permission = None;
+    let effects = dispatch(
+        Action::SetDefaultSelectedPermission("reject".to_string()),
+        &mut app,
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::PersistSetting {
+                key: "default_selected_permission",
+                rollback_value: crate::settings::SettingValue::Enum("allow_once"),
+                ..
+            }
+        )),
+        "rollback must restore allow once, got {effects:?}"
+    );
+    let mut app = test_app();
+    app.current_ui.default_selected_permission = None;
+    let effects = dispatch(
+        Action::SetDefaultSelectedPermission("always_allow_all_sessions".to_string()),
+        &mut app,
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::PersistSetting { key: "default_selected_permission", .. })),
+        "choosing always-approve from the unset default must persist, got {effects:?}"
+    );
+    let mut app = test_app();
+    app.current_ui.default_selected_permission = None;
+    assert!(
+        dispatch(
+            Action::SetDefaultSelectedPermission("allow_once".to_string()),
+            &mut app,
+        )
+        .is_empty(),
+        "allow once is already the effective default"
+    );
 }

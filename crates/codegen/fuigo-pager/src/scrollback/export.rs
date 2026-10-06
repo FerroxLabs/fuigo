@@ -46,6 +46,8 @@ pub fn render_blocks_to_markdown<'a>(blocks: impl IntoIterator<Item = &'a Render
                 out.push_str("\n\n");
                 last_was_agent = true;
             }
+            // A plugin hook's lifecycle row is not a tool call
+            RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)) => {}
             RenderBlock::ToolCall(tc) => {
                 if !in_tools_section {
                     out.push_str("## Tools\n\n");
@@ -93,6 +95,7 @@ fn tool_summary(tc: &ToolCallBlock) -> String {
         ToolCallBlock::MemorySearch(_) => "MemorySearch".into(),
         ToolCallBlock::SentMessage(message) => message.title().into(),
         ToolCallBlock::Skill(o) | ToolCallBlock::Other(o) => format!("Tool: {}", o.name),
+        ToolCallBlock::Lifecycle(l) => format!("Hooks: {}", l.name),
     }
 }
 

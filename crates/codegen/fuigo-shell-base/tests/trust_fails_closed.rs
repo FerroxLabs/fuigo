@@ -1,8 +1,9 @@
 //! The trust set must fail CLOSED before configuration is loaded.
 //!
-//! This needs its own process: `TRUSTED_API_ORIGINS` is a `OnceLock`, so any
-//! test that installs a value would poison an in-crate test of the
-//! uninitialised state. Nothing here calls `set_trusted_api_origins`.
+//! This needs its own process: the trust set is process-wide, so any test that
+//! installs a value would poison an in-crate test of the uninitialised state.
+//! Nothing here calls `set_trusted_api_origins` or claims a
+//! `TrustedOriginAuthority`.
 //!
 //! The failure direction matters. Uninitialised means session-bearer auth does
 //! not engage until config loads — inconvenient. The opposite default would
@@ -21,7 +22,7 @@ fn trust_set_is_empty_before_configuration() {
 }
 
 #[test]
-fn no_host_is_first_party_before_configuration() {
+fn no_host_is_a_configured_api_origin_before_configuration() {
     for url in [
         // The vendor this code was forked from must not be special.
         "https://api.x.ai/v1",

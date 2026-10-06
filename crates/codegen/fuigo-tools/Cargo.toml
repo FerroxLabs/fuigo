@@ -16,6 +16,7 @@ fs2 = { workspace = true }
 educe = { workspace = true, features = ["Debug"] }
 async-openai = { workspace = true }
 fuigo-tty-utils = { workspace = true }
+fuigo-secrets = { workspace = true }
 fuigo-auth = { workspace = true }
 fuigo-config = { path = "../fuigo-config" }
 fuigo-extra-ca = { workspace = true }

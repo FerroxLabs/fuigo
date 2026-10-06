@@ -55,7 +55,9 @@ pub fn run(args: &WrapArgs) -> Result<()> {
             Ok(code) => std::process::exit(code),
             Err(e) => {
                 // PTY setup failed; keep the chosen route without our PTY so the command still works (just without clipboard forwarding)
-                eprintln!("fuigo wrap: wrapped mode failed, running without PTY wrapping: {e}");
+                fuigo_tty_utils::cli_eprintln!(
+                    "fuigo wrap: wrapped mode failed, running without PTY wrapping: {e}"
+                );
                 exec_command(&fallback.program, &fallback.args)
             }
         }
@@ -188,12 +190,21 @@ fn should_wrap() -> bool {
         && std::io::stderr().is_terminal()
 }
 
+/// The command `fuigo wrap` runs without a PTY: the user's own program, so Fuigo's secrets are removed from its
+/// environment (P120).
+fn wrapped_command(program: &str, args: &[String]) -> std::process::Command {
+    let mut cmd = std::process::Command::new(program);
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
+    cmd.args(args);
+    cmd
+}
+
 /// Replace the current process with `program <args...>` (no PTY wrapping).
 #[cfg(unix)]
 fn exec_command(program: &str, args: &[String]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let err = std::process::Command::new(program).args(args).exec();
+    let err = wrapped_command(program, args).exec();
 
     // exec() only returns on error.
     Err(anyhow::anyhow!("failed to exec {program}: {err}"))
@@ -202,8 +213,7 @@ fn exec_command(program: &str, args: &[String]) -> Result<()> {
 /// On non-Unix platforms, spawn and wait.
 #[cfg(not(unix))]
 fn exec_command(program: &str, args: &[String]) -> Result<()> {
-    let status = std::process::Command::new(program)
-        .args(args)
+    let status = wrapped_command(program, args)
         .status()
         .map_err(|e| anyhow::anyhow!("failed to run {program}: {e}"))?;
 

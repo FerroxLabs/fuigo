@@ -58,6 +58,7 @@ pub(crate) fn shell_c(script: &str) -> Command {
         ("sh", "-c")
     };
     let mut cmd = Command::new(shell);
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.args([flag, script]);
     cmd
 }
@@ -368,5 +369,37 @@ mod tests {
             "drain must be bounded by ONE shared budget (took {:?})",
             start.elapsed()
         );
+    }
+}
+
+/// P120: the external sign-in command and the identity command are user-configured programs; they must not inherit
+/// Fuigo's own secrets.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[tokio::test]
+    async fn p120_shell_c_commands_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "util::subprocess::p120_tests::p120_shell_c_commands_do_not_inherit_fuigo_secrets";
+        const REGISTERED: &str = "P120_SIGNIN_BEARER";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-shell-c");
+        let out = dir.join("env.txt");
+        let status = shell_c(&format!("env > '{}'", out.display())).status().await.unwrap();
+        assert!(status.success());
+        let dump = std::fs::read_to_string(&out).unwrap();
+        probe::assert_clean(&dump, &[]);
+        probe::assert_kept(&dump, REGISTERED);
+        // An explicit variable set by the caller after construction still arrives.
+        let mut cmd = shell_c(&format!("env > '{}'", out.display()));
+        cmd.env("FUIGO_AGENT_SECRET", "explicit");
+        assert!(cmd.status().await.unwrap().success());
+        let dump = std::fs::read_to_string(&out).unwrap();
+        assert!(dump.lines().any(|l| l == "FUIGO_AGENT_SECRET=explicit"), "an explicit entry must arrive");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

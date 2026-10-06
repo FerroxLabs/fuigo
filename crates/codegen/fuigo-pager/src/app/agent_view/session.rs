@@ -122,6 +122,7 @@ impl AgentView {
             rewound_prompt_ids: VecDeque::new(),
             last_applied_event_seq: None,
             last_applied_fuigo_event_seq: None,
+            applied_hook_event_ids: HashSet::new(),
             last_seen_event_id: None,
             last_seen_event_seq: None,
             deferred_subagent_finishes: HashMap::new(),
@@ -173,10 +174,6 @@ impl AgentView {
             chat_kind: false,
             conversation_entry: false,
             app_chat_mode: false,
-            #[cfg(feature = "local-workspace")]
-            workspace_mode: crate::views::welcome::WelcomeWorkspaceMode::Sandbox,
-            #[cfg(feature = "local-workspace")]
-            workspace_mode_cli_locked: false,
             credit_balance: None,
             auto_topup: None,
             goal_state: None,
@@ -335,6 +332,7 @@ impl AgentView {
             acp_synced_generation: 0,
             hovered_permission_item: None,
             last_permission_click: None,
+            permission_typed_at: None,
             permission_queue: VecDeque::new(),
             next_perm_req_id: 0,
             permission_stashed_prompt: None,
@@ -437,6 +435,11 @@ impl AgentView {
         self.turn_start_ms = None;
         self.turn_start_ms_prompt = None;
         self.last_active_at = Some(now);
+        // P152: a finished turn proves the session started; a leftover zero-server startup seed must not keep
+        // "Starting session…" under the reply. Real MCP progress (`total > 0`) is the top-bar chip and stays.
+        if self.mcp_init_progress.as_ref().is_some_and(|p| p.total == 0) {
+            self.mcp_init_progress = None;
+        }
         if let Some(event) = self.settle_cancel(end, now) {
             fuigo_telemetry::session_ctx::log_event(event);
         }
@@ -537,6 +540,7 @@ impl AgentView {
             workflow_runs: std::mem::take(&mut self.workflow_runs),
             workflow_run_revisions: std::mem::take(&mut self.workflow_run_revisions),
             cleared_workflow_runs: std::mem::take(&mut self.cleared_workflow_runs),
+            applied_hook_event_ids: std::mem::take(&mut self.applied_hook_event_ids),
         }
     }
     /// Put a taken [`ReplayRebuiltState`] back: the counterpart of [`Self::take_replay_rebuilt_state`].
@@ -554,6 +558,7 @@ impl AgentView {
         self.workflow_runs = taken.workflow_runs;
         self.workflow_run_revisions = taken.workflow_run_revisions;
         self.cleared_workflow_runs = taken.cleared_workflow_runs;
+        self.applied_hook_event_ids = taken.applied_hook_event_ids;
     }
     /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.

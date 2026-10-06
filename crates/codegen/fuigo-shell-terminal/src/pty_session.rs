@@ -237,6 +237,23 @@ pub(crate) async fn require_pty(
         })
 }
 
+/// P113 r3: remove Fuigo's own secrets from a PTY command's base environment. Read from the builder's own base
+/// environment, not this process's (Astra r3 #2): on Windows `CommandBuilder::new` also loads the system and user
+/// registry environment, which can hold a secret this process does not. This process's names too, for a value that is
+/// not UTF-8 (`iter_full_env_as_str` skips it).
+fn remove_fuigo_secrets(cmd: &mut CommandBuilder) {
+    let mut secrets: Vec<std::ffi::OsString> = cmd
+        .iter_full_env_as_str()
+        .map(|(name, _)| name)
+        .filter(|name| fuigo_tools::util::shell_env_policy::is_fuigo_secret(name))
+        .map(std::ffi::OsString::from)
+        .collect();
+    secrets.extend(fuigo_tools::util::shell_env_policy::inherited_fuigo_secret_names());
+    for name in secrets {
+        cmd.env_remove(name);
+    }
+}
+
 pub async fn create_pty(
     shell: Option<&str>,
     cwd: Option<&str>,
@@ -274,6 +291,8 @@ pub async fn create_pty(
         cmd.cwd(dir);
     }
 
+    // P113 r3: the user's environment, without Fuigo's own secrets; explicit variables after.
+    remove_fuigo_secrets(&mut cmd);
     for (k, v) in &env {
         cmd.env(k, v);
     }
@@ -913,6 +932,72 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// P113 Astra r4 #7: a secret present only in the builder's base environment (on Windows, the registry) is removed
+    /// too, not only one this process holds.
+    #[test]
+    fn p113_pty_removes_a_secret_only_the_builder_holds() {
+        let name = "FUIGO_EXTRA_AUTH_KEY";
+        assert!(std::env::var_os(name).is_none(), "precondition: this process does not hold {name}");
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env(name, "fake-p113-registry");
+        cmd.env("P113_BENIGN", "kept");
+        remove_fuigo_secrets(&mut cmd);
+        assert!(cmd.get_env(name).is_none(), "the builder-only secret is still set");
+        assert_eq!(cmd.get_env("P113_BENIGN"), Some(std::ffi::OsStr::new("kept")));
+    }
+
+    /// P113 r3: a client PTY shell keeps the user's environment but none of Fuigo's own secrets; an explicit variable
+    /// still arrives.
+    #[tokio::test]
+    async fn p113_ptys_never_see_fuigo_secrets() {
+        if crate::p113_probe::parent_env("p113_ptys_never_see_fuigo_secrets") {
+            return;
+        }
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let dir = tempfile::tempdir().unwrap();
+                for explicit in [false, true] {
+                    let marker = dir.path().join(if explicit { "explicit" } else { "default" });
+                    let mut env = HashMap::from([("ENV".to_string(), String::new())]);
+                    if explicit {
+                        env.insert("FUIGO_AGENT_SECRET".into(), "fake-p113-explicit".into());
+                    }
+                    let (gateway, _) = recording_gateway();
+                    let pty_id = create_pty(
+                        Some("/bin/bash"),
+                        None,
+                        env,
+                        24,
+                        80,
+                        None,
+                        gateway,
+                        TargetClientId::None,
+                    )
+                    .await
+                    .expect("create test pty");
+                    let check = crate::p113_probe::check(explicit);
+                    let line = format!(
+                        "{check} && /bin/sh -c '{check}' && printf 1 > '{}'\n",
+                        marker.display()
+                    );
+                    write_pty_input(&pty_id, line.as_bytes())
+                        .await
+                        .expect("write command");
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    while !marker.exists() && std::time::Instant::now() < deadline {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    close_pty(&pty_id).await.expect("close pty");
+                    assert!(
+                        marker.exists(),
+                        "explicit={explicit}: the PTY shell saw a Fuigo secret, lost the user's environment, or \
+                         missed the explicit variable"
+                    );
+                }
+            })
+            .await;
     }
 
     #[tokio::test]

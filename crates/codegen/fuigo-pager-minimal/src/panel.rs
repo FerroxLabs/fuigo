@@ -381,7 +381,10 @@ fn render_mcps(
                                         theme,
                                     ));
                                 }
-                                rl[i] = if srv.tool_count == 1 {
+                                // P152 (Astra r2 #5): an unavailable server says why, as the full TUI does.
+                                rl[i] = if let Some(reason) = srv.status_reason.as_deref() {
+                                    format!("not connected: {reason}")
+                                } else if srv.tool_count == 1 {
                                     "1 tool".to_string()
                                 } else {
                                     format!("{} tools", srv.tool_count)
@@ -558,6 +561,7 @@ mod tests {
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
+            status_reason: None,
         }
     }
 
@@ -648,6 +652,7 @@ mod tests {
 
     #[test]
     fn mcps_panel_renders_list_and_mirrors_handler_state() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let mut a = with_mcps(vec![
             mcp_server("alpha", McpServerDisplayStatus::Ready, 3),
             mcp_server("bravo", McpServerDisplayStatus::Unavailable, 0),
@@ -682,8 +687,24 @@ mod tests {
         assert_eq!(s.entry_non_selectable.len(), 3);
     }
 
+    /// P152 (Astra r2 #5): the minimal `/mcps` list shows why a server is unavailable, on its collapsed row.
+    #[test]
+    fn mcps_panel_shows_the_unavailable_reason() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
+        let mut bravo = mcp_server("bravo", McpServerDisplayStatus::Unavailable, 0);
+        bravo.status_reason = Some("spawn failed".to_string());
+        let mut a = with_mcps(vec![bravo]);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        let text = buffer_text(&buf);
+        assert!(text.contains("not connected: spawn failed"), "reason on the row:\n{text}");
+    }
+
     #[test]
     fn resume_panel_renders_title_rows_and_footer() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let mut a = with_resume(vec![session_entry("first task"), session_entry("second")]);
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
@@ -702,6 +723,7 @@ mod tests {
 
     #[test]
     fn resume_search_uses_picker_grapheme_viewport_at_narrow_width() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
         let grapheme = "👩🏽\u{200d}💻";
         let combining = "e\u{301}";
         let mut agent = with_resume(vec![session_entry("match")]);

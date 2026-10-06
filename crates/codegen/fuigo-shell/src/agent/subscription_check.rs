@@ -48,7 +48,11 @@ async fn fetch_user_info(
             "X-XAI-Token-Auth",
             auth_manager.fuigo_com_config().token_header.as_str(),
         )
-        .header("x-fuigo-client-version", fuigo_version::VERSION)
+        // P43: identity-class header, FluxRouter-operated destinations only.
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
         .header(
             crate::http::CLIENT_MODE_HEADER,
             crate::http::process_client_mode(),
@@ -82,6 +86,24 @@ pub(crate) async fn single_check(
     let user_url = format!("{}/user?include=subscription", proxy_base_url);
     let http_client = crate::http::shared_client();
     let auth = auth_manager.current()?;
+    // P47: the session token goes only where the service-endpoint trust class admits `/user`; otherwise the
+    // check is not made and the refusal is logged with its remedy (`service_session_gate`).
+    if crate::auth::session_delivery::service_session_gate(
+        &auth,
+        &user_url,
+        Some(proxy_base_url),
+        "subscription_check",
+    )
+    .is_err()
+    {
+        fuigo_telemetry::unified_log::warn(
+            "paywall_check_error",
+            None,
+            // No `user_id`: the refusal names no account (the unified log can be uploaded for diagnostics).
+            Some(serde_json::json!({ "kind": "destination_refused" })),
+        );
+        return None;
+    }
     let user_info = match fetch_user_info(
         &http_client,
         &user_url,
@@ -173,6 +195,17 @@ pub(crate) async fn single_check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// P43 hostile: a `/user` host that is not FluxRouter-operated gets no client version.
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_info_check_sends_no_identity_to_a_non_fluxrouter_host() {
+        let (base, seen, handle) = crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let am = crate::remote::skills_client::tests::test_auth_manager();
+        let auth = am.current().expect("test auth");
+        let client = crate::http::shared_client();
+        let _ = fetch_user_info(&client, &format!("{base}/user"), &auth, &am, None).await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "subscription_check");
+    }
     /// The paid `subscriptionTier` strings exactly as the provider's `/user` sends them.
     /// These are wire values: they keep the provider's spelling, never ours.
     const PROVIDER_PAID_TIERS: &[&str] = &[

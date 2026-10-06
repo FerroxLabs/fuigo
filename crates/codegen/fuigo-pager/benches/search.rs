@@ -5,6 +5,9 @@
 //! - `query_steady` / `query_cold` measure the UI-thread cost of `update_query` after the daemon change.
 //!   A steady keystroke only compiles the matcher and enqueues the query (the scan is off-thread).
 //!   The cold path also rebuilds and ships the corpus on a content change.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::hint::black_box;
 use std::time::Duration;

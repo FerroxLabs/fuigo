@@ -132,7 +132,7 @@ async fn live_session_with_running_meta(
     id: &str,
     inspect: Option<SubagentInspection>,
 ) -> (
-    super::MvpAgent,
+    super::MvpAgentHandle,
     String,
     std::path::PathBuf,
     tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
@@ -161,6 +161,10 @@ async fn live_session_with_running_meta(
 
 #[tokio::test(flavor = "current_thread")]
 async fn list_running_subagents_finalizes_orphan_on_live_session() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -188,6 +192,10 @@ async fn list_running_subagents_finalizes_orphan_on_live_session() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn list_running_subagents_skips_live_coordinator_child() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -211,6 +219,10 @@ async fn list_running_subagents_skips_live_coordinator_child() {
 
 #[test]
 fn release_evicts_the_registry_heal_lock() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let registry = super::super::session_registry::SessionRegistry::default();
     let sid = acp::SessionId::new("s-heal-evict");
     let _ = registry.live_orphan_heal_lock(&sid);
@@ -221,6 +233,10 @@ fn release_evicts_the_registry_heal_lock() {
 
 #[test]
 fn registry_heal_lock_reuses_the_same_arc_until_release() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let registry = super::super::session_registry::SessionRegistry::default();
     let sid = acp::SessionId::new("s-heal-race");
     let inflight = registry.live_orphan_heal_lock(&sid);

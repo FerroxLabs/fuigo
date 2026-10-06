@@ -84,6 +84,7 @@ pub(super) fn notification_hook_for_update(
 
 pub(super) struct DeferredPostToolUseScrollback {
     tool_name: String,
+    tool_call_id: String,
     results: Vec<fuigo_hooks::result::HookRunResult>,
 }
 
@@ -109,6 +110,7 @@ impl SessionActor {
         &self,
         event_name: &str,
         tool_name: Option<&str>,
+        tool_call_id: Option<&str>,
         prompt_id: Option<&str>,
         results: &[fuigo_hooks::result::HookRunResult],
     ) {
@@ -175,6 +177,7 @@ impl SessionActor {
         self.send_fuigo_notification(FuigoSessionUpdate::HookExecution {
             event_name: event_name.to_string(),
             tool_name: tool_name.map(|s| s.to_string()),
+            tool_call_id: tool_call_id.map(|s| s.to_string()),
             prompt_id: prompt_id.map(|s| s.to_string()),
             runs,
         })
@@ -243,7 +246,7 @@ impl SessionActor {
         // Prompt-gate events go through dispatch_prompt_submit_hook; dispatch_non_blocking debug-asserts observe-only
         let results =
             fuigo_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx).await;
-        self.send_hook_execution(&event.to_string(), tool_name, prompt_id, &results)
+        self.send_hook_execution(&event.to_string(), tool_name, None, prompt_id, &results)
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)
             .await;
@@ -307,6 +310,7 @@ impl SessionActor {
             .await;
         let deferred = DeferredPostToolUseScrollback {
             tool_name: hook_tool_name,
+            tool_call_id: prepared.tool_call_id.0.to_string(),
             results,
         };
         (delivery, Some(deferred))
@@ -317,8 +321,14 @@ impl SessionActor {
         deferred: DeferredPostToolUseScrollback,
     ) {
         let event = fuigo_hooks::event::HookEventName::PostToolUse.to_string();
-        self.send_hook_execution(&event, Some(&deferred.tool_name), None, &deferred.results)
-            .await;
+        self.send_hook_execution(
+            &event,
+            Some(&deferred.tool_name),
+            Some(&deferred.tool_call_id),
+            None,
+            &deferred.results,
+        )
+        .await;
     }
 
     /// Build the `PostToolUseFailure` payload from a dispatched call and run the
@@ -351,6 +361,7 @@ impl SessionActor {
                 subagent_type: self.subagent_type_label(),
             },
             hook_tool_name,
+            &prepared.tool_call_id.0,
         )
         .await
     }
@@ -363,6 +374,7 @@ impl SessionActor {
         &self,
         payload: fuigo_hooks::event::HookPayload,
         tool_name: &str,
+        tool_call_id: &str,
     ) -> Vec<fuigo_hooks::dispatcher::AdditionalContext> {
         let event = fuigo_hooks::event::HookEventName::PostToolUseFailure;
         let envelope = self.fire_hook(event, None, payload);
@@ -373,8 +385,14 @@ impl SessionActor {
         let result =
             fuigo_hooks::dispatcher::dispatch_post_tool_use_failure(&registry, &envelope, &ctx)
                 .await;
-        self.send_hook_execution(&event.to_string(), Some(tool_name), None, &result.results)
-            .await;
+        self.send_hook_execution(
+            &event.to_string(),
+            Some(tool_name),
+            Some(tool_call_id),
+            None,
+            &result.results,
+        )
+        .await;
         self.emit_hook_executed_telemetry(&event.to_string(), Some(tool_name), &result.results)
             .await;
         result.additional_context
@@ -407,7 +425,7 @@ impl SessionActor {
         };
         let ctx = self.hook_run_ctx();
         let gate = fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
-        self.send_hook_execution(&event.to_string(), None, prompt_id, &gate.results)
+        self.send_hook_execution(&event.to_string(), None, None, prompt_id, &gate.results)
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
             .await;
@@ -469,6 +487,7 @@ mod notification_hook_filter_tests {
         let execution = FuigoSessionUpdate::HookExecution {
             event_name: "pre_tool_use".into(),
             tool_name: Some("read_file".into()),
+            tool_call_id: None,
             prompt_id: None,
             runs: vec![HookRunEntryDto {
                 name: "test".into(),
@@ -491,6 +510,7 @@ mod notification_hook_filter_tests {
             max_retries: 3,
             reason: "timeout".into(),
             error_type: None,
+            verdicts: None,
         });
         assert!(notification_hook_for_update(&update).is_none());
     }
