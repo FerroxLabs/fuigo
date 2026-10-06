@@ -38,26 +38,34 @@ async fn test_last_api_request_at_idle_detection() {
         })
         .await;
 }
-/// End-to-end test for `maybe_refresh_model_metadata_on_resume`.
+/// End-to-end test for `maybe_refresh_model_metadata_on_resume` against a loopback `/models-v2`.
 ///
-/// Simulates a session idle for more than 10 minutes, then verifies the function fetches `/models-v2` and parses the response.
-/// The refresh must update `context_window` and `max_completion_tokens` in the sampling config.
+/// Before P42 this asserted that the refresh fetched `/models-v2` from the loopback mock (with the session token)
+/// and updated `context_window` / `max_completion_tokens`. Since P42 the refresh carries the session token only
+/// to a destination that may receive it (`session_delivery::session_may_reach`: a configured https origin, never
+/// loopback), and its other guard, `is_cli_chat_proxy_url`, admits only loopback or the compiled prod
+/// cli-chat-proxy (empty in this tree). So in this build the refresh cannot reach any destination, and this test
+/// pins that: a session idle for 11 minutes makes NO request to the loopback mock, and its metadata is unchanged.
+/// The positive path needs a compiled-in prod cli-chat-proxy; see receipt R034.
 #[tokio::test(flavor = "current_thread")]
-async fn test_e2e_idle_resume_refreshes_model_metadata() {
+async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() {
     use axum::routing::get;
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
+            let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let hit = hits.clone();
             let app = axum::Router::new().route(
                 "/v1/models-v2",
-                get(|| async {
+                get(move || async move {
+                    hit.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     axum::Json(serde_json::json!({
                         "data": [{
                             "model": "test-model",
                             "name": "Test Model",
                             "context_window": 300_000,
                             "max_completion_tokens": 16384,
-                            "base_url": "http://localhost/v1"
+                            "base_url": format!("{}/v1", fuigo_test_support::refused_loopback_url())
                         }]
                     }))
                 }),
@@ -302,7 +310,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 ),
                 goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
                 managed_mcp_handle: Default::default(),
-                initial_client_mcp_servers: vec![],
+                initial_client_mcp_servers: Default::default(),
                 tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
                 mcp_announcements: Default::default(),
                 mcp_reminder_mode: McpReminderMode::Delta,
@@ -319,6 +327,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
                 last_api_request_at: std::sync::atomic::AtomicI64::new(0),
                 hook_registry: std::cell::RefCell::new(None),
+                hook_registry_live: Default::default(),
                 turn_report: Default::default(),
                 turn_abort: Default::default(),
                 turn_end_tx: Default::default(),
@@ -329,6 +338,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
                 plugin_registry: std::cell::RefCell::new(None),
                 plugin_registry_handle: None,
                 events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+                _turn_owner_lock: None,
                 observability_bridge: noop_observability_bridge(),
                 current_turn_number: std::cell::Cell::new(0),
                 last_recap_main_turn: std::cell::Cell::new(0),
@@ -372,15 +382,16 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
             assert_eq!(
-                cfg_after.context_window,
-                std::num::NonZeroU64::new(300_000).unwrap(),
-                "context_window should be updated to 300K from /models-v2"
+                hits.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the session-carrying /models-v2 refresh must not reach a loopback destination"
             );
             assert_eq!(
-                cfg_after.max_completion_tokens,
-                Some(16384),
-                "max_completion_tokens should be updated to 16384 from /models-v2"
+                cfg_after.context_window,
+                std::num::NonZeroU64::new(200_000).unwrap(),
+                "no refresh, so context_window is unchanged"
             );
+            assert_eq!(cfg_after.max_completion_tokens, Some(8192));
         })
         .await;
 }

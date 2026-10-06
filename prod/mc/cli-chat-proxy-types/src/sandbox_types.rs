@@ -234,7 +234,7 @@ mod tests {
 }
 
 /// Information about a single forked session.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxForkedSession {
     /// The provider sandbox ID
@@ -243,6 +243,36 @@ pub struct SandboxForkedSession {
     pub websocket_url: String,
     /// JWT token for authenticating the WebSocket connection
     pub jwt_token: String,
+}
+
+/// `url` with userinfo, query and fragment replaced by `<redacted>` (P70): a connect URL may carry a token.
+fn url_without_query(url: &str) -> String {
+    // Fail closed on anything carrying userinfo or a backslash: transport parsers normalize odd spellings
+    // (`https:/user:pw@host`, `\\`) that a string scan here could misread.
+    if url.contains(['@', '\\']) {
+        return "<redacted url>".to_owned();
+    }
+    match url.find(['?', '#']) {
+        Some(i) => format!("{}{}<redacted>", &url[..i], &url[i..=i]),
+        None => url.to_owned(),
+    }
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SandboxForkedSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            sandbox_id,
+            websocket_url,
+            jwt_token: _,
+        } = self;
+        f.debug_struct("SandboxForkedSession")
+            .field("sandbox_id", sandbox_id)
+            .field("websocket_url", &url_without_query(websocket_url))
+            .field("jwt_token", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Response from forking a sandbox session.
@@ -421,11 +451,24 @@ pub struct SandboxHibernateResponse {
 /// POST /v1/sandbox/sessions/{id}/restore
 ///
 /// The `session_id` is provided as a path parameter, not in the body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxRestoreRequest {
     /// Server key for the restored session's direct-mode agent.
     pub server_key: String,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SandboxRestoreRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            server_key: _,
+        } = self;
+        f.debug_struct("SandboxRestoreRequest")
+            .field("server_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Response from restoring a hibernated sandbox session.
@@ -508,7 +551,7 @@ pub struct SandboxEnvironment {
 }
 
 /// An environment variable key-value pair.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxEnvironmentVariable {
     #[serde(default)]
@@ -517,8 +560,23 @@ pub struct SandboxEnvironmentVariable {
     pub value: Option<String>,
 }
 
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. It carries the elements of `SandboxEnvironmentWithMetadata.secrets`.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SandboxEnvironmentVariable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            key,
+            value,
+        } = self;
+        f.debug_struct("SandboxEnvironmentVariable")
+            .field("key", key)
+            .field("value", &value.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// A secret input key-value pair for environment creation/update.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSecretInput {
     #[serde(default)]
@@ -527,8 +585,23 @@ pub struct SandboxSecretInput {
     pub value: Option<String>,
 }
 
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SandboxSecretInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            key,
+            value,
+        } = self;
+        f.debug_struct("SandboxSecretInput")
+            .field("key", key)
+            .field("value", &value.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// A sandbox environment with its associated metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxEnvironmentWithMetadata {
     /// The environment configuration.
@@ -543,6 +616,25 @@ pub struct SandboxEnvironmentWithMetadata {
     /// The requesting user's role for this environment (proto enum as string).
     #[serde(default)]
     pub user_role: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SandboxEnvironmentWithMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            environment,
+            environment_variables,
+            secrets,
+            user_role,
+        } = self;
+        f.debug_struct("SandboxEnvironmentWithMetadata")
+            .field("environment", environment)
+            .field("environment_variables", environment_variables)
+            .field("secrets", &secrets.iter().map(|v| (&v.key, "<redacted>")).collect::<Vec<_>>())
+            .field("user_role", user_role)
+            .finish()
+    }
 }
 
 /// Query parameters for listing sandbox environments.
@@ -705,4 +797,46 @@ pub struct SandboxPreinstalledPackage {
 pub struct SandboxListPreinstalledPackagesResponse {
     #[serde(default)]
     pub packages: Vec<SandboxPreinstalledPackage>,
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sandbox_secret_types_debug_redact() {
+        let forked = SandboxForkedSession {
+            sandbox_id: "p70-sbx".into(),
+            websocket_url: "wss://p70user:p70pw-FAKE-4d5e6f7a@p70.invalid/ws/@x?token=p70wq-FAKE-0b1c2d3e".into(),
+            jwt_token: "p70jw-FAKE-8f9a0b1c".into(),
+        };
+        assert_redacted(&forked, &["p70jw-FAKE-8f9a0b1c", "p70pw-FAKE-4d5e6f7a", "p70wq-FAKE-0b1c2d3e"]);
+        let restore = SandboxRestoreRequest { server_key: "p70rk-FAKE-8e9f0a1b".into() };
+        assert_redacted(&restore, &["p70rk-FAKE-8e9f0a1b"]);
+        let secret = SandboxSecretInput { key: Some("P70_NAME".into()), value: Some("p70sv-FAKE-2d3e4f5a".into()) };
+        assert_redacted(&secret, &["p70sv-FAKE-2d3e4f5a"]);
+        let with_meta = SandboxEnvironmentWithMetadata {
+            environment: None,
+            environment_variables: Vec::new(),
+            secrets: vec![SandboxEnvironmentVariable { key: Some("P70_NAME".into()), value: Some("p70se-FAKE-6b7c8d9e".into()) }],
+            user_role: None,
+        };
+        assert_redacted(&with_meta, &["p70se-FAKE-6b7c8d9e"]);
+        let element = SandboxEnvironmentVariable { key: Some("P70_NAME".into()), value: Some("p70ev-FAKE-0f1a2b3c".into()) };
+        assert_redacted(&vec![element], &["p70ev-FAKE-0f1a2b3c"]);
+    }
 }

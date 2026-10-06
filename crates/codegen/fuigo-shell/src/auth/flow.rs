@@ -180,8 +180,10 @@ pub(crate) async fn run_external_auth_provider(
     on_stderr: Option<StderrCallback>,
 ) -> anyhow::Result<(FuigoAuth, bool)> {
     let inherit_stderr = on_stderr.is_none();
+    // P70: the configured command line may embed a credential; logs and errors name its fingerprint, never its text.
+    let cmd_fp = fuigo_auth::bearer_fingerprint(command);
     tracing::info!(
-        cmd = %command,
+        cmd = %cmd_fp,
         over_stale_credential,
         inherit_stderr,
         "auth: running external auth provider (interactive login)"
@@ -200,7 +202,7 @@ pub(crate) async fn run_external_auth_provider(
     #[allow(clippy::disallowed_methods)]
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to start auth provider `{command}`: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("failed to start auth provider (command {cmd_fp}): {e}"))?;
     let stderr_task = if let Some(cb) = on_stderr {
         let stderr = child.stderr.take().expect("stderr was set to piped");
         Some(tokio::task::spawn_local(async move {
@@ -230,13 +232,13 @@ pub(crate) async fn run_external_auth_provider(
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("external auth provider `{command}` timed out after 300s"))?
-    .map_err(|e| anyhow::anyhow!("external auth provider `{command}` IO error: {e}"))?;
+    .map_err(|_| anyhow::anyhow!("external auth provider (command {cmd_fp}) timed out after 300s"))?
+    .map_err(|e| anyhow::anyhow!("external auth provider (command {cmd_fp}) IO error: {e}"))?;
     if let Some(task) = stderr_task {
         let _ = task.await;
     }
     let mut auth = parse_output(&output)
-        .map_err(|e| anyhow::anyhow!("external auth provider `{command}`: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("external auth provider (command {cmd_fp}): {e}"))?;
     let principal_policy =
         crate::auth::oidc::login_principal_policy(auth_manager.fuigo_com_config());
     crate::auth::oidc::enforce_login_principal(
@@ -557,7 +559,7 @@ pub(super) async fn run_auth_flow_steps(
                     error = %e,
                     "auth: external auth provider failed, falling through to interactive login"
                 );
-                eprintln!("Signing in with browser instead...");
+                fuigo_tty_utils::cli_eprintln!("Signing in with browser instead...");
             }
         }
     }
@@ -759,10 +761,10 @@ async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: FuigoAuth) 
 }
 /// Print the CLI "signed in" confirmation, clearing the spinner line first.
 pub(crate) fn report_signed_in(auth: &FuigoAuth) {
-    eprint!("\r\x1b[K");
+    fuigo_tty_utils::cli_eprint!("\r\x1b[K");
     match auth.email {
-        Some(ref email) => eprintln!("✓ Signed in as {email}"),
-        None => eprintln!("✓ Signed in"),
+        Some(ref email) => fuigo_tty_utils::cli_eprintln!("✓ Signed in as {email}"),
+        None => fuigo_tty_utils::cli_eprintln!("✓ Signed in"),
     }
 }
 /// CLI auth entrypoint. For GUI, use `run_auth_flow_with_stderr_bridge`.
@@ -798,7 +800,7 @@ pub async fn ensure_authenticated_with_override(
         let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
     }
     if let Some(msg) = message_prefix {
-        eprintln!("{msg}");
+        fuigo_tty_utils::cli_eprintln!("{msg}");
     }
     let (auth, did_auth) = run_auth_flow(
         &auth_manager,
@@ -885,7 +887,7 @@ async fn run_cli_login_steps(
         auth
     } else {
         if device_auth && crate::auth::oidc::is_configured(&config.fuigo_com_config) {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "Device-code login isn't available for your SSO provider; using browser sign-in."
             );
         }
@@ -913,13 +915,13 @@ pub(crate) async fn apply_post_login_config(authenticated: FuigoAuth) -> anyhow:
     let outcome = crate::managed_config::post_login_sync(Some(authenticated)).await;
     match outcome {
         crate::managed_config::ManagedConfigSync::Updated { is_team: true } => {
-            eprintln!("Applied your team's managed configuration.");
+            fuigo_tty_utils::cli_eprintln!("Applied your team's managed configuration.");
         }
         crate::managed_config::ManagedConfigSync::Updated { is_team: false } => {
-            eprintln!("Applied your deployment's managed configuration.");
+            fuigo_tty_utils::cli_eprintln!("Applied your deployment's managed configuration.");
         }
         crate::managed_config::ManagedConfigSync::Staged => {
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "Managed configuration update verified; it takes effect the next time Fuigo starts."
             );
         }
@@ -979,19 +981,23 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
     let result = perform_logout(&auth_manager, None)
         .map_err(|e| anyhow::anyhow!("Failed to clear auth: {e}"))?;
     if !result.was_logged_in {
-        eprintln!("No cached session to log out of.");
+        fuigo_tty_utils::cli_eprintln!("No cached session to log out of.");
         if result.api_key_still_set {
-            eprintln!("You are authenticated via FUIGO_API_KEY (environment variable).");
+            fuigo_tty_utils::cli_eprintln!(
+                "You are authenticated via FUIGO_API_KEY (environment variable)."
+            );
         }
         return Ok(());
     }
     if let Some(email) = result.email {
-        eprintln!("Logged out (was signed in as {email})");
+        fuigo_tty_utils::cli_eprintln!("Logged out (was signed in as {email})");
     } else {
-        eprintln!("Logged out");
+        fuigo_tty_utils::cli_eprintln!("Logged out");
     }
     if result.api_key_still_set {
-        eprintln!("FUIGO_API_KEY is still set and will be used for authentication.");
+        fuigo_tty_utils::cli_eprintln!(
+            "FUIGO_API_KEY is still set and will be used for authentication."
+        );
     }
     Ok(())
 }
@@ -1221,6 +1227,11 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn external_reauth_without_prev_auth_enriches_inline() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "auth::flow::tests::external_reauth_without_prev_auth_enriches_inline",
+        ) else {
+            return;
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let app = axum::Router::new().route(
@@ -1236,7 +1247,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = Arc::new(
             AuthManager::new(dir.path(), FuigoComConfig::default())
-                .with_proxy_base_url(&format!("http://127.0.0.1:{port}")),
+                .with_proxy_base_url(&front.front(&format!("http://127.0.0.1:{port}"))),
         );
         assert!(mgr.current_or_expired().is_none(), "precondition: no auth");
         let (auth, _) = run_external_auth_provider("printf '%s' fresh-token", &mgr, true, None)

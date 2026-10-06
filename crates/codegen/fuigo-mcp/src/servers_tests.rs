@@ -4621,6 +4621,237 @@ async fn inconclusive_oauth_probe_emits_timeout_and_verdict_events() {
     );
 }
 
+// ---- P134 (row 119): a stored, unexpired access token needs no validated authorization-server metadata ----
+
+/// An MCP/AS host. While `healthy` is clear every discovery document fails (HTTP 500, a transient IdP blip); once set it
+/// serves valid authorization-server metadata (404 for the other discovery documents). `POST /mcp` always answers 401 and `/token` counts hits and answers a
+/// valid token response.
+struct MetadataRig {
+    url: String,
+    token_hits: Arc<std::sync::atomic::AtomicUsize>,
+    healthy: Arc<std::sync::atomic::AtomicBool>,
+    /// While set, `POST /mcp` answers 200 (the server no longer needs auth) instead of 401.
+    anonymous_ok: Arc<std::sync::atomic::AtomicBool>,
+    /// While set, every discovery request stalls forever (the outer discovery timeout fires).
+    stall: Arc<std::sync::atomic::AtomicBool>,
+}
+
+async fn spawn_metadata_rig() -> MetadataRig {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let token_hits = Arc::new(AtomicUsize::new(0));
+    let healthy = Arc::new(AtomicBool::new(false));
+    let anonymous_ok = Arc::new(AtomicBool::new(false));
+    let stall = Arc::new(AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (counter, flag, doc_base) = (Arc::clone(&token_hits), Arc::clone(&healthy), base.clone());
+    let (anon, stalled) = (Arc::clone(&anonymous_ok), Arc::clone(&stall));
+    let app = axum::Router::new()
+        .route(
+            "/token",
+            axum::routing::post(move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    (
+                        [("content-type", "application/json")],
+                        r#"{"access_token":"at-new","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-new"}"#,
+                    )
+                }
+            }),
+        )
+        .route(
+            "/mcp",
+            axum::routing::post(move || {
+                let anon = Arc::clone(&anon);
+                async move {
+                    if anon.load(Ordering::SeqCst) {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::UNAUTHORIZED
+                    }
+                }
+            }),
+        )
+        .fallback(move |uri: axum::http::Uri| {
+            let (flag, doc_base, stalled) = (Arc::clone(&flag), doc_base.clone(), Arc::clone(&stalled));
+            async move {
+                use axum::response::IntoResponse as _;
+                if stalled.load(Ordering::SeqCst) {
+                    futures::future::pending::<()>().await;
+                }
+                if flag.load(Ordering::SeqCst) {
+                    if !uri.path().contains("oauth-authorization-server") {
+                        return axum::http::StatusCode::NOT_FOUND.into_response();
+                    }
+                    return axum::Json(serde_json::json!({
+                        "issuer": format!("{doc_base}/mcp"),
+                        "authorization_endpoint": format!("{doc_base}/authorize"),
+                        "token_endpoint": format!("{doc_base}/token"),
+                        "response_types_supported": ["code"],
+                        "code_challenge_methods_supported": ["S256"],
+                        "authorization_response_iss_parameter_supported": true,
+                    }))
+                    .into_response();
+                }
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    MetadataRig {
+        url: format!("{base}/mcp"),
+        token_hits,
+        healthy,
+        anonymous_ok,
+        stall,
+    }
+}
+
+/// Store a token for `(name, url)` that was received `age_secs` ago and lives `expires_in` seconds.
+fn store_token(name: &str, url: &str, expires_in: u64, age_secs: u64, refresh: bool) {
+    crate::isolate_fuigo_home_for_tests();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let refresh = if refresh { r#","refresh_token":"rt-stored""# } else { "" };
+    let creds: crate::rmcp::transport::auth::StoredCredentials = serde_json::from_str(&format!(
+        r#"{{"client_id":"c","token_response":{{"access_token":"at-stored","token_type":"bearer","expires_in":{expires_in}{refresh}}},"token_received_at":{}}}"#,
+        now - age_secs
+    ))
+    .unwrap();
+    // Locked read-modify-write: the tests of this module share one fuigo home and run in parallel.
+    let mut store = crate::credentials::McpCredentialStore::load_default().unwrap_or_default();
+    store
+        .insert_and_save(name, &url::Url::parse(url).unwrap(), creds)
+        .unwrap();
+}
+
+/// Generous timeout: on a loaded host the metadata round trips and the refresh must not race it. The stalled-discovery
+/// test passes its own short one.
+async fn p134_decide(name: &str, url: &str, mode: OauthInteractivity) -> HttpAuthDecision {
+    p134_decide_within(name, url, mode, std::time::Duration::from_secs(20)).await
+}
+
+async fn p134_decide_within(
+    name: &str,
+    url: &str,
+    mode: OauthInteractivity,
+    timeout: std::time::Duration,
+) -> HttpAuthDecision {
+    let event_writer = fuigo_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&event_writer, mode);
+    decide_http_auth_over_network(name, url, &[], &ctx, timeout).await
+}
+
+fn tokens(rig: &MetadataRig) -> usize {
+    rig.token_hits.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_stored_valid_token_is_used_when_metadata_fetch_fails_and_token_endpoint_is_never_called() {
+    for (mode, name) in [
+        (OauthInteractivity::NonInteractive, "p134-nonint"),
+        (OauthInteractivity::Interactive, "p134-int"),
+    ] {
+        let rig = spawn_metadata_rig().await;
+        store_token(name, &rig.url, 3600, 0, true);
+        let HttpAuthDecision::ManagerReady { manager, .. } = p134_decide(name, &rig.url, mode).await
+        else {
+            panic!("{mode:?}: a valid stored token must connect while metadata is down");
+        };
+        let token = manager.lock().await.get_access_token().await;
+        assert_eq!(token.as_deref().ok(), Some("at-stored"), "{mode:?}");
+        assert_eq!(tokens(&rig), 0, "{mode:?}: nothing may be sent to a guessed {{base}}/token");
+    }
+}
+
+/// Unexpired but inside rmcp's 30 s refresh window, metadata down: nothing is refreshed against guessed endpoints, and
+/// the verdict is "retry", never "log in again" (the server's 401 on an anonymous POST must not be read that way).
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_token_in_the_refresh_window_defers_instead_of_asking_for_a_login() {
+    let rig = spawn_metadata_rig().await;
+    store_token("p134-win-nonint", &rig.url, 3600, 3600 - 10, true);
+    let decision = p134_decide("p134-win-nonint", &rig.url, OauthInteractivity::NonInteractive).await;
+    assert!(
+        matches!(decision, HttpAuthDecision::Unreachable),
+        "a stored login that only awaits metadata must be retryable"
+    );
+    assert_eq!(tokens(&rig), 0);
+
+    let rig = spawn_metadata_rig().await;
+    store_token("p134-win-int", &rig.url, 3600, 3600 - 10, true);
+    let decision = p134_decide("p134-win-int", &rig.url, OauthInteractivity::Interactive).await;
+    assert!(matches!(decision, HttpAuthDecision::ManagerReady { .. }));
+    assert_eq!(tokens(&rig), 0);
+}
+
+/// An EXPIRED token needs a refresh, which needs validated metadata: deferred (no `{base}/token` request) while the
+/// metadata is down, and refreshed on the next attempt once it validates.
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_expired_token_waits_for_validated_metadata_then_refreshes() {
+    let rig = spawn_metadata_rig().await;
+    store_token("p134-exp", &rig.url, 60, 3600, true);
+    let decision = p134_decide("p134-exp", &rig.url, OauthInteractivity::NonInteractive).await;
+    assert!(
+        matches!(decision, HttpAuthDecision::Unreachable),
+        "expired token with a refresh token, metadata down: retryable"
+    );
+    assert_eq!(tokens(&rig), 0, "the refresh token must not reach a guessed {{base}}/token");
+
+    rig.healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let decision = p134_decide("p134-exp", &rig.url, OauthInteractivity::NonInteractive).await;
+    let HttpAuthDecision::ManagerReady { manager, .. } = decision else {
+        panic!("with validated metadata the next attempt must refresh and connect");
+    };
+    assert_eq!(tokens(&rig), 1, "exactly one refresh, to the validated token endpoint");
+    assert_eq!(manager.lock().await.get_access_token().await.as_deref().ok(), Some("at-new"));
+}
+
+/// The deferral must not hide a server that stopped needing auth: discovery fails, the stored login awaits metadata,
+/// but the anonymous POST is accepted, so the server connects plain (as at 15c21ddf and v1.0.20).
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_server_that_accepts_anonymous_requests_still_connects_plain_with_a_stored_login() {
+    let rig = spawn_metadata_rig().await;
+    rig.anonymous_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+    store_token("p134-anon", &rig.url, 60, 3600, true);
+    let decision = p134_decide("p134-anon", &rig.url, OauthInteractivity::NonInteractive).await;
+    assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
+    assert_eq!(tokens(&rig), 0);
+}
+
+/// Discovery that stalls past the outer timeout is the same case as one that errors: retryable, nothing refreshed.
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_stalled_discovery_defers_a_stored_login_too() {
+    let rig = spawn_metadata_rig().await;
+    rig.stall.store(true, std::sync::atomic::Ordering::SeqCst);
+    store_token("p134-stall", &rig.url, 3600, 3600 - 10, true);
+    let decision = p134_decide_within(
+        "p134-stall",
+        &rig.url,
+        OauthInteractivity::NonInteractive,
+        TEST_DISCOVERY_TIMEOUT,
+    )
+    .await;
+    assert!(
+        matches!(decision, HttpAuthDecision::Unreachable),
+        "a timed-out discovery with a stored login must be retryable, not a login prompt"
+    );
+    assert_eq!(tokens(&rig), 0);
+}
+
+/// No refresh token and expired: nothing awaits metadata, the login really is needed.
+#[tokio::test(flavor = "multi_thread")]
+async fn p134_expired_token_without_refresh_still_needs_a_login() {
+    let rig = spawn_metadata_rig().await;
+    store_token("p134-dead", &rig.url, 60, 3600, false);
+    let decision = p134_decide("p134-dead", &rig.url, OauthInteractivity::NonInteractive).await;
+    assert!(matches!(decision, HttpAuthDecision::NeedsInteractiveLogin));
+    assert_eq!(tokens(&rig), 0);
+}
+
 async fn spawn_counting_http_server() -> (String, Arc<std::sync::atomic::AtomicUsize>) {
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let handler_counter = Arc::clone(&counter);
@@ -4667,11 +4898,80 @@ async fn session_spawn_sends_zero_network_requests() {
     );
 }
 
+/// P70a follow-up (Astra f11): a stdio server's `env` values that name `${FUIGO_API_KEY}` are all resolved with the ONE
+/// key snapshot the caller took for this server (never each from the key store), an escaped `$${FUIGO_API_KEY}` is the
+/// text `${FUIGO_API_KEY}`, other values are untouched, and with no key the reference is left as written.
+#[test]
+fn apply_stdio_env_resolves_first_party_references_with_the_callers_one_snapshot() {
+    let env = vec![
+        acp::EnvVariable::new("FUIGO_API_KEY", "${FUIGO_API_KEY}"),
+        acp::EnvVariable::new("P70A_BEARER", "Bearer $FUIGO_API_KEY"),
+        acp::EnvVariable::new("P70A_ESCAPED", "$${FUIGO_API_KEY}"),
+        acp::EnvVariable::new("P70A_OTHER", "${HOME}-$$-plain"),
+    ];
+    let values = |key: Option<&str>| -> std::collections::BTreeMap<String, String> {
+        let mut cmd = Command::new("true");
+        apply_stdio_env(&mut cmd, &env, None, key);
+        cmd.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .filter(|(k, _)| k == "FUIGO_API_KEY" || k.starts_with("P70A_"))
+            .collect()
+    };
+    let with = values(Some("p70a-snapshot-FAKE"));
+    assert_eq!(with["FUIGO_API_KEY"], "p70a-snapshot-FAKE");
+    assert_eq!(with["P70A_BEARER"], "Bearer p70a-snapshot-FAKE");
+    assert_eq!(with["P70A_ESCAPED"], "${FUIGO_API_KEY}");
+    assert_eq!(with["P70A_OTHER"], "${HOME}-$$-plain");
+    let without = values(None);
+    assert_eq!(without["FUIGO_API_KEY"], "${FUIGO_API_KEY}");
+    assert_eq!(without["P70A_BEARER"], "Bearer $FUIGO_API_KEY");
+}
+
+/// P70a x P70b (restack s28): when late binding hands an MCP server the saved key, in an HTTP header, a stdio `env`
+/// value or a stdio arg, the key is recorded as a credential actually sent, so an echo of it in error or log text is
+/// replaced by P70b's scrub. A value without a reference, an escaped reference and a missing key record nothing.
+/// Each case uses its own fake key: the registry is process-wide.
+#[test]
+fn a_first_party_key_handed_to_an_mcp_server_is_recorded_as_sent() {
+    use fuigo_telemetry::sent_credentials::scrub;
+    let echoed = |key: &str| format!("401 from upstream: invalid key {key}");
+    let scrubbed = |key: &str| scrub(&echoed(key)).into_owned();
+
+    const UNSENT: &str = "p70a-p70b-unsent-FAKE-0000";
+    assert_eq!(send_first_party_key_references("plain value", Some(UNSENT)), "plain value");
+    assert_eq!(send_first_party_key_references("$${FUIGO_API_KEY}", Some(UNSENT)), "${FUIGO_API_KEY}");
+    assert_eq!(send_first_party_key_references("${FUIGO_API_KEY}", None), "${FUIGO_API_KEY}");
+    assert_eq!(scrubbed(UNSENT), echoed(UNSENT), "a key that was not handed over was recorded");
+
+    const HEADER: &str = "p70a-p70b-header-FAKE-0001";
+    let headers = http_headers_for_server(
+        vec![
+            acp::HttpHeader::new("Authorization", "Bearer ${FUIGO_API_KEY}"),
+            acp::HttpHeader::new("X-Other", "plain"),
+        ],
+        None,
+        Some(HEADER),
+    );
+    assert_eq!(headers[0].1, format!("Bearer {HEADER}"));
+    assert_eq!(headers[1].1, "plain");
+    assert_eq!(scrubbed(HEADER), echoed("<redacted>"), "a key sent in an MCP header was not recorded");
+
+    const ENV: &str = "p70a-p70b-stdio-env-FAKE-0002";
+    let mut cmd = Command::new("true");
+    apply_stdio_env(&mut cmd, &[acp::EnvVariable::new("TOKEN", "${FUIGO_API_KEY}")], None, Some(ENV));
+    assert_eq!(scrubbed(ENV), echoed("<redacted>"), "a key sent in a stdio env value was not recorded");
+
+    const ARG: &str = "p70a-p70b-stdio-arg-FAKE-0003";
+    assert_eq!(send_first_party_key_references("--key=$FUIGO_API_KEY", Some(ARG)), format!("--key={ARG}"));
+    assert_eq!(scrubbed(ARG), echoed("<redacted>"), "a key sent in a stdio arg was not recorded");
+}
+
 #[test]
 fn apply_stdio_env_session_id_cannot_be_shadowed() {
     let mut cmd = Command::new("true");
     let env = vec![acp::EnvVariable::new("FUIGO_SESSION_ID", "spoofed")];
-    apply_stdio_env(&mut cmd, &env, Some("sess-real"));
+    apply_stdio_env(&mut cmd, &env, Some("sess-real"), None);
 
     let value = cmd
         .as_std()
@@ -4746,6 +5046,91 @@ async fn t05_mcp_hook_lsp_spawn_paths_mcp() {
         .await
         .expect("MCP child/grandchild did not record successful credential checks");
         assert_eq!(std::fs::read_to_string(marker).unwrap(), "1");
+        drop(client);
+    }
+}
+
+/// P86 (CB-1), stdio MCP servers: the credentials sit in the agent's OWN environment (a fresh
+/// test process; literal names, so an emptied denylist cannot empty the test). The server and its
+/// child must not see them, `P86_BENIGN` proves the parent env does reach the server, and a key
+/// the user wrote into the server's `env` still arrives.
+#[cfg(unix)]
+#[tokio::test]
+async fn p86_stdio_mcp_servers_never_see_parent_credentials() {
+    const NAME: &str = "p86_stdio_mcp_servers_never_see_parent_credentials";
+    if std::env::var("P86_CHILD_TEST").as_deref() != Ok(NAME) {
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg(NAME)
+            .args(["--test-threads=1", "--nocapture"])
+            .env("P86_CHILD_TEST", NAME)
+            .env("P86_BENIGN", "kept");
+        for name in [
+            "FLUX_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "FUIGO_API_KEY",
+            "OPENAI_API_KEY",
+            "P86_CORP_KEY",
+        ] {
+            cmd.env(name, "fake-p86-ambient");
+        }
+        let output = cmd.output().unwrap();
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .replace("fake-p86-", "[redacted]-");
+        assert!(
+            output.status.success(),
+            "isolated P86 MCP probe failed: {diagnostics}"
+        );
+        assert!(
+            diagnostics.contains("test result: ok. 1 passed"),
+            "{diagnostics}"
+        );
+        return;
+    }
+    // What the config loader does with a user's `env_key = "P86_CORP_KEY"`.
+    fuigo_tools::util::shell_env_policy::register_credential_env_names(["P86_CORP_KEY"]);
+    let dir = tempfile::tempdir().unwrap();
+    let events = fuigo_session_events::EventWriter::noop();
+    let ctx = session_test_ctx(&events);
+    for selected in [false, true] {
+        let marker = dir
+            .path()
+            .join(if selected { "selected" } else { "default" });
+        let flux = if selected {
+            "test \"$FLUX_API_KEY\" = fake-p86-selected"
+        } else {
+            "test -z \"${FLUX_API_KEY+x}\""
+        };
+        let check = format!(
+            "test \"$P86_BENIGN\" = kept && {flux} && test -z \"${{ANTHROPIC_AUTH_TOKEN+x}}${{FUIGO_API_KEY+x}}${{OPENAI_API_KEY+x}}${{P86_CORP_KEY+x}}\""
+        );
+        let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P86_MARKER\"");
+        let mut server = acp::McpServerStdio::new("p86", PathBuf::from("/bin/sh"));
+        server.args = vec!["-c".into(), script];
+        server.env = vec![acp::EnvVariable::new(
+            "P86_MARKER",
+            marker.to_string_lossy().into_owned(),
+        )];
+        if selected {
+            server
+                .env
+                .push(acp::EnvVariable::new("FLUX_API_KEY", "fake-p86-selected"));
+        }
+        let client = start_mcp_server(acp::McpServer::Stdio(server), None, None, None, &ctx)
+            .await
+            .expect("local MCP probe should spawn");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&marker).is_ok_and(|contents| contents == "1") {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("selected={selected}: the MCP child or grandchild saw a parent credential")
+        });
         drop(client);
     }
 }
@@ -5349,4 +5734,514 @@ mod server_name_sanitizing {
         set_mcp_server_name(&mut sse, "y".to_string());
         assert_eq!(mcp_server_name(&sse), "y");
     }
+}
+
+/// P113 (CIE-01): a stdio MCP server handed the first-party key through an explicit `${FUIGO_API_KEY}` reference (P70a
+/// records the key as sent) prints a non-JSON line holding it. The decode-error event written to `events.jsonl` holds
+/// `<redacted>` and no part of the key: whole inside the sample, and straddling the sample's character cap. Production
+/// path: the key goes through `send_first_party_key_references`, the line through `ResilientRwTransport`, the event
+/// through a real `EventWriter` on disk.
+#[tokio::test]
+async fn p113_decode_error_sample_with_a_sent_key_is_persisted_redacted() {
+    const KEY: &str = "p113-FAKE-explicit-mcp-key-7f3c9a1e5b";
+    let resolved = send_first_party_key_references("--key=${FUIGO_API_KEY}", Some(KEY));
+    assert_eq!(resolved, format!("--key={KEY}"), "control: the server is handed the key");
+    // Astra r2 #1: an exported key is expanded at config load, so the text arrives already holding it.
+    const EXPORTED: &str = "p113-FAKE-exported-mcp-key-3b9d0c";
+    let expanded = format!("--key={EXPORTED}");
+    let resolved = send_first_party_key_references(&expanded, Some(EXPORTED));
+    assert_eq!(resolved, expanded, "control: the text is handed on as is");
+
+    let dir = tempfile::tempdir().unwrap();
+    let events = fuigo_session_events::EventWriter::open(dir.path());
+    let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
+    let mut transport = ResilientRwTransport::new(client_in, tokio::io::sink(), "p113".to_string(), events);
+
+    let valid = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
+    let whole = format!("debug: starting with key {KEY} on stdio, and also {EXPORTED}");
+    // The cap (DECODE_ERROR_SAMPLE_LEN chars) falls ten characters into the key.
+    let straddling = format!("{}{KEY} trailing text", "x".repeat(DECODE_ERROR_SAMPLE_LEN - 10));
+    server_out
+        .write_all(format!("{whole}\n{straddling}\n{valid}\n").as_bytes())
+        .await
+        .unwrap();
+    drop(server_out);
+    assert!(transport.receive().await.is_some(), "both undecodable lines are skipped");
+
+    let persisted = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
+    let samples: Vec<String> = persisted
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .filter(|v| v["type"] == "mcp_transport_decode_error")
+        .map(|v| v["sample"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(samples.len(), 2, "two decode-error events: {persisted}");
+    assert!(samples[0].contains("<redacted>"), "control: the whole key is replaced: {}", samples[0]);
+    // No eight-character run of either key survives anywhere in the file.
+    for key in [KEY, EXPORTED] {
+        let chars: Vec<char> = key.chars().collect();
+        for window in chars.windows(8) {
+            let fragment: String = window.iter().collect();
+            assert!(!persisted.contains(&fragment), "events.jsonl holds {fragment:?} of a key");
+        }
+    }
+}
+
+/// P113 (CIE-02): Fuigo's own secret variables, planted in the PARENT by the P113 child-environment probes. Literal on
+/// purpose (a probe that read the denylist would plant nothing once it was emptied). `FUIGO_AGENT_SECRET` authenticates
+/// an ACP connection to `fuigo agent serve`; `FUIGO_AUTH` is the whole saved login.
+#[cfg(unix)]
+const P113_INTERNAL_SECRETS: &[&str] = &[
+    "FUIGO_AGENT_SECRET",
+    "FUIGO_AUTH",
+    "FUIGO_AUTH_PATH",
+    "FUIGO_DEPLOYMENT_KEY",
+    "FUIGO_EXTRA_AUTH_KEY",
+    "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
+    "FUIGO_INTERNAL_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+    "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+    "FUIGO_TELEMETRY_EVENTS_API_KEY",
+    "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
+];
+
+/// The shell test a P113 probe child runs: the benign parent variable arrived, none of [`P113_INTERNAL_SECRETS`]
+/// did, except `FUIGO_AGENT_SECRET` when the server's own `env` names it (`explicit`).
+#[cfg(unix)]
+fn p113_child_check(explicit: bool) -> String {
+    let absent: String = P113_INTERNAL_SECRETS
+        .iter()
+        .filter(|name| !(explicit && **name == "FUIGO_AGENT_SECRET"))
+        .map(|name| format!("${{{name}+x}}"))
+        .collect();
+    let agent = if explicit {
+        " && test \"$FUIGO_AGENT_SECRET\" = fake-p113-explicit"
+    } else {
+        ""
+    };
+    format!("test \"$P113_BENIGN\" = kept{agent} && test -z \"{absent}\"")
+}
+
+/// Re-run `test_name` in a fresh test process whose own environment holds every [`P113_INTERNAL_SECRETS`] entry and
+/// `P113_BENIGN=kept`. Returns `true` in the parent (which then returns), `false` in the child (which runs the body).
+#[cfg(unix)]
+fn p113_parent_env(test_name: &str) -> bool {
+    if std::env::var("P113_CHILD_TEST").as_deref() == Ok(test_name) {
+        return false;
+    }
+    let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+    cmd.arg(test_name)
+        .args(["--test-threads=1", "--nocapture"])
+        .env("P113_CHILD_TEST", test_name)
+        .env("P113_BENIGN", "kept");
+    for name in P113_INTERNAL_SECRETS {
+        cmd.env(name, "fake-p113-ambient");
+    }
+    let output = cmd.output().unwrap();
+    let diagnostics = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .replace("fake-p113-", "[redacted]-");
+    assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
+    assert!(diagnostics.contains("test result: ok. 1 passed"), "the P113 child must run exactly one test: {diagnostics}");
+    true
+}
+
+/// P113 (CIE-02), stdio MCP servers: Fuigo's own secret variables (the `fuigo agent serve` secret, the saved login,
+/// the deployment and telemetry keys) sit in the agent's environment; the server and its child see none of them, and
+/// `FUIGO_AGENT_SECRET` written into the server's `env` still arrives.
+#[cfg(unix)]
+#[tokio::test]
+async fn p113_stdio_mcp_servers_never_see_fuigo_internal_secrets() {
+    if p113_parent_env("p113_stdio_mcp_servers_never_see_fuigo_internal_secrets") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let events = fuigo_session_events::EventWriter::noop();
+    let ctx = session_test_ctx(&events);
+    for explicit in [false, true] {
+        let marker = dir.path().join(if explicit { "explicit" } else { "default" });
+        let check = p113_child_check(explicit);
+        let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P113_MARKER\"");
+        let mut server = acp::McpServerStdio::new("p113", PathBuf::from("/bin/sh"));
+        server.args = vec!["-c".into(), script];
+        server.env = vec![acp::EnvVariable::new("P113_MARKER", marker.to_string_lossy().into_owned())];
+        if explicit {
+            server.env.push(acp::EnvVariable::new("FUIGO_AGENT_SECRET", "fake-p113-explicit"));
+        }
+        let client = start_mcp_server(acp::McpServer::Stdio(server), None, None, None, &ctx)
+            .await
+            .expect("local MCP probe should spawn");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&marker).is_ok_and(|contents| contents == "1") {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!("explicit={explicit}: the MCP child saw a Fuigo secret, or missed the explicit one")
+        });
+        drop(client);
+    }
+}
+
+// ---- P151 (C1b B33): a session (disk discovery) whose saved login waits for metadata is a retryable connection problem ----
+
+fn stored_credentials_json(name: &str, url: &str) -> String {
+    let store = crate::credentials::McpCredentialStore::load_default().unwrap_or_default();
+    let creds = store.get(name, &url::Url::parse(url).unwrap()).expect("stored login");
+    serde_json::to_string(&creds.token_response).unwrap()
+}
+
+/// The real session path: `McpSpawnCtx::for_session` (disk discovery), then the handshake. Every `.well-known` answers 500.
+/// C1b: the server was reported `needs_auth` / `authRequired: true`. B33 promises a retryable connection problem, with no
+/// refresh sent, nothing guessed and the saved login unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_session_login_awaiting_metadata_is_retryable_not_a_sign_in_request() {
+    for (label, expires_in, age, mode) in [
+        ("near", 3600, 3600 - 20, OauthInteractivity::Interactive),
+        ("near-ni", 3600, 3600 - 20, OauthInteractivity::NonInteractive),
+        ("expired", 60, 3600, OauthInteractivity::Interactive),
+        ("expired-ni", 60, 3600, OauthInteractivity::NonInteractive),
+    ] {
+        let name = format!("p151-b33-{label}");
+        let rig = spawn_metadata_rig().await;
+        store_token(&name, &rig.url, expires_in, age, true);
+        let before = stored_credentials_json(&name, &rig.url);
+        let event_writer = fuigo_session_events::EventWriter::noop();
+        let ctx = McpSpawnCtx::for_session("p151-sess", &event_writer, mode, None);
+        let client = start_mcp_server(make_http_server(&name, &rig.url), None, None, None, &ctx)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: spawn: {e}"));
+        assert!(client.has_auth(), "{label}: the saved login is used");
+        let state = Arc::new(Mutex::new(McpState::new(vec![])));
+        let error = client
+            .get_tool_registrations(state)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{label}: the handshake cannot succeed while the metadata is down"));
+        assert!(
+            error.is_transient_connectivity() && !error.is_auth_rejection(),
+            "{label}: a retryable connection problem, got {error}"
+        );
+        assert!(
+            !client.init_failure_needs_auth(&error),
+            "{label}: must not ask the user to sign in again ({error})"
+        );
+        assert_eq!(tokens(&rig), 0, "{label}: no refresh may be sent without validated metadata");
+        assert_eq!(
+            stored_credentials_json(&name, &rig.url),
+            before,
+            "{label}: the saved login is retained unchanged"
+        );
+    }
+}
+
+/// The classification still asks for a sign-in when the login is genuinely missing: an auth client whose handshake fails
+/// with metadata that VALIDATES (here: no stored login at all) stays `needs_auth`.
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_auth_client_without_a_login_still_needs_auth() {
+    let rig = spawn_metadata_rig().await;
+    rig.healthy.store(true, std::sync::atomic::Ordering::SeqCst);
+    let event_writer = fuigo_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
+    let client = start_mcp_server(make_http_server("p151-nologin", &rig.url), None, None, None, &ctx)
+        .await
+        .unwrap();
+    assert!(client.has_auth());
+    let error = client
+        .get_tool_registrations(Arc::new(Mutex::new(McpState::new(vec![]))))
+        .await
+        .err()
+        .expect("401 without a login");
+    assert!(client.init_failure_needs_auth(&error), "{error}");
+    assert_eq!(tokens(&rig), 0);
+}
+
+// ---- P151 (C1b item 7): a refused sign-in says why ----
+
+/// An authorization server whose metadata (served from its own origin) declares an issuer on another origin.
+async fn spawn_issuer_mismatch_rig() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let doc_base = base.clone();
+    let app = axum::Router::new()
+        .route("/mcp", axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+        .fallback(move |uri: axum::http::Uri| {
+            let doc_base = doc_base.clone();
+            async move {
+                use axum::response::IntoResponse as _;
+                if !uri.path().contains("oauth-authorization-server") {
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
+                }
+                axum::Json(serde_json::json!({
+                    "issuer": "http://127.0.0.1:9/",
+                    "authorization_endpoint": format!("{doc_base}/authorize"),
+                    "token_endpoint": format!("{doc_base}/token"),
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                }))
+                .into_response()
+            }
+        });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("{base}/mcp")
+}
+
+/// C1b login_issuer: the sign-in was refused at discovery but reported as "does not support OAuth".
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_issuer_mismatch_is_explained_not_reported_as_no_oauth_support() {
+    crate::isolate_fuigo_home_for_tests();
+    let url = spawn_issuer_mismatch_rig().await;
+    let reason = explain_missing_oauth(&url)
+        .await
+        .expect("a refused authorization server must be explained");
+    assert!(reason.to_ascii_lowercase().contains("issuer"), "{reason}");
+    assert!(!reason.contains("does not support"), "{reason}");
+}
+
+/// Metadata that cannot be fetched is a problem to retry, not "no OAuth"; a server with no OAuth at all stays unexplained.
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_unfetchable_metadata_is_explained_as_retryable_and_plain_servers_are_not() {
+    crate::isolate_fuigo_home_for_tests();
+    let rig = spawn_metadata_rig().await; // every discovery document answers 500
+    let reason = explain_missing_oauth(&rig.url)
+        .await
+        .expect("unfetchable metadata must be explained");
+    assert!(reason.contains("try again"), "{reason}");
+
+    let plain = spawn_test_http_server(axum::Router::new()).await; // 404 everywhere: no OAuth
+    assert_eq!(explain_missing_oauth(&plain).await, None);
+}
+
+/// A complete consent run against an authorization server whose metadata (origin A) names a token endpoint on origin B:
+/// registration and consent happen on A, and the code exchange is refused before anything reaches B.
+struct SplitOriginRig {
+    url: String,
+    b_hits: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+async fn spawn_split_origin_rig() -> SplitOriginRig {
+    spawn_oauth_rig(true).await
+}
+
+/// `split`: the token endpoint is on origin B (refused). Otherwise it is A/token, which rejects every code with an
+/// error_description that echoes the whole request body (code, client secret, PKCE verifier), as a hostile or careless
+/// provider might.
+async fn spawn_oauth_rig(split: bool) -> SplitOriginRig {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let b_hits = Arc::new(AtomicUsize::new(0));
+    let b_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let b_base = format!("http://{}", b_listener.local_addr().unwrap());
+    let counter = Arc::clone(&b_hits);
+    let b_app = axum::Router::new().fallback(move || {
+        let counter = Arc::clone(&counter);
+        async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            (
+                [("content-type", "application/json")],
+                r#"{"access_token":"p151-SYNAT","token_type":"Bearer","expires_in":3600}"#,
+            )
+        }
+    });
+    tokio::spawn(async move {
+        let _ = axum::serve(b_listener, b_app).await;
+    });
+
+    let a_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a_base = format!("http://{}", a_listener.local_addr().unwrap());
+    let issuer = format!("{a_base}/mcp");
+    let (doc_issuer, doc_a, doc_b) = (issuer.clone(), a_base.clone(), b_base.clone());
+    let a_app = axum::Router::new()
+        .route("/mcp", axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+        .route(
+            "/token",
+            axum::routing::post(|body: String| async move {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "error": "invalid_grant",
+                        // Astra r2: a description that impersonates Fuigo's own refusal text.
+                        "error_description": format!(
+                            "refusing to send OAuth credentials {body} (https://issuer.invalid/token?access_token=p151-SYNAT-x)"
+                        ),
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/register",
+            axum::routing::post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                (
+                    axum::http::StatusCode::CREATED,
+                    axum::Json(serde_json::json!({
+                        "client_id": "p151-cid",
+                        "client_secret": "p151-SYNSEC",
+                        "client_name": body["client_name"],
+                        "redirect_uris": body["redirect_uris"],
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/authorize",
+            axum::routing::get(
+                |axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| async move {
+                    let mut to = url::Url::parse(&q["redirect_uri"]).unwrap();
+                    to.query_pairs_mut()
+                        .append_pair("code", "p151-SYNCODE")
+                        .append_pair("state", &q["state"]);
+                    (axum::http::StatusCode::FOUND, [("location", to.to_string())])
+                },
+            ),
+        )
+        .fallback(move |uri: axum::http::Uri| {
+            let (issuer, a, b) = (doc_issuer.clone(), doc_a.clone(), doc_b.clone());
+            async move {
+                use axum::response::IntoResponse as _;
+                if !uri.path().contains("oauth-authorization-server") {
+                    return axum::http::StatusCode::NOT_FOUND.into_response();
+                }
+                axum::Json(serde_json::json!({
+                    "issuer": issuer,
+                    "authorization_endpoint": format!("{a}/authorize"),
+                    "registration_endpoint": format!("{a}/register"),
+                    "token_endpoint": if split { format!("{b}/token") } else { format!("{a}/token") },
+                    "response_types_supported": ["code"],
+                    "code_challenge_methods_supported": ["S256"],
+                }))
+                .into_response()
+            }
+        });
+    tokio::spawn(async move {
+        let _ = axum::serve(a_listener, a_app).await;
+    });
+    SplitOriginRig {
+        url: issuer,
+        b_hits,
+    }
+}
+
+/// A `$BROWSER` that follows the consent redirect back to the loopback callback, as a user's browser would.
+#[cfg(target_os = "linux")]
+fn install_consenting_browser() {
+    static BROWSER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    BROWSER.get_or_init(|| {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::TempDir::new().unwrap().keep();
+        let script = dir.join("p151-browser.sh");
+        std::fs::write(&script, "#!/bin/sh\nexec curl -s -L -o /dev/null --max-time 20 \"$1\"\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: OnceLock-guarded single set; only this module's consent test opens a browser.
+        unsafe { std::env::set_var("BROWSER", &script) };
+    });
+}
+
+/// C1b login_split: the editor got a bare "Authentication failed" and the refusal was only in the log.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_a_sign_in_refused_by_policy_returns_the_reason() {
+    install_consenting_browser();
+    let rig = spawn_split_origin_rig().await;
+    let event_writer = fuigo_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
+    let client = start_mcp_server(make_http_server("p151-split", &rig.url), None, None, None, &ctx)
+        .await
+        .unwrap();
+    assert!(client.has_auth());
+    let reason = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.force_reauth_with_reason(true),
+    )
+    .await
+    .expect("the consent run finishes")
+    .expect_err("the code exchange must be refused");
+    assert_eq!(
+        rig.b_hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "nothing may reach the other origin"
+    );
+    assert!(reason.contains("different origin"), "the reason must say why: {reason}");
+    for secret in ["p151-SYNCODE", "p151-SYNSEC", "p151-SYNAT"] {
+        assert!(!reason.contains(secret), "the reason must not carry {secret}: {reason}");
+    }
+}
+
+// ---- P151 Astra r1: client-visible reasons never carry credentials; only fetch failures are retryable ----
+
+/// Astra r1 HIGH: a provider error_description that echoes the request (code, client secret) must not reach the client.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_a_provider_error_echoing_the_request_never_reaches_the_reason() {
+    install_consenting_browser();
+    let rig = spawn_oauth_rig(false).await;
+    let event_writer = fuigo_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
+    let client = start_mcp_server(make_http_server("p151-echo", &rig.url), None, None, None, &ctx)
+        .await
+        .unwrap();
+    let reason = tokio::time::timeout(
+        std::time::Duration::from_secs(60),
+        client.force_reauth_with_reason(true),
+    )
+    .await
+    .expect("the consent run finishes")
+    .expect_err("the provider rejects the code");
+    for secret in ["p151-SYNCODE", "p151-SYNSEC", "code_verifier", "client_secret", "p151-SYNAT-x", "refusing"] {
+        assert!(!reason.contains(secret), "the reason must not carry {secret}: {reason}");
+    }
+}
+
+/// Astra r1 HIGH: a query string on the configured server address (it may hold a token) is never echoed.
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_explanations_never_echo_a_query_string() {
+    crate::isolate_fuigo_home_for_tests();
+    let rig = spawn_metadata_rig().await; // 500 everywhere
+    let url = format!("{}?access_token=p151-SYNAT-query", rig.url);
+    let reason = explain_missing_oauth(&url).await.expect("explained");
+    assert!(!reason.contains("p151-SYNAT-query"), "{reason}");
+    assert!(reason.contains("try again"), "{reason}");
+}
+
+/// Discovery redirected to another origin (a policy refusal rmcp wraps as "discovery failed").
+async fn spawn_redirecting_discovery_rig() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .route("/mcp", axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+        .fallback(|| async {
+            (axum::http::StatusCode::FOUND, [("location", "http://127.0.0.1:9/elsewhere")])
+        });
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("{base}/mcp")
+}
+
+/// Astra r1 MEDIUM: a refused discovery (cross-origin redirect) is not a passing problem: a saved login there still
+/// needs a sign-in, and the explanation says it was refused, not "try again".
+#[tokio::test(flavor = "multi_thread")]
+async fn p151_a_refused_discovery_is_not_retryable() {
+    let url = spawn_redirecting_discovery_rig().await;
+    store_token("p151-redir", &url, 3600, 3600 - 20, true);
+    let event_writer = fuigo_session_events::EventWriter::noop();
+    let ctx = McpSpawnCtx::for_session("p151-sess", &event_writer, OauthInteractivity::Interactive, None);
+    let client = start_mcp_server(make_http_server("p151-redir", &url), None, None, None, &ctx)
+        .await
+        .unwrap();
+    let error = client
+        .get_tool_registrations(Arc::new(Mutex::new(McpState::new(vec![]))))
+        .await
+        .err()
+        .expect("cannot connect");
+    assert!(!error.is_unreachable(), "{error}");
+    assert!(client.init_failure_needs_auth(&error), "{error}");
+    let reason = explain_missing_oauth(&url).await.expect("explained");
+    assert!(!reason.contains("try again"), "{reason}");
+    assert!(reason.contains("refused"), "{reason}");
 }

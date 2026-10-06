@@ -210,3 +210,23 @@ fn joined_line_roundtrips_words_through_real_sh() {
     let expected: String = words.iter().map(|w| format!("[{w}]")).collect();
     assert_eq!(String::from_utf8_lossy(&out.stdout), expected);
 }
+
+/// P120: `fuigo wrap` without a PTY runs the user's own program; it must not inherit Fuigo's own secrets.
+#[test]
+fn p120_wrapped_command_does_not_inherit_fuigo_secrets() {
+    use fuigo_secrets::test_probe as probe;
+    const NAME: &str = "wrap_cmd::tests::p120_wrapped_command_does_not_inherit_fuigo_secrets";
+    const REGISTERED: &str = "P120_WRAPCMD_BEARER";
+    if probe::in_parent(NAME, &[REGISTERED]) {
+        return;
+    }
+    fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+    let dir = probe::scratch_dir("p120-wrapcmd");
+    let out = dir.join("env.txt");
+    let args = vec!["-c".to_string(), format!("env > '{}'", out.display())];
+    assert!(super::wrapped_command("sh", &args).status().unwrap().success());
+    let dump = std::fs::read_to_string(&out).unwrap();
+    probe::assert_clean(&dump, &[]);
+    probe::assert_kept(&dump, REGISTERED);
+    let _ = std::fs::remove_dir_all(&dir);
+}

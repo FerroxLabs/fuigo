@@ -376,6 +376,7 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
         model_usage: json!({}),
         structured_output: None,
         errors: None,
+        permission_denials: None,
         session_id: "s".into(),
         uuid: "u".into(),
     })));

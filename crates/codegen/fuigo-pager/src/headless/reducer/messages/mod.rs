@@ -9,6 +9,7 @@ use super::{
     Lifecycle, Reducer, SessionContext, StreamEvent, ToolCallEvent, ToolCallUpdateEvent, TurnEnd,
     to_line,
 };
+use crate::headless::HeadlessDenial;
 
 mod partial;
 mod state;
@@ -24,8 +25,9 @@ use state::{
 };
 use wire::{
     AssistantFrame, AssistantMessage, CompactBoundaryLine, CompactMetadata, ContentBlock,
-    MessageUsage, MessagesLine, PartialDelta, ResultLine, SystemInitLine, SystemLine,
-    ToolResultBlock, ToolResultLine, ToolResultMessage, messages_permission_mode, new_uuid,
+    MessageUsage, MessagesLine, PartialDelta, PermissionDenial, ResultLine, SystemInitLine,
+    SystemLine, ToolResultBlock, ToolResultLine, ToolResultMessage, messages_permission_mode,
+    new_uuid,
 };
 
 /// `streaming-messages-json`: the Messages API wire format.
@@ -69,6 +71,11 @@ pub(crate) struct MessagesReducer {
     framing: PartialFraming,
     /// Monotonic counter for synthesized partial `message_start.id` placeholders.
     partial_msg_seq: u64,
+    /// Client `tool_use` blocks emitted this run, by id: the `name` and normalized `input` a
+    /// `permission_denials` entry repeats, so it names the tool exactly as the transcript did.
+    tool_uses: std::collections::HashMap<String, (String, Value)>,
+    /// The `result.permission_denials` entries; `None` until a denial is reported.
+    permission_denials: Option<Vec<PermissionDenial>>,
 }
 
 impl MessagesReducer {
@@ -96,6 +103,8 @@ impl MessagesReducer {
             last_text: String::new(),
             framing: PartialFraming::Idle,
             partial_msg_seq: 0,
+            tool_uses: std::collections::HashMap::new(),
+            permission_denials: None,
         }
     }
 
@@ -182,10 +191,15 @@ impl MessagesReducer {
 
     fn add_tool_use(&mut self, tc: ToolCallEvent) {
         self.finalize_open();
+        let input = normalized_tool_input(tc.raw_input);
+        self.tool_uses.insert(
+            tc.tool_call_id.clone(),
+            (tc.tool_name.clone(), input.clone()),
+        );
         self.blocks.push(ContentBlock::ToolUse {
             id: tc.tool_call_id,
             name: tc.tool_name,
-            input: normalized_tool_input(tc.raw_input),
+            input,
         });
     }
 
@@ -768,10 +782,47 @@ impl Reducer for MessagesReducer {
             model_usage: ru.model_usage,
             structured_output,
             errors,
+            permission_denials: self.permission_denials.clone(),
             session_id: self.result_session_id(end.session_id).to_string(),
             uuid: new_uuid(),
         }))));
         out
+    }
+
+    /// The schema's own field, filled for the first time: `result.permission_denials`.
+    ///
+    /// Whether the run ended at the refusal is already in the line — `stop_reason: "cancelled"`,
+    /// `is_error: true`, `subtype: "error_during_execution"` — so `ended_run` adds nothing here and
+    /// no fuigo-only key is invented for it (packet §3.1). The tool's `name` and `input` come from
+    /// the `tool_use` block the transcript already carried for that id; a request for a tool call
+    /// never streamed falls back to the agent's title and `{}`, so the entry is never dropped.
+    fn permission_denied(&mut self, denial: &HeadlessDenial, _ended_run: bool) {
+        // A token-budget denial (D.4) refused a model request, not a tool: the schema's entry is
+        // `{tool_name, tool_use_id, tool_input}`, and inventing a tool for it would be a false
+        // record. That `result` is still `is_error`, and its `errors[]` carries the agent's message,
+        // which names the rule and the remedy.
+        if denial.is_budget() {
+            return;
+        }
+        let (tool_name, mut tool_input) = match self.tool_uses.get(&denial.tool_call_id) {
+            Some((name, input)) => (name.clone(), input.clone()),
+            None => (
+                denial
+                    .tool_title
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| "tool".to_string()),
+                json!({}),
+            ),
+        };
+        // P149 (S8): the denial record is part of the terminal error document; credentials this process sent
+        // are replaced in the input it repeats.
+        fuigo_telemetry::sent_credentials::scrub_json_strings(&mut tool_input);
+        self.permission_denials = Some(vec![PermissionDenial {
+            tool_name,
+            tool_use_id: denial.tool_call_id.clone(),
+            tool_input,
+        }]);
     }
 
     fn error(
@@ -802,6 +853,7 @@ impl Reducer for MessagesReducer {
             model_usage: ru.model_usage,
             structured_output: None,
             errors: Some(vec![message.to_string()]),
+            permission_denials: self.permission_denials.clone(),
             session_id: self.session_id().to_string(),
             uuid: new_uuid(),
         }))));

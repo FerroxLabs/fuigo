@@ -138,7 +138,7 @@ impl WorkflowRunStore {
 
         if let Some(run_dir) = self.run_dir(run_id) {
             let scripts_dir = run_dir.join("scripts");
-            std::fs::create_dir_all(&scripts_dir)?;
+            fuigo_config::create_dir_all_owner_only(&scripts_dir)?;
             let args_json = serde_json::to_vec_pretty(args).map_err(io::Error::other)?;
             atomic_write_new(&run_dir.join("args.json"), &args_json)?;
             if let Some(effort) = effort {
@@ -371,7 +371,8 @@ fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "workflow path has no parent")
     })?;
-    std::fs::create_dir_all(parent)?;
+    // A workflow run lives in the session folder: owner-only folders and files (P150, S14).
+    fuigo_config::create_dir_all_owner_only(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -382,10 +383,10 @@ fn atomic_write(path: &Path, bytes: &[u8], replace: bool) -> io::Result<()> {
         uuid::Uuid::now_v7().simple()
     ));
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let mut file = fuigo_config::owner_only_file_options(
+            std::fs::OpenOptions::new().write(true).create_new(true),
+        )
+        .open(&tmp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);

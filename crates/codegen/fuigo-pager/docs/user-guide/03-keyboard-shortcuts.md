@@ -261,7 +261,11 @@ Actions that affect the agent session, available from the agent screen.
 
 Non-image files insert their absolute path as text instead of a chip.
 
+> **Over SSH, dropped files are not attached.** When Fuigo runs in an SSH session (`SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY` is non-empty), a pasted or dropped `file://` path names a file on your local machine, not on the host Fuigo runs on, so it is inserted as literal text. The drop classifier makes no image chip and decodes no path. This holds on every platform.
+
 > **`Alt+V` on Windows** is fuigo-specific. Windows Terminal's default `Ctrl+V` only pastes plain text and silently drops image clipboards; `Alt+V` bypasses the interceptor. To use `Ctrl+V` for images too, add `{ "command": null, "keys": "ctrl+v" }` to `actions` in your Windows Terminal `settings.json`.
+
+> **Linux: a terminal paste does not probe the clipboard for an image.** On macOS and Windows, when your terminal delivers a paste as a bracketed-paste event (for example `Cmd+V` in a terminal that forwards it that way, or a Finder drag), Fuigo also checks the system clipboard for an image or a file reference and attaches it. On Linux that extra probe is compiled out. A bracketed paste there inserts its text, and a dropped `file://` path is still recognised from the text itself, but an image or file that exists only on the clipboard (with no path in the pasted text) is not attached. To paste a clipboard screenshot on Linux, press `Ctrl+V` in Fuigo so the key itself is handled; that path is not affected.
 
 ### Linux PRIMARY and CLIPBOARD
 

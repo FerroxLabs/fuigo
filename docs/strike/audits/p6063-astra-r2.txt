@@ -1,0 +1,25 @@
+# P6063 Astra round 2 (gpt-6-astra, codex exec --sandbox read-only < /dev/null), audited 917a2cb3..1b30ee02 + git show 1b30ee02, 2026-10-02
+# Transcript trimmed to the final report (full transcript 7421 lines, sha256 befeebf5d0bceb75ecc94ce7b03dc9aa6e5ee75a3b5476642fb2dbd6dce7c0e7).
+
+Reviewed `git show 1b30ee02` and all 25 files in `917a2cb3..1b30ee02`. The four follow-up fixes are correct and complete by source inspection; no new issue found.
+
+- **BLOCKER:** None.
+- **HIGH:** None.
+- **MEDIUM:** None remaining.
+- **LOW — retained:** [watcher.rs:1506](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-shell/src/config/watcher.rs:1506): scheduling pauses can still spread the write burst beyond the three-second debounce window, causing the `count <= 3` assertion to fail despite correct behavior. This is the documented Round 1 limitation.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Read-only Round 2 audit complete; no BLOCKER/HIGH found. |
+| Git fixtures, finding 1 | ✅ Done | [git_gate_tests.rs:499](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/session/git_gate_tests.rs:499), also lines 564 and 629: all three waiter timeouts are now 60 seconds. The two-permit setup and fresh-walk/snapshot assertions remain intact. |
+| Windows ageing, finding 2 | ✅ Done | [recovery.rs:838](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/recovery.rs:838): replaces the Windows sleep with explicit directory mtime ageing; retains old-directory removal and fresh-directory survival assertions. |
+| MCP deadline, finding 3 | ✅ Done | [handle_tests.rs:6837](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/handle_tests.rs:6837): checks the deadline lower bound and the hanging server’s recorded timeout cause, while retaining the upper bound and ready-handler assertions. |
+| LSP claim cleanup, finding 5 | ✅ Done | [documents.rs:250](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-tools/src/implementations/lsp/documents.rs:250): directly asserts that commit removes the in-flight claim. |
+
+The Windows helper uses the required directory-opening flag and timestamp-write access, consistent with [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew) and [SetFileTime](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfiletime).
+
+The product re-check found no BLOCKER/HIGH in [push_version_cap](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-tools/src/implementations/lsp/documents.rs:141) or [invalidate](/Volumes/Mando/WaylandBots/Fuigo/wt-p6063/crates/codegen/fuigo-workspace/src/session/git_gate.rs:224): LSP commit/read ordering preserves the version cap, and invalidation now includes slot-only roots while preserving targeted invalidation.
+
+`git diff --check` passed; the worktree remains clean. Builds, tests and native Windows execution were not run under the read-only constraint.
+
+VERDICT: PASS

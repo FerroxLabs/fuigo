@@ -16,9 +16,10 @@ mod worktree;
 
 pub use announcements::*;
 pub use campaigns::{
-    CampaignModelsDefault, campaign_driven_models_default, effective_config_from_layers,
-    load_effective_config, load_effective_config_disk_only, persist_models_default,
-    remote_campaigns_from_settings, set_remote_campaigns_from_settings, sync_campaign_fields,
+    CampaignModelsDefault, campaign_driven_models_default, effective_config_for_remote_settings,
+    effective_config_from_layers, last_good_config_layers, load_effective_config, load_effective_config_with_campaign_free,
+    load_effective_config_disk_only, persist_models_default, remote_campaigns_from_settings,
+    set_remote_campaigns_from_settings, sync_campaign_fields,
 };
 pub use consent::*;
 pub use hints::*;

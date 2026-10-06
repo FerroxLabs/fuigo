@@ -19,6 +19,8 @@ struct ActiveTool {
 pub struct EventTracker {
     writer: EventWriter,
     turn_ended_emitted: Cell<bool>,
+    /// Set by `begin_turn`, so `close_open_turn` never closes a turn this tracker did not start.
+    turn_begun: Cell<bool>,
     active_tool: RefCell<Option<ActiveTool>>,
     turn_tool_count: Cell<u32>,
     /// Why a user interrupt cancelled the most recent turn, set by the cancel paths.
@@ -64,6 +66,7 @@ impl EventTracker {
         Self {
             writer: EventWriter::open(session_dir),
             turn_ended_emitted: Cell::new(false),
+            turn_begun: Cell::new(false),
             active_tool: RefCell::new(None),
             turn_tool_count: Cell::new(0),
             prior_interrupt_category: Cell::new(None),
@@ -82,6 +85,7 @@ impl EventTracker {
     }
 
     pub fn begin_turn(&self) {
+        self.turn_begun.set(true);
         self.turn_ended_emitted.set(false);
         self.turn_tool_count.set(0);
     }
@@ -101,6 +105,21 @@ impl EventTracker {
             cancellation_category: category,
             cancellation_context: context,
         });
+    }
+
+    /// Emits `turn_ended` only when a turn this tracker began is still open.
+    /// For exits that skip the normal outcome handling (an early error, a rewind): without it the log keeps an
+    /// unclosed `turn_started`, which a later load reports as a turn lost with its process.
+    /// Unlike `emit_turn_ended` it writes nothing before the first `begin_turn`, so it never closes a turn that never started.
+    pub fn close_open_turn(
+        &self,
+        outcome: TurnOutcomeLabel,
+        category: Option<CancellationCategory>,
+        context: Option<serde_json::Value>,
+    ) {
+        if self.turn_begun.get() && !self.turn_ended_emitted.get() {
+            self.emit_turn_ended(outcome, category, context);
+        }
     }
 
     /// Marks a tool as active so a cancel can report it.
@@ -265,6 +284,46 @@ mod tests {
         assert!(
             t.take_pending_interrupt_reminder(),
             "begin_turn must preserve the pending interrupt reminder"
+        );
+    }
+
+    fn turn_ended_lines(dir: &std::path::Path) -> usize {
+        std::fs::read_to_string(dir.join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains(r#""type":"turn_ended""#))
+            .count()
+    }
+
+    /// `close_open_turn` closes exactly the turn this tracker began, once, and nothing before the first turn.
+    #[test]
+    fn close_open_turn_closes_only_a_begun_open_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let t = EventTracker::new(dir.path());
+
+        t.close_open_turn(TurnOutcomeLabel::Error, None, None);
+        assert_eq!(
+            turn_ended_lines(dir.path()),
+            0,
+            "no turn began, so nothing closes"
+        );
+
+        t.begin_turn();
+        t.close_open_turn(TurnOutcomeLabel::Error, None, None);
+        t.close_open_turn(TurnOutcomeLabel::Error, None, None);
+        assert_eq!(
+            turn_ended_lines(dir.path()),
+            1,
+            "an open turn closes exactly once"
+        );
+
+        t.begin_turn();
+        t.emit_turn_ended(TurnOutcomeLabel::Completed, None, None);
+        t.close_open_turn(TurnOutcomeLabel::Error, None, None);
+        assert_eq!(
+            turn_ended_lines(dir.path()),
+            2,
+            "a turn already ended is not closed again"
         );
     }
 }

@@ -156,6 +156,33 @@ pub(crate) fn is_scaffold_template(content: &str) -> bool {
     trimmed.len() < SCAFFOLD_MAX_LEN && MARKERS.iter().any(|marker| trimmed.contains(marker))
 }
 
+/// Why a dream input could not be prepared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DreamInputError {
+    NoReadableSessions,
+    ContentFiltered,
+    ExistingMemoryTooLarge,
+}
+
+impl DreamInputError {
+    /// The user-facing reason, as shown after "skipped: " by `/dream`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NoReadableSessions => "no readable session content",
+            Self::ContentFiltered => "session content excluded by the memory content filter",
+            Self::ExistingMemoryTooLarge => "existing memory exceeds the dream input limit",
+        }
+    }
+}
+
+impl std::fmt::Display for DreamInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::error::Error for DreamInputError {}
+
 /// Build the user message for the dream model call from session log contents.
 ///
 /// Non-scaffold `existing_memory` is prepended before the session logs so the model merges prior knowledge instead of discarding it.
@@ -167,26 +194,46 @@ pub fn build_dream_user_message(
     stems: &[String],
     existing_memory: Option<&str>,
 ) -> Option<DreamMessage> {
-    if existing_memory.is_some_and(|s| !crate::safety::is_safe_memory(s)) {
-        return None;
+    match build_dream_user_message_checked(sessions_dir, stems, existing_memory) {
+        Ok(message) => Some(message),
+        Err(reason) => {
+            tracing::warn!(target: LOG, %reason, "DREAM_BUILD_MESSAGE: skipped");
+            None
+        }
     }
+}
+
+/// Build dream input with a specific skip reason for callers that display diagnostics.
+/// Source snapshots retain original bytes while model input excludes rejected lines.
+pub fn build_dream_user_message_checked(
+    sessions_dir: &Path,
+    stems: &[String],
+    existing_memory: Option<&str>,
+) -> Result<DreamMessage, DreamInputError> {
     let existing_len = existing_memory.map_or(0, str::len);
     let mut buf = String::with_capacity(existing_len + stems.len().min(10) * 2000);
 
     if let Some(mem) = existing_memory {
         let trimmed = mem.trim();
         if !trimmed.is_empty() && !is_scaffold_template(trimmed) {
-            buf.push_str("--- Existing Memory (merge with new sessions) ---\n\n");
-            // Never replace knowledge that was omitted from the model input.
+            // Refuse oversized input before filtering so size limits cannot hide old knowledge.
             if trimmed.len() > MAX_DREAM_INPUT_CHARS / 2 {
-                return None;
+                return Err(DreamInputError::ExistingMemoryTooLarge);
             }
-            buf.push_str(trimmed);
+            let filtered = crate::safety::filter_memory_lines(trimmed);
+            if filtered != trimmed {
+                tracing::warn!(target: LOG, "DREAM_BUILD_MESSAGE: existing memory lines excluded by the memory content filter");
+            }
+            if !filtered.trim().is_empty() {
+                buf.push_str("--- Existing Memory (merge with new sessions) ---\n\n");
+                buf.push_str(&filtered);
+            }
         }
     }
 
     let mut processed_stems = Vec::with_capacity(stems.len());
     let mut source_snapshots = Vec::new();
+    let mut content_filtered = false;
     for stem in stems {
         if std::path::Path::new(stem).components().count() != 1 {
             continue;
@@ -200,15 +247,29 @@ pub fn build_dream_user_message(
         }
         if let Ok(content) = std::fs::read_to_string(&path)
             && !content.trim().is_empty()
-            && crate::safety::is_safe_memory(&content)
         {
+            let filtered = crate::safety::filter_memory_lines(&content);
+            if filtered != content {
+                content_filtered = true;
+                tracing::warn!(target: LOG, "DREAM_BUILD_MESSAGE: session lines excluded by the memory content filter");
+            }
+            if filtered.trim().is_empty() {
+                continue;
+            }
             if !buf.is_empty() {
                 buf.push_str("\n\n");
             }
             buf.push_str("--- Session: ");
-            buf.push_str(stem);
+            // The file name is model input too. A rejected name is replaced here, so it
+            // cannot take a clean session's lines with it in the assembled check below
+            // (a `-----BEGIN PRIVATE KEY-----` name would blank what follows).
+            buf.push_str(if crate::safety::is_safe_memory(stem) {
+                stem
+            } else {
+                "(name excluded by the memory content filter)"
+            });
             buf.push_str(" ---\n\n");
-            buf.push_str(&content);
+            buf.push_str(&filtered);
             processed_stems.push(stem.clone());
             source_snapshots.push((stem.clone(), content));
 
@@ -224,9 +285,22 @@ pub fn build_dream_user_message(
             }
         }
     }
+    // Separately admitted parts (a file name, the end of one session, the start of the
+    // next) can still form a rejected phrase once joined: judge the model input as a whole.
+    if !crate::safety::is_safe_memory(&buf) {
+        tracing::warn!(target: LOG, "DREAM_BUILD_MESSAGE: assembled input filtered");
+        buf = crate::safety::filter_memory_lines(&buf);
+        content_filtered = true;
+        if buf.trim().is_empty() {
+            processed_stems.clear();
+        }
+    }
     if processed_stems.is_empty() {
-        tracing::debug!(target: LOG, "DREAM_BUILD_MESSAGE: no readable session files");
-        return None;
+        return Err(if content_filtered {
+            DreamInputError::ContentFiltered
+        } else {
+            DreamInputError::NoReadableSessions
+        });
     }
     tracing::info!(
         target: LOG,
@@ -235,7 +309,7 @@ pub fn build_dream_user_message(
         chars = buf.len(),
         "DREAM_BUILD_MESSAGE: built user message"
     );
-    Some(DreamMessage {
+    Ok(DreamMessage {
         content: buf,
         processed_stems,
         source_snapshots,

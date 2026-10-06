@@ -158,9 +158,22 @@ mod tests {
         let toml: toml::Value = toml::from_str(toml_src).unwrap();
         Config::new_from_toml_cfg(&toml).expect("config should parse")
     }
+    /// The guard must refuse a `FUIGO_AUTH_PATH` write made in the shared test process (this test is not rerun in a child).
+    #[test]
+    fn auth_path_write_in_the_shared_process_is_refused() {
+        let before = std::env::var_os("FUIGO_AUTH_PATH");
+        let refused = std::panic::catch_unwind(|| EnvGuard::set("FUIGO_AUTH_PATH", "/nonexistent/auth.json"));
+        assert!(refused.is_err(), "EnvGuard::set(FUIGO_AUTH_PATH) must panic outside a process of its own");
+        let refused = std::panic::catch_unwind(|| EnvGuard::unset("FUIGO_AUTH_PATH"));
+        assert!(refused.is_err(), "EnvGuard::unset(FUIGO_AUTH_PATH) must panic outside a process of its own");
+        assert_eq!(std::env::var_os("FUIGO_AUTH_PATH"), before, "a refused guard must not touch the environment");
+    }
     #[test]
     #[serial]
     fn resolve_api_key_env() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-test-key");
         assert_eq!(AuthStatus::resolve(&Config::default()), AuthStatus::ApiKey);
@@ -168,6 +181,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_legacy_api_key_env() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let _key = EnvGuard::set(LEGACY_FUIGO_API_KEY_ENV_VAR, "legacy-key");
         assert_eq!(AuthStatus::resolve(&Config::default()), AuthStatus::ApiKey);
@@ -175,6 +191,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_oauth_session() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let json = serde_json::to_string(&session_credential()).unwrap();
         let _auth = EnvGuard::set("FUIGO_AUTH", &json);
@@ -186,6 +205,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_model_api_key_byok() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let dm = crate::models::default_model();
         let cfg = config_from_toml(&format!(
@@ -203,6 +225,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_model_env_key_byok() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         const TEST_ENV: &str = "TEST_AUTH_STATUS_BYOK_ENV_KEY";
         let dm = crate::models::default_model();
@@ -228,6 +253,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_deployment_key() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let mut cfg = Config::default();
         cfg.endpoints.deployment_key = Some("deploy-key".into());
@@ -256,6 +284,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_not_authenticated() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         assert_eq!(
             AuthStatus::resolve(&Config::default()),
@@ -265,6 +296,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_priority_api_key_over_byok_and_deployment() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let _key = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, "fuigo-test-key");
         let dm = crate::models::default_model();
@@ -274,6 +308,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_priority_session_over_byok_and_deployment() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let json = serde_json::to_string(&session_credential()).unwrap();
         let _auth = EnvGuard::set("FUIGO_AUTH", &json);
@@ -287,6 +324,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_priority_byok_over_deployment() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let dm = crate::models::default_model();
         let cfg = config_from_toml(&byok_and_deployment_toml(dm));
@@ -298,6 +338,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_disable_api_key_auth_suppresses_byok_banner() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let dm = crate::models::default_model();
         let cfg = config_from_toml(&format!(
@@ -315,6 +358,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_disable_api_key_auth_falls_through_to_deployment() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let dm = crate::models::default_model();
         let cfg = config_from_toml(&format!(
@@ -335,6 +381,9 @@ mod tests {
     #[test]
     #[serial]
     fn resolve_model_credentials_uses_first_catalog_key() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_dir, _g) = isolate_auth_sources();
         let cfg = config_from_toml(
             r#"

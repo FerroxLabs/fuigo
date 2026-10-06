@@ -36,7 +36,7 @@ pub async fn set_consent_answer(
     acked: bool,
 ) -> Result<()> {
     update_config(|cfg| {
-        let entry = cfg.consent.answers.entry(notice_id).or_default();
+        let entry = cfg.consent.answers.entry(notice_id.clone()).or_default();
 
         // A different account restarts the count rather than inheriting the previous version.
         let recorded = if entry.account == account {
@@ -44,7 +44,7 @@ pub async fn set_consent_answer(
         } else {
             0
         };
-        entry.account = account;
+        entry.account = account.clone();
 
         // The ack belongs to a version, so a replay cannot mark a higher one acked.
         if version > recorded {

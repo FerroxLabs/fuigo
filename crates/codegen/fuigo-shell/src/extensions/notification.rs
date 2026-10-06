@@ -549,6 +549,11 @@ pub enum SessionUpdate {
         event_name: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
+        /// The ACP tool call a `pre_tool_use` / `post_tool_use` / `post_tool_use_failure` batch belongs to, so a client can put
+        /// the runs on that call's row (several calls of one batch are in flight at once). `None` for every other event, and from
+        /// older shells.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
         /// Keeps a delayed turn-end batch off the wrong turn's marker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt_id: Option<String>,
@@ -856,6 +861,14 @@ pub enum SessionUpdate {
     /// Prompt images dropped before send (integrity failure or the upscale cap).
     /// The model is told via a system-reminder; this notification shows the drops to the UI.
     ImageDropped { notes: Vec<String> },
+    /// The session's saved history was repaired while the session was loaded (P96).
+    /// `message` is the whole note for display; it starts with "Session history repaired:".
+    /// A client that does not know this variant decodes it as [`SessionUpdate::Unknown`] and shows nothing.
+    HistoryRepaired { message: String },
+    /// A config source was refused something (P133): a reference to the saved API key that a project config, plugin or
+    /// client-supplied MCP server may not make. Sent once per session, per note. `message` is the whole note.
+    /// A client that does not know this variant decodes it as [`SessionUpdate::Unknown`] and shows nothing.
+    ConfigNotice { message: String },
     /// Memory file listing for the pager's /memory modal.
     MemoryFiles { files: Vec<MemoryFileInfo> },
     WorkflowUpdated {
@@ -1024,6 +1037,12 @@ pub enum SessionUpdate {
         /// Wall-clock turn duration in milliseconds. `None` on old files.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         elapsed_ms: Option<u64>,
+        /// Typed verdicts (P119 / P70c) computed from the failure text BEFORE sent credentials were replaced in `agent_result`.
+        /// Set only for a failed turn while this process holds sent credentials; a client then decides (upsell filter, headline status)
+        /// on these and treats `agent_result` as display text. Absent from an older shell, whose text was never scrubbed (the client
+        /// then reads the text), and ignored by an older client.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdicts: Option<crate::sampling::error_verdicts::ErrorVerdicts>,
     },
     /// One model response opened (Messages `message_start`), carrying the real message id, model, and input-side token counts.
     /// Rides the buffered chunk rail so it is ordered AHEAD of this response's agent chunks.
@@ -1145,6 +1164,10 @@ pub enum RetryState {
         /// Sampler error kind when known; absent on old shells and non-sampler paces.
         #[serde(default)]
         error_type: Option<String>,
+        /// Typed verdicts the shell computed from `reason` before any credential was replaced in it (P119). A client
+        /// decides on these and only displays `reason`; absent on older shells, whose text is unscrubbed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdicts: Option<crate::sampling::error_verdicts::ErrorVerdicts>,
     },
     /// All retries have been exhausted
     Exhausted {
@@ -1162,6 +1185,10 @@ pub enum RetryState {
         /// (an empty-response exhaustion reads "Request failed" instead of "Empty response").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_type: Option<String>,
+        /// Typed verdicts the shell computed from `reason` before any credential was replaced in it (P119). A client
+        /// decides on these and only displays `reason`; absent on older shells, whose text is unscrubbed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdicts: Option<crate::sampling::error_verdicts::ErrorVerdicts>,
     },
     /// A non-retryable error occurred (e.g., auth error, invalid params)
     Failed {
@@ -1169,7 +1196,107 @@ pub enum RetryState {
         error_type: String,
         /// Human-readable error message
         message: String,
+        /// Typed verdicts the shell computed from `message` before any credential was replaced in it (P119). A client
+        /// decides on these and only displays `message`; absent on older shells, whose text is unscrubbed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verdicts: Option<crate::sampling::error_verdicts::ErrorVerdicts>,
     },
+}
+
+impl RetryState {
+    /// P70b display sink: replace credentials this process sent upstream (exact match) in the human-readable text.
+    ///
+    /// P119: the verdicts a client decides on are computed FIRST, from the text as it arrived, and stamped into the
+    /// state (once: a state that already carries verdicts keeps them, so a second pass over scrubbed text can never
+    /// overwrite them). Everything the pager used to infer from the words of `reason` / `message` is then in
+    /// `verdicts`, and the text can be rewritten freely.
+    pub fn scrub_sent_credentials(&mut self) {
+        use fuigo_telemetry::sent_credentials::scrub_in_place;
+        self.stamp_verdicts();
+        match self {
+            Self::Retrying { reason, .. } | Self::Exhausted { reason, .. } => {
+                scrub_in_place(reason);
+            }
+            Self::Failed { message, .. } => {
+                scrub_in_place(message);
+            }
+        }
+    }
+
+    /// Compute [`crate::sampling::error_verdicts::ErrorVerdicts`] from the text now in the state, unless it already
+    /// carries some. An exhaustion is judged without its kind and a failure with it, as the pager always did.
+    pub fn stamp_verdicts(&mut self) {
+        use crate::sampling::error_verdicts::ErrorVerdicts;
+        match self {
+            Self::Retrying {
+                reason,
+                error_type,
+                verdicts,
+                ..
+            } if verdicts.is_none() => {
+                *verdicts = Some(ErrorVerdicts::for_retry(error_type.as_deref(), reason));
+            }
+            Self::Exhausted {
+                reason, verdicts, ..
+            } if verdicts.is_none() => {
+                *verdicts = Some(ErrorVerdicts::for_retry(None, reason));
+            }
+            Self::Failed {
+                error_type,
+                message,
+                verdicts,
+            } if verdicts.is_none() => {
+                *verdicts = Some(ErrorVerdicts::for_retry(Some(error_type), message));
+            }
+            _ => {}
+        }
+    }
+
+    /// The verdicts a client decides on, when the shell stamped them.
+    pub fn verdicts(&self) -> Option<&crate::sampling::error_verdicts::ErrorVerdicts> {
+        match self {
+            Self::Retrying { verdicts, .. }
+            | Self::Exhausted { verdicts, .. }
+            | Self::Failed { verdicts, .. } => verdicts.as_ref(),
+        }
+    }
+}
+
+impl SessionUpdate {
+    /// P70b display sink: replace credentials this process sent upstream (exact match) in the variants that carry
+    /// error text from a failed model or tool call. Applied where a Fuigo notification is sent, so the client, the
+    /// persisted `updates.jsonl`, the standard-rail retry mirror and the notification hooks all get the scrubbed text.
+    ///
+    /// Deliberately not a walk over every string: some variants are state the client or a later turn acts on
+    /// (`CompactionCheckpoint`, `DiffReview`), and rewriting those would change behaviour, not just display.
+    pub fn scrub_sent_credentials(&mut self) {
+        use fuigo_telemetry::sent_credentials::scrub_in_place;
+        match self {
+            Self::RetryState(state) => state.scrub_sent_credentials(),
+            Self::AutoCompactFailed { error }
+            | Self::AutoRecoveryStarted { error, .. }
+            | Self::AutoRecoveryExhausted { error, .. } => {
+                scrub_in_place(error);
+            }
+            Self::SubagentFinished {
+                error: Some(error), ..
+            } => {
+                scrub_in_place(error);
+            }
+            Self::MemoryFlushCompleted { result, .. }
+            | Self::MemoryDreamCompleted { result, .. } => {
+                scrub_in_place(result);
+            }
+            // Set only for a failed turn: the error text (`prompt_complete_fields`).
+            Self::TurnCompleted {
+                agent_result: Some(result),
+                ..
+            } => {
+                scrub_in_place(result);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Chunk `_meta` key tagging the standard-rail mirror of a [`RetryState`]; its value is the `RetryState` object as `retry_state` carries it (`type` tag, snake_case fields).
@@ -1196,6 +1323,7 @@ pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String
     if let RetryState::Failed {
         error_type,
         message,
+        ..
     } = state
         && error_type == DISK_FULL_ERROR_TYPE
     {
@@ -1280,11 +1408,56 @@ pub fn is_retry_status_update(update: &acp::SessionUpdate) -> bool {
 /// `legacy_auth` is excluded: its message carries its own migration guidance (`fuigo update` / `fuigo logout` / `fuigo login`), shown verbatim.
 /// `auth_transient` is excluded for the opposite reason: it is emitted only when the failure self-heals (`AuthManager::requires_manual_reauth`).
 /// Its message already says it recovers on its own, so no `/login` banner is shown.
+/// `auth_destination_refused` (P42) is excluded too: the session token was withheld because the destination may
+/// not receive it, signing in again cannot fix that, and the message carries the `[endpoints]` remedy instead.
 pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
-    if matches!(error_type, Some("legacy_auth") | Some("auth_transient")) {
+    if matches!(
+        error_type,
+        Some("legacy_auth") | Some("auth_transient") | Some(AUTH_DESTINATION_REFUSED_ERROR_TYPE)
+    ) {
         return false;
     }
     error_type == Some("auth") || message.contains(UNAUTHORIZED_NEEDLE)
+}
+
+/// P42: turn error type for a 401 caused by withholding the session token from a destination that may not
+/// receive it. Not re-authable (see [`is_reauthable_failure`]).
+pub const AUTH_DESTINATION_REFUSED_ERROR_TYPE: &str = "auth_destination_refused";
+
+/// P42: the `[endpoints]` remedy that leads an [`AUTH_DESTINATION_REFUSED_ERROR_TYPE`] message.
+pub const AUTH_DESTINATION_REFUSED_REMEDY: &str = "Your session token goes only to https origins in `[endpoints]`, never loopback: add this endpoint there or give the model an `api_key`.";
+
+/// P42: the one plain sentence that follows the remedy. It names no HTTP status on purpose (see
+/// [`auth_destination_refused_message`]).
+pub const AUTH_DESTINATION_REFUSED_SENTENCE: &str =
+    "The endpoint rejected a request that carried no credential.";
+
+/// P42: the whole message for a 401 on a request whose session token was withheld because its destination
+/// may not receive it.
+///
+/// Order is load-bearing for clients: the [`AUTH_DESTINATION_REFUSED_REMEDY`] first, then
+/// [`AUTH_DESTINATION_REFUSED_SENTENCE`], then `diagnostics` (the `  Model:` / `  Auth:` / `  Version:` block),
+/// then the refused destination. The pager cuts a banner at the first `Model:` line and caps it near 200
+/// characters, so the remedy and the sentence (one paragraph, 195 characters together) are what it shows;
+/// the destination URL sits below the cut.
+///
+/// The text carries no `(401)`, `Unauthorized (` or `status NNN`, and the turn error sends no `http_status`:
+/// a client that sniffs either for its sign-in prompt (and the prompt it stashes for a post-login resubmit)
+/// must not treat this as re-authable. Signing in again cannot fix a destination.
+///
+/// P149 (S12, live lane C2 D4): the destination is shown by location only. A base URL can carry a password
+/// (`https://user:pass@host`) or a query secret (`?key=…`), so those become `<redacted>`; a URL without either is
+/// printed exactly as configured.
+pub fn auth_destination_refused_message(destination: &str, diagnostics: &str) -> String {
+    let diagnostics = diagnostics.trim_matches('\n');
+    let destination = if destination.contains(['@', '?', '#', '\\']) {
+        fuigo_auth::redact_url(destination)
+    } else {
+        destination.to_owned()
+    };
+    format!(
+        "{AUTH_DESTINATION_REFUSED_REMEDY} {AUTH_DESTINATION_REFUSED_SENTENCE}\n\n{diagnostics}\n  Endpoint:  {destination}"
+    )
 }
 
 /// Text fallback for 401s that arrive without a typed `error_type`.
@@ -1370,6 +1543,63 @@ impl From<FeedbackRequestData> for FeedbackRequestNotification {
 /// Metadata stored in `updates.jsonl` as a `CompactionCheckpoint` session update.
 ///
 /// This is a lightweight reference; the full compacted conversation lives in a separate file (`compaction_checkpoints/{checkpoint_id}.json`).
+/// Where a checkpoint marker's file lives inside `session_dir`. A marker can come from a remote or shared session, so
+/// its `checkpoint_file` is trusted only in the exact form compaction writes, `compaction_checkpoints/<token>.json`
+/// with a plain-token name; anything else (`..`, an absolute path, extra components) resolves to a path that never
+/// exists, so the caller sees an ordinary missing checkpoint and nothing outside the session directory is touched.
+pub(crate) fn contained_checkpoint_path(session_dir: &std::path::Path, checkpoint_file: &str) -> std::path::PathBuf {
+    let ok = checkpoint_file
+        .strip_prefix("compaction_checkpoints/")
+        .and_then(|n| n.strip_suffix(".json"))
+        .is_some_and(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        });
+    if ok {
+        session_dir.join(checkpoint_file)
+    } else {
+        session_dir.join("compaction_checkpoints").join(".rejected")
+    }
+}
+
+/// Read the checkpoint file a marker names, from inside `session_dir` only. Every checkpoint read goes through here.
+///
+/// [`contained_checkpoint_path`] checks the marker's path as text. That alone still followed a symlink planted at
+/// `compaction_checkpoints/<id>.json` (or a symlinked `compaction_checkpoints` directory) to a file outside the
+/// session, which then became the session's summary and was copied into its forks (P146, S17). Compaction only ever
+/// writes a regular file in a real directory, so anything else is refused with `NotFound`: callers treat it exactly as
+/// a missing checkpoint, the way they treat a marker whose path is refused as text. Neither the directory nor the
+/// file is ever followed through a symlink, including one swapped in after a check, and a FIFO there cannot block the
+/// read (see `open_beneath_nofollow`).
+pub(crate) fn read_contained_checkpoint(session_dir: &std::path::Path, checkpoint_file: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let refused = |what: &str| {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("compaction checkpoint {checkpoint_file:?} refused: {what}; it is treated as missing"),
+        );
+        tracing::warn!(session_dir = %session_dir.display(), %error, "compaction checkpoint refused");
+        error
+    };
+    let path = contained_checkpoint_path(session_dir, checkpoint_file);
+    if path.file_name() == Some(std::ffi::OsStr::new(".rejected")) {
+        return Err(refused("its path is not inside compaction_checkpoints/"));
+    }
+    let relative = path.strip_prefix(session_dir).map_err(|_| refused("its path is not inside the session folder"))?;
+    let mut file = match crate::session::storage::open_beneath_nofollow(session_dir, relative) {
+        Ok(file) => file,
+        Err(crate::session::storage::BeneathRefusal::Refused(what)) => return Err(refused(what)),
+        Err(crate::session::storage::BeneathRefusal::Io(error)) => return Err(error),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(refused("it is not a regular file"));
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct CompactionCheckpointInfo {
@@ -1405,8 +1635,15 @@ pub struct AutoContinueInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CompactionCheckpointFile {
-    /// Resolved inherited prefix; zero means released. Missing on legacy files.
-    #[serde(default)]
+    /// Resolved inherited prefix; zero means released. Missing on legacy files. Informational: nothing reads it to
+    /// decide what a resumed model sees.
+    ///
+    /// Written as `resolved_prefix_len`; `inherited_prefix_len` (1.0.10-1.0.19) is still read. The key was renamed
+    /// because those releases replace a resumed session's `chat_history.jsonl` with a text-only rebuild whenever the
+    /// latest checkpoint carries `inherited_prefix_len`, which loses every tool call after it (P88). Under the new key a
+    /// compaction made by this version reads as a legacy checkpoint there, so running an older binary on the same
+    /// sessions keeps their history intact.
+    #[serde(default, rename = "resolved_prefix_len", alias = "inherited_prefix_len")]
     pub inherited_prefix_len: Option<usize>,
     /// Unique checkpoint identifier (matches [`CompactionCheckpointInfo::checkpoint_id`]).
     pub checkpoint_id: String,
@@ -1542,6 +1779,88 @@ pub struct RecapRequestFile {
 mod tests {
     use super::*;
 
+    /// P70b: the error-bearing updates have every credential sent upstream replaced; state-bearing ones are untouched.
+    #[test]
+    fn error_bearing_updates_scrub_credentials_sent_upstream() {
+        const CRED: &str = "p70b-notification-cred-0123";
+        fuigo_telemetry::sent_credentials::record(CRED);
+        let with = |s: &str| format!("bad key {CRED}: {s}");
+        let mut updates = vec![
+            SessionUpdate::RetryState(RetryState::Retrying {
+                attempt: 1,
+                max_retries: 3,
+                reason: with("retrying"),
+                error_type: None,
+                verdicts: None,
+            }),
+            SessionUpdate::RetryState(RetryState::Exhausted {
+                attempts: 3,
+                reason: with("exhausted"),
+                is_rate_limited: false,
+                error_type: None,
+                verdicts: None,
+            }),
+            SessionUpdate::RetryState(RetryState::Failed {
+                error_type: "api".into(),
+                message: with("failed"),
+                verdicts: None,
+            }),
+            SessionUpdate::AutoCompactFailed {
+                error: with("compact"),
+            },
+            SessionUpdate::AutoRecoveryStarted {
+                attempt: 1,
+                max_retries: 2,
+                error: with("recovery"),
+                delay_ms: 10,
+            },
+            SessionUpdate::AutoRecoveryExhausted {
+                attempts: 2,
+                error: with("recovery exhausted"),
+            },
+            SessionUpdate::MemoryFlushCompleted {
+                result: with("flush"),
+                path: None,
+            },
+            SessionUpdate::MemoryDreamCompleted {
+                result: with("dream"),
+                path: None,
+            },
+            SessionUpdate::TurnCompleted {
+                prompt_id: "p".into(),
+                stop_reason: "error".into(),
+                agent_result: Some(with("turn")),
+                error_kind: Some("api".into()),
+                usage: None,
+                elapsed_ms: None,
+                verdicts: None,
+            },
+            SessionUpdate::SubagentFinished {
+                subagent_id: "sa".into(),
+                child_session_id: "child".into(),
+                status: "failed".into(),
+                error: Some(with("subagent")),
+                tool_calls: 0,
+                turns: 1,
+                duration_ms: 5,
+                tokens_used: 0,
+                output: None,
+                will_wake: false,
+            },
+        ];
+        for update in &mut updates {
+            update.scrub_sent_credentials();
+            let wire = serde_json::to_string(update).unwrap();
+            assert!(!wire.contains(CRED), "{wire}");
+            assert!(wire.contains("bad key <redacted>"), "{wire}");
+        }
+        let mut hook = SessionUpdate::HookAnnotation {
+            message: with("hook output is not upstream error text"),
+        };
+        hook.scrub_sent_credentials();
+        assert!(serde_json::to_string(&hook).unwrap().contains(CRED));
+    }
+
     /// Every retry state mirrors onto a live `agent_thought_chunk` tagged `fuigo/retryStatus`, never onto `agent_message_chunk`.
     /// Stock ACP clients (Murage) fold message chunks into the answer and show thought chunks only in the thinking area.
     #[test]
@@ -1553,6 +1872,7 @@ mod tests {
                     max_retries: 2,
                     reason: "empty response from model (reasoning_only)".into(),
                     error_type: Some("empty_response".into()),
+                    verdicts: None,
                 },
                 "Retrying the model (1/2): empty response from model (reasoning_only)\n\n",
             ),
@@ -1562,6 +1882,7 @@ mod tests {
                     reason: "429 Too Many Requests".into(),
                     is_rate_limited: true,
                     error_type: None,
+                    verdicts: None,
                 },
                 "The model request failed after 3 attempts: 429 Too Many Requests\n\n",
             ),
@@ -1569,6 +1890,7 @@ mod tests {
                 RetryState::Failed {
                     error_type: "empty_response".into(),
                     message: "empty response from model (reasoning_only)".into(),
+                    verdicts: None,
                 },
                 "The model request failed: empty response from model (reasoning_only)\n\n",
             ),
@@ -1604,6 +1926,7 @@ mod tests {
         let state = RetryState::Failed {
             error_type: DISK_FULL_ERROR_TYPE.to_string(),
             message: DISK_FULL_USER_MESSAGE.to_string(),
+            verdicts: None,
         };
         assert_eq!(
             retry_status_text(&state, false),
@@ -1618,6 +1941,7 @@ mod tests {
                 &RetryState::Failed {
                     error_type: "api".to_string(),
                     message: "upstream exploded".to_string(),
+                    verdicts: None,
                 },
                 false
             ),
@@ -1636,6 +1960,7 @@ mod tests {
             reason: "empty response from model (reasoning_only)".into(),
             is_rate_limited: false,
             error_type: Some("empty_response".into()),
+            verdicts: None,
         };
         assert_eq!(
             retry_status_text(&one, false),
@@ -1646,6 +1971,7 @@ mod tests {
             reason: "empty response from model (reasoning_only)".into(),
             is_rate_limited: false,
             error_type: Some("empty_response".into()),
+            verdicts: None,
         };
         assert_eq!(
             retry_status_text(&two, false),
@@ -1663,6 +1989,7 @@ mod tests {
             max_retries: 3,
             reason: "Server error; retrying request".into(),
             error_type: Some("api".into()),
+            verdicts: None,
         };
         assert_eq!(
             format!(
@@ -2523,6 +2850,7 @@ mod tests {
             error_kind: Some("max_tokens_truncation".into()),
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "turn_completed");
@@ -2541,6 +2869,7 @@ mod tests {
             error_kind: None,
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "turn_completed");
@@ -2559,6 +2888,7 @@ mod tests {
                 error_kind: Some("max_tokens_truncation".into()),
                 usage: None,
                 elapsed_ms: Some(1234),
+                verdicts: None,
             },
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-min".into(),
@@ -2567,6 +2897,7 @@ mod tests {
                 error_kind: None,
                 usage: None,
                 elapsed_ms: None,
+                verdicts: None,
             },
         ] {
             let json_str = serde_json::to_string(&update).unwrap();
@@ -2589,6 +2920,7 @@ mod tests {
                 error_kind: None,
                 usage: None,
                 elapsed_ms: None,
+                verdicts: None,
             }
         );
     }
@@ -2602,6 +2934,7 @@ mod tests {
             error_kind: None,
             usage: None,
             elapsed_ms: Some(1234),
+            verdicts: None,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["elapsed_ms"], 1234);
@@ -2832,5 +3165,79 @@ mod tests {
                 share_url: Some("https://share.example.test/build/s1".into())
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod contained_checkpoint_path_tests {
+    use super::contained_checkpoint_path;
+    use std::path::Path;
+
+    #[test]
+    fn only_the_exact_compaction_path_form_is_followed() {
+        let dir = Path::new("/s/dir");
+        assert_eq!(
+            contained_checkpoint_path(dir, "compaction_checkpoints/ab-12_X.json"),
+            dir.join("compaction_checkpoints/ab-12_X.json")
+        );
+        for bad in [
+            "../../etc/passwd",
+            "/etc/passwd",
+            "compaction_checkpoints/../../x.json",
+            "compaction_checkpoints/a/b.json",
+            "compaction_checkpoints/.json",
+            "compaction_checkpoints/a.b.json",
+            "x.json",
+            "",
+        ] {
+            let p = contained_checkpoint_path(dir, bad);
+            assert_eq!(p, dir.join("compaction_checkpoints/.rejected"), "{bad:?} escaped: {p:?}");
+        }
+    }
+
+    /// P146 (S17): a checkpoint is read only when it is a regular file in the real `compaction_checkpoints` directory.
+    /// A symlink there (to a file outside the session) reads as missing, and so does a symlinked directory; a marker
+    /// refused as text never reaches the file system, even when `.rejected` itself is a planted symlink.
+    #[cfg(unix)]
+    #[test]
+    fn a_checkpoint_read_never_follows_a_symlink() {
+        use super::read_contained_checkpoint;
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("sentinel.json");
+        std::fs::write(&secret, b"OUTSIDE").unwrap();
+        let session = tempfile::tempdir().unwrap();
+        let dir = session.path().join("compaction_checkpoints");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("good.json"), b"INSIDE").unwrap();
+        assert_eq!(read_contained_checkpoint(session.path(), "compaction_checkpoints/good.json").unwrap(), b"INSIDE");
+
+        std::os::unix::fs::symlink(&secret, dir.join("linked.json")).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join(".rejected")).unwrap();
+        for marker in ["compaction_checkpoints/linked.json", "../outside.json", "compaction_checkpoints/missing.json"] {
+            let error = read_contained_checkpoint(session.path(), marker).expect_err(marker);
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{marker}: {error}");
+        }
+
+        // A symlinked directory: the name inside it is a regular file, but outside the session.
+        let other = tempfile::tempdir().unwrap();
+        std::fs::create_dir(other.path().join("x")).unwrap();
+        std::fs::write(other.path().join("x/good.json"), b"OUTSIDE").unwrap();
+        let session2 = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(other.path().join("x"), session2.path().join("compaction_checkpoints")).unwrap();
+        let error = read_contained_checkpoint(session2.path(), "compaction_checkpoints/good.json").expect_err("dir link");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
+
+        // A FIFO with no writer: refused at once instead of blocking the read (the open does not wait for a writer).
+        let fifo = std::ffi::CString::new(dir.join("fifo.json").to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo(3) on a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "make the fifo");
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let session_path = session.path().to_path_buf();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(read_contained_checkpoint(&session_path, "compaction_checkpoints/fifo.json"));
+        });
+        let outcome = done_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("a FIFO must not block the read");
+        let error = outcome.expect_err("a FIFO is not a checkpoint");
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}");
     }
 }

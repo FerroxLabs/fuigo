@@ -323,10 +323,17 @@ const SYSTEM_REMINDER_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*system[-_]reminder)";
 static SYSTEM_REMINDER_TAG_RE: std::sync::LazyLock<regex::Regex> =
     std::sync::LazyLock::new(|| regex::Regex::new(SYSTEM_REMINDER_TAG_PATTERN).unwrap());
 
+/// Open/close `memory-context` (the frame Fuigo puts around recalled memory), case-insensitive, prefix match.
+const MEMORY_CONTEXT_TAG_PATTERN: &str = r"(?i)<(\s*/?\s*memory[-_]context)";
+
+static MEMORY_CONTEXT_TAG_RE: std::sync::LazyLock<regex::Regex> =
+    std::sync::LazyLock::new(|| regex::Regex::new(MEMORY_CONTEXT_TAG_PATTERN).unwrap());
+
 /// HTML-escape leading `<` so untrusted AGENTS.md cannot break out of or forge harness framing.
 fn neutralize_reminder_tags(content: &str) -> String {
-    SYSTEM_REMINDER_TAG_RE
-        .replace_all(content, "&lt;$1")
+    let content = SYSTEM_REMINDER_TAG_RE.replace_all(content, "&lt;$1");
+    MEMORY_CONTEXT_TAG_RE
+        .replace_all(&content, "&lt;$1")
         .into_owned()
 }
 

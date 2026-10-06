@@ -187,6 +187,7 @@ async fn refresh_codebase_graph_after_head_change(
     repo_root: &Path,
 ) {
     let mut cmd = tokio::process::Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.args(["diff", "--name-status", "ORIG_HEAD", "HEAD"])
         .current_dir(repo_root)
         .stdin(std::process::Stdio::null());

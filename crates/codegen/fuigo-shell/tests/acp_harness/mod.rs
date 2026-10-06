@@ -71,11 +71,12 @@ pub fn spawn_agent_local_with_config(agent_config: AgentConfig) -> AgentPipes {
     let agent = MvpAgent::new(GatewaySender::new(gw_tx), &agent_config, auth_manager, None)
         .expect("valid config");
 
-    let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
-    let (agent_conn, agent_io) =
-        acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
-            tokio::task::spawn_local(fut);
-        });
+    // The production wiring (`agent_side_connection`), so a test sees what a client of the real binary sees.
+    let (agent_conn, agent_io) = fuigo_shell::agent::credential_scrub::agent_side_connection(
+        agent,
+        a2c_a.compat_write(),
+        c2a_b.compat(),
+    );
     tokio::task::spawn_local(
         GatewayReceiver::new(gw_rx, agent_conn)
             .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)

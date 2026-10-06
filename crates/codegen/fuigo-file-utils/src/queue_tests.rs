@@ -1,6 +1,17 @@
 use super::*;
 use crate::UploadMethod;
 
+/// P47: the proxy-upload fixtures below model a NON-session static key. A session `user_token` on the static
+/// path is checked against the service-endpoint trust class and can never reach these loopback mocks (that is
+/// pinned in `storage_client` and in fuigo-shell's wire tests); what these tests exercise is queue behaviour.
+fn static_test_key(token: &str) -> Option<Arc<dyn AuthCredentialProvider>> {
+    Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
+        Box::new(crate::storage_client::StaticFuigoAuth::new(Some(token.to_owned()))),
+        Some(token.to_owned()),
+        fuigo_auth::BearerDestination::Unrestricted,
+    )))
+}
+
 /// Mock credential resolver for tests.
 struct MockResolver;
 
@@ -1706,6 +1717,10 @@ struct CountingResolver {
 }
 
 impl TraceExportSource for CountingResolver {
+    fn proxy_credentials(&self) -> Option<Arc<dyn AuthCredentialProvider>> {
+        static_test_key("test-token")
+    }
+
     fn resolve(&self) -> TraceExportConfig {
         self.count.fetch_add(1, Ordering::SeqCst);
         TraceExportConfig {
@@ -1792,6 +1807,24 @@ fn upload_disposition_structured_terminal() {
         let wrapped = http_err(code).context("Streaming upload failed for s/turn_0/x");
         assert_eq!(upload_disposition(&wrapped), Disposition::Terminal);
     }
+}
+
+/// P47: a destination the credential provider refuses is terminal: no refresh, no retry, no park (nothing was
+/// sent, and no retry changes the destination). Reached as the storage client produces it: the middleware's
+/// `reqwest_middleware::Error::Middleware` wrapped in upload context. Control: a 401 still parks.
+#[test]
+fn p47_upload_disposition_bearer_refusal_is_terminal() {
+    let middleware = reqwest_middleware::Error::Middleware(
+        fuigo_auth::BearerDestinationRefused("refused".into()).into(),
+    );
+    let wrapped = anyhow::Error::from(middleware)
+        .context("Fetching upload limits")
+        .context("Streaming upload failed for s/turn_0/x");
+    assert_eq!(upload_disposition(&wrapped), Disposition::Terminal);
+    assert_eq!(
+        upload_disposition(&anyhow::anyhow!("Upload to 'path': HTTP 401 - Unauthorized")),
+        Disposition::AuthRefresh
+    );
 }
 
 #[test]
@@ -1883,6 +1916,83 @@ async fn upload_with_retries_resolves_credentials_each_attempt() {
         3,
         "resolver.resolve() called each attempt"
     );
+}
+
+/// P47, end to end through the queue: a static SESSION `user_token` aimed at a cleartext loopback proxy is refused
+/// by the auth middleware, so the server is never contacted, and the queue treats the refusal as terminal — one
+/// attempt, no retry, no park. Positive control: `upload_with_retries_aborts_on_persistent_auth_error` reaches the
+/// same kind of server with a non-session key.
+#[tokio::test]
+async fn p47_session_upload_refusal_is_terminal_in_the_queue() {
+    use axum::{Router, http::StatusCode, routing::post};
+    struct SessionStaticResolver {
+        proxy_base_url: String,
+    }
+    impl TraceExportSource for SessionStaticResolver {
+        fn resolve(&self) -> TraceExportConfig {
+            TraceExportConfig {
+                bucket_url: None,
+                service_account_key: None,
+                prefix_dir: None,
+                gcs_prefix: None,
+                absolute_paths: false,
+                archive_name_override: None,
+                upload_method: UploadMethod::Proxy {
+                    proxy_base_url: self.proxy_base_url.clone(),
+                    user_token: "p47-session-token".to_string(),
+                    deployment_key: None,
+                    alpha_test_key: None,
+                },
+            }
+        }
+    }
+    let hits = Arc::new(AtomicU32::new(0));
+    let seen = hits.clone();
+    let app = Router::new().fallback(post(move || {
+        seen.fetch_add(1, Ordering::SeqCst);
+        async { StatusCode::UNAUTHORIZED }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let resolver: Arc<dyn TraceExportSource> = Arc::new(SessionStaticResolver {
+        proxy_base_url: format!("http://{addr}/v1"),
+    });
+    let policy = UploadRetryPolicy {
+        max_attempts: 5,
+        initial_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+        multiplier: 1.0,
+        max_age: DEFAULT_MAX_AGE,
+        auth_park_probe_interval: DEFAULT_AUTH_PARK_PROBE_INTERVAL,
+    };
+    let temp = tempfile::TempDir::new().unwrap();
+    let file_path = temp.path().join("test.json");
+    std::fs::write(&file_path, b"test data").unwrap();
+    let mut item = UploadQueueItem {
+        source: UploadSource::OwnedTemp(file_path),
+        gcs_path: "session/turn_0/test.json".to_string(),
+        content_type: "application/json".to_string(),
+        artifact_name: "test".to_string(),
+        attempts: 0,
+        enqueued_at: Instant::now(),
+        sidecar_path: None,
+        completion_tx: None,
+        client_version: None,
+        compress: false,
+        parent_span: tracing::Span::none(),
+        _in_flight: None,
+    };
+    let err = tokio::time::timeout(
+        Duration::from_secs(20),
+        run_upload_with_retries(&mut item, &resolver, &policy),
+    )
+    .await
+    .expect("a refusal must not park or retry")
+    .unwrap_err();
+    assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(), "{err:#}");
+    assert_eq!(item.attempts, 1, "terminal: no retry");
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "the loopback proxy was contacted");
 }
 
 /// Exercises the 401 abort path end-to-end via a mock axum server.
@@ -2018,6 +2128,10 @@ impl ParkingResolver {
 impl TraceExportSource for ParkingResolver {
     fn has_usable_credential(&self) -> bool {
         self.usable.load(Ordering::SeqCst)
+    }
+
+    fn proxy_credentials(&self) -> Option<Arc<dyn AuthCredentialProvider>> {
+        static_test_key("test-token")
     }
 
     fn resolve(&self) -> TraceExportConfig {
@@ -3428,6 +3542,10 @@ async fn inline_fallback_semaphore_bounds_concurrency() {
     }
 
     impl TraceExportSource for ConcurrencyResolver {
+        fn proxy_credentials(&self) -> Option<Arc<dyn AuthCredentialProvider>> {
+            static_test_key("t")
+        }
+
         fn resolve(&self) -> TraceExportConfig {
             TraceExportConfig {
                 bucket_url: None,
@@ -4551,4 +4669,176 @@ fn cleanup_orphans_never_deletes_reference_source() {
         ref_source.exists(),
         "a reference source outside queue_dir must never be swept"
     );
+}
+
+// ---- P71: the destination gate on the queue's send path ----
+
+mod p71_gate {
+    use super::*;
+    use crate::destination_gate::is_withheld;
+    use crate::gate_testkit::RecordingEndpoint;
+
+    const CONTENT: &[u8] = b"P71-QUEUED-ARCHIVE: account user-123 team-456 /home/rowan";
+
+    fn resolver_for(base: String) -> Arc<dyn TraceExportSource> {
+        Arc::new(CountingResolver {
+            count: Arc::new(AtomicU32::new(0)),
+            proxy_base_url: base,
+        })
+    }
+
+    /// Write the pair a prior process life spilled (temp + sidecar), as `enqueue_bytes_blocking` does.
+    fn spilled_pair(home: &Path) -> (PathBuf, PathBuf, QueueItemSidecar) {
+        let queue_dir = home.join("upload_queue");
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        let temp = queue_dir.join("abcdef12_turn4_archive.bin_111_0");
+        std::fs::write(&temp, CONTENT).unwrap();
+        let sidecar = QueueItemSidecar {
+            schema_version: 1,
+            session_id: "session-abcdef12".to_string(),
+            turn_number: 4,
+            gcs_path: "session-abcdef12/turn_4/archive.bin".to_string(),
+            content_type: "application/gzip".to_string(),
+            artifact_name: "archive.bin".to_string(),
+            enqueued_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            sha256: crate::sha256_hex(CONTENT),
+        };
+        let sidecar_path = sidecar_path_for(&temp);
+        std::fs::write(&sidecar_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        (temp, sidecar_path, sidecar)
+    }
+
+    /// A freshly enqueued item bound for a third-party proxy: the worker sends nothing, does not retry
+    /// (one attempt, no backoff), and counts it failed.
+    #[tokio::test]
+    async fn queued_item_to_a_third_party_proxy_sends_nothing() {
+        let mock = RecordingEndpoint::third_party().await;
+        let home = tempfile::TempDir::new().unwrap();
+        let queue = UploadQueue::spawn(
+            home.path(),
+            resolver_for(mock.proxy_base_url()),
+            UploadRetryPolicy::default(),
+        );
+        let outcome = queue
+            .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+            .await;
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
+        mock.settle(Duration::from_millis(300)).await;
+        assert_eq!(mock.connections(), 0, "the third-party proxy was contacted");
+        assert!(!mock.received_contains(b"P71-QUEUED"));
+        assert_eq!(queue.stats().uploaded.load(Ordering::Relaxed), 0);
+        assert_eq!(queue.stats().failed.load(Ordering::Relaxed), 1);
+    }
+
+    /// Positive control: the same item bound for a FluxRouter-class proxy is delivered unchanged.
+    #[tokio::test]
+    async fn queued_item_to_a_fluxrouter_class_proxy_is_delivered_unchanged() {
+        let mock = RecordingEndpoint::fluxrouter_class().await;
+        let home = tempfile::TempDir::new().unwrap();
+        let queue = UploadQueue::spawn(
+            home.path(),
+            resolver_for(mock.proxy_base_url()),
+            UploadRetryPolicy::default(),
+        );
+        queue
+            .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+            .await;
+        assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
+        assert!(mock.received_contains(CONTENT), "FluxRouter-class proxy did not receive the bytes");
+        assert_eq!(queue.stats().uploaded.load(Ordering::Relaxed), 1);
+    }
+
+    /// Recovery under a CHANGED proxy: a pair spilled while the destination was FluxRouter is re-sent
+    /// after a restart into a third-party proxy. The decision is taken at send time, so nothing
+    /// reaches it; the same pair re-sent to a FluxRouter-class proxy is delivered unchanged.
+    #[tokio::test]
+    async fn recovered_spill_is_decided_on_the_destination_at_send_time() {
+        let third_party = RecordingEndpoint::third_party().await;
+        let home = tempfile::TempDir::new().unwrap();
+        let (temp, sidecar_path, sidecar) = spilled_pair(home.path());
+        let queue = UploadQueue::spawn(
+            home.path(),
+            resolver_for(third_party.proxy_base_url()),
+            UploadRetryPolicy::default(),
+        );
+        assert_eq!(queue.enqueue_recovered(&temp, &sidecar_path, &sidecar), EnqueueOutcome::Enqueued);
+        assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
+        third_party.settle(Duration::from_millis(300)).await;
+        assert_eq!(third_party.connections(), 0, "a recovered spill reached a third-party proxy");
+        assert_eq!(queue.stats().failed.load(Ordering::Relaxed), 1);
+
+        let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+        let home = tempfile::TempDir::new().unwrap();
+        let (temp, sidecar_path, sidecar) = spilled_pair(home.path());
+        let queue = UploadQueue::spawn(
+            home.path(),
+            resolver_for(fluxrouter_class.proxy_base_url()),
+            UploadRetryPolicy::default(),
+        );
+        assert_eq!(queue.enqueue_recovered(&temp, &sidecar_path, &sidecar), EnqueueOutcome::Enqueued);
+        assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
+        assert!(fluxrouter_class.received_contains(CONTENT));
+    }
+
+    /// The inline fallbacks (over-budget / full channel) go through the same gate.
+    ///
+    /// The fallback is a detached task, so the test waits for it by what it must do: resolve its destination
+    /// (the resolver counts), then return its fallback permits when its upload attempt is over. Only then
+    /// does it look at what the mock received. The FluxRouter-class half proves the same fallback really
+    /// sends when it is allowed to.
+    #[tokio::test]
+    async fn inline_fallback_to_a_third_party_proxy_sends_nothing() {
+        async fn fall_back_inline(base: String) {
+            let home = tempfile::TempDir::new().unwrap();
+            std::fs::create_dir_all(home.path().join("upload_queue")).unwrap();
+            let resolved = Arc::new(AtomicU32::new(0));
+            let (tx, _rx) = mpsc::channel(1);
+            let queue = test_queue(
+                tx,
+                home.path().join("upload_queue"),
+                Arc::new(CountingResolver {
+                    count: resolved.clone(),
+                    proxy_base_url: base,
+                }),
+                Arc::new(UploadQueueStats::new()),
+                0, // no disk budget: every enqueue falls back to an inline upload
+            );
+            let outcome = queue
+                .enqueue_bytes_blocking(CONTENT, "s/turn_0/archive.bin", "application/gzip", "archive.bin", "s", 0)
+                .await;
+            assert_eq!(outcome, EnqueueOutcome::FellBackToInline);
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+            while resolved.load(Ordering::SeqCst) == 0 {
+                assert!(tokio::time::Instant::now() < deadline, "the inline fallback never resolved its destination");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            // It took its fallback permits before it resolved and gives them back when its upload attempt is
+            // over (sent, or refused): all permits back means the detached task has finished.
+            while queue.inline_fallback_semaphore.available_permits() < INLINE_FALLBACK_TOTAL_PERMITS as usize {
+                assert!(tokio::time::Instant::now() < deadline, "the inline fallback never finished");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+        fall_back_inline(fluxrouter_class.proxy_base_url()).await;
+        assert!(
+            fluxrouter_class.received_contains(CONTENT),
+            "the inline fallback did not send to a FluxRouter-class proxy (positive control)"
+        );
+
+        let third_party = RecordingEndpoint::third_party().await;
+        fall_back_inline(third_party.proxy_base_url()).await;
+        assert_eq!(third_party.connections(), 0, "the inline fallback reached a third-party proxy");
+        assert!(third_party.received().is_empty());
+    }
+
+    /// The queue's disposition for a withheld upload is terminal: never retried, never parked.
+    #[test]
+    fn withheld_is_terminal() {
+        let err = crate::destination_gate::gate_proxy_url("https://third.example/v1", "x").unwrap_err();
+        assert!(is_withheld(&err));
+        assert!(matches!(upload_disposition(&err), Disposition::Terminal));
+    }
 }

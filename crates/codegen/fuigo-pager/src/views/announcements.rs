@@ -840,6 +840,7 @@ mod tests {
 
     #[test]
     fn render_banner_title_row_with_hide_button_message_row_with_cta() {
+        let _theme = crate::theme::cache::pin_theme();
         let anns = [RemoteAnnouncement {
             severity: Some("critical".into()),
             title: Some("Outage".into()),
@@ -887,6 +888,7 @@ mod tests {
 
     #[test]
     fn render_banner_hide_button_highlights_on_hover() {
+        let _theme = crate::theme::cache::pin_theme();
         let anns = [ann(Some("critical"), Some("outage"))];
         let area = Rect::new(0, 0, 60, 2);
         let mut buf = Buffer::empty(area);
@@ -1301,6 +1303,7 @@ mod tests {
     /// It never overpaints past `max_width`; that keeps the in-session header / dashboard CTA from writing over the right-aligned chips.
     #[test]
     fn render_cta_button_clamps_to_max_width() {
+        let _theme = crate::theme::cache::pin_theme();
         let theme = Theme::current();
 
         // Fits: the full button; the rect covers it (no caption requested).
@@ -1427,6 +1430,7 @@ mod tests {
     /// Hide affordances right-aligned; rects for both buttons.
     #[test]
     fn render_promo_row_button_and_hide_affordances() {
+        let _theme = crate::theme::cache::pin_theme();
         let mut ann = promo("p", "New promo", Some(("Get Fuigo Pro", "https://example.com/pro")));
         ann.cta.as_mut().unwrap().caption = Some("or use Ctrl+O".into());
         let anns = [ann];
@@ -1464,6 +1468,7 @@ mod tests {
 
     #[test]
     fn render_promo_row_hover_styles() {
+        let _theme = crate::theme::cache::pin_theme();
         let anns = [promo("p", "msg", Some(("Go", "https://x.ai")))];
         let area = Rect::new(0, 0, 80, 1);
         let theme = Theme::current();

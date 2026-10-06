@@ -1269,51 +1269,62 @@ fn try_remove_from_json_object(
     nested_key: Option<&str>,
     source_url_or_path: &str,
 ) -> bool {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let mut json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let map = if let Some(key) = nested_key {
-        match json.get_mut(key).and_then(|v| v.as_object_mut()) {
-            Some(m) => m,
-            None => return false,
-        }
-    } else {
-        match json.as_object_mut() {
-            Some(m) => m,
-            None => return false,
-        }
-    };
-
-    let matching_key = map.iter().find_map(|(name, config)| {
-        if json_source_matches(config, source_url_or_path) {
-            Some(name.clone())
-        } else {
-            None
-        }
-    });
-
-    let Some(key) = matching_key else {
+    use fuigo_config::fs_atomic::Edit;
+    // Nothing to remove from a missing file; take no lock for it.
+    if !path.exists() {
         return false;
-    };
-
-    map.remove(&key);
-
-    match serde_json::to_string_pretty(&json) {
-        Ok(new_content) => {
-            if std::fs::write(path, format!("{new_content}\n")).is_ok() {
-                tracing::info!(key = %key, "removed marketplace source from JSON file");
-                true
+    }
+    // The shared read-modify-write: under a cross-process lock (kept under
+    // `~/.fuigo/locks/`, never beside a `~/.claude` file), the file REPLACED
+    // rather than truncated and rewritten in place (Claude Code reads these
+    // files too), written through a symlink and keeping its mode as the old
+    // in-place write did, and renamed only over the version read.
+    let edited = crate::util::config::edit_config_file_raw(
+        path,
+        |path, bytes| {
+            fuigo_config::write_through::stage_file_atomically_with(
+                path,
+                bytes,
+                fuigo_config::write_through::NewFileMode::Default,
+            )
+        },
+        |current| {
+            let Ok(Some(bytes)) = current else {
+                return Ok(Edit::Keep(None));
+            };
+            let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                return Ok(Edit::Keep(None));
+            };
+            let map = if let Some(key) = nested_key {
+                match json.get_mut(key).and_then(|v| v.as_object_mut()) {
+                    Some(m) => m,
+                    None => return Ok(Edit::Keep(None)),
+                }
             } else {
-                false
-            }
+                match json.as_object_mut() {
+                    Some(m) => m,
+                    None => return Ok(Edit::Keep(None)),
+                }
+            };
+            let Some(key) = map.iter().find_map(|(name, config)| {
+                json_source_matches(config, source_url_or_path).then(|| name.clone())
+            }) else {
+                return Ok(Edit::Keep(None));
+            };
+            map.remove(&key);
+            let new_content = serde_json::to_string_pretty(&json)?;
+            Ok(Edit::Replace {
+                contents: format!("{new_content}\n").into_bytes(),
+                value: Some(key),
+            })
+        },
+    );
+    match edited {
+        Ok(Some(key)) => {
+            tracing::info!(key = %key, "removed marketplace source from JSON file");
+            true
         }
-        Err(_) => false,
+        Ok(None) | Err(_) => false,
     }
 }
 

@@ -11,6 +11,9 @@
 //! # Test read-only profile
 //! cargo run -p fuigo-sandbox --example sandbox_smoke_test -- read-only
 //! ```
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::Path;
 use fuigo_sandbox::{ProfileName, SandboxManager};

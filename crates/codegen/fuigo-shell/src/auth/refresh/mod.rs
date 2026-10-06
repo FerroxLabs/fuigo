@@ -71,7 +71,6 @@ pub(crate) fn resolve_refresh_credential(
         })
 }
 /// Outcome of a refresh attempt. It carries data only: `refresh_chain` handles the mutations.
-#[derive(Debug)]
 #[must_use = "RefreshOutcome encodes a state transition; route it through refresh_chain"]
 pub(crate) enum RefreshOutcome {
     /// The authority returned a fresh token; the caller persists it via `update()`.
@@ -95,6 +94,26 @@ pub(crate) enum RefreshOutcome {
     /// Transient or unknown failure; the caller may retry later.
     /// The refresher logs the cause structurally and flattens it to a message here; the retry decision needs recoverability, not the source chain.
     TransientFailure { message: String },
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructures are exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for RefreshOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Success(v0) => f.debug_tuple("Success").field(v0).finish(),
+            Self::PermanentFailure { error, tried_key, tried_refresh_token } => f
+                .debug_struct("PermanentFailure")
+                .field("error", error)
+                .field("tried_key", &tried_key.as_ref().map(|_| "<redacted>"))
+                .field("tried_refresh_token", &tried_refresh_token.as_ref().map(|_| "<redacted>"))
+                .finish(),
+            Self::TransientFailure { message } => f
+                .debug_struct("TransientFailure")
+                .field("message", message)
+                .finish(),
+        }
+    }
 }
 impl RefreshOutcome {
     /// A fresh credential from the authority (hides the `Box`).

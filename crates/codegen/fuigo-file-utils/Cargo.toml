@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 base64.workspace = true
 dunce = { workspace = true }
 fuigo-circuit-breaker = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 fuigo-version = { workspace = true }
 aws-sdk-s3 = { version = "1", default-features = false, features = [
     "rt-tokio",
@@ -55,6 +56,10 @@ zstd.workspace = true
 
 [features]
 default-bazel = []
+# TEST SEAM (P71): classify the hosts `127.0.0.1` and `[::1]` as a FluxRouter-operated storage proxy so
+# loopback mocks receive content, and build the recording mock (`gate_testkit`, which needs `tokio/net`).
+# Enable ONLY from `[dev-dependencies]`; `fuigo-extra-ca/tests/upload_gate_guard.rs` pins that.
+test-loopback-operator = ["tokio/net"]
 
 
 [dev-dependencies]

@@ -308,16 +308,7 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             "session directory not found",
         ));
     };
-    let session_id = req.session_id.clone();
-    let archive = tokio::task::spawn_blocking({
-        let session_dir = session_dir.clone();
-        move || crate::upload::feedback_archive::build_session_archive(&session_dir, &session_id)
-    })
-    .await
-    .map_err(|e| crate::acp_error::internal_error(format!("couldn't build session archive: {e}")))?
-    .map_err(|e| {
-        crate::acp_error::internal_error(format!("couldn't build session archive: {e}"))
-    })?;
+    // Resolve the destination first: identity in the packed files follows it (P54).
     let Some(gcs_config) = agent
         .one_shot_feedback_gcs_config(req.session_id.clone())
         .await
@@ -326,9 +317,52 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
             "trace upload is not available",
         ));
     };
-    let object_path = format!("{}/feedback_trace.tar.gz", req.session_id);
+    send_feedback_archive(
+        session_dir,
+        req.session_id.clone(),
+        gcs_config,
+        Some(agent.auth_manager.clone()),
+    )
+    .await
+}
+
+/// Pack `session_dir` and upload it as the one-shot feedback archive.
+///
+/// The handler resolves the session and the destination; everything that moves bytes is here, so a
+/// test can drive it against a mock storage endpoint.
+pub(crate) async fn send_feedback_archive(
+    session_dir: std::path::PathBuf,
+    session_id_owned: String,
+    gcs_config: crate::session::repo_changes::TraceExportConfig,
+    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+) -> ExtResult {
+    // P71: a destination that may not receive file content gets nothing, so do not read or pack the
+    // session directory for it. (`upload_bytes` below enforces the same rule for every caller.)
+    fuigo_file_utils::destination_gate::gate_upload_as(
+        fuigo_file_utils::destination_gate::WithheldKind::FeedbackArchive,
+        &gcs_config.upload_method,
+        &format!("{}/feedback_trace.tar.gz", session_id_owned),
+    )
+    .map_err(|e| crate::acp_error::internal_error(format!("trace upload withheld: {e:#}")))?;
+    let destination = archive_destination(&gcs_config.upload_method);
+    let session_id = session_id_owned.clone();
+    let archive = tokio::task::spawn_blocking({
+        let session_dir = session_dir.clone();
+        move || {
+            crate::upload::feedback_archive::build_session_archive(
+                &session_dir,
+                &session_id,
+                &destination,
+            )
+        }
+    })
+    .await
+    .map_err(|e| crate::acp_error::internal_error(format!("couldn't build session archive: {e}")))?
+    .map_err(|e| {
+        crate::acp_error::internal_error(format!("couldn't build session archive: {e}"))
+    })?;
+    let object_path = format!("{}/feedback_trace.tar.gz", session_id_owned);
     use crate::upload::gcs::WithAuth as _;
-    let auth_manager = Some(agent.auth_manager.clone());
     match tokio::time::timeout(
         std::time::Duration::from_secs(FEEDBACK_TRACE_UPLOAD_TIMEOUT_SECS),
         fuigo_file_utils::gcs::upload_bytes(
@@ -352,6 +386,79 @@ async fn handle_upload_trace(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
 }
 /// Record inline code review events.
 ///
+/// P54: the URL a one-shot feedback archive's identity is decided on: the storage proxy it is
+/// uploaded through. `one_shot_feedback_gcs_config` refuses every other method today; if one is
+/// ever returned, the empty destination withholds identity (fails closed).
+fn archive_destination(upload_method: &fuigo_file_utils::upload_config::UploadMethod) -> String {
+    use fuigo_file_utils::upload_config::UploadMethod;
+    match upload_method {
+        UploadMethod::Proxy { proxy_base_url, .. } => proxy_base_url.clone(),
+        UploadMethod::Direct { .. } | UploadMethod::S3 { .. } => String::new(),
+    }
+}
+
+/// P54: add `agentId` (the persisted machine id) to a review-comment record only where the
+/// record's destination may receive it.
+///
+/// * `Direct` (GCS with a configured service-account key) and `S3` (configured bucket and
+///   credentials) are the operator's own storage, configured for exactly this trace data: kept.
+/// * `Proxy` uploads through the operator-configured storage proxy, the auxiliary-service class
+///   P43 gates: the id goes as is only when that proxy is FluxRouter-operated. Any other proxy
+///   receives `IdentityDisclosure::body_key_for(proxy, id)`, the SAME origin-scoped pseudonym the
+///   session's `hunk_records.jsonl` carries to that proxy in a feedback archive
+///   (`upload::feedback_archive::withhold_loc_identity`), so a create record, its delete
+///   tombstone and the LOC records of one session keep one stable machine key there (P54-K:
+///   P54 omitted the field, which broke any consumer joining or requiring it). Where a session's
+///   archive is also uploaded the proxy already holds this key; a deployment-key configuration
+///   uploads comments but never one-shot archives (`one_shot_feedback_gcs_config`), so there this
+///   is a new, pseudonymous, origin-scoped machine key — within the P54 policy ("nothing or a
+///   per-origin pseudonym"), and the operator's own proxy.
+pub(crate) fn stamp_review_agent_id(
+    record: &mut serde_json::Value,
+    upload_method: &fuigo_file_utils::upload_config::UploadMethod,
+    agent_id: &str,
+) {
+    use fuigo_file_utils::upload_config::UploadMethod;
+    let kept = match upload_method {
+        UploadMethod::Direct { .. } | UploadMethod::S3 { .. } => agent_id.to_owned(),
+        UploadMethod::Proxy { proxy_base_url, .. } => {
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::body_key_for(proxy_base_url, agent_id)
+        }
+    };
+    if let Some(map) = record.as_object_mut() {
+        map.insert("agentId".into(), serde_json::Value::String(kept));
+    }
+}
+
+/// Upload one `fuigo/review/*` record (`event` is `"create"` for a comment, `"delete"` for the tombstone of a
+/// deleted one) to cloud storage. Best-effort: a failure is logged, never surfaced.
+///
+/// Both review handlers send through here, so a test can drive the upload against a mock storage endpoint
+/// (P71: a storage proxy that is not FluxRouter-operated receives nothing; `upload_bytes` enforces it).
+pub(crate) async fn upload_review_record(
+    gcs_config: crate::session::repo_changes::TraceExportConfig,
+    auth_manager: Option<Arc<crate::auth::AuthManager>>,
+    gcs_path: String,
+    json_bytes: Vec<u8>,
+    event: &'static str,
+) {
+    match upload_bytes(
+        &gcs_config.with_auth(auth_manager),
+        &gcs_path,
+        &json_bytes,
+        "application/json",
+    )
+    .await
+    {
+        Ok(gcs_url) => {
+            tracing::info!(gcs_url = %gcs_url, event, "Review comment record uploaded to GCS");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, gcs_path, event, "Failed to upload review comment record to GCS");
+        }
+    }
+}
+
 /// Methods:
 /// - `fuigo/review/comment`: record a new inline code comment to cloud storage
 /// - `fuigo/review/comment/delete`: record a tombstone event for a deleted comment
@@ -368,21 +475,21 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 lines = %format!("{}-{}", request.citation.start_line, request.citation.end_line),
                 "Comment received"
             );
-            let record = serde_json::json!({
-                "event": "create",
-                "commentId": comment_id,
-                "sessionId": request.session_id,
-                "promptIndex": request.prompt_index,
-                "comment": null,
-                "citation": request.citation,
-                "agentId": agent_id().to_string(),
-                "clientType": format!("{:?}", agent.client_type()),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
             if let Some(gcs_config) = agent
                 .build_gcs_config(format!("{}/comments", request.session_id))
                 .await
             {
+                let mut record = serde_json::json!({
+                    "event": "create",
+                    "commentId": comment_id,
+                    "sessionId": request.session_id,
+                    "promptIndex": request.prompt_index,
+                    "comment": null,
+                    "citation": request.citation,
+                    "clientType": format!("{:?}", agent.client_type()),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                });
+                stamp_review_agent_id(&mut record, &gcs_config.upload_method, &agent_id());
                 let json_bytes = serde_json::to_vec_pretty(&record)
                     .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
                 let gcs_path = format!(
@@ -390,24 +497,13 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
                     comment_id
                 );
-                let auth_manager = Some(agent.auth_manager.clone());
-                tokio::spawn(async move {
-                    match upload_bytes(
-                        &gcs_config.with_auth(auth_manager),
-                        &gcs_path,
-                        &json_bytes,
-                        "application/json",
-                    )
-                    .await
-                    {
-                        Ok(gcs_url) => {
-                            tracing::info!(gcs_url = %gcs_url, "Comment uploaded to GCS");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, gcs_path, "Failed to upload comment to GCS");
-                        }
-                    }
-                });
+                tokio::spawn(upload_review_record(
+                    gcs_config,
+                    Some(agent.auth_manager.clone()),
+                    gcs_path,
+                    json_bytes,
+                    "create",
+                ));
             }
             let value = serde_json::to_value(CommentResponse {
                 comment_id,
@@ -425,18 +521,18 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                 session_id = %request.session_id,
                 "Comment delete received"
             );
-            let record = serde_json::json!({
-                "event": "delete",
-                "commentId": request.comment_id,
-                "sessionId": request.session_id,
-                "agentId": agent_id().to_string(),
-                "clientType": format!("{:?}", agent.client_type()),
-                "timestamp": chrono::Utc::now().to_rfc3339(),
-            });
             if let Some(gcs_config) = agent
                 .build_gcs_config(format!("{}/comments", request.session_id))
                 .await
             {
+                let mut record = serde_json::json!({
+                    "event": "delete",
+                    "commentId": request.comment_id,
+                    "sessionId": request.session_id,
+                    "clientType": format!("{:?}", agent.client_type()),
+                    "timestamp": chrono::Utc::now().to_rfc3339(),
+                });
+                stamp_review_agent_id(&mut record, &gcs_config.upload_method, &agent_id());
                 let json_bytes = serde_json::to_vec_pretty(&record)
                     .map_err(|e| crate::acp_error::internal_error(e.to_string()))?;
                 let event_id = uuid::Uuid::now_v7().to_string();
@@ -445,24 +541,13 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     gcs_config.gcs_prefix.as_deref().unwrap_or("comments"),
                     event_id
                 );
-                let auth_manager = Some(agent.auth_manager.clone());
-                tokio::spawn(async move {
-                    match upload_bytes(
-                        &gcs_config.with_auth(auth_manager),
-                        &gcs_path,
-                        &json_bytes,
-                        "application/json",
-                    )
-                    .await
-                    {
-                        Ok(gcs_url) => {
-                            tracing::info!(gcs_url = %gcs_url, "Comment delete event uploaded to GCS");
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, gcs_path, "Failed to upload comment delete event to GCS");
-                        }
-                    }
-                });
+                tokio::spawn(upload_review_record(
+                    gcs_config,
+                    Some(agent.auth_manager.clone()),
+                    gcs_path,
+                    json_bytes,
+                    "delete",
+                ));
             }
             let value = serde_json::to_value(CommentDeleteResponse {
                 comment_id: request.comment_id,
@@ -477,3 +562,73 @@ async fn handle_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
 }
 
+
+#[cfg(test)]
+mod review_identity_tests {
+    use super::stamp_review_agent_id;
+    use fuigo_file_utils::upload_config::UploadMethod;
+
+    const MACHINE_ID: &str = "5d1f0c2a-7a7a-4b4b-8c8c-0123456789ab";
+
+    fn proxy(url: &str) -> UploadMethod {
+        UploadMethod::Proxy {
+            proxy_base_url: url.into(),
+            user_token: "tok".into(),
+            deployment_key: None,
+            alpha_test_key: None,
+        }
+    }
+
+    fn stamped(method: &UploadMethod) -> serde_json::Value {
+        let mut record = serde_json::json!({"event": "create", "commentId": "c1", "sessionId": "s1"});
+        stamp_review_agent_id(&mut record, method, MACHINE_ID);
+        record
+    }
+
+    /// P54 hostile: a review-comment record uploaded through a storage proxy that is not
+    /// FluxRouter-operated never carries the machine id itself; through FluxRouter, or into the
+    /// operator's own configured bucket (Direct GCS, S3), it still does.
+    ///
+    /// P54-K: at a non-FluxRouter proxy the record carries the proxy-origin pseudonym — the key
+    /// `hunk_records.jsonl` already carries to that proxy for the same session — not nothing, so a
+    /// create record and its tombstone stay joinable and a consumer that requires the field keeps
+    /// working. Pinned as equality with the archive's transformation of the same id.
+    #[test]
+    fn review_comment_records_carry_the_machine_id_only_to_permitted_storage() {
+        for url in [
+            "https://cli-proxy.example/v1",
+            "http://127.0.0.1:9/v1",
+            "http://api.fluxrouter.ai/v1",
+        ] {
+            let record = stamped(&proxy(url));
+            assert!(!record.to_string().contains(MACHINE_ID), "{url}: {record}");
+            let key = record["agentId"].as_str().unwrap_or_else(|| panic!("{url}: no agentId: {record}"));
+            assert_eq!(
+                key,
+                fuigo_extra_ca::fluxrouter::destination_pseudonym(url, MACHINE_ID),
+                "{url}: not the origin pseudonym"
+            );
+            let archived = crate::upload::feedback_archive::withhold_loc_identity(
+                url,
+                format!("{{\"agentId\":\"{MACHINE_ID}\",\"authorType\":\"agent\"}}\n").into_bytes(),
+            );
+            let archived: serde_json::Value =
+                serde_json::from_slice(&archived).expect("one transformed LOC record");
+            assert_eq!(archived["agentId"], key, "{url}: comment and LOC keys differ");
+            assert_eq!(record["commentId"], "c1");
+        }
+        assert_eq!(stamped(&proxy("https://api.fluxrouter.ai/v1"))["agentId"], MACHINE_ID);
+        assert_eq!(
+            stamped(&UploadMethod::Direct { service_account_key: Some("{}".into()) })["agentId"],
+            MACHINE_ID
+        );
+        let s3 = UploadMethod::S3 {
+            bucket: "b".into(),
+            region: "r".into(),
+            credentials_file: None,
+            credentials_content: None,
+            endpoint_url: None,
+        };
+        assert_eq!(stamped(&s3)["agentId"], MACHINE_ID);
+    }
+}

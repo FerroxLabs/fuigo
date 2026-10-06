@@ -995,6 +995,9 @@ mod tests {
 
     #[test]
     fn workspace_key_ignores_home_git_repo_for_subdir() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // Home-is-a-git-repo (dotfiles in $HOME): the git up-walk finds home as the repo root, but a subdir must key on the SUBDIR, not $HOME
         // Pin HOME and USERPROFILE: fuigo_dirs::home_dir reads USERPROFILE on Windows
         let _lock = crate::ENV_TEST_LOCK
@@ -1454,6 +1457,9 @@ mod tests {
 
     #[test]
     fn workspace_key_collapses_standalone_fuigo_worktree_onto_source_repo() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A standalone worktree is a full clone with its OWN `.git`, so git topology can't link it to its source
         // The registry (worktrees.db) must collapse it onto the recorded source repo so trust is shared
         // The worktree dir is a plain dir (no git), proving the REGISTRY path (not git topology) does the collapse
@@ -1484,6 +1490,9 @@ mod tests {
 
     #[test]
     fn workspace_key_collapses_worktree_onto_source_repo_git_root() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // The registry records `source_repo` as the launch cwd, which may be a SUBDIR of the repo
         // workspace_key must key on the repo's git ROOT, not on `<repo>/sub`
         // A worktree launched from a subdir then shares ONE key with the source and linked worktrees (which key on the root)
@@ -1506,6 +1515,9 @@ mod tests {
 
     #[test]
     fn workspace_key_ignores_registry_for_cwd_outside_worktrees_dir() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // A populated registry must NOT collapse a cwd OUTSIDE `<fuigo_home>/worktrees`
         // `worktree_record_for_cwd` skips the registry there, so the key falls back to git/cwd
         // Non-vacuous: the registry IS populated with a real git source repo that WOULD be returned for a worktree cwd

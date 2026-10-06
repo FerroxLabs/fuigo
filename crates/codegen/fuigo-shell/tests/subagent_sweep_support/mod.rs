@@ -1,6 +1,9 @@
 //! Shared harness for the subagent latency sweep and the bootstrap-cost regression tier.
 //! Both test binaries include this file via `#[path]`.
 //! The regression tier lives in its own binary because the waterfall sink and env latch once per process.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};

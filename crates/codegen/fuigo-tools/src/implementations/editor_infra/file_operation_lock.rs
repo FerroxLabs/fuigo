@@ -212,14 +212,21 @@ mod tests {
         let guard1 = mgr.wait_for_lock("a.ts").await;
         let order2 = order.clone();
         let mgr2 = mgr.clone();
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(async move {
             order2.lock().await.push("2-waiting");
+            let _ = queued_tx.send(());
             let _guard2 = mgr2.wait_for_lock("a.ts").await;
             order2.lock().await.push("2-acquired");
         });
 
-        // Give spawned task time to queue.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait for the spawned task to start (a fixed sleep raced the
+        // scheduler on a loaded host and let "1-releasing" be logged first),
+        // then yield so it can reach the lock queue.
+        queued_rx.await.unwrap();
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
         order.lock().await.push("1-releasing");
         drop(guard1);
 
@@ -240,7 +247,9 @@ mod tests {
             true
         });
 
-        let result = tokio::time::timeout(std::time::Duration::from_millis(100), handle)
+        // A generous bound: this only has to distinguish "acquired" from
+        // "blocked behind a.ts forever"; 100ms flaked on a loaded host.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
             .await
             .expect("should not timeout")
             .expect("should not panic");

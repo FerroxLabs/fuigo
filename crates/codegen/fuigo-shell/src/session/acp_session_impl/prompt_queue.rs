@@ -212,7 +212,9 @@ impl SessionActor {
         // For synthetic prompts, derive trace config from the template captured during the first real user prompt
         let (trace_gcs_config, artifact_tracker) =
             if input_origin.is_synthetic() && trace_gcs_config.is_none() {
-                if let Some(template) = self.trace_config_template.borrow().clone() {
+                // Bind the clone first so the `RefCell` borrow ends before the await below.
+                let template = self.trace_config_template.borrow().clone();
+                if let Some(template) = template {
                     let cfg = crate::session::repo_changes::TraceExportConfig {
                         bucket_url: template.bucket_url,
                         service_account_key: None,

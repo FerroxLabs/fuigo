@@ -142,7 +142,9 @@ impl SessionActor {
                 Err(error) => last_error = error.to_string(),
             }
         }
-        Err(last_error)
+        // P70b display sink: the evaluator's error goes into the goal history, the pause message, `goal/state.json`
+        // and `GoalUpdated` notifications. Nothing decides on this text; credentials sent upstream are replaced.
+        Err(fuigo_telemetry::sent_credentials::scrub_owned(last_error))
     }
 
     fn record_goal_round_progress(&self, detail: &str, failed: bool) {
@@ -868,6 +870,24 @@ impl SessionActor {
             BudgetLimited,
             NoGoal,
         }
+        // P89. A goal's turns share one execution record. A turn that was only interrupted leaves
+        // it reopenable, but a limit (a spent token budget, the model-call or runtime limit,
+        // `--max-turns`) leaves it terminal for good; say so here, with the remedy, rather than
+        // hand the goal to a turn that is refused before it reaches the model.
+        let resumable_goal = self.goal_tracker.lock().snapshot().and_then(|goal| {
+            (goal.status == GoalStatus::Active || goal.status.is_paused())
+                .then(|| goal.goal_id.clone())
+        });
+        if let Some(goal_id) = resumable_goal
+            && let Some(reason) = crate::session::execution_state::Execution::goal_resume_blocker(
+                &self.notifications.persistence_tx,
+                &self.session_info.id.to_string(),
+                &goal_id,
+            )
+            .await
+        {
+            return GoalResumeOutcome::Message(format!("Goal cannot resume. {reason}"));
+        }
         let transition = {
             let mut tracker = self.goal_tracker.lock();
             match tracker.status() {
@@ -1060,6 +1080,8 @@ impl SessionActor {
             .filter(|item| !is_goal_continuation_directive(item))
             .collect();
         self.chat_state_handle.replace_conversation(kept);
+        self.note_history_not_rewritten_with("removing the earlier goal directives", false)
+            .await;
     }
 
     pub(super) async fn enforce_goal_token_budget(&self, current_tokens: i64) -> bool {

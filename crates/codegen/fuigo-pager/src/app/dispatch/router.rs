@@ -201,55 +201,6 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::NewSession => dispatch_new_session(app),
         Action::LeaveHome => leave_welcome_for_session(app),
-        #[cfg(feature = "local-workspace")]
-        Action::ConfirmWelcomeLocalWorkspaceAck => {
-            match crate::views::welcome::workspace_mode::confirm_welcome_local_workspace_ack(
-                &app.cwd, false,
-            ) {
-                Ok(cfg) => {
-                    app.welcome_workspace_mode =
-                        crate::views::welcome::WelcomeWorkspaceMode::LocalWorkspace;
-                    app.welcome_session_local_workspace = Some(Some(cfg));
-                    app.welcome_local_workspace_ack_pending = false;
-                    let effects = if app.deferred_startup.worktree {
-                        app.deferred_startup.worktree = false;
-                        let label = app.deferred_startup.worktree_label.take();
-                        let git_ref = app.deferred_startup.worktree_ref.take();
-                        let load_session_id = match app.deferred_startup.session.take() {
-                            Some(crate::app::session_startup::DeferredSessionStartup::Load {
-                                session_id,
-                                ..
-                            }) => Some(session_id),
-                            other => {
-                                app.deferred_startup.session = other;
-                                None
-                            }
-                        };
-                        let preferred = app.deferred_startup.preferred_session_id.take();
-                        dispatch_new_worktree_session(
-                            app,
-                            load_session_id,
-                            label,
-                            None,
-                            None,
-                            git_ref,
-                            preferred,
-                        )
-                    } else {
-                        dispatch_new_session(app)
-                    };
-                    if !crate::app::event_loop::welcome_oneshot_applies_to_effects(&effects) {
-                        app.welcome_session_local_workspace = None;
-                    }
-                    effects
-                }
-                Err(err) => {
-                    tracing::warn!("welcome local-workspace ack: {err}");
-                    app.show_toast(&format!("Local workspace: {err}"));
-                    vec![]
-                }
-            }
-        }
         Action::ChooseNewSessionMode => open_new_session_question(app),
         Action::ExitSession | Action::ExitSessionConfirmed => dispatch_exit_session(app),
         Action::DeleteCurrentSession => open_delete_current_session_question(app),
@@ -972,28 +923,32 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             .filter(|a| crate::views::announcements::is_dismissible(a))
             .map(fuigo_announcements::announcement_hide_key);
             if let Some(key) = shown_key
-                && app.hidden_announcement_ids.insert(key)
+                && app.hidden_announcement_ids.insert(key.clone())
             {
                 vec![Effect::PersistAnnouncementsHidden {
                     hidden_ids: app.hidden_announcement_ids.clone(),
+                    changed: std::collections::BTreeSet::from([key]),
                 }]
             } else {
                 vec![]
             }
         }
         Action::AnnouncementsShow => {
-            let mut changed = false;
+            let mut changed = std::collections::BTreeSet::new();
             for key in crate::views::announcements::session_announcement_hide_keys(
                 &app.active_announcements,
             ) {
-                changed |= app.hidden_announcement_ids.remove(&key);
+                if app.hidden_announcement_ids.remove(&key) {
+                    changed.insert(key);
+                }
             }
-            if changed {
+            if changed.is_empty() {
+                vec![]
+            } else {
                 vec![Effect::PersistAnnouncementsHidden {
                     hidden_ids: app.hidden_announcement_ids.clone(),
+                    changed,
                 }]
-            } else {
-                vec![]
             }
         }
         Action::AnnouncementsOpenCta(surface) => {
@@ -1307,6 +1262,28 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         } => dispatch_agent_type_mismatch_answered(app, start_new, model_id, effort),
         Action::PersistMemoryFullscreen(fs) => {
             vec![Effect::PersistMemoryFullscreen { fullscreen: fs }]
+        }
+        Action::PersistPluginCtaDismissal(plugin_id) => {
+            // Resolved now: a relative `FUIGO_HOME` must not follow a later `/cd`.
+            let path = fuigo_config::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
+            vec![Effect::PersistPluginCtaDismissal {
+                plugin_id,
+                config_path: std::path::absolute(&path).unwrap_or(path),
+            }]
+        }
+        Action::AgentsModalConfigWrite(write) => vec![Effect::AgentsModalConfigWrite {
+            agent_id: app.active_view.agent_id(),
+            write,
+        }],
+        Action::WriteProviderConfig(request) => {
+            let report_to = match app.active_view {
+                ActiveView::Agent(id) => crate::app::actions::ConfigWriteReport::Agent(id),
+                ActiveView::AgentDashboard if app.dashboard.is_some() => {
+                    crate::app::actions::ConfigWriteReport::Dashboard
+                }
+                _ => crate::app::actions::ConfigWriteReport::Anywhere,
+            };
+            vec![Effect::WriteProviderConfig { request, report_to }]
         }
         Action::OpenMemoryModal => {
             if let ActiveView::Agent(id) = app.active_view

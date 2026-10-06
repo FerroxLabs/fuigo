@@ -713,6 +713,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_image_path_detected_as_image() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -732,6 +735,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_tiny_image_path_cannot_insert_or_send_immediately() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -765,6 +771,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_non_image_file_url_with_clipboard_icon_uses_path_not_icon() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -797,6 +806,9 @@ pub(super) mod paste_key_tests {
     /// The probe's `FileUrlsThenImage` route suppresses the Finder file-icon raster off-thread, so the completion sees no image.
     #[test]
     fn paste_key_file_urls_probe_recovers_when_text_is_none() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -836,6 +848,9 @@ pub(super) mod paste_key_tests {
     /// The deferred file-url recovery must still route the path on completion.
     #[test]
     fn paste_key_file_urls_probe_recovers_when_text_is_empty_string() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -865,6 +880,9 @@ pub(super) mod paste_key_tests {
     /// The Finder file-icon raster is suppressed by the off-thread probe.
     #[test]
     fn paste_key_file_urls_probe_handles_multi_file_payload() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -901,6 +919,9 @@ pub(super) mod paste_key_tests {
     /// The off-thread file-url recovery therefore never runs and can't insert a rival path.
     #[test]
     fn paste_key_file_urls_probe_not_double_inserted_when_text_classifies() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -928,6 +949,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_non_image_file_url_percent_encoded_space_round_trips() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -961,6 +985,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_multi_file_drop_image_plus_non_image_handles_both() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -997,6 +1024,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn paste_key_image_path_with_trailing_newline_still_attaches() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -1018,12 +1048,35 @@ pub(super) mod paste_key_tests {
             agent.prompt.text()
         );
     }
+    /// Over SSH the drop classifier stands down: a dropped path would name a file on the user's local machine, not on this host, so a `file://` paste stays literal text and never becomes a chip or a decoded path.
+    #[test]
+    fn event_paste_file_url_stays_literal_text_in_ssh_session() {
+        if crate::test_util::rerun_with_ssh_env(true) {
+            return;
+        }
+        let mut agent = make_agent();
+        agent.set_active_pane(ActivePane::Prompt, true);
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("ssh_drop.png");
+        std::fs::write(&png, make_test_png(8, 8)).unwrap();
+        let url = format!("file://{}", png.display());
+        let registry = ActionRegistry::defaults();
+        let _ = agent.handle_input(&Event::Paste(url.clone()), &registry);
+        assert!(
+            agent.prompt.images.is_empty(),
+            "an SSH session must not attach a dropped image"
+        );
+        assert_eq!(agent.prompt.text(), url, "the URL must be inserted verbatim");
+    }
     /// Mirrors the strongest Cmd+V drop-path test, but exercises the `Event::Paste` (bracketed-paste) branch.
     /// That is the actual path a drag-from-Finder takes through the dispatcher.
     /// A refactor that re-orders the clipboard-image probe ahead of the path classifier on this branch would turn every non-image drop into a chip.
     /// This test fails fast in that scenario.
     #[test]
     fn event_paste_non_image_file_url_inserts_decoded_path_not_chip() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let dir = tempfile::tempdir().unwrap();
@@ -1059,6 +1112,9 @@ pub(super) mod paste_key_tests {
     /// The dedup latch itself is enforced by the `image_cap_reached` branch in `try_handle_dropped_paths_paste`.
     #[test]
     fn paste_key_cap_reached_does_not_block_non_image_insert() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let cap = crate::views::prompt_widget::PromptWidget::IMAGE_CAP;
@@ -1152,6 +1208,9 @@ pub(super) mod paste_key_tests {
     /// and fail this test.
     #[test]
     fn event_paste_plan_feedback_non_image_file_url_decoded_into_prompt() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         assert_event_paste_arm_decodes_non_image("plan_feedback", |agent| {
             agent.enter_casual_commenting_for_test();
             assert!(
@@ -1163,6 +1222,9 @@ pub(super) mod paste_key_tests {
     /// Permission-followup `Event::Paste` arm routes through the classifier.
     #[test]
     fn event_paste_permission_followup_non_image_file_url_decoded_into_prompt() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         assert_event_paste_arm_decodes_non_image("permission_followup", |agent| {
             agent
                 .permission_queue
@@ -1172,6 +1234,9 @@ pub(super) mod paste_key_tests {
     /// Plan-approval-view `Event::Paste` arm routes through the classifier.
     #[test]
     fn event_paste_plan_approval_non_image_file_url_decoded_into_prompt() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         assert_event_paste_arm_decodes_non_image("plan_approval", |agent| {
             let mut view = make_plan_approval_view_state();
             view.focus = crate::views::plan_approval_view::PlanApprovalFocus::Prompt;
@@ -1196,6 +1261,9 @@ pub(super) mod paste_key_tests {
     /// the question view is in `InputMode` focus.
     #[test]
     fn event_paste_question_view_input_mode_non_image_file_url_decoded_into_prompt() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         assert_event_paste_arm_decodes_non_image("question_view", |agent| {
             agent.question_view = Some(make_question_view_state_in_input_mode());
         });
@@ -1625,6 +1693,7 @@ pub(super) mod paste_key_tests {
     /// Each button registers a hit-rect carrying the source.
     #[test]
     fn paints_affordance_row_with_label_and_registers_all_buttons() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::blocks::mermaid_content::{AffordanceKind, affordance_row};
         use crate::scrollback::render::DiagramAffordancePlacement;
         use ratatui::buffer::Buffer;
@@ -1679,6 +1748,7 @@ pub(super) mod paste_key_tests {
     /// With the cursor off the row, all buttons are idle.
     #[test]
     fn paints_affordance_row_highlights_only_the_hovered_button() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::blocks::mermaid_content::affordance_row;
         use crate::scrollback::render::DiagramAffordancePlacement;
         use ratatui::buffer::Buffer;
@@ -1733,6 +1803,7 @@ pub(super) mod paste_key_tests {
     /// A row wide enough for the label and `[Open]` paints just those and registers only `[Open]`'s hit-rect; the clipped buttons register none.
     #[test]
     fn paints_affordance_row_clips_segments_to_row_width() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::scrollback::render::DiagramAffordancePlacement;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -1768,6 +1839,7 @@ pub(super) mod paste_key_tests {
     /// `render_dropdown_chrome` anchors the items band above the prompt by default (full TUI) and below it when `below = true` (minimal mode).
     #[test]
     fn dropdown_chrome_anchors_above_or_below_the_prompt() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::appearance::LayoutConfig;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -1824,6 +1896,7 @@ pub(super) mod paste_key_tests {
     #[test]
     #[serial_test::serial]
     fn dropdown_chrome_embedded_is_flush_left() {
+        let _theme = crate::theme::cache::pin_theme();
         use crate::appearance::LayoutConfig;
         use ratatui::buffer::Buffer;
         use ratatui::layout::Rect;
@@ -2663,6 +2736,9 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_completion_inserts_unreadable_file_url_as_path_text() {
+        if crate::test_util::rerun_without_ambient_ssh() {
+            return;
+        }
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let ctx = agent_completion_ctx(&agent, None);

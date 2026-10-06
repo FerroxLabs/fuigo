@@ -228,8 +228,16 @@ impl WorkflowManager {
                     .register(&run_id, &execution_script, &spec.args, spec.effort)
                     .map_err(|error| LaunchError::Store(error.to_string()))?;
                 let journal_rel = format!("workflows/{run_id}/journal.jsonl");
-                let journal_path = self.session_dir.as_ref().map(|d| d.join(&journal_rel));
-                let journal = Journal::new(journal_path);
+                // Write the v2 header now, at creation: it is the positive evidence that lets a run
+                // paused or stopped before its first journaled step resume as a fresh start instead
+                // of loading as a legacy journal (`Journal::create`).
+                let journal = match self.session_dir.as_ref().map(|d| d.join(&journal_rel)) {
+                    Some(path) => Journal::create(path).map_err(|error| {
+                        self.store.remove(&run_id);
+                        LaunchError::Journal(error.to_string())
+                    })?,
+                    None => Journal::new(None),
+                };
                 let state = self.tracker.lock().start_run(
                     run_id.clone(),
                     resolved.meta.name,
@@ -369,24 +377,17 @@ impl WorkflowManager {
                 let mut tracker = tracker.lock();
                 if tracker.execution_epoch(&watcher_run_id) != Some(execution_epoch) {
                     (false, None)
-                } else if drain_failed {
+                } else {
                     (
                         true,
-                        tracker.interrupt(
+                        settle_finished_run(
+                            &mut tracker,
                             &watcher_run_id,
-                            "workflow cleanup timed out or could not be acknowledged; start a \
-                             new run",
+                            drain_failed,
+                            pause_intent.load(Ordering::Relaxed),
+                            &outcome,
                         ),
                     )
-                } else if pause_intent.load(Ordering::Relaxed)
-                    && matches!(
-                        outcome,
-                        WorkflowOutcome::Cancelled | WorkflowOutcome::Paused { .. }
-                    )
-                {
-                    (true, tracker.pause_user(&watcher_run_id, None))
-                } else {
-                    (true, tracker.apply_outcome(&watcher_run_id, &outcome))
                 }
             };
             if !epoch_matches {
@@ -824,6 +825,36 @@ impl WorkflowManager {
     }
 }
 
+/// The lifecycle a finished run settles into, from the engine's outcome and the manager's pause intent.
+///
+/// A paused run ends `Cancelled` (the pause fires the run's stop signal) or, if the script reached its
+/// own pause first, `Paused`; either way the user's pause wins. This relies on the engine reporting a
+/// host request lost to the stop's teardown as `Cancelled`, not `Failed` (P38-F): a `Failed` here would
+/// overwrite the eager `UserPaused` below.
+fn settle_finished_run(
+    tracker: &mut WorkflowTracker,
+    run_id: &str,
+    drain_failed: bool,
+    pause_intent: bool,
+    outcome: &WorkflowOutcome,
+) -> Option<WorkflowRunState> {
+    if drain_failed {
+        tracker.interrupt(
+            run_id,
+            "workflow cleanup timed out or could not be acknowledged; start a new run",
+        )
+    } else if pause_intent
+        && matches!(
+            outcome,
+            WorkflowOutcome::Cancelled | WorkflowOutcome::Paused { .. }
+        )
+    {
+        tracker.pause_user(run_id, None)
+    } else {
+        tracker.apply_outcome(run_id, outcome)
+    }
+}
+
 fn log_run_started(
     run_id: &str,
     parent_session_id: &str,
@@ -909,6 +940,191 @@ mod tests {
             Vec<fuigo_tools::implementations::fuigo_build::task::types::SubagentCancelTarget>,
         >,
     >;
+
+    /// How long a test waits on a workflow channel before it declares the run wedged.
+    ///
+    /// Deliberately longer than the watcher's own 25 s host-drain bound, so a slow drain
+    /// surfaces as the run's own `Failed { .. }` outcome and only a run that never reports
+    /// at all trips this. Every healthy wait in this module completes in milliseconds;
+    /// the bound is not a tuning knob, it converts "wedged forever" into a named failure.
+    const WORKFLOW_TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(40);
+
+    /// Run one workflow test on its own current-thread runtime.
+    ///
+    /// Not `#[tokio::test]`, for one reason: dropping a runtime WAITS, unboundedly, for its
+    /// `spawn_blocking` tasks, and a workflow's engine runs on exactly such a thread. Measured
+    /// at the accepted baseline `2eb306e`: `active_run_admission_is_bounded_per_session` had
+    /// PASSED its body and then sat in `BlockingPool::shutdown` for half an hour, because the
+    /// engine thread it left behind was parked in `release_agent_calls`. A wedged run therefore
+    /// turned even a bounded wait into a hang at teardown, with the diagnosis never printed
+    /// (libtest holds a test's captured output until the test returns).
+    ///
+    /// Here teardown is bounded, and a blocking thread that outlives the bound FAILS the test
+    /// (naming how many), instead of being waited for or silently leaked.
+    fn run_workflow_test<F: std::future::Future<Output = ()>>(test: F) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // `spawn_blocking` threads are the only threads a current-thread runtime starts, so
+        // started-minus-stopped is exactly the number of engine threads still alive.
+        let alive = Arc::new(AtomicUsize::new(0));
+        let (on_start, on_stop) = (alive.clone(), alive.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(move || {
+                on_start.fetch_add(1, Ordering::SeqCst);
+            })
+            .on_thread_stop(move || {
+                on_stop.fetch_sub(1, Ordering::SeqCst);
+            })
+            .build()
+            .expect("test runtime");
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(test);
+        }));
+        // Drop the runtime exactly as a `#[tokio::test]` would (scheduler shutdown first, which
+        // drops the host service and so releases any engine thread waiting on it, then a wait
+        // for the blocking pool), but on a helper thread, so the wait can be bounded.
+        // `Runtime::shutdown_timeout` is NOT equivalent: it waits for the blocking pool BEFORE
+        // the scheduler has dropped its tasks, so every healthy engine thread would time out.
+        let grace = shutdown_grace();
+        let (dropped_tx, dropped_rx) = std::sync::mpsc::channel();
+        let teardown = std::thread::Builder::new()
+            .name("workflow-test-runtime-drop".into())
+            .spawn(move || {
+                drop(runtime);
+                let _ = dropped_tx.send(());
+            })
+            .expect("spawn runtime teardown thread");
+        let torn_down = dropped_rx.recv_timeout(grace).is_ok();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(
+            torn_down,
+            "workflow test `{}` finished, but its runtime could not be torn down within {}s: \
+             {} blocking thread(s) were still running, so a workflow engine thread is wedged \
+             (most likely parked in `release_agent_calls`, waiting for a reply the host will \
+             never send). Teardown is bounded so this is a named failure and not a hang \
+             (R012 section 9b).",
+            std::thread::current().name().unwrap_or("<unnamed>"),
+            grace.as_secs_f32(),
+            alive.load(Ordering::SeqCst),
+        );
+        teardown.join().expect("runtime teardown thread");
+    }
+
+    /// Healthy tests release their blocking threads in milliseconds; this only bounds a wedge.
+    const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(15);
+
+    thread_local! {
+        /// Lets the test that proves the bound shorten it; nothing else may.
+        static DEADLINE_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+            const { std::cell::Cell::new(None) };
+        static SHUTDOWN_GRACE_OVERRIDE: std::cell::Cell<Option<std::time::Duration>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    fn shutdown_grace() -> std::time::Duration {
+        SHUTDOWN_GRACE_OVERRIDE
+            .with(std::cell::Cell::get)
+            .unwrap_or(RUNTIME_SHUTDOWN_GRACE)
+    }
+
+    fn workflow_test_deadline() -> std::time::Duration {
+        DEADLINE_OVERRIDE
+            .with(std::cell::Cell::get)
+            .unwrap_or(WORKFLOW_TEST_DEADLINE)
+    }
+
+    /// Everything the manager knows about why a run has not reported, for a failure message.
+    fn stall_diagnosis(manager: &WorkflowManager, waiting_for: &str, site: &str) -> String {
+        let thread = std::thread::current();
+        let mut runs = Vec::new();
+        let tracker = manager.tracker.lock();
+        for (run_id, active) in &manager.active {
+            let state = tracker.get(run_id);
+            runs.push(format!(
+                "active {run_id}: tracker_status={} agents_used={:?} cancelled={} pause_intent={}",
+                state
+                    .as_ref()
+                    .map(|s| s.status.as_str())
+                    .unwrap_or("<absent>"),
+                state.as_ref().map(|s| s.agents_used),
+                active.cancel.is_cancelled(),
+                active.pause_intent.load(Ordering::Relaxed),
+            ));
+        }
+        for (run_id, _) in &manager.retiring {
+            runs.push(format!(
+                "retiring {run_id}: tracker_status={}",
+                tracker
+                    .get(run_id)
+                    .map(|s| s.status.as_str())
+                    .unwrap_or("<absent>"),
+            ));
+        }
+        format!(
+            "workflow test wedged: test `{}` at {site} waited {}s for {waiting_for} and it never \
+             arrived. The wait is bounded so a wedged workflow fails with this diagnosis rather \
+             than hanging the suite (a hang produces no failing set). Manager state: [{}]. Either \
+             the workflow executor never finished (blocked in run_workflow), the host service \
+             never drained, or the terminal-state persist was never acknowledged.",
+            thread.name().unwrap_or("<unnamed>"),
+            workflow_test_deadline().as_secs_f32(),
+            runs.join("; "),
+        )
+    }
+
+    async fn await_outcome(
+        manager: &WorkflowManager,
+        rx: oneshot::Receiver<WorkflowOutcome>,
+        site: &str,
+    ) -> Result<WorkflowOutcome, oneshot::error::RecvError> {
+        match tokio::time::timeout(workflow_test_deadline(), rx).await {
+            Ok(result) => result,
+            Err(_) => panic!(
+                "{}",
+                stall_diagnosis(manager, "the run's WorkflowOutcome", site)
+            ),
+        }
+    }
+
+    async fn next_event(
+        manager: &WorkflowManager,
+        rx: &mut SubagentEventRx,
+        what: &str,
+        site: &str,
+    ) -> fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent {
+        match tokio::time::timeout(workflow_test_deadline(), rx.recv()).await {
+            Ok(Some(event)) => event,
+            Ok(None) => panic!("{what}: subagent event channel closed before it arrived ({site})"),
+            Err(_) => panic!(
+                "{}",
+                stall_diagnosis(manager, &format!("the subagent event `{what}`"), site)
+            ),
+        }
+    }
+
+    /// The run's outcome; a wedged run or a dropped sender is a named failure.
+    macro_rules! outcome_of {
+        ($manager:expr, $rx:expr) => {
+            await_outcome(&$manager, $rx, concat!(file!(), ":", line!()))
+                .await
+                .expect("workflow watcher dropped its outcome sender without reporting")
+        };
+    }
+    /// Wait for the run to settle and discard how; still bounded.
+    macro_rules! settled_of {
+        ($manager:expr, $rx:expr) => {
+            let _ = await_outcome(&$manager, $rx, concat!(file!(), ":", line!())).await;
+        };
+    }
+    macro_rules! event_of {
+        ($manager:expr, $rx:expr, $what:expr) => {
+            next_event(&$manager, &mut $rx, $what, concat!(file!(), ":", line!())).await
+        };
+    }
 
     fn test_manager(session_dir: Option<PathBuf>) -> (WorkflowManager, SubagentEventRx) {
         let (manager, events, _cancels) = test_manager_with_cancels(session_dir);
@@ -999,16 +1215,25 @@ mod tests {
         )
     }
 
+    /// The next subagent event, which must be a spawn. Bounded by the module's wedge deadline like every other must-arrive
+    /// wait here. It used to be a fixed 2 s, which a loaded host exceeds before the engine's blocking thread compiles the
+    /// script and dispatches its first agent ("expected spawn, timed out").
     async fn recv_spawn(
+        manager: &WorkflowManager,
         rx: &mut SubagentEventRx,
+        site: &str,
     ) -> fuigo_tools::implementations::fuigo_build::task::types::SubagentSpawnRequest {
         use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
-        match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
-            Ok(Some(SubagentEvent::Spawn(req))) => req,
-            Ok(Some(_)) => panic!("expected spawn, got a non-spawn event"),
-            Ok(None) => panic!("expected spawn, channel closed"),
-            Err(_) => panic!("expected spawn, timed out"),
+        match next_event(manager, rx, "spawn", site).await {
+            SubagentEvent::Spawn(req) => req,
+            _ => panic!("expected spawn, got a non-spawn event ({site})"),
         }
+    }
+
+    macro_rules! spawn_of {
+        ($manager:expr, $rx:expr) => {
+            recv_spawn(&$manager, &mut $rx, concat!(file!(), ":", line!())).await
+        };
     }
 
     fn complete_spawn(
@@ -1025,52 +1250,55 @@ mod tests {
         });
     }
 
-    #[tokio::test]
-    async fn launch_completes_and_updates_tracker() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
-        )
-        .unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+    #[test]
+    fn launch_completes_and_updates_tracker() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+            )
+            .unwrap();
+            let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
-        let outcome = outcome_rx.await.unwrap();
-        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Complete
-        );
-        assert_eq!(state.result_summary.as_deref(), Some("done"));
-        assert!(
-            dir.path()
-                .join("workflows")
-                .join(&run_id)
-                .join("script.rhai")
-                .exists()
-        );
+            let outcome = outcome_of!(manager, outcome_rx);
+            assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(
+                state.status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Complete
+            );
+            assert_eq!(state.result_summary.as_deref(), Some("done"));
+            assert!(
+                dir.path()
+                    .join("workflows")
+                    .join(&run_id)
+                    .join("script.rhai")
+                    .exists()
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn plain_resume_uses_immutable_script_not_edited_projection() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\nawait_user(\"user\", \"pause\");\ncomplete(\"original\");";
-        let (run_id, outcome_rx) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
+    #[test]
+    fn plain_resume_uses_immutable_script_not_edited_projection() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\nawait_user(\"user\", \"pause\");\ncomplete(\"original\");";
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Paused { .. }
+            ));
+            std::fs::write(
+                manager.script_copy_path(&run_id).unwrap(),
+                "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"edited\");",
+            )
             .unwrap();
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Paused { .. }
-        ));
-        std::fs::write(
-            manager.script_copy_path(&run_id).unwrap(),
-            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"edited\");",
-        )
-        .unwrap();
 
-        let (_same_id, outcome_rx) = manager
+            let (_same_id, outcome_rx) = manager
             .launch(
                 resolve_inline(
                     "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"caller copy\");"
@@ -1083,519 +1311,411 @@ mod tests {
                 },
             )
             .unwrap();
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!("original"));
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(result, serde_json::json!("original"));
+                }
+                other => panic!("expected Completed, got {other:?}"),
             }
-            other => panic!("expected Completed, got {other:?}"),
-        }
+        });
     }
 
-    #[tokio::test]
-    async fn resume_reuses_immutable_launch_effort() {
-        use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
+    #[test]
+    fn resume_reuses_immutable_launch_effort() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
                       await_user(\"user\", \"pause\");\n\
                       let r = agent(\"after resume\");\n\
                       complete(r.output);";
-        let (run_id, first_outcome) = manager
-            .launch(
-                resolve_inline(script.into()).unwrap(),
-                LaunchSpec {
-                    effort: Some(ReasoningEffort::High),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        assert!(matches!(
-            first_outcome.await.unwrap(),
-            WorkflowOutcome::Paused { .. }
-        ));
+            let (run_id, first_outcome) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        effort: Some(ReasoningEffort::High),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            assert!(matches!(
+                outcome_of!(manager, first_outcome),
+                WorkflowOutcome::Paused { .. }
+            ));
 
-        let (_same_id, resumed_outcome) = manager
-            .launch(
-                resolve_inline(script.into()).unwrap(),
-                LaunchSpec {
-                    effort: None,
-                    resume_run_id: Some(run_id),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("resumed spawn") else {
-            panic!("expected resumed spawn event");
-        };
-        assert_eq!(
-            req.runtime_overrides.reasoning_effort.as_deref(),
-            Some("high")
-        );
-        complete_spawn(req);
-        assert!(matches!(
-            resumed_outcome.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn pause_eagerly_marks_user_paused() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let run_id = "wf_pause_eager".to_string();
-        manager
-            .store
-            .register(
-                &run_id,
-                "let meta = #{ name: \"t\", description: \"d\" };",
-                &serde_json::json!({}),
-                None,
-            )
-            .unwrap();
-        manager.tracker.lock().start_run(
-            run_id.clone(),
-            "t".into(),
-            "obj".into(),
-            Vec::new(),
-            None,
-            None,
-        );
-        let (_done_tx, done_rx) = oneshot::channel();
-        manager.test_insert_active_run(run_id.clone(), done_rx);
-
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Active,
-        );
-        assert!(manager.pause(&run_id));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
-            "pause() must eagerly mark UserPaused so status is not still Active"
-        );
-        assert!(!manager.active.contains_key(&run_id));
-    }
-
-    #[tokio::test]
-    async fn control_ack_stops_by_name_without_a_completion_wake_and_rejects_inapplicable_or_unknown()
-    {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let run_id = "wf_ctrl".to_string();
-        manager
-            .store
-            .register(
-                &run_id,
-                "let meta = #{ name: \"t\", description: \"d\" };",
-                &serde_json::json!({}),
-                None,
-            )
-            .unwrap();
-        manager.tracker.lock().start_run(
-            run_id.clone(),
-            "review-changes".into(),
-            "obj".into(),
-            Vec::new(),
-            None,
-            None,
-        );
-        let (_done_tx, done_rx) = oneshot::channel();
-        manager.test_insert_active_run(run_id.clone(), done_rx);
-
-        let unknown = manager.control_ack("nope", WorkflowControl::Stop);
-        assert!(
-            matches!(
-                unknown,
-                WorkflowLaunchAck::Rejected {
-                    code: "workflow_control_unknown_run",
-                    ..
-                }
-            ),
-            "{unknown:?}"
-        );
-
-        let stopped = manager.control_ack("review-changes", WorkflowControl::Stop);
-        assert!(
-            matches!(
-                &stopped,
-                WorkflowLaunchAck::Controlled { run_id: id, name, control: WorkflowControl::Stop }
-                    if id == &run_id && name == "review-changes"
-            ),
-            "{stopped:?}"
-        );
-        let stopped_state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(stopped_state.status, WorkflowRunStatus::Cancelled);
-        assert!(
-            !manager
-                .tracker
-                .lock()
-                .is_unreported_completion(&run_id, stopped_state.revision),
-            "a tool-initiated stop must not queue a completion wake turn"
-        );
-        assert!(!manager.active.contains_key(&run_id));
-
-        let paused = manager.control_ack(&run_id, WorkflowControl::Pause);
-        assert!(
-            matches!(
-                &paused,
-                WorkflowLaunchAck::Rejected { code: "workflow_control_not_applicable", detail }
-                    if detail == "run 'review-changes' is cancelled and cannot be paused"
-            ),
-            "{paused:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn control_ack_pauses_an_active_run_by_run_id_and_keeps_the_completion_wake() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let run_id = "wf_ctrl_pause".to_string();
-        manager
-            .store
-            .register(
-                &run_id,
-                "let meta = #{ name: \"t\", description: \"d\" };",
-                &serde_json::json!({}),
-                None,
-            )
-            .unwrap();
-        manager.tracker.lock().start_run(
-            run_id.clone(),
-            "review-changes".into(),
-            "obj".into(),
-            Vec::new(),
-            None,
-            None,
-        );
-        let (_done_tx, done_rx) = oneshot::channel();
-        manager.test_insert_active_run(run_id.clone(), done_rx);
-
-        let paused = manager.control_ack(&run_id, WorkflowControl::Pause);
-        assert!(
-            matches!(
-                &paused,
-                WorkflowLaunchAck::Controlled { run_id: id, name, control: WorkflowControl::Pause }
-                    if id == &run_id && name == "review-changes"
-            ),
-            "{paused:?}"
-        );
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(state.status, WorkflowRunStatus::UserPaused);
-        assert!(!manager.active.contains_key(&run_id));
-
-        // Only a stop opts out of the completion wake; a pause is not a completion.
-        let (_restored, fresh) = manager.tracker.lock().take_unreported_terminal_runs();
-        assert!(fresh.is_empty(), "{fresh:?}");
-    }
-
-    #[tokio::test]
-    async fn control_run_refuses_to_stop_a_budget_limited_run_so_resume_still_needs_a_raised_cap() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
-                      let r = agent(\"work\");\ncomplete(r.output);";
-        let (run_id, _outcome) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap();
-        let _child = recv_spawn(&mut subagent_rx).await;
-        manager.tracker.lock().apply_outcome(
-            &run_id,
-            &WorkflowOutcome::BudgetExceeded {
-                message: "budget".into(),
-            },
-        );
-
-        assert_eq!(
-            manager
-                .control_run(&run_id, WorkflowControl::Stop)
-                .unwrap_err(),
-            ControlError::NotApplicable {
-                name: "t".to_owned(),
-                status: WorkflowRunStatus::BudgetLimited,
-                control: WorkflowControl::Stop,
-            }
-        );
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            WorkflowRunStatus::BudgetLimited
-        );
-        let resume = LaunchSpec {
-            resume_run_id: Some(run_id.clone()),
-            ..spec()
-        };
-        assert!(matches!(
-            manager
-                .launch(resolve_inline(script.into()).unwrap(), resume)
-                .unwrap_err(),
-            LaunchError::BudgetNotRaised { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn control_run_refuses_to_pause_an_engine_paused_run() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
-                      let r = agent(\"work\");\ncomplete(r.output);";
-        let (run_id, _outcome) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap();
-        let _child = recv_spawn(&mut subagent_rx).await;
-        manager.tracker.lock().apply_outcome(
-            &run_id,
-            &WorkflowOutcome::Paused {
-                kind: fuigo_workflow::PauseKind::BackOff,
-                message: "backing off".into(),
-            },
-        );
-
-        // The run is still in `active`, so a bare pause() would report success without changing anything.
-        assert_eq!(
-            manager
-                .control_run(&run_id, WorkflowControl::Pause)
-                .unwrap_err(),
-            ControlError::NotApplicable {
-                name: "t".to_owned(),
-                status: WorkflowRunStatus::BackOffPaused,
-                control: WorkflowControl::Pause,
-            }
-        );
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            WorkflowRunStatus::BackOffPaused
-        );
-    }
-
-    #[tokio::test]
-    async fn pause_marks_user_paused_and_resume_rejects_unknown_effect() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
-        let resolved = resolve_inline(script.into()).unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
-
-        use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
-        let spawn_req = tokio::time::timeout(std::time::Duration::from_secs(5), subagent_rx.recv())
-            .await.expect("initial spawn timed out").expect("spawn request");
-        let SubagentEvent::Spawn(_spawn) = spawn_req else {
-            panic!("expected spawn request");
-        };
-        assert!(manager.pause(&run_id));
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
-            "pause() must mark UserPaused immediately"
-        );
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
-            .await.expect("pause did not drain").unwrap();
-        assert!(matches!(outcome, WorkflowOutcome::Cancelled));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
-            "pause intent must map Cancelled → UserPaused"
-        );
-
-        let resolved = resolve_inline(script.into()).unwrap();
-        let (_run_id2, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    resume_run_id: Some(run_id.clone()),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        // The first child was dispatched, but its result is unknown. V2 journals
-        // must not blindly replay that effect, even after a clean user pause.
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
-            .await.expect("resume did not report its outcome").unwrap();
-        match outcome {
-            WorkflowOutcome::Failed { error } => {
-                assert!(error.contains("unknown outcome"), "{error}");
-            }
-            other => panic!("expected unknown-outcome failure, got {other:?}"),
-        }
-        assert!(subagent_rx.try_recv().is_err(), "unknown effect must not respawn");
-    }
-
-    #[tokio::test]
-    async fn resume_reconciles_agents_used_from_journal_no_double_charge() {
-        use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
-        let (run_id, outcome_rx) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap();
-
-        let SubagentEvent::Spawn(_first) = subagent_rx.recv().await.expect("first spawn") else {
-            panic!("expected spawn event");
-        };
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().agents_used,
-            1,
-            "the live agent reserves one slot before it spawns"
-        );
-
-        assert!(manager.pause(&run_id));
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Cancelled
-        ));
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().agents_used,
-            1,
-            "cancel tears the host down before the release lands, so the reserved slot leaks in memory"
-        );
-
-        let (_resumed_id, outcome_rx) = manager
-            .launch(
-                resolve_inline(script.into()).unwrap(),
-                LaunchSpec {
-                    resume_run_id: Some(run_id.clone()),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        // The spawn was journaled as dispatched with no recorded result. The bounded
-        // engine refuses to replay an effect with an unknown outcome, so resume fails
-        // instead of respawning (see pause_marks_user_paused_and_resume_rejects_unknown_effect).
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
-            .await
-            .expect("resume did not report its outcome")
-            .unwrap();
-        match outcome {
-            WorkflowOutcome::Failed { error } => {
-                assert!(error.contains("unknown outcome"), "{error}");
-            }
-            other => panic!("expected unknown-outcome failure, got {other:?}"),
-        }
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(200), subagent_rx.recv())
-                .await
-                .is_err(),
-            "unknown effect must not respawn"
-        );
-
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().agents_used,
-            0,
-            "resume reconciles agents_used from the journal (0 recorded reservations) and the \
-             refused replay reserves nothing; without the reconcile the slot leaked at pause would \
-             stay charged and any later re-reservation would double-charge"
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_run_resumes_and_reexecutes_failed_host_call_live() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
-                      let content = read_scratch_file(\"data.txt\");\n\
-                      complete(content);";
-        let (run_id, outcome_rx) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap();
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Failed { error } => {
-                assert!(error.contains("scratch"), "{error}");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Failed
-        );
-        let journal_path = dir
-            .path()
-            .join("workflows")
-            .join(&run_id)
-            .join("journal.jsonl");
-        assert!(
-            std::fs::read_to_string(&journal_path)
-                .unwrap()
-                .contains("__fuigo_workflow_host_error"),
-            "the uncaught host error must be journaled as a trailing sentinel"
-        );
-
-        let scratch = dir.path().join("workflows").join(&run_id).join("scratch");
-        std::fs::create_dir_all(&scratch).unwrap();
-        std::fs::write(scratch.join("data.txt"), "hello").unwrap();
-
-        let (_same_id, outcome_rx) = manager
-            .launch(
-                resolve_inline(script.into()).unwrap(),
-                LaunchSpec {
-                    resume_run_id: Some(run_id.clone()),
-                    ..spec()
-                },
-            )
-            .unwrap();
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(
-                    result,
-                    serde_json::json!("hello"),
-                    "the failed host call must go live instead of replaying the sentinel"
-                );
-            }
-            other => panic!("expected Completed, got {other:?}"),
-        }
-        assert_eq!(
-            manager.tracker.lock().get(&run_id).unwrap().status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Complete
-        );
-        assert!(
-            !std::fs::read_to_string(&journal_path)
-                .unwrap()
-                .contains("__fuigo_workflow_host_error"),
-            "the trailing sentinel must be pruned and replaced by the live result"
-        );
-    }
-
-    #[tokio::test]
-    async fn completed_and_interrupted_runs_are_not_resumable() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet a = agent(\"step one\");\ncomplete(a.output);";
-        let (run_id, outcome_rx) = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("first spawn") else {
-            panic!("expected spawn event");
-        };
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("one"),
-            subagent_id: id,
-            ..Default::default()
+            let (_same_id, resumed_outcome) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        effort: None,
+                        resume_run_id: Some(run_id),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "resumed spawn") else {
+                panic!("expected resumed spawn event");
+            };
+            assert_eq!(
+                req.runtime_overrides.reasoning_effort.as_deref(),
+                Some("high")
+            );
+            complete_spawn(req);
+            assert!(matches!(
+                outcome_of!(manager, resumed_outcome),
+                WorkflowOutcome::Completed { .. }
+            ));
         });
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
+    }
 
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        for status in [
-            crate::session::workflow::tracker::WorkflowRunStatus::Complete,
-            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
-        ] {
-            let mut restored = state.clone();
-            restored.status = status;
-            let original_tracker = manager.tracker.clone();
-            manager.tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::from_snapshot(
-                vec![restored],
-            )));
-            let err = manager
+    #[test]
+    fn pause_eagerly_marks_user_paused() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let run_id = "wf_pause_eager".to_string();
+            manager
+                .store
+                .register(
+                    &run_id,
+                    "let meta = #{ name: \"t\", description: \"d\" };",
+                    &serde_json::json!({}),
+                    None,
+                )
+                .unwrap();
+            manager.tracker.lock().start_run(
+                run_id.clone(),
+                "t".into(),
+                "obj".into(),
+                Vec::new(),
+                None,
+                None,
+            );
+            let (_done_tx, done_rx) = oneshot::channel();
+            manager.test_insert_active_run(run_id.clone(), done_rx);
+
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Active,
+            );
+            assert!(manager.pause(&run_id));
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(
+                state.status,
+                crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
+                "pause() must eagerly mark UserPaused so status is not still Active"
+            );
+            assert!(!manager.active.contains_key(&run_id));
+        });
+    }
+
+    #[test]
+    fn control_ack_stops_by_name_without_a_completion_wake_and_rejects_inapplicable_or_unknown() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let run_id = "wf_ctrl".to_string();
+            manager
+                .store
+                .register(
+                    &run_id,
+                    "let meta = #{ name: \"t\", description: \"d\" };",
+                    &serde_json::json!({}),
+                    None,
+                )
+                .unwrap();
+            manager.tracker.lock().start_run(
+                run_id.clone(),
+                "review-changes".into(),
+                "obj".into(),
+                Vec::new(),
+                None,
+                None,
+            );
+            let (_done_tx, done_rx) = oneshot::channel();
+            manager.test_insert_active_run(run_id.clone(), done_rx);
+
+            let unknown = manager.control_ack("nope", WorkflowControl::Stop);
+            assert!(
+                matches!(
+                    unknown,
+                    WorkflowLaunchAck::Rejected {
+                        code: "workflow_control_unknown_run",
+                        ..
+                    }
+                ),
+                "{unknown:?}"
+            );
+
+            let stopped = manager.control_ack("review-changes", WorkflowControl::Stop);
+            assert!(
+                matches!(
+                    &stopped,
+                    WorkflowLaunchAck::Controlled { run_id: id, name, control: WorkflowControl::Stop }
+                        if id == &run_id && name == "review-changes"
+                ),
+                "{stopped:?}"
+            );
+            let stopped_state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(stopped_state.status, WorkflowRunStatus::Cancelled);
+            assert!(
+                !manager
+                    .tracker
+                    .lock()
+                    .is_unreported_completion(&run_id, stopped_state.revision),
+                "a tool-initiated stop must not queue a completion wake turn"
+            );
+            assert!(!manager.active.contains_key(&run_id));
+
+            let paused = manager.control_ack(&run_id, WorkflowControl::Pause);
+            assert!(
+                matches!(
+                    &paused,
+                    WorkflowLaunchAck::Rejected { code: "workflow_control_not_applicable", detail }
+                        if detail == "run 'review-changes' is cancelled and cannot be paused"
+                ),
+                "{paused:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn control_ack_pauses_an_active_run_by_run_id_and_keeps_the_completion_wake() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let run_id = "wf_ctrl_pause".to_string();
+            manager
+                .store
+                .register(
+                    &run_id,
+                    "let meta = #{ name: \"t\", description: \"d\" };",
+                    &serde_json::json!({}),
+                    None,
+                )
+                .unwrap();
+            manager.tracker.lock().start_run(
+                run_id.clone(),
+                "review-changes".into(),
+                "obj".into(),
+                Vec::new(),
+                None,
+                None,
+            );
+            let (_done_tx, done_rx) = oneshot::channel();
+            manager.test_insert_active_run(run_id.clone(), done_rx);
+
+            let paused = manager.control_ack(&run_id, WorkflowControl::Pause);
+            assert!(
+                matches!(
+                    &paused,
+                    WorkflowLaunchAck::Controlled { run_id: id, name, control: WorkflowControl::Pause }
+                        if id == &run_id && name == "review-changes"
+                ),
+                "{paused:?}"
+            );
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(state.status, WorkflowRunStatus::UserPaused);
+            assert!(!manager.active.contains_key(&run_id));
+
+            // Only a stop opts out of the completion wake; a pause is not a completion.
+            let (_restored, fresh) = manager.tracker.lock().take_unreported_terminal_runs();
+            assert!(fresh.is_empty(), "{fresh:?}");
+        });
+    }
+
+    #[test]
+    fn control_run_refuses_to_stop_a_budget_limited_run_so_resume_still_needs_a_raised_cap() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let r = agent(\"work\");\ncomplete(r.output);";
+            let (run_id, _outcome) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            let _child = spawn_of!(manager, subagent_rx);
+            manager.tracker.lock().apply_outcome(
+                &run_id,
+                &WorkflowOutcome::BudgetExceeded {
+                    message: "budget".into(),
+                },
+            );
+
+            assert_eq!(
+                manager
+                    .control_run(&run_id, WorkflowControl::Stop)
+                    .unwrap_err(),
+                ControlError::NotApplicable {
+                    name: "t".to_owned(),
+                    status: WorkflowRunStatus::BudgetLimited,
+                    control: WorkflowControl::Stop,
+                }
+            );
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                WorkflowRunStatus::BudgetLimited
+            );
+            let resume = LaunchSpec {
+                resume_run_id: Some(run_id.clone()),
+                ..spec()
+            };
+            assert!(matches!(
+                manager
+                    .launch(resolve_inline(script.into()).unwrap(), resume)
+                    .unwrap_err(),
+                LaunchError::BudgetNotRaised { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn control_run_refuses_to_pause_an_engine_paused_run() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let r = agent(\"work\");\ncomplete(r.output);";
+            let (run_id, _outcome) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            let _child = spawn_of!(manager, subagent_rx);
+            manager.tracker.lock().apply_outcome(
+                &run_id,
+                &WorkflowOutcome::Paused {
+                    kind: fuigo_workflow::PauseKind::BackOff,
+                    message: "backing off".into(),
+                },
+            );
+
+            // The run is still in `active`, so a bare pause() would report success without changing anything.
+            assert_eq!(
+                manager
+                    .control_run(&run_id, WorkflowControl::Pause)
+                    .unwrap_err(),
+                ControlError::NotApplicable {
+                    name: "t".to_owned(),
+                    status: WorkflowRunStatus::BackOffPaused,
+                    control: WorkflowControl::Pause,
+                }
+            );
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                WorkflowRunStatus::BackOffPaused
+            );
+        });
+    }
+
+    #[test]
+    fn pause_marks_user_paused_and_resume_rejects_unknown_effect() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
+            let resolved = resolve_inline(script.into()).unwrap();
+            let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+
+            let _spawn = spawn_of!(manager, subagent_rx);
+            assert!(manager.pause(&run_id));
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
+                "pause() must mark UserPaused immediately"
+            );
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+                .await
+                .expect("pause did not drain")
+                .unwrap();
+            assert!(matches!(outcome, WorkflowOutcome::Cancelled));
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(
+                state.status,
+                crate::session::workflow::tracker::WorkflowRunStatus::UserPaused,
+                "pause intent must map Cancelled → UserPaused"
+            );
+
+            let resolved = resolve_inline(script.into()).unwrap();
+            let (_run_id2, outcome_rx) = manager
+                .launch(
+                    resolved,
+                    LaunchSpec {
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            // The first child was dispatched, but its result is unknown. V2 journals
+            // must not blindly replay that effect, even after a clean user pause.
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+                .await
+                .expect("resume did not report its outcome")
+                .unwrap();
+            match outcome {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(error.contains("unknown outcome"), "{error}");
+                }
+                other => panic!("expected unknown-outcome failure, got {other:?}"),
+            }
+            assert!(
+                subagent_rx.try_recv().is_err(),
+                "unknown effect must not respawn"
+            );
+        });
+    }
+
+    /// The journal of a run that has not journaled a step: the v2 header written at creation and an
+    /// empty dispatch sidecar. Asserting it proves the run stopped before its first journaled step.
+    fn assert_nothing_journaled(dir: &std::path::Path, run_id: &str) {
+        let journal = dir.join("workflows").join(run_id).join("journal.jsonl");
+        assert_eq!(
+            std::fs::read_to_string(&journal).unwrap(),
+            "{\"fuigo_workflow_journal_version\":2}\n",
+            "the run must have stopped before its first journaled step"
+        );
+        assert_eq!(
+            std::fs::read_to_string(journal.with_extension("dispatch-v2.jsonl")).unwrap(),
+            "",
+            "the run must have stopped before dispatching anything"
+        );
+    }
+
+    /// P45: a run paused before its first journaled step resumes as a fresh start of the same run.
+    /// Before the fix its journal file was never written, loaded as legacy, and the resume failed
+    /// with `LegacyBoundary` at its first dispatch.
+    #[test]
+    fn pause_before_the_first_journaled_step_resumes_as_a_fresh_start() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            // A pure-compute prologue (about a second unoptimised): the pause lands in it, before any
+            // host call, unless this thread is descheduled for longer than the loop runs. If it ever
+            // lands later, `assert_nothing_journaled` fails by name rather than the test passing
+            // vacuously. (No hook exists to hold the engine before its first host call.)
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let i = 0;\n\
+                      while i < 3000000 { i += 1; }\n\
+                      let r = agent(\"work\");\n\
+                      complete(r.output);";
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            assert!(manager.pause(&run_id));
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Cancelled
+            ));
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::UserPaused
+            );
+            assert_nothing_journaled(dir.path(), &run_id);
+            assert!(subagent_rx.try_recv().is_err(), "nothing was spawned");
+
+            let (same_id, outcome_rx) = manager
                 .launch(
                     resolve_inline(script.into()).unwrap(),
                     LaunchSpec {
@@ -1603,310 +1723,600 @@ mod tests {
                         ..spec()
                     },
                 )
-                .unwrap_err();
-            manager.tracker = original_tracker;
-            assert!(
-                matches!(err, LaunchError::NotResumable(_)),
-                "{status:?}: {err}"
+                .unwrap();
+            assert_eq!(same_id, run_id);
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn after resume")
+            else {
+                panic!("expected the resumed run's first spawn");
+            };
+            complete_spawn(req);
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(result, serde_json::json!("ok"));
+                }
+                other => panic!("expected Completed, got {other:?}"),
+            }
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Complete
             );
-        }
-
-        let mut cancelled = state.clone();
-        cancelled.status = crate::session::workflow::tracker::WorkflowRunStatus::Cancelled;
-        manager.tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::from_snapshot(
-            vec![cancelled],
-        )));
-        manager
-            .launch(
-                resolve_inline(script.into()).unwrap(),
-                LaunchSpec {
-                    resume_run_id: Some(run_id.clone()),
-                    ..spec()
-                },
-            )
-            .expect("cancelled /workflow stop runs stay resumable from the journal");
-    }
-
-    #[tokio::test]
-    async fn shutdown_timeout_marks_active_run_interrupted() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
-        let run_id = "wf_timeout".to_string();
-        manager
-            .store
-            .register(
-                &run_id,
-                "let meta = #{ name: \"t\", description: \"d\" };",
-                &serde_json::json!({}),
-                None,
+            let journal = Journal::load(
+                dir.path()
+                    .join("workflows")
+                    .join(&run_id)
+                    .join("journal.jsonl"),
             )
             .unwrap();
-        manager.tracker.lock().start_run(
-            run_id.clone(),
-            "t".into(),
-            "obj".into(),
-            Vec::new(),
-            None,
-            None,
-        );
-        let (_done_tx, done_rx) = oneshot::channel();
-        manager.test_insert_active_run(run_id.clone(), done_rx);
-
-        let result = manager
-            .cancel_all_and_drain(std::time::Duration::from_millis(1))
-            .await;
-        assert_eq!(result.unwrap_err(), vec![run_id.clone()]);
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
-        );
-        assert!(!state.status.is_paused());
+            assert_eq!(journal.len(), 1, "the fresh start journals its one spawn");
+        });
     }
 
-    #[tokio::test]
-    async fn workflow_spawns_await_to_completion() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+    /// P45, the stopped variant: a run that hits its agent cap before its first journaled step (the
+    /// reservation is refused before any dispatch) resumes with a raised cap as a fresh start.
+    #[test]
+    fn budget_stop_before_the_first_journaled_step_resumes_as_a_fresh_start() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let r = agent(\"work\");\n\
+                      complete(r.output);";
+            let (run_id, outcome_rx) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        agent_budget: Some(0),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::BudgetExceeded { .. } => {}
+                other => panic!("expected BudgetExceeded, got {other:?}"),
+            }
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::BudgetLimited
+            );
+            assert_nothing_journaled(dir.path(), &run_id);
+            assert!(subagent_rx.try_recv().is_err(), "nothing was spawned");
+
+            let (_same_id, outcome_rx) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        agent_budget: Some(1),
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn after resume")
+            else {
+                panic!("expected the resumed run's first spawn");
+            };
+            complete_spawn(req);
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(result, serde_json::json!("ok"));
+                }
+                other => panic!("expected Completed, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn resume_reconciles_agents_used_from_journal_no_double_charge() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet r = agent(\"work\");\ncomplete(r.output);";
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+
+            let SubagentEvent::Spawn(_first) = event_of!(manager, subagent_rx, "first spawn")
+            else {
+                panic!("expected spawn event");
+            };
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().agents_used,
+                1,
+                "the live agent reserves one slot before it spawns"
+            );
+
+            assert!(manager.pause(&run_id));
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Cancelled
+            ));
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().agents_used,
+                1,
+                "cancel tears the host down before the release lands, so the reserved slot leaks in memory"
+            );
+
+            let (_resumed_id, outcome_rx) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            // The spawn was journaled as dispatched with no recorded result. The bounded
+            // engine refuses to replay an effect with an unknown outcome, so resume fails
+            // instead of respawning (see pause_marks_user_paused_and_resume_rejects_unknown_effect).
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(30), outcome_rx)
+                .await
+                .expect("resume did not report its outcome")
+                .unwrap();
+            match outcome {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(error.contains("unknown outcome"), "{error}");
+                }
+                other => panic!("expected unknown-outcome failure, got {other:?}"),
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), subagent_rx.recv())
+                    .await
+                    .is_err(),
+                "unknown effect must not respawn"
+            );
+
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().agents_used,
+                0,
+                "resume reconciles agents_used from the journal (0 recorded reservations) and the \
+             refused replay reserves nothing; without the reconcile the slot leaked at pause would \
+             stay charged and any later re-reservation would double-charge"
+            );
+        });
+    }
+
+    #[test]
+    fn failed_run_resumes_and_reexecutes_failed_host_call_live() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                      let content = read_scratch_file(\"data.txt\");\n\
+                      complete(content);";
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(error.contains("scratch"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Failed
+            );
+            let journal_path = dir
+                .path()
+                .join("workflows")
+                .join(&run_id)
+                .join("journal.jsonl");
+            assert!(
+                std::fs::read_to_string(&journal_path)
+                    .unwrap()
+                    .contains("__fuigo_workflow_host_error"),
+                "the uncaught host error must be journaled as a trailing sentinel"
+            );
+
+            let scratch = dir.path().join("workflows").join(&run_id).join("scratch");
+            std::fs::create_dir_all(&scratch).unwrap();
+            std::fs::write(scratch.join("data.txt"), "hello").unwrap();
+
+            let (_same_id, outcome_rx) = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(
+                        result,
+                        serde_json::json!("hello"),
+                        "the failed host call must go live instead of replaying the sentinel"
+                    );
+                }
+                other => panic!("expected Completed, got {other:?}"),
+            }
+            assert_eq!(
+                manager.tracker.lock().get(&run_id).unwrap().status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Complete
+            );
+            assert!(
+                !std::fs::read_to_string(&journal_path)
+                    .unwrap()
+                    .contains("__fuigo_workflow_host_error"),
+                "the trailing sentinel must be pruned and replaced by the live result"
+            );
+        });
+    }
+
+    #[test]
+    fn completed_and_interrupted_runs_are_not_resumable() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\nlet a = agent(\"step one\");\ncomplete(a.output);";
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "first spawn") else {
+                panic!("expected spawn event");
+            };
+            let id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("one"),
+                subagent_id: id,
+                ..Default::default()
+            });
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Completed { .. }
+            ));
+
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            for status in [
+                crate::session::workflow::tracker::WorkflowRunStatus::Complete,
+                crate::session::workflow::tracker::WorkflowRunStatus::Interrupted,
+            ] {
+                let mut restored = state.clone();
+                restored.status = status;
+                let original_tracker = manager.tracker.clone();
+                manager.tracker = Arc::new(parking_lot::Mutex::new(
+                    WorkflowTracker::from_snapshot(vec![restored]),
+                ));
+                let err = manager
+                    .launch(
+                        resolve_inline(script.into()).unwrap(),
+                        LaunchSpec {
+                            resume_run_id: Some(run_id.clone()),
+                            ..spec()
+                        },
+                    )
+                    .unwrap_err();
+                manager.tracker = original_tracker;
+                assert!(
+                    matches!(err, LaunchError::NotResumable(_)),
+                    "{status:?}: {err}"
+                );
+            }
+
+            let mut cancelled = state.clone();
+            cancelled.status = crate::session::workflow::tracker::WorkflowRunStatus::Cancelled;
+            manager.tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::from_snapshot(
+                vec![cancelled],
+            )));
+            manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .expect("cancelled /workflow stop runs stay resumable from the journal");
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_marks_active_run_interrupted() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+            let run_id = "wf_timeout".to_string();
+            manager
+                .store
+                .register(
+                    &run_id,
+                    "let meta = #{ name: \"t\", description: \"d\" };",
+                    &serde_json::json!({}),
+                    None,
+                )
+                .unwrap();
+            manager.tracker.lock().start_run(
+                run_id.clone(),
+                "t".into(),
+                "obj".into(),
+                Vec::new(),
+                None,
+                None,
+            );
+            let (_done_tx, done_rx) = oneshot::channel();
+            manager.test_insert_active_run(run_id.clone(), done_rx);
+
+            let result = manager
+                .cancel_all_and_drain(std::time::Duration::from_millis(1))
+                .await;
+            assert_eq!(result.unwrap_err(), vec![run_id.clone()]);
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(
+                state.status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Interrupted
+            );
+            assert!(!state.status.is_paused());
+        });
+    }
+
+    #[test]
+    fn workflow_spawns_await_to_completion() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\");\n\
              complete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+                    .into(),
+            )
+            .unwrap();
+            let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
-        let spawn_req = subagent_rx.recv().await.expect("spawn event");
-        let SubagentEvent::Spawn(req) = spawn_req else {
-            panic!("expected spawn event");
-        };
-        assert!(
-            req.await_to_completion,
-            "workflow agent spawns must disable the ordinary task-tool await budget"
-        );
-        assert!(
-            req.owner.is_workflow(),
-            "workflow agent spawns must carry run lifecycle ownership"
-        );
-        assert_eq!(
+            let spawn_req = event_of!(manager, subagent_rx, "spawn event");
+            let SubagentEvent::Spawn(req) = spawn_req else {
+                panic!("expected spawn event");
+            };
+            assert!(
+                req.await_to_completion,
+                "workflow agent spawns must disable the ordinary task-tool await budget"
+            );
+            assert!(
+                req.owner.is_workflow(),
+                "workflow agent spawns must carry run lifecycle ownership"
+            );
+            assert_eq!(
             req.runtime_overrides.model_override_provenance,
             fuigo_tools::implementations::fuigo_build::task::types::ModelOverrideProvenance::Tool,
             "script model overrides are untrusted tool provenance"
         );
-        assert_eq!(req.runtime_overrides.reasoning_effort, None);
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("slow but done"),
-            subagent_id: id,
-            ..Default::default()
+            assert_eq!(req.runtime_overrides.reasoning_effort, None);
+            let id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("slow but done"),
+                subagent_id: id,
+                ..Default::default()
+            });
+            let outcome = outcome_of!(manager, outcome_rx);
+            assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
         });
-        let outcome = outcome_rx.await.unwrap();
-        assert!(matches!(outcome, WorkflowOutcome::Completed { .. }));
     }
 
-    #[tokio::test]
-    async fn launch_effort_applies_to_children_and_child_override_wins() {
-        use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
+    #[test]
+    fn launch_effort_applies_to_children_and_child_override_wins() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::SubagentEvent;
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let results = parallel([\n\
                  #{ prompt: \"inherits\" },\n\
                  #{ prompt: \"overrides\", effort: \"LoW\" },\n\
              ]);\n\
              complete(results.len());"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    effort: Some(ReasoningEffort::High),
-                    ..spec()
-                },
+                    .into(),
             )
             .unwrap();
+            let (_run_id, outcome_rx) = manager
+                .launch(
+                    resolved,
+                    LaunchSpec {
+                        effort: Some(ReasoningEffort::High),
+                        ..spec()
+                    },
+                )
+                .unwrap();
 
-        let mut efforts = HashMap::new();
-        for _ in 0..2 {
-            let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-                panic!("expected spawn event");
-            };
-            efforts.insert(
-                req.request.prompt.clone(),
-                req.request.runtime_overrides.reasoning_effort.clone(),
-            );
-            complete_spawn(req);
-        }
-        assert_eq!(
-            efforts.get("inherits").and_then(Option::as_deref),
-            Some("high")
-        );
-        assert_eq!(
-            efforts.get("overrides").and_then(Option::as_deref),
-            Some("low")
-        );
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn agent_rejects_invalid_effort_before_spawning() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
-             agent(\"work\", #{ effort: \"turbo\" });"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
-
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Failed { error } => {
-                assert!(error.contains("invalid workflow agent effort"), "{error}");
-                assert!(error.contains("turbo"), "{error}");
+            let mut efforts = HashMap::new();
+            for _ in 0..2 {
+                let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn") else {
+                    panic!("expected spawn event");
+                };
+                efforts.insert(
+                    req.request.prompt.clone(),
+                    req.request.runtime_overrides.reasoning_effort.clone(),
+                );
+                complete_spawn(req);
             }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        assert!(
-            subagent_rx.try_recv().is_err(),
-            "invalid effort must not reach the coordinator"
-        );
+            assert_eq!(
+                efforts.get("inherits").and_then(Option::as_deref),
+                Some("high")
+            );
+            assert_eq!(
+                efforts.get("overrides").and_then(Option::as_deref),
+                Some("low")
+            );
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Completed { .. }
+            ));
+        });
     }
 
-    #[tokio::test]
-    async fn parallel_nulls_invalid_child_effort_without_spawning() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+    #[test]
+    fn agent_rejects_invalid_effort_before_spawning() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
+             agent(\"work\", #{ effort: \"turbo\" });"
+                    .into(),
+            )
+            .unwrap();
+            let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(error.contains("invalid workflow agent effort"), "{error}");
+                    assert!(error.contains("turbo"), "{error}");
+                }
+                other => panic!("expected Failed, got {other:?}"),
+            }
+            assert!(
+                subagent_rx.try_recv().is_err(),
+                "invalid effort must not reach the coordinator"
+            );
+        });
+    }
+
+    #[test]
+    fn parallel_nulls_invalid_child_effort_without_spawning() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let results = parallel([#{ prompt: \"work\", effort: \"turbo\" }]);\n\
              complete(results);"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+                    .into(),
+            )
+            .unwrap();
+            let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!([null]));
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(result, serde_json::json!([null]));
+                }
+                other => panic!("expected Completed, got {other:?}"),
             }
-            other => panic!("expected Completed, got {other:?}"),
-        }
-        assert!(
-            subagent_rx.try_recv().is_err(),
-            "invalid effort must not reach the coordinator"
-        );
+            assert!(
+                subagent_rx.try_recv().is_err(),
+                "invalid effort must not reach the coordinator"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn active_run_admission_is_bounded_per_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+    #[test]
+    fn active_run_admission_is_bounded_per_session() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
                       let r = agent(\"work\");\ncomplete(r.output);";
-        let mut outcomes = Vec::new();
-        let mut spawned = Vec::new();
-        for _ in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
-            let (_, outcome) = manager
+            let mut outcomes = Vec::new();
+            let mut spawned = Vec::new();
+            for _ in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
+                let (_, outcome) = manager
+                    .launch(resolve_inline(script.into()).unwrap(), spec())
+                    .unwrap();
+                outcomes.push(outcome);
+                spawned.push(event_of!(manager, subagent_rx, "spawn event"));
+            }
+            let error = manager
                 .launch(resolve_inline(script.into()).unwrap(), spec())
-                .unwrap();
-            outcomes.push(outcome);
-            spawned.push(subagent_rx.recv().await.expect("spawn event"));
-        }
-        let error = manager
-            .launch(resolve_inline(script.into()).unwrap(), spec())
-            .unwrap_err();
-        assert!(matches!(error, LaunchError::TooManyActiveRuns));
-        drop(spawned);
-        let _ = manager
-            .cancel_all_and_drain(std::time::Duration::from_secs(1))
-            .await;
-        drop(outcomes);
+                .unwrap_err();
+            assert!(matches!(error, LaunchError::TooManyActiveRuns));
+            drop(spawned);
+            let _ = manager
+                .cancel_all_and_drain(std::time::Duration::from_secs(1))
+                .await;
+            drop(outcomes);
+        });
     }
 
-    #[tokio::test]
-    async fn retiring_runs_still_consume_session_admission() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, _subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let mut done_senders = Vec::new();
-        for index in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
-            let (done_tx, done_rx) = oneshot::channel();
-            manager
-                .retiring
-                .push((format!("retiring-{index}"), done_rx));
-            done_senders.push(done_tx);
-            assert_eq!(manager.retiring.len(), index + 1);
-        }
+    #[test]
+    fn retiring_runs_still_consume_session_admission() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, _subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let mut done_senders = Vec::new();
+            for index in 0..WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
+                let (done_tx, done_rx) = oneshot::channel();
+                manager
+                    .retiring
+                    .push((format!("retiring-{index}"), done_rx));
+                done_senders.push(done_tx);
+                assert_eq!(manager.retiring.len(), index + 1);
+            }
 
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
-        )
-        .unwrap();
-        assert!(matches!(
-            manager.launch(resolved, spec()).unwrap_err(),
-            LaunchError::TooManyActiveRuns
-        ));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+            )
+            .unwrap();
+            assert!(matches!(
+                manager.launch(resolved, spec()).unwrap_err(),
+                LaunchError::TooManyActiveRuns
+            ));
 
-        done_senders.pop().unwrap().send(()).unwrap();
-        manager.reap_terminal_runs();
-        assert_eq!(
-            manager.retiring.len(),
-            WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION - 1
-        );
-        assert!(
-            manager.active.len().saturating_add(manager.retiring.len())
-                < WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION
-        );
-        drop(done_senders);
+            done_senders.pop().unwrap().send(()).unwrap();
+            manager.reap_terminal_runs();
+            assert_eq!(
+                manager.retiring.len(),
+                WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION - 1
+            );
+            assert!(
+                manager.active.len().saturating_add(manager.retiring.len())
+                    < WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION
+            );
+            drop(done_senders);
+        });
     }
 
-    #[tokio::test]
-    async fn untrusted_workflow_cannot_fork_parent_context() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+    #[test]
+    fn untrusted_workflow_cannot_fork_parent_context() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\", #{ fork_context: true });\n\
              complete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+                    .into(),
+            )
+            .unwrap();
+            let (_run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Failed { error } => {
-                assert!(error.contains("fork_context is restricted to built-in workflows"));
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(error.contains("fork_context is restricted to built-in workflows"));
+                }
+                other => panic!("expected Failed, got {other:?}"),
             }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        assert!(
-            subagent_rx.try_recv().is_err(),
-            "rejected fork_context must not reach the coordinator"
-        );
+            assert!(
+                subagent_rx.try_recv().is_err(),
+                "rejected fork_context must not reach the coordinator"
+            );
+        });
     }
 
-    #[tokio::test]
-    async fn output_schema_stays_host_side_with_one_corrective_retry() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+    #[test]
+    fn output_schema_stays_host_side_with_one_corrective_retry() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
             "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"scan\", #{ output_schema: #{ \"type\": \"object\", \
              \"required\": [\"ok\"], \"properties\": #{ \"ok\": #{ \"type\": \"boolean\" } } } });\n\
@@ -1914,295 +2324,644 @@ mod tests {
                 .into(),
         )
         .unwrap();
-        let (_run_id, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    agent_budget: Some(5),
-                    ..spec()
-                },
-            )
-            .unwrap();
+            let (_run_id, outcome_rx) = manager
+                .launch(
+                    resolved,
+                    LaunchSpec {
+                        agent_budget: Some(5),
+                        ..spec()
+                    },
+                )
+                .unwrap();
 
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("first spawn") else {
-            panic!("expected spawn event");
-        };
-        assert!(
-            req.runtime_overrides.output_schema.is_none(),
-            "schema must not be passed to the child runtime"
-        );
-        assert!(
-            req.prompt.contains("<output-contract>"),
-            "prompt must carry the schema contract"
-        );
-        assert!(req.resume_from.is_none());
-        assert_eq!(req.runtime_overrides.output_token_budget, None);
-        let first_id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("All files scanned, nothing found."),
-            subagent_id: first_id.clone(),
-            child_session_id: first_id.clone(),
-            tokens_used: 100,
-            output_tokens_used: 100,
-            total_tokens_used: 100,
-            ..Default::default()
-        });
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "first spawn") else {
+                panic!("expected spawn event");
+            };
+            assert!(
+                req.runtime_overrides.output_schema.is_none(),
+                "schema must not be passed to the child runtime"
+            );
+            assert!(
+                req.prompt.contains("<output-contract>"),
+                "prompt must carry the schema contract"
+            );
+            assert!(req.resume_from.is_none());
+            assert_eq!(req.runtime_overrides.output_token_budget, None);
+            let first_id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("All files scanned, nothing found."),
+                subagent_id: first_id.clone(),
+                child_session_id: first_id.clone(),
+                tokens_used: 100,
+                output_tokens_used: 100,
+                total_tokens_used: 100,
+                ..Default::default()
+            });
 
-        let SubagentEvent::Spawn(retry) = subagent_rx.recv().await.expect("corrective retry")
-        else {
-            panic!("expected retry spawn event");
-        };
-        assert_eq!(retry.resume_from.as_deref(), Some(first_id.as_str()));
-        assert!(retry.prompt.contains("did not satisfy the output contract"));
-        assert_eq!(retry.runtime_overrides.output_token_budget, None);
-        let retry_id = retry.id.clone();
-        let _ = retry.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("```json\n{\"ok\": true}\n```"),
-            subagent_id: retry_id.clone(),
-            child_session_id: retry_id,
-            tokens_used: 50,
-            output_tokens_used: 50,
-            total_tokens_used: 50,
-            ..Default::default()
-        });
+            let SubagentEvent::Spawn(retry) = event_of!(manager, subagent_rx, "corrective retry")
+            else {
+                panic!("expected retry spawn event");
+            };
+            assert_eq!(retry.resume_from.as_deref(), Some(first_id.as_str()));
+            assert!(retry.prompt.contains("did not satisfy the output contract"));
+            assert_eq!(retry.runtime_overrides.output_token_budget, None);
+            let retry_id = retry.id.clone();
+            let _ = retry.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("```json\n{\"ok\": true}\n```"),
+                subagent_id: retry_id.clone(),
+                child_session_id: retry_id,
+                tokens_used: 50,
+                output_tokens_used: 50,
+                total_tokens_used: 50,
+                ..Default::default()
+            });
 
-        let outcome = outcome_rx.await.unwrap();
-        match outcome {
-            WorkflowOutcome::Completed { result } => {
-                assert_eq!(result, serde_json::json!(true));
+            let outcome = outcome_of!(manager, outcome_rx);
+            match outcome {
+                WorkflowOutcome::Completed { result } => {
+                    assert_eq!(result, serde_json::json!(true));
+                }
+                other => panic!("expected Completed, got {other:?}"),
             }
-            other => panic!("expected Completed, got {other:?}"),
-        }
-        let state = manager.tracker.lock().list().into_iter().next().unwrap();
-        assert_eq!(state.agents_used, 1, "schema retry is one logical agent");
-        assert_eq!(state.agent_budget, Some(5));
+            let state = manager.tracker.lock().list().into_iter().next().unwrap();
+            assert_eq!(state.agents_used, 1, "schema retry is one logical agent");
+            assert_eq!(state.agent_budget, Some(5));
+        });
     }
 
-    #[tokio::test]
-    async fn explicit_max_output_tokens_is_ignored_and_run_charges_totals() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+    #[test]
+    fn explicit_max_output_tokens_is_ignored_and_run_charges_totals() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\", #{ max_output_tokens: 900 });\n\
              complete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (run_id, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    agent_budget: Some(2),
-                    ..spec()
-                },
+                    .into(),
             )
             .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-            panic!("expected spawn");
-        };
-        assert_eq!(req.runtime_overrides.output_token_budget, None);
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("done"),
-            subagent_id: id.clone(),
-            child_session_id: id,
-            output_tokens_used: 120,
-            total_tokens_used: 120,
-            ..Default::default()
-        });
-        assert!(matches!(
-            outcome_rx.await.unwrap(),
-            WorkflowOutcome::Completed { .. }
-        ));
-        let state = manager.tracker.lock().get(&run_id).unwrap();
-        assert_eq!(state.agents_used, 1);
-        assert_eq!(state.agent_budget, Some(2));
-    }
-
-    #[tokio::test]
-    async fn children_spawn_without_output_clamp() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
-             let r = agent(\"work\");\ncomplete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (_run_id, _outcome_rx) = manager.launch(resolved, spec()).unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-            panic!("expected spawn");
-        };
-        assert_eq!(req.runtime_overrides.output_token_budget, None);
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            success: true,
-            output: std::sync::Arc::from("done"),
-            subagent_id: id.clone(),
-            child_session_id: id,
-            output_tokens_used: 1,
-            ..Default::default()
+            let (run_id, outcome_rx) = manager
+                .launch(
+                    resolved,
+                    LaunchSpec {
+                        agent_budget: Some(2),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn") else {
+                panic!("expected spawn");
+            };
+            assert_eq!(req.runtime_overrides.output_token_budget, None);
+            let id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("done"),
+                subagent_id: id.clone(),
+                child_session_id: id,
+                output_tokens_used: 120,
+                total_tokens_used: 120,
+                ..Default::default()
+            });
+            assert!(matches!(
+                outcome_of!(manager, outcome_rx),
+                WorkflowOutcome::Completed { .. }
+            ));
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(state.agents_used, 1);
+            assert_eq!(state.agent_budget, Some(2));
         });
     }
 
-    #[tokio::test]
-    async fn cancellation_uses_run_owned_cancel_event_without_parent_detach() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentCancelTarget, SubagentEvent,
-        };
+    #[test]
+    fn children_spawn_without_output_clamp() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx, cancels) =
-            test_manager_with_cancels(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\");\ncomplete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (run_id, outcome_rx) = manager
-            .launch(
-                resolved,
-                LaunchSpec {
-                    agent_budget: Some(100),
-                    ..spec()
-                },
+                    .into(),
             )
             .unwrap();
-        let SubagentEvent::Spawn(req) = subagent_rx.recv().await.expect("spawn") else {
-            panic!("expected spawn");
-        };
-        assert!(req.owner.is_workflow());
-        assert!(manager.cancel(&run_id));
-        let _ = outcome_rx.await;
-        assert!(
-            req.cancel_token.is_cancelled(),
-            "run cancel must cancel the child token, not silently detach the receiver"
-        );
-        assert!(
-            cancels.lock().iter().any(|target| matches!(
-                target,
-                SubagentCancelTarget::WorkflowRunId(id) if id == &run_id
-            )),
-            "cancellation must emit an explicit run-owned cancel event"
-        );
+            let (_run_id, _outcome_rx) = manager.launch(resolved, spec()).unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn") else {
+                panic!("expected spawn");
+            };
+            assert_eq!(req.runtime_overrides.output_token_budget, None);
+            let id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("done"),
+                subagent_id: id.clone(),
+                child_session_id: id,
+                output_tokens_used: 1,
+                ..Default::default()
+            });
+        });
     }
 
-    #[tokio::test]
-    async fn backgrounded_stub_fails_loudly() {
-        use fuigo_tools::implementations::fuigo_build::task::types::{
-            SubagentEvent, SubagentResult,
-        };
+    #[test]
+    fn cancellation_uses_run_owned_cancel_event_without_parent_detach() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentCancelTarget, SubagentEvent,
+            };
 
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        let resolved = resolve_inline(
-            "let meta = #{ name: \"t\", description: \"d\" };\n\
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx, cancels) =
+                test_manager_with_cancels(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
+             let r = agent(\"work\");\ncomplete(r.output);"
+                    .into(),
+            )
+            .unwrap();
+            let (run_id, outcome_rx) = manager
+                .launch(
+                    resolved,
+                    LaunchSpec {
+                        agent_budget: Some(100),
+                        ..spec()
+                    },
+                )
+                .unwrap();
+            let SubagentEvent::Spawn(req) = event_of!(manager, subagent_rx, "spawn") else {
+                panic!("expected spawn");
+            };
+            assert!(req.owner.is_workflow());
+            assert!(manager.cancel(&run_id));
+            settled_of!(manager, outcome_rx);
+            assert!(
+                req.cancel_token.is_cancelled(),
+                "run cancel must cancel the child token, not silently detach the receiver"
+            );
+            assert!(
+                cancels.lock().iter().any(|target| matches!(
+                    target,
+                    SubagentCancelTarget::WorkflowRunId(id) if id == &run_id
+                )),
+                "cancellation must emit an explicit run-owned cancel event"
+            );
+        });
+    }
+
+    #[test]
+    fn backgrounded_stub_fails_loudly() {
+        run_workflow_test(async {
+            use fuigo_tools::implementations::fuigo_build::task::types::{
+                SubagentEvent, SubagentResult,
+            };
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            let resolved = resolve_inline(
+                "let meta = #{ name: \"t\", description: \"d\" };\n\
              let r = agent(\"work\");\n\
              complete(r.output);"
-                .into(),
-        )
-        .unwrap();
-        let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
+                    .into(),
+            )
+            .unwrap();
+            let (run_id, outcome_rx) = manager.launch(resolved, spec()).unwrap();
 
-        let spawn_req = subagent_rx.recv().await.expect("spawn event");
-        let SubagentEvent::Spawn(req) = spawn_req else {
-            panic!("expected spawn event");
-        };
-        let id = req.id.clone();
-        let _ = req.result_tx.send(SubagentResult {
-            backgrounded: true,
-            subagent_id: id,
-            ..Default::default()
-        });
-        let outcome = outcome_rx.await.unwrap();
-        match outcome {
-            WorkflowOutcome::Failed { error } => {
-                assert!(
-                    error.contains("auto-backgrounded"),
-                    "distinct engine-bug message expected, got: {error}"
-                );
+            let spawn_req = event_of!(manager, subagent_rx, "spawn event");
+            let SubagentEvent::Spawn(req) = spawn_req else {
+                panic!("expected spawn event");
+            };
+            let id = req.id.clone();
+            let _ = req.result_tx.send(SubagentResult {
+                backgrounded: true,
+                subagent_id: id,
+                ..Default::default()
+            });
+            let outcome = outcome_of!(manager, outcome_rx);
+            match outcome {
+                WorkflowOutcome::Failed { error } => {
+                    assert!(
+                        error.contains("auto-backgrounded"),
+                        "distinct engine-bug message expected, got: {error}"
+                    );
+                }
+                other => panic!("expected Failed, got {other:?}"),
             }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        let state = manager.tracker.lock().get(&run_id).unwrap();
+            let state = manager.tracker.lock().get(&run_id).unwrap();
+            assert_eq!(
+                state.status,
+                crate::session::workflow::tracker::WorkflowRunStatus::Failed
+            );
+        });
+    }
+
+    #[test]
+    fn parallel_panel_respects_concurrency_cap() {
+        run_workflow_test(async {
+            const CAP: usize = 2;
+            const N: usize = 6;
+
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            manager.test_set_max_concurrent_agents(CAP);
+            let (_run_id, outcome_rx) = manager
+                .launch(resolve_inline(parallel_n_script(N)).unwrap(), spec())
+                .unwrap();
+
+            let mut live = Vec::new();
+            for _ in 0..CAP {
+                live.push(spawn_of!(manager, subagent_rx));
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
+                    .await
+                    .is_err(),
+                "more than {CAP} children were live"
+            );
+
+            let mut completed = 0usize;
+            while completed + live.len() < N {
+                complete_spawn(live.remove(0));
+                completed += 1;
+                live.push(spawn_of!(manager, subagent_rx));
+            }
+            for req in live {
+                complete_spawn(req);
+            }
+
+            match outcome_of!(manager, outcome_rx) {
+                WorkflowOutcome::Completed { result } => assert_eq!(result, serde_json::json!(N)),
+                other => panic!("expected Completed, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn cancel_drops_queued_spawns_before_coordinator() {
+        run_workflow_test(async {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
+            manager.test_set_max_concurrent_agents(1);
+            let (run_id, outcome_rx) = manager
+                .launch(resolve_inline(parallel_n_script(4)).unwrap(), spec())
+                .unwrap();
+
+            let first = spawn_of!(manager, subagent_rx);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
+                    .await
+                    .is_err(),
+                "queued agents reached the coordinator before cancel"
+            );
+
+            assert!(manager.cancel(&run_id));
+            settled_of!(manager, outcome_rx);
+            assert!(first.cancel_token.is_cancelled());
+            assert!(subagent_rx.try_recv().is_err());
+        });
+    }
+
+    /// The hang P35 documented (R012 §9b): a workflow that never reports used to park the test
+    /// forever on an unbounded `outcome_rx.await`, which produces no failing set at all. The
+    /// wait is now bounded and fails with a named diagnosis. Virtual time keeps this instant.
+    #[tokio::test(start_paused = true)]
+    async fn a_run_that_never_reports_fails_with_a_named_diagnosis_instead_of_hanging() {
+        let (mut manager, _events) = test_manager(None);
+        let (_done_tx, done_rx) = oneshot::channel();
+        manager.test_insert_active_run("wf_wedged".into(), done_rx);
+        // `_outcome_tx` stays alive and never sends: exactly a watcher that never finishes.
+        let (_outcome_tx, outcome_rx) = oneshot::channel::<WorkflowOutcome>();
+
+        let started = tokio::time::Instant::now();
+        let message = {
+            let manager = &manager;
+            let waited = std::panic::AssertUnwindSafe(async move {
+                let _ = await_outcome(manager, outcome_rx, "test-site:1").await;
+            });
+            let payload = futures::FutureExt::catch_unwind(waited)
+                .await
+                .expect_err("an unreported outcome must fail, not resolve");
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .expect("panic payload is a string")
+        };
+
         assert_eq!(
-            state.status,
-            crate::session::workflow::tracker::WorkflowRunStatus::Failed
+            started.elapsed(),
+            WORKFLOW_TEST_DEADLINE,
+            "it must give up at the deadline, not earlier and not never"
+        );
+        for needle in [
+            "workflow test wedged",
+            "a_run_that_never_reports_fails_with_a_named_diagnosis_instead_of_hanging",
+            "test-site:1",
+            "the run's WorkflowOutcome",
+            "active wf_wedged",
+            "run_workflow",
+        ] {
+            assert!(
+                message.contains(needle),
+                "diagnosis lacks `{needle}`: {message}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_subagent_event_that_never_arrives_fails_with_a_named_diagnosis() {
+        let (manager, mut events) = test_manager(None);
+        let message = {
+            let manager = &manager;
+            let events = &mut events;
+            let waited = std::panic::AssertUnwindSafe(async move {
+                let _ = next_event(manager, events, "first spawn", "test-site:2").await;
+            });
+            let payload = futures::FutureExt::catch_unwind(waited)
+                .await
+                .expect_err("a missing event must fail, not resolve");
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .expect("panic payload is a String")
+        };
+        assert!(message.contains("workflow test wedged"), "{message}");
+        assert!(
+            message.contains("the subagent event `first spawn`"),
+            "{message}"
+        );
+    }
+
+    /// The wedge for real, end to end. A live run that never reports (its child is never
+    /// completed, so its engine thread stays parked in `run_workflow`) used to park
+    /// `outcome_rx.await` forever. It must now fail, naming the run and its state, and the
+    /// runtime teardown must not then hang on the engine's blocking thread.
+    #[test]
+    fn a_wedged_run_fails_with_its_diagnosis_and_leaves_no_hang_behind() {
+        let started = std::time::Instant::now();
+        let failure = std::panic::catch_unwind(|| {
+            run_workflow_test(async {
+                let (mut manager, mut subagent_rx) = test_manager(None);
+                let script = "let meta = #{ name: \"t\", description: \"d\" };\n\
+                              let r = agent(\"work\");\ncomplete(r.output);";
+                let (_run_id, outcome_rx) = manager
+                    .launch(resolve_inline(script.into()).unwrap(), spec())
+                    .unwrap();
+                // The child is dispatched and then left running: nothing will ever complete it.
+                let _child = event_of!(manager, subagent_rx, "first spawn");
+
+                DEADLINE_OVERRIDE.with(|d| d.set(Some(std::time::Duration::from_millis(400))));
+                let _ = outcome_of!(manager, outcome_rx);
+                unreachable!("a run with a live, never-completed child cannot report an outcome");
+            });
+        })
+        .expect_err("a wedged run must fail the test");
+        let message = failure
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("the failure is a formatted diagnosis");
+
+        for needle in [
+            "workflow test wedged",
+            "a_wedged_run_fails_with_its_diagnosis_and_leaves_no_hang_behind",
+            "the run's WorkflowOutcome",
+            "active wf_",
+            "tracker_status=active",
+            "cancelled=false",
+        ] {
+            assert!(
+                message.contains(needle),
+                "diagnosis lacks `{needle}`: {message}"
+            );
+        }
+        // Detected at the (shortened) bound and torn down within the grace period, not stalled.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(30),
+            "took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `run_workflow_test` exists because a dropped runtime waits for `spawn_blocking` tasks.
+    /// Prove the premise and the remedy: a blocking thread nothing will ever release must not
+    /// hold the test forever, and must not pass silently either.
+    #[test]
+    fn a_stuck_blocking_thread_fails_the_test_instead_of_hanging_its_teardown() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        SHUTDOWN_GRACE_OVERRIDE.with(|g| g.set(Some(std::time::Duration::from_secs(1))));
+        let started = std::time::Instant::now();
+        let failure = std::panic::catch_unwind(|| {
+            run_workflow_test(async move {
+                let (running_tx, running_rx) = oneshot::channel();
+                let _stuck = tokio::task::spawn_blocking(move || {
+                    let _ = running_tx.send(());
+                    // Blocks until `release_tx` is dropped by the test thread, after teardown.
+                    let _ = release_rx.recv();
+                });
+                running_rx.await.unwrap();
+            });
+        })
+        .expect_err("a blocking thread that outlives teardown must fail the test");
+        let elapsed = started.elapsed();
+        SHUTDOWN_GRACE_OVERRIDE.with(|g| g.set(None));
+
+        let message = failure
+            .downcast_ref::<String>()
+            .cloned()
+            .expect("the failure is a formatted diagnosis");
+        assert!(
+            message.contains("1 blocking thread(s) were still running"),
+            "{message}"
+        );
+        assert!(message.contains("release_agent_calls"), "{message}");
+        assert!(
+            elapsed >= std::time::Duration::from_secs(1),
+            "gave up early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "teardown was not bounded: {elapsed:?}"
+        );
+        drop(release_tx);
+    }
+
+    // P38-F: a pause or stop that lands while a host request is stranded by the host's teardown (P38).
+    // The engine runs for real against the P38 stranding host (see `fuigo-workflow`'s engine tests),
+    // the stop goes through the real `pause()` / `cancel()`, and the finished run settles through the
+    // watcher's own `settle_finished_run`.
+
+    #[derive(Clone, Copy, Debug)]
+    enum Stranded {
+        Reservation,
+        AgentHostCall,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum UserStop {
+        Pause,
+        Stop,
+    }
+
+    async fn user_stop_during_stranded_request(
+        stop: UserStop,
+        stranded: Stranded,
+    ) -> (WorkflowOutcome, WorkflowRunStatus) {
+        use fuigo_workflow::WorkflowHostRequest as R;
+
+        let (mut manager, _events) = test_manager(None);
+        let run_id = format!("wf_p38f_{stop:?}_{stranded:?}").to_lowercase();
+        manager.tracker.lock().start_run(
+            run_id.clone(),
+            run_id.clone(),
+            "obj".into(),
+            vec![],
+            Some(10),
+            None,
+        );
+        let cancel = CancellationToken::new();
+        let pause_intent = Arc::new(AtomicBool::new(false));
+        let (_done_tx, done_rx) = oneshot::channel();
+        manager.active.insert(
+            run_id.clone(),
+            ActiveRun {
+                cancel: cancel.clone(),
+                pause_intent: pause_intent.clone(),
+                done: done_rx,
+            },
+        );
+
+        // The P38 stranding host: serve until the selected request arrives, report it held, wait for the
+        // user's stop, then stop serving and keep the request (and its reply sender) until the channel's
+        // last sender is gone, the lifetime tokio gives a request stranded by a send racing `Rx::drop`.
+        let (host_tx, mut host_rx) = mpsc::unbounded_channel::<R>();
+        let senders = host_tx.downgrade();
+        let (held_tx, held_rx) = oneshot::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let host = std::thread::spawn(move || {
+            let request = loop {
+                let Some(request) = host_rx.blocking_recv() else {
+                    return;
+                };
+                match (stranded, request) {
+                    (Stranded::Reservation, request @ R::ReserveAgentCalls { .. })
+                    | (Stranded::AgentHostCall, request @ R::SpawnAgent { .. }) => break request,
+                    (
+                        _,
+                        R::ReserveAgentCalls { reply, .. } | R::ReleaseAgentCalls { reply, .. },
+                    ) => {
+                        let _ = reply.send(Ok(()));
+                    }
+                    _ => {}
+                }
+            };
+            let _ = held_tx.send(());
+            let _ = go_rx.recv();
+            drop(host_rx);
+            while senders.upgrade().is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            drop(request);
+        });
+
+        // A plain thread, not `spawn_blocking`: a wedged engine must fail this test by name, not hold the
+        // runtime's shutdown.
+        let (outcome_tx, outcome_rx) = oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = outcome_tx.send(fuigo_workflow::run_workflow(WorkflowRunParams {
+                script: "let meta = #{ name: \"t\", description: \"d\" };\n\
+                         let r = agent(\"work\");\ncomplete(r.output);"
+                    .into(),
+                args: serde_json::json!({}),
+                journal: Journal::new(None),
+                host_tx,
+                cancel,
+                max_ops: WorkflowRunParams::DEFAULT_MAX_OPS,
+            }));
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), held_rx)
+            .await
+            .expect("the engine never sent the request to strand")
+            .expect("stranding host ended early");
+        match stop {
+            UserStop::Pause => assert!(manager.pause(&run_id)),
+            UserStop::Stop => assert!(manager.cancel(&run_id)),
+        }
+        go_tx.send(()).expect("stranding host gone");
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(20), outcome_rx)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("{stop:?} during a stranded {stranded:?}: the engine wedged (P38)")
+            })
+            .expect("engine thread panicked");
+        host.join().expect("stranding host panicked");
+        let status = settle_finished_run(
+            &mut manager.tracker.lock(),
+            &run_id,
+            false,
+            pause_intent.load(Ordering::Relaxed),
+            &outcome,
+        )
+        .expect("run is tracked")
+        .status;
+        (outcome, status)
+    }
+
+    #[tokio::test]
+    async fn pause_during_a_stranded_reservation_leaves_the_run_user_paused() {
+        let (outcome, status) =
+            user_stop_during_stranded_request(UserStop::Pause, Stranded::Reservation).await;
+        assert!(matches!(outcome, WorkflowOutcome::Cancelled), "{outcome:?}");
+        assert_eq!(
+            status,
+            WorkflowRunStatus::UserPaused,
+            "engine outcome {outcome:?}"
         );
     }
 
     #[tokio::test]
-    async fn parallel_panel_respects_concurrency_cap() {
-        const CAP: usize = 2;
-        const N: usize = 6;
-
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        manager.test_set_max_concurrent_agents(CAP);
-        let (_run_id, outcome_rx) = manager
-            .launch(resolve_inline(parallel_n_script(N)).unwrap(), spec())
-            .unwrap();
-
-        let mut live = Vec::new();
-        for _ in 0..CAP {
-            live.push(recv_spawn(&mut subagent_rx).await);
-        }
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
-                .await
-                .is_err(),
-            "more than {CAP} children were live"
+    async fn pause_during_a_stranded_agent_host_call_leaves_the_run_user_paused() {
+        let (outcome, status) =
+            user_stop_during_stranded_request(UserStop::Pause, Stranded::AgentHostCall).await;
+        assert!(matches!(outcome, WorkflowOutcome::Cancelled), "{outcome:?}");
+        assert_eq!(
+            status,
+            WorkflowRunStatus::UserPaused,
+            "engine outcome {outcome:?}"
         );
-
-        let mut completed = 0usize;
-        while completed + live.len() < N {
-            complete_spawn(live.remove(0));
-            completed += 1;
-            live.push(recv_spawn(&mut subagent_rx).await);
-        }
-        for req in live {
-            complete_spawn(req);
-        }
-
-        match outcome_rx.await.unwrap() {
-            WorkflowOutcome::Completed { result } => assert_eq!(result, serde_json::json!(N)),
-            other => panic!("expected Completed, got {other:?}"),
-        }
     }
 
     #[tokio::test]
-    async fn cancel_drops_queued_spawns_before_coordinator() {
-        let dir = tempfile::tempdir().unwrap();
-        let (mut manager, mut subagent_rx) = test_manager(Some(dir.path().to_path_buf()));
-        manager.test_set_max_concurrent_agents(1);
-        let (run_id, outcome_rx) = manager
-            .launch(resolve_inline(parallel_n_script(4)).unwrap(), spec())
-            .unwrap();
-
-        let first = recv_spawn(&mut subagent_rx).await;
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(150), subagent_rx.recv())
-                .await
-                .is_err(),
-            "queued agents reached the coordinator before cancel"
+    async fn stop_during_a_stranded_reservation_leaves_the_run_cancelled() {
+        let (outcome, status) =
+            user_stop_during_stranded_request(UserStop::Stop, Stranded::Reservation).await;
+        // The tracker ignores outcomes once `cancel()` marked it `Cancelled`, so the status alone would
+        // not show a `Failed`; the outcome the watcher reports and logs must be `Cancelled` too.
+        assert!(matches!(outcome, WorkflowOutcome::Cancelled), "{outcome:?}");
+        assert_eq!(
+            status,
+            WorkflowRunStatus::Cancelled,
+            "engine outcome {outcome:?}"
         );
+    }
 
-        assert!(manager.cancel(&run_id));
-        let _ = outcome_rx.await;
-        assert!(first.cancel_token.is_cancelled());
-        assert!(subagent_rx.try_recv().is_err());
+    #[tokio::test]
+    async fn stop_during_a_stranded_agent_host_call_leaves_the_run_cancelled() {
+        let (outcome, status) =
+            user_stop_during_stranded_request(UserStop::Stop, Stranded::AgentHostCall).await;
+        assert!(matches!(outcome, WorkflowOutcome::Cancelled), "{outcome:?}");
+        assert_eq!(
+            status,
+            WorkflowRunStatus::Cancelled,
+            "engine outcome {outcome:?}"
+        );
     }
 }

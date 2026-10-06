@@ -4,7 +4,7 @@ use super::*;
 /// proxy-specific header and auth behaviour.
 ///
 /// It used to be `crate::env::PROD_CLI_CHAT_PROXY_BASE_URL`, which is now EMPTY
-/// -- Fuigo ships no first-party auxiliary host -- so those tests were asserting
+/// -- Fuigo ships no compiled auxiliary host -- so those tests were asserting
 /// proxy behaviour against the empty string and failing.
 ///
 /// Loopback is used rather than naming an upstream host: the predicate accepts
@@ -13,28 +13,25 @@ use super::*;
 /// That compatibility is retained for anyone running such a proxy themselves.
 const A_CLI_CHAT_PROXY_URL: &str = "http://localhost:18080/v1";
 
-/// A URL that the FIRST-PARTY predicates (`is_fuigo_api_url`,
-/// `is_prod_cli_chat_proxy_url`) recognise.
+/// A URL that the CONFIGURED-API-ORIGIN predicates (`is_fuigo_api_url`,
+/// `is_fuigo_api_bearer_url`) recognise once the test trust set is installed.
 ///
 /// Distinct from [`A_CLI_CHAT_PROXY_URL`]: loopback satisfies
-/// `is_cli_chat_proxy_url` but is deliberately NOT first-party, so tests about
-/// first-party credential handling need a real one.
+/// `is_cli_chat_proxy_url` but is deliberately NOT a configured origin, so tests about
+/// configured-origin credential handling need a real one.
 ///
 /// This is a predicate fixture, never dialled -- and the egress guard would
 /// refuse it if anything tried.
 ///
-/// It has to be an `*.x.ai` host, which is now the ONLY first-party form left:
+/// It is `api.x.ai` because `Config::install_test_trusted_origins` configures it
+/// (alongside FluxRouter); no host is trusted by compilation any more (P17-R).
 /// `is_prod_cli_chat_proxy_url` compares against `PROD_CLI_CHAT_PROXY_BASE_URL`,
-/// and that is empty, so the cli-chat-proxy arm can never match. The `*.x.ai`
-/// arm at `fuigo-shell-base/src/util/mod.rs:122` is hardcoded and survives.
+/// which is empty, so the cli-chat-proxy arm never matches.
 ///
-/// That makes "first-party" effectively vestigial for Fuigo, which operates no
-/// hosts of its own -- FluxRouter is deliberately third-party, so no session
-/// bearer is auto-stamped onto it. Left alone rather than made always-false:
-/// the predicate also gates credential REFUSAL under `disable_api_key_auth`,
-/// which is documented to fail closed, and loosening that deserves its own
-/// change rather than riding along with a rename.
-const A_FIRST_PARTY_URL: &str = "https://api.x.ai/v1";
+/// P30: "configured API origin" is the credential-delivery class. It is not the
+/// identity-disclosure class (`fuigo_extra_ca::fluxrouter::IdentityDisclosure`),
+/// which no configuration can widen.
+const A_CONFIGURED_ORIGIN_URL: &str = "https://api.x.ai/v1";
 use fuigo_test_support::EnvGuard;
 use serial_test::serial;
 #[test]
@@ -300,6 +297,7 @@ fn resolve_runtime_fields_propagates_disable_zdr_incompatible_tools() {
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
+            campaign_free_config: None,
         }
     }
     let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
@@ -320,7 +318,7 @@ fn re_resolve_runtime_fields_refreshes_typed_memory_from_raw_config() {
         toml::from_str("[memory]\nenabled = true\n[memory.search]\nmax_results = 12").unwrap();
     let mut cfg = Config::new_from_toml_cfg(&initial).unwrap();
     cfg.memory_enabled_override = Some(true);
-    cfg.re_resolve_runtime_fields(&updated);
+    cfg.re_resolve_runtime_fields(&updated, None);
     assert_eq!(cfg.memory_config.unwrap().search.max_results, 12);
 }
 #[test]
@@ -338,6 +336,7 @@ fn resolve_runtime_fields_propagates_disable_web_search() {
             todo_gate: false,
             laziness_debug_log: None,
             storage_mode: None,
+            campaign_free_config: None,
         }
     }
     let empty: toml::Value = toml::Value::Table(toml::map::Map::new());
@@ -420,7 +419,7 @@ fn finalize_image_describe_sampler_none_uses_active_session_model_not_forced_hel
         model: "composer-session-model".into(),
         ..Default::default()
     };
-    let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3));
+    let (model, cfg) = finalize_image_describe_sampler_config(None, &active, None, Some(3), HelperModelChoice::Default);
     assert_eq!(model, "composer-session-model");
     assert_eq!(cfg.model, "composer-session-model");
     assert_ne!(cfg.model, "fuigo-build");
@@ -436,7 +435,13 @@ fn finalize_image_describe_sampler_some_stamps_session_fields() {
         ..Default::default()
     };
     let (model, cfg) =
-        finalize_image_describe_sampler_config(Some(aux), &active, Some("cli".into()), Some(7));
+        finalize_image_describe_sampler_config(
+            Some(aux),
+            &active,
+            Some("cli".into()),
+            Some(7),
+            HelperModelChoice::Default,
+        );
     assert_eq!(model, "fuigo-build");
     assert_eq!(cfg.model, "fuigo-build");
     assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
@@ -536,22 +541,34 @@ fn session_resolver_is_not_stamped_onto_third_party_samplers() {
         base_url: "https://litellm.corp.example/v1".into(),
         ..SamplerConfig::default()
     };
-    stamp_session_local_sampler_fields(&mut third_party, &session_cfg, None, None);
+    stamp_session_local_sampler_fields(
+        &mut third_party,
+        &session_cfg,
+        None,
+        None,
+        HelperModelChoice::Default,
+    );
     assert!(
         third_party.bearer_resolver.is_none(),
         "a third-party endpoint must keep its resolved credential"
     );
-    // Explicitly first-party, NOT `resolve_inference_base_url()`. That now
-    // returns FluxRouter, which these predicates correctly classify as
-    // third-party -- a session bearer resolver must not be stamped onto it.
-    let mut first_party = SamplerConfig {
-        base_url: A_FIRST_PARTY_URL.to_string(),
+    // Explicitly a configured API origin, named here rather than taken from
+    // `resolve_inference_base_url()`, so the assertion does not depend on what the
+    // default endpoint resolves to.
+    let mut configured_origin = SamplerConfig {
+        base_url: A_CONFIGURED_ORIGIN_URL.to_string(),
         ..SamplerConfig::default()
     };
-    stamp_session_local_sampler_fields(&mut first_party, &session_cfg, None, None);
+    stamp_session_local_sampler_fields(
+        &mut configured_origin,
+        &session_cfg,
+        None,
+        None,
+        HelperModelChoice::Default,
+    );
     assert!(
-        first_party.bearer_resolver.is_some(),
-        "first-party aux samplers keep the session refresh behavior"
+        configured_origin.bearer_resolver.is_some(),
+        "configured-origin aux samplers keep the session refresh behavior"
     );
 }
 /// A cold cache disables web search rather than sending an unauthenticated request.
@@ -1195,7 +1212,7 @@ fn sampling_config_uses_fallback_when_no_model_api_key() {
 fn sampling_config_scopes_no_inline_citations_include() {
     crate::agent::config::Config::install_test_trusted_origins();
     for (supports_search, backend, base_url, expected) in [
-        (true, ApiBackend::Responses, A_FIRST_PARTY_URL, true),
+        (true, ApiBackend::Responses, A_CONFIGURED_ORIGIN_URL, true),
         (true, ApiBackend::Responses, "https://api.x.ai/v1", true),
         (false, ApiBackend::Responses, "https://api.x.ai/v1", false),
         (
@@ -1416,7 +1433,7 @@ fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
     let _alias = EnvGuard::set(alias, "");
     let _global = EnvGuard::set(FUIGO_API_KEY_ENV_VAR, sentinel);
     let _legacy = EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
-    // A CONFIGURED first-party origin. This previously read
+    // A CONFIGURED API origin. This previously read
     // `https://inference.example/v1` -- an arbitrary third-party host -- and
     // asserted that `FUIGO_API_KEY` was sent there. The subject of this test is
     // the fall-through from an empty `env_key` to the global key, which is
@@ -1432,7 +1449,7 @@ fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
     // And the property that made the old spelling dangerous. A prefetched
     // catalogue model carries its own `base_url` and never passes through the
     // `[model.*]` fail-closed guard, so if `FUIGO_API_KEY` were unscoped this
-    // is where a catalogue-chosen host would collect the user's first-party
+    // is where a catalogue-chosen host would collect the user's own Fuigo API
     // key.
     let third_party = test_model_entry("m", "https://inference.example/v1", None, None, None);
     let creds = resolve_credentials(&third_party, None);
@@ -1562,14 +1579,34 @@ fn api_key_creds(base_url: &str) -> ResolvedCredentials {
 }
 /// The production trust mapping, asserted directly.
 ///
-/// `install_trusted_api_origins` is test-pinned so the process-wide `OnceLock`
-/// cannot make results depend on the test schedule -- which means the
+/// `install_trusted_api_origins` is test-pinned so the process-wide trust store
+/// (an `RwLock<Option<..>>`, seed is first-write-wins) cannot make results depend on the test schedule -- which means the
 /// `#[cfg(not(test))]` branch that turns `[endpoints]` into the trust set is
 /// unreachable from every unit test in this crate. This covers the mapping
-/// itself, which is what decides whether a real user's own gateway is
-/// first-party.
+/// itself, which is what decides whether a real user's own gateway is a
+/// configured API origin.
 #[test]
+#[serial]
 fn configured_endpoints_become_the_trusted_origins() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    // `EndpointsConfig::default()` resolves FUIGO_API_BASE_URL, FUIGO_MODELS_BASE_URL,
+    // FUIGO_MODELS_LIST_URL and FUIGO_CLI_CHAT_PROXY_BASE_URL from the environment at
+    // `Default`/deserialize time, and `from_config_value` calls it on every load. So the
+    // second half of this test -- "an unset endpoint cannot widen the trust set" -- was
+    // asserting a property of the ambient environment. Measured failure:
+    // `left: ["https://only.example/v1", "http://localhost:18081/v1"]`, the loopback URL
+    // belonging to `agent::app::tests::embedded_otel_gate_keeps_a_session_user_fail_closed`,
+    // running concurrently. The test now makes its own precondition true instead of
+    // hoping for it; the proxy guard is exclusive process-wide (`PROCESS_ANCHORS`).
+    // The other three keys are not anchors, so `EnvGuard` requires the UNNAMED
+    // `#[serial]` group for them: it excludes the serial tests that export
+    // FUIGO_MODELS_BASE_URL / FUIGO_API_BASE_URL, and makes these writes sound.
+    let _proxy = EnvGuard::unset("FUIGO_CLI_CHAT_PROXY_BASE_URL");
+    let _models = EnvGuard::unset("FUIGO_MODELS_BASE_URL");
+    let _models_list = EnvGuard::unset("FUIGO_MODELS_LIST_URL");
+    let _api_base = EnvGuard::unset("FUIGO_API_BASE_URL");
     let raw: toml::Value = toml::from_str(
         r#"
 [endpoints]
@@ -1610,6 +1647,139 @@ fuigo_api_base_url = "https://only.example/v1"
     );
 }
 
+/// The injectable trust set follows the endpoints this `Config` sends to, in process, in any order (P150).
+///
+/// `Config::trusted_origins` is a VALUE, so this asserts the real resolution
+/// logic against two different sets inside one test binary -- which the
+/// process-wide store could never allow, since its first writer decides the
+/// answer for every test in the run. The process-wide half is pinned by
+/// `tests/trusted_origins_follow_config.rs`, which needs its own process and a
+/// build without `cfg(test)`.
+///
+/// P150 (B25/F5): a re-read `[endpoints]` edit no longer REPLACES the set. The
+/// endpoints, the model catalog and every session's `base_url` are fixed at
+/// process start, so replacing trust with the edited origin withheld the session
+/// bearer and `FUIGO_API_KEY` from the endpoint still in use (401 until a
+/// restart). The set is the live endpoints plus the re-read ones (a reloaded
+/// `[model.*] base_url` can point at the latter), and the re-read half is
+/// replaced, not accumulated, on the next reload.
+///
+/// Deliberately asserts membership rather than the whole set: `EndpointsConfig::
+/// default()` reads `FUIGO_MODELS_BASE_URL` and friends from the ambient
+/// environment, and an exact-set assertion here would depend on what other
+/// tests in the binary had exported.
+#[test]
+fn the_injectable_trust_set_follows_the_endpoints_in_use() {
+    const OLD: &str = "https://old.gateway.invalid/v1";
+    const NEW: &str = "https://new.gateway.invalid/v1";
+
+    let old_raw: toml::Value =
+        toml::from_str(&format!("[endpoints]\nfuigo_api_base_url = \"{OLD}\"\n")).unwrap();
+    let new_raw: toml::Value =
+        toml::from_str(&format!("[endpoints]\nfuigo_api_base_url = \"{NEW}\"\n")).unwrap();
+
+    let mut cfg = Config::new_from_toml_cfg(&old_raw).expect("config should parse");
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(OLD));
+    assert!(!cfg.trusted_origins().is_fuigo_api_bearer_url(NEW));
+
+    // A settings reapply after an `[endpoints]` edit: requests still go to OLD, so OLD stays trusted, and NEW (which
+    // a reloaded model's `base_url` can use) becomes trusted too.
+    cfg.re_resolve_runtime_fields(&new_raw, None);
+    assert_eq!(cfg.endpoints.fuigo_api_base_url, OLD, "the endpoints are fixed at process start");
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(&cfg.endpoints.fuigo_api_base_url),
+        "the endpoint requests go to must stay a configured API origin: this is the 401 after an [endpoints] edit"
+    );
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(NEW),
+        "a reloaded endpoint must become a configured API origin"
+    );
+
+    // Astra r2: a re-read that fails to parse says nothing new about `[endpoints]`, so the set stays as it was (a
+    // reloaded model may already point at NEW).
+    let broken: toml::Value = toml::from_str("[endpoints]\nfuigo_api_base_url = 5\n").unwrap();
+    assert!(Config::new_from_toml_cfg(&broken).is_err(), "precondition: this table fails to parse");
+    cfg.re_resolve_runtime_fields(&broken, None);
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(OLD));
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(NEW),
+        "a failed parse must not drop the last re-read endpoint"
+    );
+
+    // The re-read half is replaced on the next reload, not accumulated.
+    const THIRD: &str = "https://third.gateway.invalid/v1";
+    let third_raw: toml::Value =
+        toml::from_str(&format!("[endpoints]\nfuigo_api_base_url = \"{THIRD}\"\n")).unwrap();
+    cfg.re_resolve_runtime_fields(&third_raw, None);
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(OLD));
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(THIRD));
+    assert!(
+        !cfg.trusted_origins().is_fuigo_api_bearer_url(NEW),
+        "a superseded re-read endpoint must not stay trusted: trust must not accumulate"
+    );
+
+    // When the live endpoints DO move (a requirements pin re-applied to this Config), trust follows them.
+    cfg.endpoints.fuigo_api_base_url = NEW.to_owned();
+    cfg.re_resolve_runtime_fields(&new_raw, None);
+    assert!(cfg.trusted_origins().is_fuigo_api_bearer_url(NEW));
+    assert!(
+        !cfg.trusted_origins().is_fuigo_api_bearer_url(OLD),
+        "an origin neither in use nor configured must not stay trusted"
+    );
+
+    // A fresh instance is unaffected by either: no shared mutable state.
+    let untouched = Config::new_from_toml_cfg(&old_raw).expect("config should parse");
+    assert!(untouched.trusted_origins().is_fuigo_api_bearer_url(OLD));
+    assert!(!untouched.trusted_origins().is_fuigo_api_bearer_url(NEW));
+}
+
+/// An EMPTY config table no longer resets the trust set (P150).
+///
+/// An empty table parses perfectly well, and `EndpointsConfig` is
+/// `#[serde(default)]`, so this used to replace the configured origin with the
+/// built-in default, and a `config.toml` caught empty mid-rewrite reset the trust
+/// set while requests still went to the configured endpoint (R013 recorded that
+/// gap). The set now follows the endpoints in use, which a re-read does not
+/// change, so the configured origin stays trusted. The caller-side guarantee for a
+/// FAILED read is still asserted separately by
+/// `a_failed_config_read_during_settings_refresh_keeps_the_configured_trust_set`.
+///
+/// Environment-independent: endpoint env vars fill only ABSENT `[endpoints]`
+/// fields -- exactly this case -- so an ambient `FUIGO_API_BASE_URL` naming
+/// another host would change the default. They are removed here.
+#[test]
+#[serial]
+fn an_empty_reload_table_keeps_the_configured_trust_set() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    const CONFIGURED: &str = "https://my.gateway.invalid/v1";
+    // `EnvGuard`, not `EnvVarGuard`: the proxy URL is a process anchor whose lock
+    // every other reader of it takes, and `EnvVarGuard`'s lock excludes only other
+    // `EnvVarGuard`s. The two non-anchor keys need the unnamed `#[serial]` group.
+    let _proxy = EnvGuard::unset("FUIGO_CLI_CHAT_PROXY_BASE_URL");
+    let _api_base = EnvGuard::unset("FUIGO_API_BASE_URL");
+    let _models = EnvGuard::unset("FUIGO_MODELS_BASE_URL");
+
+    let configured_raw: toml::Value = toml::from_str(&format!(
+        "[endpoints]\nfuigo_api_base_url = \"{CONFIGURED}\"\n"
+    ))
+    .unwrap();
+    let mut cfg = Config::new_from_toml_cfg(&configured_raw).expect("config should parse");
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(CONFIGURED),
+        "precondition: the user's configured endpoint is a configured API origin"
+    );
+
+    let empty = toml::Value::Table(toml::map::Map::new());
+    cfg.re_resolve_runtime_fields(&empty, None);
+
+    assert!(
+        cfg.trusted_origins().is_fuigo_api_bearer_url(CONFIGURED),
+        "the endpoint in use must stay trusted across a re-read of an empty table"
+    );
+}
+
 /// `disable_api_key_auth` kill switch (Claude `forceLoginMethod` parity).
 #[test]
 fn enforce_disable_api_key_auth_blocks_first_party_only() {
@@ -1639,9 +1809,9 @@ fn enforce_disable_api_key_auth_blocks_first_party_only() {
     assert_eq!(creds.auth_type, AuthType::SessionToken);
 }
 /// Regression for the OVERRIDE_MODEL kill-switch bypass.
-/// A first-party model with its own api_key resolves to `ApiKey` (priority 1, beating the session).
+/// A model on a configured API origin with its own api_key resolves to `ApiKey` (priority 1, beating the session).
 /// The kill switch, now applied inside `try_resolve_model_credentials`, swaps it for the session token.
-/// BYOK (non-x.ai) own keys are preserved.
+/// BYOK own keys (a `base_url` that is not a configured API origin) are preserved.
 /// (`try_resolve_model_credentials` loads global config, so this exercises its resolve and enforce core.)
 #[test]
 fn try_resolve_model_credentials_swaps_first_party_own_key_under_kill_switch() {
@@ -3354,7 +3524,7 @@ fn e2e_credential_priority_model_key_beats_session_beats_env() {
         sampling.base_url, "https://custom.api/v1",
         "model's own base_url must be used"
     );
-    // A CONFIGURED first-party origin, because the session token only goes to
+    // A CONFIGURED API origin, because the session token only goes to
     // one. This previously read `https://proxy.api/v1` -- an arbitrary
     // third-party host -- and asserted the user's session token was sent there.
     // That was the bug `may_receive_session` now closes, not the behaviour to
@@ -3601,6 +3771,9 @@ fn unset_endpoint_env_vars() {
 #[test]
 #[serial]
 fn aux_endpoints_resolve_to_proxy_never_inference() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     unset_endpoint_env_vars();
     let inference = "https://inference.acme-corp.example/fuigo/v1";
     let cfg = EndpointsConfig {
@@ -3674,6 +3847,9 @@ fn aux_endpoints_resolve_to_proxy_never_inference() {
 #[test]
 #[serial]
 fn loader_managed_config_url_never_follows_inference_endpoint() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     unset_endpoint_env_vars();
     let cfg = Config::new_from_toml_cfg(
         &toml::from_str(
@@ -5624,6 +5800,39 @@ fn resolve_upload_method_accepts_deployment_key_without_oauth() {
         other => panic!("expected Proxy upload method, got {other:?}"),
     }
 }
+/// P47: the static trace-upload path never carries the session token to a trace-upload URL the service-endpoint
+/// trust class refuses (cleartext, loopback): the token is dropped before an upload method is built. Positive
+/// control: an https FluxRouter trace-upload URL keeps it. A deployment key keeps its own rules.
+#[test]
+fn p47_resolve_upload_method_drops_the_session_token_for_a_refused_trace_url() {
+    use crate::session::repo_changes::UploadMethod;
+    crate::agent::config::Config::install_test_trusted_origins();
+    let token = "p47-trace-session-token";
+    let endpoints = |url: &str, dk: Option<&str>| EndpointsConfig {
+        trace_upload_url: Some(url.to_string()),
+        trace_upload_bucket: None,
+        deployment_key: dk.map(str::to_string),
+        ..Default::default()
+    };
+    for refused in ["http://127.0.0.1:9/v1", "http://api.fluxrouter.ai/v1", "https://localhost/v1"] {
+        let method = endpoints(refused, None).resolve_upload_method(Some(token.into()));
+        assert!(
+            !matches!(&method, Some(UploadMethod::Proxy { user_token, .. }) if user_token == token),
+            "{refused}: the session token must not reach the proxy upload method: {method:?}"
+        );
+        match endpoints(refused, Some("enterprise-key")).resolve_upload_method(Some(token.into())) {
+            Some(UploadMethod::Proxy { deployment_key, user_token, .. }) => {
+                assert_eq!(deployment_key.as_deref(), Some("enterprise-key"));
+                assert_eq!(user_token, token, "the deployment key wins on the wire");
+            }
+            other => panic!("{refused}: expected the deployment-key proxy method, got {other:?}"),
+        }
+    }
+    match endpoints("https://api.fluxrouter.ai/v1", None).resolve_upload_method(Some(token.into())) {
+        Some(UploadMethod::Proxy { user_token, .. }) => assert_eq!(user_token, token),
+        other => panic!("expected Proxy with the token, got {other:?}"),
+    }
+}
 #[test]
 fn otlp_traces_endpoint_precedence() {
     let proxy = "https://inference.acme.com/v1".to_string();
@@ -6431,6 +6640,7 @@ fn resolve_runtime_fields_compat_asymmetric_sources() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(!config.compat_resolved.cursor.sessions);
     assert!(!config.compat_resolved.claude.sessions);
@@ -6455,6 +6665,7 @@ fn resolve_runtime_fields_interactive_defaults() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(cfg.subagents_enabled);
     assert!(!cfg.respect_gitignore);
@@ -6489,6 +6700,7 @@ fn resolve_runtime_fields_headless_defaults() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(
         !cfg.managed_mcps_enabled,
@@ -6519,6 +6731,7 @@ fn resolve_runtime_fields_managed_gateway_tools_from_remote() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(cfg.managed_mcp_gateway_tools_enabled);
 }
@@ -6540,6 +6753,7 @@ fn resolve_runtime_fields_subagents_from_config() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(cfg.subagents_enabled);
 }
@@ -6561,6 +6775,7 @@ fn resolve_runtime_fields_cli_subagents_override() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(cfg.subagents_enabled);
 }
@@ -6583,6 +6798,7 @@ fn resolve_runtime_fields_gitignore_from_env() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(!cfg.respect_gitignore);
     clear_runtime_env_vars();
@@ -6605,6 +6821,7 @@ fn resolve_runtime_fields_model_overrides_from_cli() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert_eq!(cfg.web_search_model, "custom-ws");
     assert_eq!(cfg.session_summary_model, Some("custom-ss".to_owned()));
@@ -6631,6 +6848,7 @@ fn resolve_runtime_fields_path_hints_from_remote() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     });
     assert!(cfg.path_not_found_hints);
 }
@@ -6652,6 +6870,7 @@ fn resolve_runtime_fields_idempotent() {
         todo_gate: false,
         laziness_debug_log: None,
         storage_mode: None,
+        campaign_free_config: None,
     };
     cfg.resolve_runtime_fields(&ctx);
     let first_subagents = cfg.subagents_enabled;
@@ -7874,8 +8093,8 @@ fn remote_settings_disarm_managed_config_signatures() {
         ..Default::default()
     };
     apply_remote_settings_side_effects(Some(&settings));
-    // Disarm is refused: it requires a TRUSTED origin, and Fuigo configures no
-    // first-party proxy, so `is_prod_cli_chat_proxy_url` is never satisfied.
+    // Disarm is refused: it requires a TRUSTED origin, and Fuigo compiles in no
+    // cli-chat-proxy, so `is_prod_cli_chat_proxy_url` is never satisfied.
     // Tightening still applies (below); only the loosening direction is gated.
     assert!(
         fuigo_config::signed_policy::verification_active(),
@@ -7903,6 +8122,9 @@ fn remote_settings_disarm_managed_config_signatures() {
 #[test]
 #[serial_test::serial(remote_sig_disarm)]
 fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     fuigo_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
         true,
@@ -7912,12 +8134,16 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         managed_config_signature_verification: Some(false),
         ..Default::default()
     };
-    unsafe {
-        std::env::remove_var("FUIGO_CLI_CHAT_PROXY_BASE_URL");
-    }
+    // The proxy URL is a process anchor (`PROCESS_ANCHORS`): every other test in
+    // the binary that reads or sets it holds the anchor lock, which a raw
+    // `set_var`/`remove_var` from this `remote_sig_disarm`-only test would bypass
+    // -- and the attacker URL below would leak into their trust sets. Guards take
+    // the lock and restore the prior value; one phase each, because the anchor
+    // lock is not reentrant.
+    let no_proxy = EnvGuard::unset("FUIGO_CLI_CHAT_PROXY_BASE_URL");
     apply_remote_settings_side_effects(Some(&settings));
     // Upstream this asserted the PROD proxy origin was trusted enough to disarm
-    // signature verification. Fuigo configures no first-party proxy, so no
+    // signature verification. Fuigo compiles in no cli-chat-proxy, so no
     // origin is trusted and the disarm is refused. That is the safer direction:
     // remote settings from an untrusted origin can no longer switch off
     // managed-config signature checking.
@@ -7930,20 +8156,17 @@ fn remote_settings_disarm_requires_prod_proxy_when_keys_embedded() {
         true,
     );
     assert!(fuigo_config::signed_policy::verification_active());
-    unsafe {
-        std::env::set_var(
-            "FUIGO_CLI_CHAT_PROXY_BASE_URL",
-            "https://attacker.example/v1",
-        );
-    }
+    drop(no_proxy);
+    let attacker_proxy = EnvGuard::set(
+        "FUIGO_CLI_CHAT_PROXY_BASE_URL",
+        "https://attacker.example/v1",
+    );
     apply_remote_settings_side_effects(Some(&settings));
     assert!(
         fuigo_config::signed_policy::verification_active(),
         "env-overridden proxy must not be able to disarm keyed verification"
     );
-    unsafe {
-        std::env::remove_var("FUIGO_CLI_CHAT_PROXY_BASE_URL");
-    }
+    drop(attacker_proxy);
     fuigo_config::signed_policy::apply_remote_managed_config_signature_verification(
         Some(true),
         true,
@@ -8039,10 +8262,380 @@ async fn subscription_conflicting_static_key_and_command_fail_closed() {
 }
 
 #[test]
+fn subscription_default_image_helper_uses_active_subscription() {
+    let active = SamplerConfig {
+        model: "subscription-model".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let auxiliary = SamplerConfig {
+        model: crate::models::default_image_description_model().into(),
+        base_url: "https://api.fluxrouter.ai/v1".into(),
+        api_key: Some("fake-paid-key".into()),
+        ..Default::default()
+    };
+    let (model, routed) = finalize_image_describe_sampler_config(
+        Some(auxiliary),
+        &active,
+        None,
+        None,
+        HelperModelChoice::Default,
+    );
+    assert_eq!(model, active.model);
+    assert_eq!(routed.base_url, active.base_url);
+    assert_eq!(routed.subscription, active.subscription);
+    assert!(routed.api_key.is_none());
+}
+
+/// P90 F6: the same catalog-resolved local helper, during a ChatGPT subscription session, keeps
+/// its own route when the user chose it and is routed to the subscription when it is a default.
+#[test]
+fn subscription_explicit_local_helper_keeps_its_route_and_a_default_one_does_not() {
+    let mut catalog = IndexMap::new();
+    catalog.insert(
+        "local-helper".to_owned(),
+        test_model_entry(
+            "local-vision",
+            "http://127.0.0.1:11434/v1",
+            Some("fake-local-key"),
+            None,
+            None,
+        ),
+    );
+    let auxiliary = resolve_aux_model_sampling_config(
+        "local-helper",
+        &catalog,
+        &EndpointsConfig::default(),
+        None,
+        false,
+        None,
+        None,
+    )
+    .expect("the helper resolves from the catalog");
+    let active = SamplerConfig {
+        model: "subscription-model".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let (model, routed) = finalize_image_describe_sampler_config(
+        Some(auxiliary.clone()),
+        &active,
+        Some("cli".into()),
+        Some(4),
+        HelperModelChoice::Explicit,
+    );
+    assert_eq!(model, "local-vision");
+    assert_eq!(routed.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(routed.api_key.as_deref(), Some("fake-local-key"));
+    assert!(routed.subscription.is_none());
+    assert!(routed.subscription_resolver.is_none());
+    // Session-local fields are still stamped.
+    assert_eq!(routed.client_identifier.as_deref(), Some("cli"));
+    assert_eq!(routed.max_retries, Some(4));
+    // The auto-mode classifier and the session summary go through the same stamp.
+    let mut classifier = auxiliary.clone();
+    stamp_session_local_sampler_fields(&mut classifier, &active, None, None, HelperModelChoice::Explicit);
+    assert_eq!(classifier.base_url, "http://127.0.0.1:11434/v1");
+    assert!(classifier.subscription.is_none());
+
+    let (model, routed) = finalize_image_describe_sampler_config(
+        Some(auxiliary),
+        &active,
+        None,
+        None,
+        HelperModelChoice::Default,
+    );
+    assert_eq!(model, active.model);
+    assert_eq!(routed.base_url, active.base_url);
+    assert_eq!(routed.subscription, active.subscription);
+    assert!(routed.api_key.is_none());
+}
+
+/// P90 F6: an explicit choice changes nothing outside a subscription session.
+#[test]
+fn explicit_helper_choice_is_inert_without_a_subscription_session() {
+    let active = SamplerConfig {
+        model: "session-model".into(),
+        base_url: "https://api.example.test/v1".into(),
+        api_key: Some("fake-session-key".into()),
+        ..Default::default()
+    };
+    let helper = SamplerConfig {
+        model: "helper".into(),
+        base_url: "http://127.0.0.1:11434/v1".into(),
+        api_key: Some("fake-local-key".into()),
+        ..Default::default()
+    };
+    for choice in [HelperModelChoice::Default, HelperModelChoice::Explicit] {
+        let mut routed = helper.clone();
+        stamp_session_local_sampler_fields(&mut routed, &active, Some("c".into()), Some(2), choice);
+        assert_eq!(routed.base_url, helper.base_url);
+        assert_eq!(routed.api_key, helper.api_key);
+        assert_eq!(routed.client_identifier.as_deref(), Some("c"));
+    }
+}
+
+/// P90 F6 (Astra r1 H1): an explicit helper whose endpoint takes no credential (a local model)
+/// is used as configured, with no credential; it is never rerouted to the Ferrox inference
+/// route with a key the user did not choose for it. A default keeps the old fallthrough.
+#[test]
+fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
+    let mut catalog = IndexMap::new();
+    catalog.insert(
+        "local-helper".to_owned(),
+        test_model_entry("local-vision", "http://127.0.0.1:11434/v1", None, None, None),
+    );
+    let endpoints = EndpointsConfig {
+        deployment_key: Some("fake-deployment-key".into()),
+        ..EndpointsConfig::default()
+    };
+    let explicit = resolve_aux_model_sampling_config_for_held(
+        "local-helper",
+        &catalog,
+        &endpoints,
+        None,
+        false,
+        None,
+        None,
+        HelperModelChoice::Explicit,
+    )
+    .expect("an explicit keyless local helper resolves to its own route");
+    assert_eq!(explicit.base_url, "http://127.0.0.1:11434/v1");
+    assert_eq!(explicit.model, "local-vision");
+    assert!(explicit.api_key.is_none());
+    assert!(explicit.subscription.is_none());
+    let active = SamplerConfig {
+        model: "subscription-model".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    assert!(!explicit_helper_fallback_refused(Some(&explicit), &active, HelperModelChoice::Explicit));
+    let (_, routed) = finalize_image_describe_sampler_config(
+        Some(explicit),
+        &active,
+        None,
+        None,
+        HelperModelChoice::Explicit,
+    );
+    assert_eq!(routed.base_url, "http://127.0.0.1:11434/v1");
+    assert!(routed.api_key.is_none() && routed.subscription.is_none());
+    // The pre-P90 fallthrough stays for a default: a key on the inference route.
+    let default = resolve_aux_model_sampling_config_for_held(
+        "local-helper",
+        &catalog,
+        &endpoints,
+        None,
+        false,
+        None,
+        None,
+        HelperModelChoice::Default,
+    )
+    .expect("a default falls through to the inference route");
+    assert_ne!(default.base_url, "http://127.0.0.1:11434/v1");
+    assert!(default.api_key.is_some());
+}
+
+/// P90 F6: an explicit image helper that cannot be used fails the turn in a subscription
+/// session instead of sending the images to the subscription.
+#[test]
+fn unusable_explicit_image_helper_is_refused_only_in_a_subscription_session() {
+    let subscription = SamplerConfig {
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let api = SamplerConfig::default();
+    let usable = SamplerConfig::default();
+    assert!(explicit_helper_fallback_refused(None, &subscription, HelperModelChoice::Explicit));
+    assert!(!explicit_helper_fallback_refused(None, &subscription, HelperModelChoice::Default));
+    assert!(!explicit_helper_fallback_refused(None, &api, HelperModelChoice::Explicit));
+    assert!(!explicit_helper_fallback_refused(Some(&usable), &subscription, HelperModelChoice::Explicit));
+}
+
+/// P90 F6 (Astra r1 M4, r2 #4): a DEFAULT helper on another subscription, or on the same
+/// provider (a resolver may be bound to a different account), follows the active one.
+#[test]
+fn default_helper_on_another_subscription_follows_the_active_one() {
+    let active = SamplerConfig {
+        model: "chatgpt-model".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let mut xai = SamplerConfig {
+        model: "grok-sub".into(),
+        base_url: "https://api.x.ai/v1".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Xai),
+        ..Default::default()
+    };
+    stamp_session_local_sampler_fields(&mut xai, &active, None, None, HelperModelChoice::Default);
+    assert_eq!(xai.model, "chatgpt-model");
+    assert_eq!(xai.subscription, active.subscription);
+    let mut same = SamplerConfig {
+        model: "chatgpt-mini".into(),
+        base_url: "https://chatgpt.com/backend-api/codex".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    stamp_session_local_sampler_fields(&mut same, &active, None, None, HelperModelChoice::Default);
+    assert_eq!(same.model, "chatgpt-model");
+    // An explicit helper on another subscription keeps it.
+    let mut chosen = SamplerConfig {
+        model: "grok-sub".into(),
+        base_url: "https://api.x.ai/v1".into(),
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Xai),
+        ..Default::default()
+    };
+    stamp_session_local_sampler_fields(&mut chosen, &active, None, None, HelperModelChoice::Explicit);
+    assert_eq!(chosen.model, "grok-sub");
+}
+
+/// P90 F6 (Astra r1 H2): the image helper slug and its provenance come from one config
+/// snapshot, so a reload that changes the explicit helper never pairs the old slug with the
+/// new provenance.
+#[test]
+fn image_description_helper_pairs_slug_and_choice_from_one_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let auth = std::sync::Arc::new(crate::auth::AuthManager::new(
+        temp.path(),
+        Default::default(),
+    ));
+    let config = |slug: &str, explicit: Option<&str>| Config {
+        image_description_model: Some(slug.to_owned()),
+        explicit_helper_models: crate::config::ExplicitHelperModels {
+            image_description: explicit.map(str::to_owned),
+            ..Default::default()
+        },
+        ..Config::default()
+    };
+    let manager = crate::agent::models::ModelsManager::new(
+        None,
+        IndexMap::new(),
+        agent_client_protocol::ModelId::new("default"),
+        auth,
+        config("helper-a", Some("helper-a")),
+    );
+    assert_eq!(
+        manager.image_description_helper(),
+        Some(("helper-a".to_owned(), HelperModelChoice::Explicit))
+    );
+    manager.apply_config(config("helper-b", Some("helper-b")));
+    assert_eq!(
+        manager.image_description_helper(),
+        Some(("helper-b".to_owned(), HelperModelChoice::Explicit))
+    );
+    manager.apply_config(config("grok-4.6", None));
+    assert_eq!(
+        manager.image_description_helper(),
+        Some(("grok-4.6".to_owned(), HelperModelChoice::Default))
+    );
+    // Astra r4 #3: a settings refresh re-resolves the agent config after the manager got its
+    // snapshot; publishing the helper fields brings the refreshed choice to image description.
+    manager.publish_helper_models(&config("local-a", Some("local-a")));
+    assert_eq!(
+        manager.image_description_helper(),
+        Some(("local-a".to_owned(), HelperModelChoice::Explicit))
+    );
+}
+
+/// P90 F6 (Astra r3 #1): runtime resolution takes which helpers the user chose from the
+/// campaign-free table that travels with the raw config, never from any other read.
+#[test]
+fn runtime_resolution_takes_helper_provenance_from_its_own_snapshot() {
+    let raw: toml::Value =
+        toml::from_str("[models]\nimage_description = \"local-a\"\nsession_summary = \"campaign-ss\"\n")
+            .unwrap();
+    let files: toml::Value = toml::from_str("[models]\nimage_description = \"local-a\"\n").unwrap();
+    let resolve = |campaign_free: Option<&toml::Value>| {
+        let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        cfg.resolve_runtime_fields(&RuntimeResolutionContext {
+            raw_config: &raw,
+            remote_settings: None,
+            is_headless: true,
+            cli_subagents: None,
+            cli_web_search_model: None,
+            cli_session_summary_model: None,
+            memory_enabled_override: None,
+            disable_web_search: false,
+            todo_gate: false,
+            laziness_debug_log: None,
+            storage_mode: None,
+            campaign_free_config: campaign_free,
+        });
+        cfg
+    };
+    let cfg = resolve(Some(&files));
+    assert_eq!(cfg.image_description_model.as_deref(), Some("local-a"));
+    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+    assert_eq!(cfg.explicit_helper_models.session_summary, None);
+    let cfg = resolve(None);
+    assert_eq!(cfg.explicit_helper_models, crate::config::ExplicitHelperModels::default());
+    // `re_resolve_runtime_fields` carries the same pairing.
+    let mut cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    cfg.re_resolve_runtime_fields(&raw, Some(&files));
+    assert_eq!(cfg.explicit_helper_models.image_description.as_deref(), Some("local-a"));
+    cfg.re_resolve_runtime_fields(&raw, None);
+    assert_eq!(cfg.explicit_helper_models.image_description, None);
+}
+
+/// P90 F6 (Astra r3 #2): in a subscription session an explicit helper the catalog does not
+/// know is unusable (never resolved on the inference route with a stray key); a default, a
+/// catalog helper, or a non-subscription session is unaffected.
+#[test]
+fn explicit_helper_off_the_catalog_is_unusable_in_a_subscription_session() {
+    let subscription = SamplerConfig {
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let api = SamplerConfig::default();
+    let gateway = SamplerConfig {
+        model: "private-vision".into(),
+        base_url: "https://api.example.test/v1".into(),
+        api_key: Some("fake-stray-key".into()),
+        ..Default::default()
+    };
+    use HelperModelChoice::{Default as D, Explicit as E};
+    assert!(explicit_helper_route(Some(gateway.clone()), false, &subscription, E).is_none());
+    assert!(explicit_helper_fallback_refused(None, &subscription, E));
+    assert!(explicit_helper_route(Some(gateway.clone()), true, &subscription, E).is_some());
+    assert!(explicit_helper_route(Some(gateway.clone()), false, &subscription, D).is_some());
+    assert!(explicit_helper_route(Some(gateway), false, &api, E).is_some());
+}
+
+/// P90 F6 (Astra r4 #2): a classifier route cached before a model switch is re-judged against
+/// the session's current model on every request.
+#[test]
+fn cached_helper_route_is_rejudged_against_the_current_session() {
+    use CachedHelperRoute::{Keep, Refuse, UseSession};
+    use HelperModelChoice::{Default as D, Explicit as E};
+    let subscription = SamplerConfig {
+        subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),
+        ..Default::default()
+    };
+    let api = SamplerConfig::default();
+    // Wired in an API session (a paid default route), then switched to the subscription.
+    assert_eq!(cached_helper_route(D, true, &subscription), UseSession);
+    assert_eq!(cached_helper_route(E, true, &subscription), Keep);
+    assert_eq!(cached_helper_route(E, false, &subscription), Refuse);
+    for (choice, in_catalog) in [(D, true), (D, false), (E, true), (E, false)] {
+        assert_eq!(cached_helper_route(choice, in_catalog, &api), Keep);
+    }
+}
+
+#[test]
+fn helper_model_choice_is_explicit_only_for_the_slug_the_user_chose() {
+    assert_eq!(HelperModelChoice::of(Some("local-helper"), "local-helper"), HelperModelChoice::Explicit);
+    assert_eq!(HelperModelChoice::of(Some("local-helper"), "grok-4.6"), HelperModelChoice::Default);
+    assert_eq!(HelperModelChoice::of(None, "grok-4.6"), HelperModelChoice::Default);
+}
+
+#[test]
 fn subscription_auxiliary_selection_does_not_fall_back_to_api_key() {
     let active=SamplerConfig {model:"subscription-model".into(),base_url:"https://chatgpt.com/backend-api/codex".into(),subscription:Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt),..Default::default()};
     let mut auxiliary=SamplerConfig {model:"paid-default".into(),base_url:"https://api.fluxrouter.ai/v1".into(),api_key:Some("fake-paid-key".into()),..Default::default()};
-    stamp_session_local_sampler_fields(&mut auxiliary,&active,None,None);
+    stamp_session_local_sampler_fields(&mut auxiliary,&active,None,None,HelperModelChoice::Default);
     assert_eq!(auxiliary.model,active.model);assert_eq!(auxiliary.base_url,active.base_url);assert_eq!(auxiliary.subscription,active.subscription);assert!(auxiliary.api_key.is_none());
 }
 
@@ -8339,4 +8932,102 @@ fn explicit_chat_completions_backend_survives_same_slug_catalog_sibling() {
         "an entry with no backend still inherits the sibling's backend"
     );
     assert_eq!(inferred.context_window.get(), 1_050_000);
+}
+
+/// P86 (CB-1): an `env_key` resolved as a credential -- including one a remote model catalogue
+/// supplied, which no config file names -- is denied to child processes from then on, and so are
+/// the `env_key` / `env_http_headers` variables a parsed config names.
+#[test]
+fn p86_credential_variables_a_config_names_are_denied_to_children() {
+    use fuigo_tools::util::shell_env_policy::is_provider_credential;
+    assert!(!is_provider_credential("P86_REMOTE_CATALOG_KEY"));
+    let _ = EnvKeys::single("P86_REMOTE_CATALOG_KEY").resolve_value();
+    assert!(is_provider_credential("P86_REMOTE_CATALOG_KEY"));
+
+    for name in [
+        "P86_UNIT_MODEL_KEY",
+        "P86_UNIT_MODEL_HEADER",
+        "P86_UNIT_PROVIDER_KEY",
+        "P86_UNIT_PROVIDER_HEADER",
+    ] {
+        assert!(
+            !is_provider_credential(name),
+            "{name} denied before the config named it"
+        );
+    }
+    let raw: toml::Value = toml::from_str(
+        r#"
+[model.p86]
+model = "p86-model"
+base_url = "https://gateway.p86.example/v1"
+env_key = ["P86_UNIT_MODEL_KEY"]
+
+[model.p86.env_http_headers]
+X-P86 = "P86_UNIT_MODEL_HEADER"
+X-P86-User = "USER"
+
+[model_providers.p86]
+base_url = "https://gateway.p86.example/v1"
+env_key = "P86_UNIT_PROVIDER_KEY"
+
+[model_providers.p86.env_http_headers]
+X-P86-Provider = "P86_UNIT_PROVIDER_HEADER"
+"#,
+    )
+    .unwrap();
+    Config::new_from_toml_cfg(&raw).unwrap();
+    for name in [
+        "P86_UNIT_MODEL_KEY",
+        "P86_UNIT_MODEL_HEADER",
+        "P86_UNIT_PROVIDER_KEY",
+        "P86_UNIT_PROVIDER_HEADER",
+    ] {
+        assert!(
+            is_provider_credential(name),
+            "{name} not denied after the config named it"
+        );
+    }
+    assert!(
+        !is_provider_credential("USER"),
+        "a core variable must never be denied"
+    );
+
+    // The hot-reload path registers from the raw file before it notifies sessions.
+    assert!(!is_provider_credential("P86_UNIT_RELOADED_KEY"));
+    let reloaded: toml::Value =
+        toml::from_str("[model.reloaded]\nenv_key = \"P86_UNIT_RELOADED_KEY\"\n").unwrap();
+    deny_credentials_named_in(&reloaded);
+    assert!(is_provider_credential("P86_UNIT_RELOADED_KEY"));
+}
+
+/// P70a follow-up (Astra f3 #1): a model's `extra_headers` value that says `${FUIGO_API_KEY}` is NOT resolved against
+/// the key the user saved, because `extra_headers` also come from the remote model catalogue and its cache: the
+/// sampler sends the literal text, as it did whenever the key was not exported. (`api_key`, user config only, does
+/// resolve: `auth_method`'s `explicit_key_reference_in_config_…` test.)
+#[test]
+#[serial]
+fn p70a_model_extra_header_naming_the_first_party_key_is_not_resolved_from_the_saved_key() {
+    const SAVED: &str = "p70a-unit-model-header-saved-FAKE";
+    use crate::agent::auth_method::{
+        FUIGO_API_KEY_ENV_VAR, LEGACY_FUIGO_API_KEY_ENV_VAR, load_saved_api_key, set_stored_api_key,
+    };
+    let home = tempfile::tempdir().expect("tempdir");
+    crate::auth::store_api_key(home.path(), SAVED).expect("seed auth.json");
+    let _env = fuigo_test_support::EnvGuard::unset(FUIGO_API_KEY_ENV_VAR);
+    let _legacy = fuigo_test_support::EnvGuard::unset(LEGACY_FUIGO_API_KEY_ENV_VAR);
+    set_stored_api_key(None, false);
+    assert!(load_saved_api_key(home.path(), false), "the saved key is loaded");
+    let dm = crate::models::default_model();
+    let (_, models) = resolve_models_from_toml(
+        r#"
+            [models]
+            extra_headers = { "X-P70a-Key" = "Bearer ${FUIGO_API_KEY}" }
+            "#,
+        None,
+    );
+    let model = models.get(dm).expect("default model should exist");
+    let sampler = sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None);
+    let sent = sampler.extra_headers.get("X-P70a-Key").cloned();
+    set_stored_api_key(None, false);
+    assert_eq!(sent.as_deref(), Some("Bearer ${FUIGO_API_KEY}"), "an extra_headers reference was resolved");
 }

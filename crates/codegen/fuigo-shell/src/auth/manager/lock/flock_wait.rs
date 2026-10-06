@@ -105,7 +105,7 @@ impl Drop for DepositOnDrop {
         let result = self
             .result
             .take()
-            .unwrap_or_else(|| Err(io::Error::other("flock wait panicked")));
+            .unwrap_or_else(|| Err(io::Error::other("flock wait panicked or was cancelled")));
         *self.wait.lock_round() = Round::Deposited(result);
         self.wait.notify.notify_waiters();
     }
@@ -131,13 +131,15 @@ pub(super) fn join(lock_path: &Path) -> Ticket {
     });
     waits.retain(|_, entry| entry.strong_count() > 0);
     waits.insert(lock_path.to_owned(), Arc::downgrade(&wait));
-    let deposit_wait = Arc::clone(&wait);
+    // The guard exists before the task is scheduled: a runtime shut down before the task starts drops it unrun, and
+    // the guard then deposits an error and wakes every subscriber instead of leaving them on a round nobody serves.
+    let mut deposit = DepositOnDrop {
+        wait: Arc::clone(&wait),
+        result: None,
+    };
     let thread_path = lock_path.to_owned();
     let _detached_from_any_caller = tokio::task::spawn_blocking(move || {
-        let mut deposit = DepositOnDrop {
-            wait: deposit_wait,
-            result: None,
-        };
+        let mut deposit = deposit;
         deposit.result = Some(super::blocking_acquire(&thread_path));
     });
     Ticket { wait }

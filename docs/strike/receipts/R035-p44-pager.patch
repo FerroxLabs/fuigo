@@ -1,0 +1,122 @@
+From ddc74a030117d5b72d068d0494c0bb619282c0c4 Mon Sep 17 00:00:00 2001
+From: ci <sean@seandonahoe.com>
+Date: Thu, 1 Oct 2026 13:10:51 +0700
+Subject: [PATCH] fix(headless): P44 -- an execution budget, not only a token
+ budget, in the denial line and the guides
+
+P44 adds the model-call and runtime limit rules (execution_model_call_limit,
+execution_runtime_limit) to the shell's ExecutionBudgetRule. The pager already
+decodes them through the same path (from_acp_error -> ExecutionBudget(rule), exit
+3, the rule's own id and remedy on the record); this only stops the stderr line
+and the unknown-rule remedy calling every budget a token budget, and lists the two
+rules in the headless guide's rule table (which the_guide_lists_every_rule pins)
+and in the agent guide's budget-denial table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../fuigo-pager/docs/user-guide/14-headless-mode.md | 13 ++++++++-----
+ .../fuigo-pager/docs/user-guide/15-agent-mode.md    |  2 ++
+ crates/codegen/fuigo-pager/src/headless.rs          |  9 +++++----
+ 3 files changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md b/crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md
+index 2c07f127..7c75a719 100644
+--- a/crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md
++++ b/crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md
+@@ -630,7 +630,7 @@ fuigo -p "Run the test suite" --yolo
+ | `0`  | Success. The prompt completed normally |
+ | `1`  | Error. Authentication failure, network error, or runtime error |
+ | `2`  | A managed-policy requirement is not met. Fuigo refused to start; update Fuigo or ask your administrator to fix the managed requirements |
+-| `3`  | **Blocked.** The run ended because a tool permission was denied and headless mode had nobody to ask, or because the execution's token budget refused the next model request (see [Blocked by a Permission](#blocked-by-a-permission)) |
++| `3`  | **Blocked.** The run ended because a tool permission was denied and headless mode had nobody to ask, or because an execution budget (a token budget, `FUIGO_MAX_MODEL_CALLS`, `FUIGO_MAX_RUNTIME_SECS`) refused the next model request (see [Blocked by a Permission](#blocked-by-a-permission)) |
+ | `4`  | The tokio runtime could not be created (Fuigo never started; nothing was run). No other start-up failure uses this code |
+ | `130` | Interrupted by SIGINT (Ctrl+C)                                   |
+ | `143` | Terminated by SIGTERM, or torn down because the process that started Fuigo exited (see [Parent-Process Binding](#parent-process-binding)) |
+@@ -642,8 +642,9 @@ They describe `fuigo -p` / `--print` runs. `fuigo wrap <command>` is different 
+ ### Blocked by a Permission
+ 
+ Headless mode has no operator to ask, so it never approves a permission request. A run that **ends**
+-because of such a refusal exits **`3`**, not `0` and not `1`. So does a run whose execution token
+-budget refused the next model request (a goal's `--budget`, a workflow child's output grant). That
++because of such a refusal exits **`3`**, not `0` and not `1`. So does a run whose execution budget
++refused the next model request (a goal's `--budget`, a workflow child's output grant, or the
++`FUIGO_MAX_MODEL_CALLS` / `FUIGO_MAX_RUNTIME_SECS` limits of a private agent). That
+ is the same outcome, reported through the same record, with a budget `rule`. That distinction is the point: `0`
+ would make a blocked run look finished, and `1` would make it look like a crash, so a CI job could
+ not tell which had happened.
+@@ -745,10 +746,12 @@ ends (`0`, or `1` if it later fails). They produce no record and no stderr line.
+ | `execution_token_budget_exhausted` | The execution's total-token budget is spent | Raise the goal's token budget (`/goal <objective> --budget <tokens>`) or clear the goal (`/goal clear`). Tokens already spent are not refunded |
+ | `execution_output_token_budget_exhausted` | The output-token budget granted to this workflow child is spent | Raise `output_token_budget` for the child. Output tokens already spent are not refunded |
+ | `execution_token_usage_unknown` | A token budget is set, but the provider reported no usage for an earlier request, so the budget fails closed | Use a model that reports usage, or run without a token budget |
++| `execution_model_call_limit` | `FUIGO_MAX_MODEL_CALLS` has no model call left for the request (spent, or the last one reserved for the final answer, or a subagent's share of its parent's calls spent) | Raise `FUIGO_MAX_MODEL_CALLS` for the next run. Calls already made are not refunded; under a goal, clear the goal (`/goal clear`) |
++| `execution_runtime_limit` | `FUIGO_MAX_RUNTIME_SECS` has passed | Raise `FUIGO_MAX_RUNTIME_SECS` for the next run. It counts from agent start and cannot be extended in a running agent; under a goal, clear the goal (`/goal clear`) |
+ | `execution_budget_denied` | A budget denial under a rule this build does not know (a newer agent) | Read the agent's error message, which names the rule and its remedy |
+ 
+ The budget rules come from the agent's typed error (`data.code: "execution_budget_denied"`, see the
+-agent-mode guide, "Errors"). Their stderr line reads `fuigo: blocked — the execution's token budget
++agent-mode guide, "Errors"). Their stderr line reads `fuigo: blocked — an execution budget
+ refused the next model request. Denied by rule … Remedy: … Exiting 3.` For a rule this build does
+ not know, `plain` writes two stderr lines: first the agent's own message, which names the rule and
+ its remedy, then that line.
+@@ -798,7 +801,7 @@ unexpectedly mid-turn, stderr reports the closed connection, not the refusal. If
+ cannot be written, the write error is what is reported.
+ 
+ To avoid a permission `3`, pre-approve the work: `--allow`, a higher `--permission-mode`, `--yolo`,
+-or a trusted folder whose project permission rules allow it. None of these lifts a token budget. A
++or a trusted folder whose project permission rules allow it. None of these lifts a budget. A
+ budget denial needs the budget raised or cleared, as its remedy says. See [Always-approve for automation](#always-approve-for-automation) and
+ [22-permissions-and-safety.md](22-permissions-and-safety.md).
+ 
+diff --git a/crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md b/crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md
+index 2d1e768a..ec3441d2 100644
+--- a/crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md
++++ b/crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md
+@@ -210,6 +210,8 @@ carries the denial as data:
+ | `execution_token_budget_exhausted` | The total-token budget is spent |
+ | `execution_output_token_budget_exhausted` | The output-token budget is spent |
+ | `execution_token_usage_unknown` | A token budget is set, but an earlier request reported no usage. The guard cannot tell how much is left, so it fails closed and refuses |
++| `execution_model_call_limit` | `FUIGO_MAX_MODEL_CALLS` has no model call left for the request (see "Bounded private jobs") |
++| `execution_runtime_limit` | `FUIGO_MAX_RUNTIME_SECS` has passed (see "Bounded private jobs") |
+ 
+ New rules may be added; a reply with `code: "execution_budget_denied"` and an unknown `rule` is still
+ a budget denial. `fuigo -p` (headless mode) turns this reply into exit code `3` and the same
+diff --git a/crates/codegen/fuigo-pager/src/headless.rs b/crates/codegen/fuigo-pager/src/headless.rs
+index c95dc83e..1cf911a7 100644
+--- a/crates/codegen/fuigo-pager/src/headless.rs
++++ b/crates/codegen/fuigo-pager/src/headless.rs
+@@ -117,11 +117,12 @@ pub enum HeadlessDenialRule {
+     HeadlessNeverApproves,
+     /// `--yolo` auto-approves, but this request offered no allow option to select.
+     YoloHadNoAllowOption,
+-    /// The execution's token-budget guard refused the next model request (Contract D.4). The shell
++    /// A budget refused the next model request: the execution's token-budget guard (Contract D.4), or
++    /// the model-call or runtime limit (P44). The shell
+     /// reports it as the turn's ACP error with `data.code = "execution_budget_denied"`
+     /// ([`fuigo_shell::acp_error::ExecutionBudgetDenial`]); the inner rule is the shell's own.
+     ExecutionBudget(fuigo_shell::acp_error::ExecutionBudgetRule),
+-    /// A token-budget denial whose rule this build does not know (a newer agent). Still a denial —
++    /// A budget denial whose rule this build does not know (a newer agent). Still a denial —
+     /// the shell's stable `data.code` says so — so it still exits with the denial code.
+     ExecutionBudgetUnrecognized,
+ }
+@@ -152,7 +153,7 @@ impl HeadlessDenialRule {
+             }
+             Self::ExecutionBudget(rule) => rule.remedy(),
+             Self::ExecutionBudgetUnrecognized => {
+-                "the agent's token budget refused the request under a rule this build does not \
++                "an agent budget refused the request under a rule this build does not \
+                  know; the agent's error message names it and its remedy"
+             }
+         }
+@@ -241,7 +242,7 @@ impl HeadlessDenial {
+     pub fn human_line(&self) -> String {
+         if self.is_budget() {
+             return format!(
+-                "fuigo: blocked — the execution's token budget refused {}. \
++                "fuigo: blocked — an execution budget refused {}. \
+                  Denied by rule `{}`. Remedy: {}. Exiting {}.",
+                 self.requested(),
+                 self.rule.id(),
+-- 
+2.50.1 (Apple Git-155)
+

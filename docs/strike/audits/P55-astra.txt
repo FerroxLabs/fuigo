@@ -1,0 +1,147 @@
+=================== P55 Astra round 1 (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Audited `strike/p55` at `38e1cfa2303e086e109370b96175327f9436b3ba` against the specified parent. **No BLOCKER/HIGH findings; three MEDIUM findings.** No files changed, builds performed, or tests executed.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Diff, consumer compatibility, clock semantics, and regression coverage reviewed. Runtime conclusions use your supplied evidence. |
+
+1. **MEDIUM — IPv6 selection can route previously local mock requests through an inherited proxy.**  
+   [mock_server.rs:322](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/mock_server.rs:322), [mock_server.rs:1262](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/mock_server.rs:1262).  
+   With `HTTP_PROXY` configured and `NO_PROXY=127.0.0.1,localhost`, the old mock bypasses the proxy; the selected `::1` mock does not. The new GET client inherits proxies, as do the sampler’s shared clients. This also affects ordinary, unpaused consumers—for example, `fuigo-sampler/tests/cf_edge_error_message.rs:55`.
+
+   The subprocess `TestSandbox` already supplies `::1` in both bypass variables, but that does not configure clients in the parent test process. Add `.no_proxy()` to the new direct-mock test client and provide a hermetic launch environment for tests exercising production clients. Avoid changing process-global environment variables during parallel tests. This is a conditional regression established from the client/proxy code, not a reproduced failure in this audit.
+
+2. **MEDIUM — The probe can qualify an address despite evidence that it is unsuitable.**  
+   [loopback.rs:54](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:54), [loopback.rs:90](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:90).  
+   Two successful rounds and one timeout explicitly qualify the address, which is then cached for every mock in that process. A sporadically asynchronous IPv4 path can therefore win over a reliable IPv6 path.
+
+   Additionally, `timeout(...).await == Ok(...)` does **not** establish that virtual time stayed stationary. The pinned Tokio implementation polls the inner future before the deadline; if both are ready, completion wins even after clock advancement. Neither the probe nor the HTTP regression test checks elapsed virtual time.
+
+   Require successful exchange **and zero virtual elapsed time**, and reject a candidate with any observed failed round. That strengthens this heuristic; finite probing still cannot guarantee future socket scheduling.
+
+3. **MEDIUM — Reverting the server’s bind change remains invisible on native Linux.**  
+   [mock_server.rs:1260](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/mock_server.rs:1260), [loopback.rs:113](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:113).  
+   Restoring `TcpListener::bind("127.0.0.1:0")` leaves the injected selection tests untouched. The host test still checks `loopback_ip()` independently, and the HTTP test still passes where IPv4 already works.
+
+   The GET test should detect that revert on the affected WSL host, assuming a hermetic proxy environment. For portable regression protection, inject selection through the actual server-start path, force IPv6 selection, and assert the bound address and bracketed URL. Retain the WSL test as platform qualification.
+
+The **test-hermeticity classification is supported**. Your namespace/address-family controls isolate the networking path, and the paused-runtime reproducer isolates clock advancement. The reported real-clock latency is far below the configured timeout. Tokio documents automatic advancement when a paused runtime has no runnable work; this does not establish a production networking defect. [Tokio clock documentation](https://docs.rs/tokio/latest/tokio/time/fn.pause.html)
+
+For the other consumers, I found **no concrete IPv4-only URL assertion or port reconstruction on a `MockInferenceServer` path**. `SocketAddr` formatting preserves brackets; sampler origin handling uses URL parsing; the sandbox recognizes IPv6 loopback. The subscription assertions requiring `127.0.0.1` use separate fixtures. `fuigo-tools` imports other test-support utilities, not this server. Enabling `test-util` through the PTY harness’s normal dependency does not itself pause its runtime.
+
+This is a reasonable targeted WSL workaround, but not complete network hermeticity. Your already-demonstrated private network namespace is a stronger runner-level remedy where available. A broader deterministic design would separate paused-clock retry tests from real socket timing; that is not necessary to expand P55’s scope.
+
+VERDICT: PASS
+
+=================== P55 Astra round 2 (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Reviewed the full `b6c7b4ce…HEAD` diff at `6c2225462086a6969f543dbf11cc89f5e11ce1b4`. Clean checkout; no files changed, builds, or tests run.
+
+**No BLOCKER/HIGH findings. No new MEDIUM/LOW findings.** The round-1 dispositions are sound, with M1 retained as an acknowledged environment limitation.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Full diff and relevant callers reviewed read-only. |
+| M1 — MEDIUM: proxies | ✅ Done | New clients bypass proxies at [mock_server.rs:1271](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/mock_server.rs:1271) and line 1309. Parent-process product clients remain environment-dependent; this is accepted for the stated proxy-free build hosts, not universally resolved. Subprocess `NO_PROXY` already includes `::1`. |
+| M2 — MEDIUM: probe acceptance | ✅ Done | [loopback.rs:57](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:57) requires all three rounds to succeed. Rejecting a zero-elapsed requirement is justified: the relevant outcome is successful I/O before timeout rejection. |
+| M3 — MEDIUM: IPv6 coverage | ✅ Done | [mock_server.rs:1293](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/mock_server.rs:1293) directly exercises IPv6 binding, bracketed URLs, and HTTP response content. Its skip path requires a separate IPv6 bind failure. Line 1326 checks default binding against the selected address. |
+
+The locked Tokio 1.52.3 source confirms that `Timeout` polls its inner future before checking the timer, consistent with [Tokio’s published implementation](https://docs.rs/tokio/latest/src/tokio/time/timeout.rs.html). Therefore, virtual-clock advancement alone is not a valid probe failure criterion.
+
+The remaining mutation-coverage boundary is accurately stated: reverting the default bind to IPv4 is distinguishable only where the selector chooses IPv6. The forced-IPv6 test independently protects IPv6 plumbing, but cannot replace that host-specific regression evidence.
+
+The native timing measurements, build-host proxy environment, and Beast mutant result are supplied evidence; this audit did not independently reproduce them.
+
+VERDICT: PASS
+
+=================== P55 Astra round 3 (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Reviewed both requested diffs at `f818f894d1259fd326d1be6d6cf48a591a6ef00f`. No BLOCKER, HIGH, or MEDIUM findings.
+
+- **LOW — released-port race is understated.** [loopback.rs:53](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:53): another listener taking the released port does **not** guarantee a fast failure. It could accept and stall, causing the laziness test to exceed two seconds. In the probe, reuse can falsely disqualify an otherwise suitable address; in the new host test, it can fail `expect_err`. This is a residual fixture-flakiness risk, not evidence that the WSL correction is wrong. Correct the comment; eliminating the race would require retaining ownership of a bound, non-listening socket through the request, with platform qualification.
+
+The requested correctness checks otherwise pass source review:
+
+- **Probe behavior:** the listener drops before `closed_port()` returns. The refusal check accepts exactly `ConnectionRefused`. There is no evident systematic native-Linux rejection: Linux specifies `ECONNREFUSED` when nothing listens, and the pinned Tokio implementation polls the connect future before the timeout. A paused-clock jump alone therefore does not reject an already-ready refusal. [Linux connect documentation](https://www.man7.org/linux/man-pages/man2/connect.2.html), [Tokio timeout behavior](https://docs.rs/tokio/latest/tokio/time/fn.timeout.html).
+- **Config ordering:** [the fixture update](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/session/acp_session_tests/laziness/laziness_integration_tests.rs:71) synchronously enqueues `UpdateSamplingConfig`. Subsequent queries use the same FIFO mailbox, whose actor processes commands sequentially. No extra acknowledgement is required here.
+- **Actual endpoint use:** [the classifier](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/session/acp_session_impl/laziness.rs:477) calls `prepare_chat_completion(false)`. That reconstructs configuration from chat state and copies [the updated `base_url`](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:804) into the fresh sampling client used by `conversation_collect`.
+- **Whole packet:** IPv6 URL brackets, mock-server binding, `test-util` enablement, and both fixture call sites are consistent. The existing two-second assertion remains intact.
+
+Worktree clean; `git diff --check` passed. No files changed, builds, or tests run. Native Linux and WSL runtime results were not independently reproduced.
+
+VERDICT: PASS
+
+=================== P55 Astra round 4 (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+**No BLOCKER, HIGH, MEDIUM, or LOW findings.** Reviewed both requested diffs at `944877717c3d626603b6a026e23466fd28bf7353` on clean branch `strike/p55`. The reservation fixes the released-port race.
+
+- **Bound but not listening → ECONNREFUSED:** Yes, on ordinary Linux IPv4 and IPv6 loopback. Binding reserves the endpoint without creating a listener; incoming SYNs trigger a reset, which the connecting socket reports as `ECONNREFUSED`. This does not repair the reported WSL mirrored IPv4 routing behavior—the existing candidate probe handles that distinction. See [Linux IPv4](https://github.com/torvalds/linux/blob/v6.6/net/ipv4/tcp_ipv4.c), [IPv6](https://github.com/torvalds/linux/blob/v6.6/net/ipv6/tcp_ipv6.c), and [reset handling](https://github.com/torvalds/linux/blob/v6.6/net/ipv4/tcp_input.c).
+
+- **Competing bind with SO_REUSEADDR:** Cannot take the reserved endpoint on Linux. Reuse requires cooperation from the existing socket; `closed_port` enables neither `SO_REUSEADDR` nor `SO_REUSEPORT`. A competing Tokio listener therefore gets `EADDRINUSE` for that endpoint, including an overlapping wildcard bind. The same numeric port can exist on a non-overlapping address without compromising the reservation. Relevant code: [loopback.rs:64](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:64). Sources: [socket(7)](https://www.man7.org/linux/man-pages/man7/socket.7.html), [kernel bind-conflict implementation](https://github.com/torvalds/linux/blob/v6.6/net/ipv4/inet_connection_sock.c).
+
+- **Ephemeral auto-bind:** Cannot steal the reserved endpoint. `bind(..., 0)` applies bind-conflict checks; unbound `connect()` skips the bind bucket marked by this explicit, non-reusable reservation. Exhausting the 4,096-port range causes allocation failure rather than overriding it. Sources: [port-zero allocation](https://github.com/torvalds/linux/blob/v6.6/net/ipv4/inet_connection_sock.c), [connect allocation](https://github.com/torvalds/linux/blob/v6.6/net/ipv4/inet_hashtables.c).
+
+- **Plain `#[test]` runtime requirement:** None for this path. Inspected the locally installed, locked Tokio `1.52.3`: construction, `bind`, and `local_addr` operate through `socket2` without reactor registration. `loopback_ip()` creates its probe runtime on a separate OS thread. Thus [loopback.rs:169](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:169) is valid outside a Tokio runtime.
+
+The `_held` binding at [loopback.rs:124](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:124) owns the socket across the awaited probe; its underscore prefix does not drop it. The `OnceLock` at [loopback.rs:56](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-test-support/src/loopback.rs:56) retains the URL reservation for process lifetime.
+
+Read-only source audit completed; no builds or tests run. This verdict does not claim a fresh WSL full-suite pass.
+
+VERDICT: PASS
+
+=================== P55 Astra round 5 (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Round 5 reviewed at `9aa3004515958b4700d112c57e292cb5ddc38ea5`, including `94487771..HEAD` and the full `b6c7b4ce..HEAD` diff.
+
+No BLOCKER, HIGH, MEDIUM, or LOW findings.
+
+- `fuigo-test-support` is an existing sampler dev-dependency, available to `src` unit tests.
+- Locked reqwest 0.12.24 explicitly implements `IntoUrl` for `&String`.
+- The reserved socket remains bound without listening; `SocketAddr` formatting correctly brackets IPv6.
+- The egress guard permits `::1`; the HTTP connector handles bracketed IP literals without DNS resolution.
+- Connection refusal preserves `is_connect()`, producing `RetryWithClientRebuild` then `Retry`, and excluding image stripping.
+- The actor test preserves its terminal `Failed` and no-`ImagesStripped` assertions. It does not explicitly assert the terminal error’s class; that is unchanged.
+- `loopback.rs`’s round-5 change is formatting only. The full packet review found no additional issues; `git diff --check` passed.
+
+Read-only source audit completed. No builds or tests run; WSL2 runtime results were not independently reproduced.
+
+VERDICT: PASS
+
+=================== P55 Astra round 6 (new commits after rebase onto c2d0de14; codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Round 6 reviewed `549ed829` and `e96cf568` at the requested HEAD. Working tree is clean; `c2d0de14` is an ancestor. No builds or tests run.
+
+**No BLOCKER, HIGH, MEDIUM, or LOW findings in the two commits.**
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Scoped read-only audit complete. |
+| Product checks | ✅ Done | Parsed-host matching fixes IPv6 while preserving HTTP(S)/WS(S) localhost and normalized IPv4 behavior. Exact-address checks still reject `127.0.0.2`, `::2`, and IPv4-mapped IPv6. |
+| Regression coverage | ✅ Done | IPv6-positive assertions would catch restoration of the old comparisons: [server_tests.rs:4947](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/leader/server_tests.rs:4947), [hub_auth/mod.rs:407](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:407), [util/mod.rs:1067](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell-base/src/util/mod.rs:1067). |
+| Fixture changes | ✅ Done | Socket-address formatting handles IPv6 brackets; laziness constructors inherit the shared refused endpoint. No stale assertions on replaced URLs found. `fuigo-test-support` is already a dev-dependency in shell and sampler. |
+
+The leader flag feeds `allow_insecure_ws`; the SDK’s independent, correct `host_is_loopback` remains intact. Hub auth now selects the static bearer for `ws://[::1]`. The shared proxy predicate reaches the header, telemetry-policy, idle-refresh, and API-classification callers.
+
+**Grep qualification:** no remaining executable `host_str()` comparison against bare `"::1"` was found. The broader claim that *no loopback string comparison remains* is false: [device_code.rs:507](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/auth/device_code.rs:507) still explicitly permits HTTP localhost/IPv4; [public_download.rs:42](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-extra-ca/src/public_download.rs:42) uses strings but correctly strips IPv6 brackets. Test-only IPv4 comparisons also remain. These are pre-existing, outside the two commits.
+
+VERDICT: PASS
+=================== P55 Astra round 7 (after rebase onto 90c5a4af; codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null) ===================
+Round 7 reviewed `strike/p55` at `939f50ce`, against `90c5a4af`. Clean checkout; new parent confirmed as an ancestor. **No P55 BLOCKER/HIGH findings or rebase interaction requiring rejection.** No files changed, builds, or tests run.
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Scoped diff, new-parent interactions, and six-failure causality audit complete. |
+
+1. **Scope: matches P55.** The diff contains exactly the expected 19 crate files and two P55 documents. No additional environment handling, permission logic, home-directory resolution, or dependency versions changed.
+
+2. **New-parent interactions: no regression found.**
+   - New paused-clock recovery tests exercise files, timers, and channels—not fixed-IPv4 servers: [interrupted_turn_tests.rs:1181](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/session/interrupted_turn_tests.rs:1181).
+   - The new fixed-IPv4 `SessionFront` explicitly requires real-clock callers. Every `run_current_thread` invocation in its auth-retry consumers passes `false`. Its backend address construction preserves IPv6 brackets: [session_wire.rs:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/test_support/session_wire.rs:214), [session_wire.rs:264](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/test_support/session_wire.rs:264).
+   - Newly added `127.0.0.1:9` cases test destination policy, constructed requests, or synthetic failures; I found no new fixture relying on that port refusing connections. Example: [auth_error_no_retry_tests.rs:2033](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/session/acp_session_tests/auth_error_no_retry_tests.rs:2033).
+   - HEAD grep found no executable `host_str()` comparison against bare `"::1"`. Existing loopback string comparisons remain: [device_code.rs:515](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-shell/src/auth/device_code.rs:515) permits HTTP localhost/IPv4; [public_download.rs:42](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-extra-ca/src/public_download.rs:42) correctly strips IPv6 brackets.
+
+3. **MEDIUM — pre-existing workspace test isolation defect; strongly explains the six failures.**
+   - The tilde test reads HOME at [git_tests.rs:514](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/session/git_tests.rs:514), then production reads it again asynchronously at [git.rs:532](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/session/git.rs:532). The test holds no environment lock.
+   - The trust test compares two separately resolved environment-dependent paths without locking: [trust.rs:672](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/trust.rs:672). Concurrent tests explicitly change HOME and unset FUIGO_HOME: [workspace_ops.rs:1880](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/workspace_ops.rs:1880). Their writer lock cannot protect unlocked readers.
+   - All four permission tests likewise lack environment locking. Persist and subsequent manager/reload operations independently resolve their store directories: [state.rs:156](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/permission/state.rs:156), [state.rs:302](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/permission/state.rs:302), [state.rs:394](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/permission/state.rs:394). A changed home can hide saved grants or denials, explaining Reject/Allow and persistence mismatches.
+
+Those relevant files, `fuigo-dirs`, and test-support `env.rs` are byte-identical across **old parent, new parent, and HEAD**. P55’s sole workspace test only parses URLs and calls the pure predicate at [hub_auth/mod.rs:389](/Volumes/Mando/WaylandBots/Fuigo/wt-p55/crates/codegen/fuigo-workspace/src/hub_auth/mod.rs:389). Its loopback helpers do not mutate environment variables; dependency unit tests do not execute inside the workspace test binary.
+
+**Assessment:** pre-existing process-environment races are the supported explanation. Tip-only occurrence can reflect scheduling changes; it does not establish P55 causation. The exact failing interleavings remain unproven without runtime isolation evidence.
+
+VERDICT: PASS

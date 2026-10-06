@@ -933,6 +933,7 @@ impl HostService {
         }
 
         let mut cmd = tokio::process::Command::new("git");
+        fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
         cmd.arg("diff")
             .arg(commit)
             .current_dir(&self.params.cwd)

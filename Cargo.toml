@@ -3,6 +3,10 @@
 [patch.crates-io]
 gcloud-auth = { path = "third_party/gcloud-policy/gcloud-auth-1.3.0" }
 gcloud-metadata = { path = "third_party/gcloud-policy/gcloud-metadata-1.0.2" }
+# R077: vendored without their raw prints (a print to a dead stdout/stderr aborts a
+# panic = "abort" build); see each crate's Cargo.toml footer.
+tiff = { path = "third_party/tiff-0.11.3" }
+usvg = { path = "third_party/usvg-0.47.0" }
 async-openai = { git = "https://github.com/our-forks/async-openai.git", rev = "95b52ebdedf42143083cf3d6f0e0be7c84e9c808" }
 
 [workspace]
@@ -107,6 +111,8 @@ members = [
     "third_party/graphlib_rust",
     "third_party/mermaid-to-svg",
     "third_party/ordered_hashmap",
+    "third_party/tiff-0.11.3",
+    "third_party/usvg-0.47.0",
 ]
 
 [workspace.package]
@@ -315,6 +321,7 @@ wildmatch = "2"
 windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Console", "Win32_System_Pipes"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
+wayland-backend = "0.3.12"
 fuigo-acp-lib = { path = "crates/codegen/fuigo-acp-lib" }
 fuigo-agent-lifecycle = { path = "crates/codegen/fuigo-agent-lifecycle" }
 fuigo-circuit-breaker = { path = "crates/common/fuigo-circuit-breaker" }
@@ -472,3 +479,13 @@ uninlined_format_args = "allow"
 # into `format!("{}", param)`, which clippy flags as useless_format.
 # Suppressed until the upstream crate fixes its codegen (fixed in 0.7.16+).
 useless_format = "allow"
+
+# Release builds are panic=abort, and `println!`/`print!`/`eprintln!`/`eprint!` panic when the
+# stream is a dead pipe, a closed pane or a full disk: one print on a dead fd aborts the whole
+# process (R060, R070, R077). Shipped code prints through `fuigo_tty_utils::cli_println!` /
+# `cli_eprintln!` (best effort; see `fuigo-tty-utils/src/best_effort_std{out,err}.rs`), or through
+# a writer whose errors it handles. `clippy.toml` sets `allow-print-in-tests`/`allow-dbg-in-tests`;
+# build scripts and dev-only tools carry a justified `#[allow]`.
+print_stdout = "deny"
+print_stderr = "deny"
+dbg_macro = "deny"

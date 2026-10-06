@@ -1579,6 +1579,18 @@ mod tests {
             base: String,
         }
         impl TraceExportSource for SlowProxyResolver {
+            // P47: a NON-session static key, so the upload really reaches the slow loopback handler (a session
+            // `user_token` on the static path is refused before any request; that is pinned elsewhere). The test
+            // is about the shutdown drain clamp.
+            fn proxy_credentials(&self) -> Option<Arc<dyn fuigo_auth::AuthCredentialProvider>> {
+                Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
+                    Box::new(fuigo_file_utils::storage_client::StaticFuigoAuth::new(Some(
+                        "test-token".into(),
+                    ))),
+                    Some("test-token".into()),
+                    fuigo_auth::BearerDestination::Unrestricted,
+                )))
+            }
             fn resolve(&self) -> TraceExportConfig {
                 TraceExportConfig {
                     bucket_url: Some("gs://test-bucket".to_string()),
@@ -1854,6 +1866,11 @@ mod author_identity_tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn env_var_identity_reaches_the_wire_end_to_end() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "session::feedback_manager::author_identity_tests::env_var_identity_reaches_the_wire_end_to_end",
+        ) else {
+            return;
+        };
         let _email =
             fuigo_test_support::env::EnvGuard::set("FUIGO_TEST_WORK_EMAIL", "ada@corp.example");
         let _name = fuigo_test_support::env::EnvGuard::set("FUIGO_TEST_WORK_NAME", "Ada Lovelace");
@@ -1880,8 +1897,8 @@ email = ["$FUIGO_TEST_WORK_EMAIL"]
 
         let (addr, captured) = start_capture_server().await;
         let client = crate::agent::feedback_client::FeedbackClient::with_client(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
+            crate::http::shared_client(),
+            front.front(&format!("http://{addr}/v1")),
             Some("tok".into()),
         );
         let mut submission = text_submission();
@@ -1921,14 +1938,19 @@ email = ["$FUIGO_TEST_WORK_EMAIL"]
     #[tokio::test]
     #[serial_test::serial]
     async fn workflow_merges_user_metadata_into_submission() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "session::feedback_manager::author_identity_tests::workflow_merges_user_metadata_into_submission",
+        ) else {
+            return;
+        };
         let _guard = fuigo_test_support::env::EnvGuard::set(
             "FUIGO_USER_METADATA",
             r#"{"team": "platform-tools"}"#,
         );
         let (addr, captured) = start_capture_server().await;
         let client = crate::agent::feedback_client::FeedbackClient::with_client(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
+            crate::http::shared_client(),
+            front.front(&format!("http://{addr}/v1")),
             Some("tok".into()),
         );
         let mut submission = text_submission();
@@ -1964,10 +1986,15 @@ email = ["$FUIGO_TEST_WORK_EMAIL"]
     #[tokio::test]
     #[serial_test::serial]
     async fn workflow_without_identity_omits_author_fields() {
+        let Some(front) = crate::test_support::session_wire::fronted_child(
+            "session::feedback_manager::author_identity_tests::workflow_without_identity_omits_author_fields",
+        ) else {
+            return;
+        };
         let (addr, captured) = start_capture_server().await;
         let client = crate::agent::feedback_client::FeedbackClient::with_client(
-            reqwest::Client::new(),
-            format!("http://{addr}/v1"),
+            crate::http::shared_client(),
+            front.front(&format!("http://{addr}/v1")),
             Some("tok".into()),
         );
 

@@ -188,13 +188,13 @@ impl fuigo_tool_runtime::Tool for GrepTool {
         let mut child = match cmd.spawn() {
             Ok(c) => c,
             Err(e) => {
-                return Ok(GrepSearchOutput {
-                    stdout: Vec::new(),
-                    stderr: format!("Error spawning rg: {e}").into_bytes(),
-                    exit_code: -1,
-                    match_count: 0,
-                    file_matches: Vec::new(),
-                });
+                // P19. Same defect as the fuigo_build implementation, which shares
+                // `rg_path` with this one: a spawn failure was reported as a successful
+                // search with no matches. See receipt R006.
+                return Err(fuigo_tool_runtime::ToolError::new(
+                    fuigo_tool_runtime::ToolErrorKind::Execution,
+                    format!("ripgrep could not be started, so the search did not run: {e}"),
+                ));
             }
         };
 

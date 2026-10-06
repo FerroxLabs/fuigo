@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Default install directory name under `~/.fuigo/`.
 const DEFAULT_INSTALL_DIR_NAME: &str = "installed-plugins";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InstallRegistry {
     /// Schema version for forward compatibility.
     pub version: u32,
@@ -19,9 +19,24 @@ pub struct InstallRegistry {
     /// Absolute path to the install directory.
     #[serde(skip)]
     install_dir: PathBuf,
+    /// `repos` as this registry last read them from, or wrote them to, disk:
+    /// [`Self::save`] writes only what changed since (P72).
+    #[serde(skip)]
+    baseline: std::sync::Mutex<HashMap<String, InstalledRepo>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Clone for InstallRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            version: self.version,
+            repos: self.repos.clone(),
+            install_dir: self.install_dir.clone(),
+            baseline: std::sync::Mutex::new(self.baseline_now()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum InstallKind {
     /// Cloned from a remote git repo.
@@ -43,7 +58,7 @@ pub enum InstallKind {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstalledRepo {
     pub kind: InstallKind,
     pub installed_at: String,
@@ -58,7 +73,7 @@ pub struct InstalledRepo {
 }
 
 /// Lives here (not in fuigo-plugin-marketplace) to keep dependency direction sane.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarketplaceProvenance {
     /// Canonical source identity (git URL or local path).
     pub source_url_or_path: String,
@@ -68,7 +83,7 @@ pub struct MarketplaceProvenance {
     pub plugin_subdir: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RepoPlugin {
     /// Subdirectory within the repo (None if plugin is at repo root).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -123,6 +138,7 @@ impl InstallRegistry {
                         detail: e.to_string(),
                     })?;
                 reg.install_dir = install_dir;
+                reg.baseline = std::sync::Mutex::new(reg.repos.clone());
                 Ok(reg)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty(install_dir)),
@@ -138,46 +154,138 @@ impl InstallRegistry {
             version: 1,
             repos: HashMap::new(),
             install_dir,
+            baseline: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
+    fn baseline_now(&self) -> HashMap<String, InstalledRepo> {
+        self.baseline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Write this registry's changes to `registry.json`.
+    ///
+    /// Only what changed since the registry was loaded (or last saved) is
+    /// written, merged into the file as it is NOW (P72): an install, update or
+    /// removal reads the registry, then does slow git/copy work, then saves --
+    /// and the old save wrote the whole registry back, dropping every repo a
+    /// second Fuigo installed or removed in between. The merge is a
+    /// read-modify-write through the shared helper
+    /// (`fuigo_config::fs_atomic::edit_state_file`): under the registry's
+    /// state lock (out of the install directory), applied to the file's
+    /// current version and renamed in only if the file is still that version,
+    /// with the slow work long done (it never runs under the lock).
+    ///
+    /// Per repo key: one this registry added, changed or removed is set to (or
+    /// removed as) this registry's value, also if another writer changed that
+    /// same key meanwhile (the later save wins for its own key); every other
+    /// key is the file's. The file keeps its mode and a symlinked
+    /// `registry.json` is written through. A file that cannot be read is
+    /// refused; one that cannot be parsed is replaced, as a load of it starts
+    /// fresh. Nothing is written when nothing changed and the file exists.
     pub fn save(&self) -> Result<(), InstallError> {
         self.save_atomic()
     }
 
+    /// See [`Self::save`].
     pub fn save_atomic(&self) -> Result<(), InstallError> {
+        use fuigo_config::fs_atomic::{Edit, EditError};
         std::fs::create_dir_all(&self.install_dir).map_err(|e| InstallError::Io {
             path: self.install_dir.clone(),
             source: e,
         })?;
 
         let registry_path = self.install_dir.join("registry.json");
-        let content = serde_json::to_string_pretty(self).map_err(|e| InstallError::Json {
-            detail: e.to_string(),
-        })?;
         if std::env::var_os("FUIGO_TEST_FAIL_REGISTRY_SAVE_AFTER_SERIALIZE").is_some() {
             return Err(InstallError::InstallFailed {
                 detail: "test-injected registry save failure".into(),
             });
         }
-        let temp_path = self.install_dir.join(format!(
-            ".registry.json.tmp-{}-{}",
-            std::process::id(),
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-        ));
-        std::fs::write(&temp_path, content).map_err(|e| InstallError::Io {
-            path: temp_path.clone(),
-            source: e,
-        })?;
+        let baseline = self.baseline_now();
+        let mut keys: Vec<&String> = self.repos.keys().chain(baseline.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        let changes: Vec<(String, Option<InstalledRepo>)> = keys
+            .into_iter()
+            .filter(|k| self.repos.get(*k) != baseline.get(*k))
+            .map(|k| (k.clone(), self.repos.get(k).cloned()))
+            .collect();
 
-        if let Err(e) = std::fs::rename(&temp_path, &registry_path) {
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(InstallError::Io {
-                path: registry_path,
+        fuigo_config::fs_atomic::edit_state_file(
+            &registry_path,
+            |bytes| {
+                fuigo_config::write_through::stage_file_atomically_with(
+                    &registry_path,
+                    bytes,
+                    fuigo_config::write_through::NewFileMode::Default,
+                )
+            },
+            |current| {
+                let (mut disk, exists) = match current {
+                    Ok(None) => (Self::empty(self.install_dir.clone()), false),
+                    Ok(Some(bytes)) => match serde_json::from_slice::<InstallRegistry>(bytes) {
+                        Ok(reg) => (reg, true),
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %registry_path.display(),
+                                error = %e,
+                                "install registry is unreadable JSON; replacing it"
+                            );
+                            (Self::empty(self.install_dir.clone()), false)
+                        }
+                    },
+                    Err(e) => {
+                        return Err(InstallError::Io {
+                            path: registry_path.clone(),
+                            source: std::io::Error::new(e.kind(), e.to_string()),
+                        });
+                    }
+                };
+                if exists && changes.is_empty() && disk.version >= self.version {
+                    return Ok(Edit::Keep(()));
+                }
+                for (key, repo) in &changes {
+                    match repo {
+                        Some(repo) => {
+                            disk.repos.insert(key.clone(), repo.clone());
+                        }
+                        None => {
+                            disk.repos.remove(key);
+                        }
+                    }
+                }
+                disk.version = disk.version.max(self.version);
+                let contents = serde_json::to_string_pretty(&disk).map_err(|e| {
+                    InstallError::Json {
+                        detail: e.to_string(),
+                    }
+                })?;
+                Ok(Edit::Replace {
+                    contents: contents.into_bytes(),
+                    value: (),
+                })
+            },
+        )
+        .map_err(|e| match e {
+            EditError::Edit(e) => e,
+            EditError::Lock(e) => InstallError::Io {
+                path: registry_path.clone(),
                 source: e,
-            });
-        }
-
+            },
+            EditError::Write(e) => InstallError::Io {
+                path: registry_path.clone(),
+                source: e,
+            },
+        })?;
+        // The next save diffs against what this registry holds now (its view
+        // never took in other writers' keys, so diffing against the merged
+        // file would read them as removed here).
+        *self
+            .baseline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.repos.clone();
         Ok(())
     }
 
@@ -334,6 +442,106 @@ pub enum InstallError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_repo(dir: &Path, name: &str) -> InstalledRepo {
+        InstalledRepo {
+            kind: InstallKind::Local {
+                source_path: dir.join(name),
+                subdir: None,
+            },
+            installed_at: "t".into(),
+            updated_at: "t".into(),
+            path: dir.join(name),
+            plugins: HashMap::from([(
+                name.to_owned(),
+                RepoPlugin {
+                    subdir: None,
+                    version: None,
+                },
+            )]),
+            marketplace: None,
+        }
+    }
+
+    /// P72 (P61-F1): installers in parallel -- each loads the registry, does
+    /// its slow work, then saves -- keep every one's repo, and a removal by one
+    /// removes only its own key. (The old save wrote the whole registry back
+    /// and dropped every repo another installer added in between.)
+    #[test]
+    #[serial_test::serial(home_env)] // the state lock lives under the (env-derived) fuigo home
+    fn installers_saving_after_slow_work_keep_each_others_repos() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("installed-plugins");
+        let mut seed = InstallRegistry::empty(install_dir.clone());
+        seed.insert("doomed".into(), local_repo(dir.path(), "doomed"));
+        seed.insert("kept".into(), local_repo(dir.path(), "kept"));
+        seed.save().unwrap();
+        const N: usize = 6;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+        let threads: Vec<_> = (0..N)
+            .map(|t| {
+                let (install_dir, barrier, base) =
+                    (install_dir.clone(), barrier.clone(), dir.path().to_path_buf());
+                std::thread::spawn(move || {
+                    // All load the same version...
+                    let mut reg = InstallRegistry::try_load_from(install_dir).unwrap();
+                    barrier.wait();
+                    // ...then each saves its own change after its "git work".
+                    std::thread::sleep(std::time::Duration::from_millis(5 * t as u64));
+                    if t == 0 {
+                        reg.remove("doomed");
+                    }
+                    reg.insert(format!("r{t}"), local_repo(&base, &format!("r{t}")));
+                    reg.save().unwrap();
+                    // A second change from the same object later diffs against
+                    // what it saved, not against the merged file.
+                    reg.get_repo_mut(&format!("r{t}")).unwrap().updated_at = "u".into();
+                    reg.save().unwrap();
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let on_disk = InstallRegistry::try_load_from(install_dir.clone()).unwrap();
+        let mut keys: Vec<&str> = on_disk.repos.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        let mut want: Vec<String> = (0..N).map(|t| format!("r{t}")).collect();
+        want.push("kept".into());
+        want.sort();
+        assert_eq!(keys, want);
+        for t in 0..N {
+            assert_eq!(on_disk.repos[&format!("r{t}")].updated_at, "u");
+        }
+        let names: Vec<String> = std::fs::read_dir(&install_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["registry.json"], "no temp or lock in the install dir");
+    }
+
+    /// A save with no change does not rewrite an existing file; a registry
+    /// that is not readable JSON is replaced (as loading it starts fresh).
+    #[test]
+    #[serial_test::serial(home_env)] // the state lock lives under the (env-derived) fuigo home
+    fn unchanged_saves_keep_the_file_and_a_corrupt_one_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_dir = dir.path().join("installed-plugins");
+        let mut reg = InstallRegistry::empty(install_dir.clone());
+        reg.insert("a".into(), local_repo(dir.path(), "a"));
+        reg.save().unwrap();
+        let path = install_dir.join("registry.json");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        InstallRegistry::try_load_from(install_dir.clone()).unwrap().save().unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
+        std::fs::write(&path, "{ not json").unwrap();
+        let mut fresh = InstallRegistry::load_from(install_dir.clone());
+        fresh.insert("b".into(), local_repo(dir.path(), "b"));
+        fresh.save().unwrap();
+        let on_disk = InstallRegistry::try_load_from(install_dir).unwrap();
+        assert!(on_disk.repos.contains_key("b"));
+    }
 
     #[test]
     fn repo_key_from_https_url() {

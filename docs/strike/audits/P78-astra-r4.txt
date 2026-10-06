@@ -1,0 +1,13 @@
+# P78 Astra round 4 (gpt-6-astra, codex exec, read-only) - audited 37a5b9d4..9dd2c541
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `37a5b9d4..9dd2c541` using git and file reads only. No builds, tests, or edits.
+
+1. **LOW — NEW: reader guard rejects unrelated same-name bindings.** [theme_pin_guard_tests.rs:568](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:568)  
+   After `let _theme = pin_theme();`, a nested helper such as `fn helper(_theme: ()) {}` triggers the “moved or dropped guard” failure, although it never accesses the outer guard. Harmless shadowing or borrowing is also rejected. This is a conservative scanner limitation; none of the four listed readers encounters it. **Existing self-tests do not catch this:** the longer-identifier fixture checks token boundaries, not binding scope.
+
+No MEDIUM-or-higher findings remain. Both round-3 findings are resolved: explicit guard drops/moves are rejected, and the dispatch test establishes the opening answer before querying while preserving its refresh subject.
+
+Matcher, gutter, atomic-dump, and modal-isolation fixes remain supported. No weakened assertions, additional silent matcher waits, or protected-test changes found. Compilation, Clippy, and runtime remain unverified.
+
+LAND-WITH-FOLLOWUPS

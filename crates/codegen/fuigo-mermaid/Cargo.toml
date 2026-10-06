@@ -34,3 +34,6 @@ libc = { workspace = true }
 # default-features=false; "Do not add features globally"). Used by tests to
 # decode the output PNG and assert its dimensions.
 image = { workspace = true, features = ["png"] }
+
+[lints]
+workspace = true

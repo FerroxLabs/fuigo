@@ -1489,31 +1489,58 @@ mod tests {
 
     #[test]
     fn watcher_debounces_rapid_writes() {
+        // The window has to hold the whole burst. With 500 ms, a writer stalled for half a second mid-burst under host load
+        // split it in two (each half then debounces to its own pair of events) and the count reached 4. Correct behaviour:
+        // writes further apart than the window are separate changes. The burst is ~50 ms, so a 3 s window leaves a margin of
+        // 60x, and nothing else in the test is timed against it.
+        const DEBOUNCE: Duration = Duration::from_secs(3);
         let tmp = TempDir::new().unwrap();
 
-        // Use a long debounce (500ms) so all rapid writes (50ms total) land in a single debounce window regardless of platform
-        let (_w, mut rx) =
-            ConfigFileWatcher::start(tmp.path(), &[], None, Some(Duration::from_millis(500)))
-                .expect("watcher should start");
-
+        let (_w, mut rx) = ConfigFileWatcher::start(tmp.path(), &[], None, Some(DEBOUNCE))
+            .expect("watcher should start");
+        // Let the backend settle before the burst, as before (FSEvents starts asynchronously on macOS).
         wait_ms(200);
 
-        // 5 rapid writes, ~50ms total, well within the 500ms debounce window
+        // 5 rapid writes, ~50 ms total
+        let burst_start = std::time::Instant::now();
         for i in 0..5 {
             fs::write(tmp.path().join("config.toml"), format!("version = {i}")).unwrap();
             wait_ms(10);
         }
-        // Wait for the single debounce tick to fire
-        wait_ms(800);
+        let burst = burst_start.elapsed();
 
-        let mut count = 0;
-        while rx.try_recv().is_ok() {
-            count += 1;
+        // notify-debouncer-mini emits at most an `AnyContinuous` one window after the first event and the final `Any` one
+        // window after the last, so everything this burst can cause has arrived two windows after it ended.
+        // Collect for that long (plus a second of slack) so an extra event, the thing under test, cannot arrive unseen.
+        let deadline = std::time::Instant::now() + 2 * DEBOUNCE + Duration::from_secs(1);
+        let mut events = Vec::new();
+        while std::time::Instant::now() < deadline {
+            while let Ok(evt) = rx.try_recv() {
+                events.push(evt);
+            }
+            wait_ms(20);
         }
+        // A last drain: the loop can exit after a long deschedule with events still queued.
+        while let Ok(evt) = rx.try_recv() {
+            events.push(evt);
+        }
+        let count = events.len();
         // All writes should coalesce into a small number of events
         // That is 1 per debounce tick, or a few if the OS delivers events in separate batches within the window
-        assert!(count >= 1, "expected at least 1 event, got {count}");
-        assert!(count <= 3, "expected coalesced events (<=3), got {count}");
+        assert!(
+            count >= 1,
+            "expected at least 1 event, got {count} (burst took {burst:?})"
+        );
+        assert!(
+            count <= 3,
+            "expected coalesced events (<=3), got {count}: {events:?} (burst took {burst:?} against a {DEBOUNCE:?} window)"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| *e == ConfigChangeEvent::GlobalConfigChanged),
+            "{events:?}"
+        );
     }
 
     /// Bookkeeping-only (no OS event delivery, so deterministic on

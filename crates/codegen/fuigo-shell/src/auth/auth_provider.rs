@@ -13,7 +13,7 @@ use super::token_output::{expiry_after_seconds, parse_token_output};
 
 /// One named `[auth_provider.<name>]` table, honored only from the trusted config layers (`parse_auth_providers`).
 /// A new field here needs a `parse_auth_providers` warning decision.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default)]
 pub struct AuthProviderConfig {
     /// Native subscription auth instead of a command helper.
@@ -30,6 +30,31 @@ pub struct AuthProviderConfig {
     pub timeout_secs: Option<u64>,
     /// Working directory for the command; a leading `~` expands to home.
     pub cwd: Option<String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. A helper command line may embed a credential, so `command` and `args` are not printed.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for AuthProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            subscription,
+            account,
+            command,
+            args,
+            token_ttl_secs,
+            timeout_secs,
+            cwd,
+        } = self;
+        f.debug_struct("AuthProviderConfig")
+            .field("subscription", subscription)
+            .field("account", account)
+            .field("command", &"<redacted>")
+            .field("args", &format_args!("<{} args redacted>", args.as_ref().map_or(0, Vec::len)))
+            .field("token_ttl_secs", token_ttl_secs)
+            .field("timeout_secs", timeout_secs)
+            .field("cwd", cwd)
+            .finish()
+    }
 }
 
 impl AuthProviderConfig {
@@ -256,7 +281,8 @@ where
 }
 
 /// Remove every first-party credential from the helper's environment.
-/// BYOK isolates these keys on the wire, so the helper (the agent puts them in its own env at startup) must not inherit them.
+/// BYOK isolates these keys on the wire, so the helper must not inherit one the launcher put in the agent's environment
+/// (since P70 the agent itself no longer copies the saved key there).
 fn scrub_first_party_credentials(cmd: &mut tokio::process::Command) {
     for var in crate::agent::config::FIRST_PARTY_CREDENTIAL_ENV_VARS {
         cmd.env_remove(var);
@@ -377,6 +403,9 @@ async fn mint_provider_token(
         }
         None => crate::util::subprocess::shell_c(config.command.as_str()),
     };
+    // The shared registry (P120): every Fuigo-OWNED secret (not the user's config-registered names) leaves the inherited
+    // environment BEFORE the explicit variables below are set, so those still arrive.
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     if let Some(ref dir) = cwd {
         cmd.current_dir(dir);
     }

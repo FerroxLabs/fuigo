@@ -37,15 +37,24 @@ impl fuigo_sampler::BearerResolver for WireValidBearerResolver {
 }
 /// Production impl: wraps the live `AuthManager`.
 /// 401 recovery delegates to `AuthManager::unauthorized_recovery`.
+///
+/// P47: `service_base` is the configured base of the service this provider authenticates (`None`: the
+/// configured-API-origin and FluxRouter tiers only), and `site` labels refusals in the log. Every request the
+/// middleware would stamp with the session token is checked by
+/// [`crate::auth::session_delivery::session_may_reach_service`] first ([`AuthCredentialProvider::bearer_may_reach`]).
 pub(crate) struct ShellAuthCredentialProvider {
     auth_manager: Arc<AuthManager>,
     static_credentials: FuigoAuthCredentials,
+    service_base: Option<String>,
+    site: &'static str,
 }
 impl ShellAuthCredentialProvider {
     pub(crate) fn new(
         auth_manager: Arc<AuthManager>,
         deployment_key: Option<String>,
         alpha_test_key: Option<String>,
+        service_base: Option<String>,
+        site: &'static str,
     ) -> Self {
         let mut static_credentials = FuigoAuthCredentials::new(None);
         static_credentials.deployment_key = deployment_key;
@@ -53,6 +62,8 @@ impl ShellAuthCredentialProvider {
         Self {
             auth_manager,
             static_credentials,
+            service_base,
+            site,
         }
     }
 }
@@ -114,16 +125,44 @@ impl AuthCredentialProvider for ShellAuthCredentialProvider {
     fn needs_token_auth_header(&self) -> bool {
         self.static_credentials.deployment_key.is_none()
     }
+    /// P47: decided on the exact `bearer` the middleware is about to stamp. The configured deployment key and the
+    /// held static `AuthMode::ApiKey` credential (matched by value) keep their own rules; any other value is treated
+    /// as the session token and goes only where the service-endpoint trust class admits `url`.
+    fn bearer_may_reach(
+        &self,
+        url: &reqwest::Url,
+        bearer: &str,
+    ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+        if self.static_credentials.deployment_key.as_deref() == Some(bearer)
+            || crate::auth::session_delivery::is_held_static_key(&self.auth_manager, bearer)
+        {
+            return Ok(());
+        }
+        crate::auth::session_delivery::service_session_url_gate(
+            url.as_str(),
+            self.service_base.as_deref(),
+            self.site,
+        )
+        .map_err(|refused| fuigo_auth::BearerDestinationRefused(refused.to_string()))
+    }
 }
-/// Resolves the embedding credentials for `embed_base_url`, attaching the Ferrox Labs session credential only to Ferrox Labs-operated endpoints over `https`.
+/// Resolves the embedding credentials for `embed_base_url`, attaching the session credential only where it may be delivered:
+/// a user-configured API origin over `https`, never loopback (`is_fuigo_api_bearer_url`; credential delivery, see P30).
 pub(crate) fn embedding_session_credentials(
     embed_base_url: &str,
     auth_manager: Option<&Arc<AuthManager>>,
     api_key_provider: Option<fuigo_tools::types::SharedApiKeyProvider>,
 ) -> fuigo_memory::EndpointScopedCredentials {
+    // Inference class (P42 decides it below with `is_fuigo_api_bearer_url`); no service base, so the P47 check
+    // the middleware runs admits exactly the configured API origins and FluxRouter.
     let auth_credentials = auth_manager.map(|am| {
-        Arc::new(ShellAuthCredentialProvider::new(am.clone(), None, None))
-            as Arc<dyn AuthCredentialProvider>
+        Arc::new(ShellAuthCredentialProvider::new(
+            am.clone(),
+            None,
+            None,
+            None,
+            "embeddings",
+        )) as Arc<dyn AuthCredentialProvider>
     });
     fuigo_memory::EndpointScopedCredentials::for_endpoint(
         embed_base_url,
@@ -166,6 +205,8 @@ pub fn build_storage_client_for_proxy(
             am.clone(),
             deployment_key,
             alpha_test_key,
+            Some(proxy_base_url.to_owned()),
+            "storage_proxy",
         ));
         let bridge: Arc<dyn fuigo_file_utils::storage_client::Auth401AttributionCallback> =
             Arc::new(StorageClientAttributionBridge::new(am, session_id));
@@ -185,8 +226,18 @@ pub fn build_storage_client_for_proxy(
             .deployment_key
             .clone()
             .or_else(|| creds.user_token.clone());
+        // P47: with no AuthManager to classify it, a `user_token` is treated as the session token it is documented
+        // to be; a deployment key keeps its own rules.
+        let destination = if creds.deployment_key.is_none() && creds.user_token.is_some() {
+            crate::auth::session_delivery::service_bearer_destination(
+                Some(proxy_base_url.to_owned()),
+                "storage_proxy",
+            )
+        } else {
+            fuigo_auth::BearerDestination::Unrestricted
+        };
         let provider: Arc<dyn AuthCredentialProvider> = Arc::new(
-            StaticAuthCredentialProvider::new(Box::new(creds), wire_bearer),
+            StaticAuthCredentialProvider::new(Box::new(creds), wire_bearer, destination),
         );
         fuigo_file_utils::storage_client::StorageClient::with_provider(
             proxy_base_url,
@@ -220,13 +271,13 @@ impl StorageClientAttributionBridge {
 impl fuigo_file_utils::storage_client::Auth401AttributionCallback
     for StorageClientAttributionBridge
 {
-    fn record_401(&self, operation: &str, sent_bearer_prefix: Option<&str>) {
+    fn record_401(&self, operation: &str, sent_bearer: Option<&fuigo_auth::BearerFingerprint>) {
         crate::auth::attribution::record_consumer_401(
             self.auth_manager.as_ref(),
             self.session_id.as_deref(),
             crate::auth::attribution::ConsumerKind::StorageClient,
             operation,
-            sent_bearer_prefix,
+            sent_bearer,
         );
     }
 }
@@ -256,6 +307,13 @@ impl OtelAuthCredentialProvider {
             live: arc_swap::ArcSwap::from_pointee(None),
             deployment_key: arc_swap::ArcSwap::from_pointee(None),
         }
+    }
+    /// A provider already upgraded to `auth_manager` (P47 tests).
+    #[cfg(test)]
+    pub(crate) fn for_test(auth_manager: Arc<AuthManager>) -> Self {
+        let provider = Self::new(auth_manager.clone());
+        provider.set_live(auth_manager);
+        provider
     }
     /// Upgrade to the agent's live `AuthManager`.
     /// After this call, `snapshot()` reads from the live manager and `refresh_after_unauthorized()` drives the full recovery state machine.
@@ -357,6 +415,22 @@ impl AuthCredentialProvider for OtelAuthCredentialProvider {
     }
     fn needs_token_auth_header(&self) -> bool {
         self.deployment_key.load().is_none()
+    }
+    /// P47: the OTLP exporter carries the session token only to a FluxRouter-operated or configured API origin
+    /// (no service base: an `OTEL_*` / internal-endpoint repoint gets no session token). A deployment key and a
+    /// static `AuthMode::ApiKey` credential keep their own rules.
+    fn bearer_may_reach(
+        &self,
+        url: &reqwest::Url,
+        bearer: &str,
+    ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+        if (**self.deployment_key.load()).as_deref() == Some(bearer)
+            || crate::auth::session_delivery::is_held_static_key(&self.load_state().0, bearer)
+        {
+            return Ok(());
+        }
+        crate::auth::session_delivery::service_session_url_gate(url.as_str(), None, "otlp_export")
+            .map_err(|refused| fuigo_auth::BearerDestinationRefused(refused.to_string()))
     }
 }
 /// Process-wide OTel credential provider handle.
@@ -524,7 +598,7 @@ mod tests {
             &dir,
             Some(make_auth("live-token", ChronoDuration::hours(1))),
         );
-        let provider = ShellAuthCredentialProvider::new(mgr, None, None);
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None, None, "test");
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("live-token"));
         assert_eq!(snap.user_id.as_deref(), Some("test-user"));
@@ -543,7 +617,7 @@ mod tests {
         );
         assert!(mgr.current().is_none(), "buffer-window precondition");
         assert!(mgr.expired_auth().is_some(), "buffer-window precondition");
-        let provider = ShellAuthCredentialProvider::new(mgr, None, None);
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None, None, "test");
         let snap = provider.snapshot();
         assert_eq!(
             snap.token.as_deref(),
@@ -559,7 +633,7 @@ mod tests {
         let _guard = EarlyInvalidationGuard::pin_to_default();
         let dir = tempfile::tempdir().unwrap();
         let mgr = make_manager(&dir, None);
-        let provider = ShellAuthCredentialProvider::new(mgr, None, None);
+        let provider = ShellAuthCredentialProvider::new(mgr, None, None, None, "test");
         let snap = provider.snapshot();
         assert!(
             snap.token.is_none(),
@@ -610,7 +684,7 @@ mod tests {
         mgr.set_refresher(Arc::new(OkRefresher {
             calls: calls.clone(),
         }));
-        let provider = ShellAuthCredentialProvider::new(mgr.clone(), None, None);
+        let provider = ShellAuthCredentialProvider::new(mgr.clone(), None, None, None, "test");
         assert!(provider.refresh_after_unauthorized().await);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(mgr.current().unwrap().key, "fresh");
@@ -638,26 +712,26 @@ mod tests {
                 "session credentials must not reach {denied}"
             );
         }
-        // "First party" is now whatever the installation configures, not a
+        // A configured API origin is whatever the installation configures, not a
         // compiled-in vendor, so derive the allowed URL from the live trust
         // set rather than naming a host. Reading it back keeps this
         // deterministic no matter which test populated the OnceLock first.
         // MUST use the shared helper. The store is a process-wide OnceLock,
         // so installing a different set here would race the one in
         // `config.rs` -- whichever test ran first would win, and several
-        // config tests that use `api.x.ai` as their first-party fixture would
+        // config tests that use `api.x.ai` as their configured-origin fixture would
         // fail or pass depending on the schedule. A "matches baseline" result
         // is only meaningful if it is schedule-independent.
         crate::agent::config::Config::install_test_trusted_origins();
-        let first_party = fuigo_shell_base::util::trusted_api_origins()
+        let configured_origin = fuigo_shell_base::util::trusted_api_origins()
             .first()
             .expect("a trusted origin must be installed")
             .clone();
         let resolved =
-            embedding_session_credentials(&first_party, Some(&mgr), Some(api_key_provider));
+            embedding_session_credentials(&configured_origin, Some(&mgr), Some(api_key_provider));
         assert!(
             !resolved.is_empty(),
-            "session credentials must reach the configured first-party origin {first_party}"
+            "session credentials must reach the configured API origin {configured_origin}"
         );
     }
     /// Deployment-key path has no recovery (operator owns the bearer).
@@ -667,7 +741,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = make_manager(&dir, None);
         let provider =
-            ShellAuthCredentialProvider::new(mgr, Some("deployment-key".to_string()), None);
+            ShellAuthCredentialProvider::new(mgr, Some("deployment-key".to_string()), None, None, "test");
         assert!(!provider.refresh_after_unauthorized().await);
     }
     #[test]
@@ -679,6 +753,8 @@ mod tests {
             make_manager(&dir, None),
             Some("fuigo-token-EX".into()),
             None,
+            None,
+            "test",
         )
         .snapshot();
         assert_eq!(
@@ -692,7 +768,7 @@ mod tests {
             expires_at: Some(Utc::now() + ChronoDuration::hours(1)),
             ..FuigoAuth::test_default()
         };
-        let api = ShellAuthCredentialProvider::new(make_manager(&dir, Some(api_auth)), None, None)
+        let api = ShellAuthCredentialProvider::new(make_manager(&dir, Some(api_auth)), None, None, None, "test")
             .snapshot();
         assert_eq!(
             api.api_key_id.as_deref(),
@@ -706,6 +782,8 @@ mod tests {
             ),
             None,
             None,
+            None,
+            "test",
         )
         .snapshot();
         assert!(oidc.deployment_id.is_none() && oidc.api_key_id.is_none());
@@ -920,7 +998,7 @@ mod tests {
             Some(make_auth("user-token", ChronoDuration::hours(1))),
         );
         let provider =
-            ShellAuthCredentialProvider::new(mgr, Some("deployment-key-12345".to_string()), None);
+            ShellAuthCredentialProvider::new(mgr, Some("deployment-key-12345".to_string()), None, None, "test");
         let snap = provider.snapshot();
         assert_eq!(snap.token.as_deref(), Some("deployment-key-12345"));
         assert!(snap.user_id.is_none());

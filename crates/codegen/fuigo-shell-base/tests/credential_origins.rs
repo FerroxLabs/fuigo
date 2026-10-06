@@ -1,4 +1,5 @@
-//! A separate process owns this OnceLock fixture; it cannot widen other tests' trust.
+//! A separate process owns this fixture: the trust set is process-wide (first seed wins),
+//! so installing it here cannot widen any other test binary's trust.
 use fuigo_shell_base::util::{is_configured_api_origin, set_trusted_api_origins};
 
 #[test]

@@ -200,6 +200,7 @@ fn the_title_is_centred_and_stays_inside_the_margin() {
 
 #[test]
 fn hovering_a_link_brightens_every_row_it_wraps_onto() {
+    let _theme = crate::theme::cache::pin_theme();
     let theme = Theme::current();
     let (plain, result) = render(30, 40);
     let (hovered, _) = render_with(30, 40, &notice(), Some(0), None);

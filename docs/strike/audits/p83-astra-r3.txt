@@ -1,0 +1,57 @@
+Astra round 3 (codex 0.160.0, model gpt-6-astra, read-only) on dbf192cf..8a6aa088 -- final report only.
+Raw transcript (4516 lines) not committed; sha256 e51bfc6b148ffe6790806d396e7460370c76485866c5178ccc2ddaae26a8a38b; copy at hetzner-dsm:/root/fuigo-builds/p83/audits/p83-astra-r3.raw.txt
+
+Audited `dbf192cf..8a6aa088` at clean HEAD `8a6aa088615829dd3555fbc5f674487220fa3b4d`. Read-only; no builds or tests run. **The round-2 corrections address their reported paths, but two additional HIGH teardown gaps remain.** These are source-level findings; I found no ordinary production trigger for either.
+
+1. **HIGH — A future becomes invisible to teardown before its destructor finishes.**  
+   [local_ref.rs:171](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:171), also [Driver at line 155](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:155).
+
+   On completion, `Driver::poll` takes the future out, releases the slot borrow, then destroys the future. During that destruction, the registry sees an empty, unborrowed slot.
+
+   Concrete scenario: a custom bound future returns `Ready` while retaining a destructor-bearing field. Its destructor releases the last agent owner through an external thread-local owner slot, then accesses its `LocalRef`. Agent teardown sees `future == None`, destroys the agent, and returns to the still-running future destructor. The subsequent access dangles. This requires neither moving the agent nor exporting its `LocalRef`.
+
+   Cancellation has the corresponding gap: `Driver` has no explicit destructor. Dropping its last `Rc<Slot>` makes the registry’s weak reference unupgradable before the contained future finishes destruction. Reentrant agent destruction therefore skips that future entirely. [Rust’s weak-reference ownership semantics](https://doc.rust-lang.org/std/rc/struct.Weak.html).
+
+   **Tests:** Not caught. Existing probes do not release the owner from a future destructor. The direct slot tests also retain extra strong slot references.
+
+   **Disposition:** Remaining soundness gap in the new teardown mechanism. Keep destruction observably in progress through both completed-future destruction and `Driver` cancellation, so reentrant owner destruction reliably aborts. This is a bounded lifecycle correction, separate from the move architecture.
+
+2. **HIGH — Logging can unwind before the mandatory abort.**  
+   [local_ref.rs:132](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:132).
+
+   The active-poll branch calls `tracing::error!` before `process::abort()`, outside any catch boundary. Tracing invokes subscriber callbacks synchronously; the inspected dispatcher does not catch their panics. [Subscriber event contract](https://docs.rs/tracing-core/0.1.36/tracing_core/trait.Subscriber.html#tymethod.event).
+
+   Concrete scenario: a bound future releases an externally stored last agent owner during its poll. The slot is borrowed, so teardown enters this branch. A subscriber panics on the diagnostic. The abort is never reached; agent fields unwind while the active future and potentially other bound futures still exist. Catching the owner-drop panic inside the poll permits continued access through the dangling `LocalRef`.
+
+   **Tests:** Not caught. There is no active-poll owner-drop subprocess test with a panicking subscriber.
+
+   **Disposition:** Remaining hole in the new abort safeguard. Remove the callback before abort, or ensure abort occurs even if logging panics. Do not allow a caught logging payload’s destructor to defeat that guarantee.
+
+3. **HIGH — R1/R2 HIGH 1 remains, but does not independently block this packet under the stated disposition.**  
+   [local_ref.rs:183](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:183).
+
+   Initializing an agent, relocating it, freeing the original allocation, then polling its background work can still dereference the old address. The public API does not enforce address stability.
+
+   **Comparison with `dbf192cf`:** I found no new move capability or worsened move invariant. The old `LocalRef` already required an unmoved pointee. Removing the intermediate diagnostic removes partial detection relative to `ccb7e389`, but does not introduce this defect relative to the requested baseline. ACP, server, and pager ownership still establish stable allocations before bound work.
+
+   **Tests:** No relocation-soundness regression remains. The teardown tests’ `Rc` ownership correctly avoids relocation within those tests.
+
+   **Disposition:** Retain HIGH severity and the separate architectural follow-up. **This finding alone would not make this change DO-NOT-LAND.**
+
+4. **LOW — The wake test does not establish its claimed ordering.**  
+   [local_ref.rs:268](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:268).
+
+   `PanickyWake` always panics; the second future’s flag is inspected only after teardown returns. Moving each caught wake back inside the drain loop would still satisfy these assertions.
+
+   **Tests:** The test catches the old uncaught-wake failure, but not an ordering regression. Record whether all probes were dropped **inside the wake callback**, then assert that observation afterward. Non-blocking follow-up.
+
+The remaining requested checks support these conclusions:
+
+- **Secondary panic payloads:** `keep_first_panic` fixes R2 HIGH 2. Forgetting subsequent payloads deliberately leaks their resources, but prevents their destructors from interrupting the drain. The new three-slot test discriminates the reported failure.
+- **Teardown wakes:** R2 HIGH 3 is fixed in the implementation: stored driver wakers run after draining, each under `catch_unwind`.
+- **Ordinary poll panics:** The slot borrow unwinds before Tokio destroys the driver. Without reentrant owner destruction, I found no additional dangling-future path. A double panic can terminate the process rather than leave surviving tasks.
+- **Converted call sites:** Initialization announcements, both settings tasks, periodic announcements, heap monitoring, tier recheck, supervision, deferred recovery, coordinator, trace receiver, and individual traces remain bound. Coordinator run/validate/describe futures remain in its owned collections; worker, presentation, and upload tasks receive owned snapshots.
+- **Test validity:** The `Rc` changes address R2 MEDIUM 4. The ACP subprocess helper verifies actual child-test entry. The reproducer still does not synchronize specifically on a live `LeaderGuard`; the field probes establish drop ordering, not complete pointer soundness.
+
+**DO-NOT-LAND**
+exit=0

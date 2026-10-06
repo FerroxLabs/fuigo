@@ -20,6 +20,10 @@ impl AsyncTerminalRunner for DummyTerminal {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn fork_reload_second_compaction_preserves_authority() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
     use crate::session::execution_state::{Execution, TokenLimits};
     use fuigo_sampling_types::{ExecutionAdmission, RequestPurpose};
@@ -187,7 +191,7 @@ async fn create_test_actor(
     let chat_state_handle = fuigo_chat_state::ChatStateActor::spawn(
         vec![],
         fuigo_sampling_types::SamplingConfig {
-            base_url: "http://localhost".to_string(),
+            base_url: fuigo_test_support::refused_loopback_url(),
             model: "test".to_string(),
             max_completion_tokens: None,
             temperature: None,
@@ -363,7 +367,7 @@ async fn create_test_actor(
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announcements: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
@@ -380,6 +384,7 @@ async fn create_test_actor(
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_registry_live: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
@@ -390,6 +395,7 @@ async fn create_test_actor(
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
+        _turn_owner_lock: None,
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
         last_recap_main_turn: std::cell::Cell::new(0),
@@ -424,6 +430,10 @@ async fn create_test_actor(
 /// `other` clears next turn, `credit_block` holds until a successful model call, `size` is sticky until a full reset (success/rewind/model switch).
 #[tokio::test(flavor = "current_thread")]
 async fn suppression_gates_and_reset_is_reason_scoped() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS};
     let local = tokio::task::LocalSet::new();
     local
@@ -498,6 +508,10 @@ async fn suppression_gates_and_reset_is_reason_scoped() {
 /// it (else it silently re-sends the doomed request) and resets re-enable it.
 #[tokio::test(flavor = "current_thread")]
 async fn suppression_gates_prefire_two_pass() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_TURN};
     use std::sync::atomic::Ordering::Relaxed;
     let local = tokio::task::LocalSet::new();
@@ -539,6 +553,10 @@ async fn suppression_gates_prefire_two_pass() {
 /// covered by `model_switch_keeps_account_state_suppression`.
 #[tokio::test(flavor = "current_thread")]
 async fn model_switch_clears_sticky_suppression() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_NONE};
     let local = tokio::task::LocalSet::new();
     local
@@ -576,6 +594,10 @@ async fn model_switch_clears_sticky_suppression() {
 /// Model switch must not clear credit/auth suppress or compact under it.
 #[tokio::test(flavor = "current_thread")]
 async fn model_switch_keeps_account_state_suppression() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{
         PreviousModelInfo, SUPPRESS_AUTH, SUPPRESS_UNTIL_SUCCESS,
     };
@@ -622,6 +644,10 @@ async fn model_switch_keeps_account_state_suppression() {
 /// Auth suppress clears on credential recovery, not on a model 200.
 #[tokio::test(flavor = "current_thread")]
 async fn auth_suppress_clears_on_credential_recovery() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{SUPPRESS_AUTH, SUPPRESS_NONE};
     let local = tokio::task::LocalSet::new();
     local
@@ -649,6 +675,10 @@ async fn auth_suppress_clears_on_credential_recovery() {
 /// Auth recovery must not clear credit suppress.
 #[tokio::test(flavor = "current_thread")]
 async fn clear_auth_suppress_leaves_credit_suppress() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS;
     let local = tokio::task::LocalSet::new();
     local
@@ -672,6 +702,10 @@ async fn clear_auth_suppress_leaves_credit_suppress() {
 /// This ordering broke when prepare_sampler ran after the gate.
 #[tokio::test(flavor = "current_thread")]
 async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_AUTH;
     let local = tokio::task::LocalSet::new();
     local
@@ -700,6 +734,10 @@ async fn clear_auth_suppress_rearms_pre_sampling_compact_gate() {
 }
 #[test]
 fn is_auth_compact_error_classifies_401_messages() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let auth =
         acp::Error::internal_error().data("compact failed: API error (status 401 Unauthorized)");
     assert!(SessionActor::is_auth_compact_error(&auth));
@@ -711,6 +749,10 @@ fn is_auth_compact_error_classifies_401_messages() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
     use crate::session::storage::SessionUpdate;
     let local = tokio::task::LocalSet::new();
@@ -731,6 +773,7 @@ async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
                         crate::extensions::notification::RetryState::Failed {
                             error_type,
                             message,
+                            ..
                         },
                     ) = &notif.update
                 {
@@ -752,6 +795,10 @@ async fn surface_compact_auth_failure_emits_reauthable_retry_state() {
 /// The suppression notification text is tailored to the failure reason; the unclassified `Other` bucket carries the normalized real error.
 #[test]
 fn suppression_notification_message_is_reason_specific() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let msg = SessionActor::suppress_notification_message;
     let detail = "compact failed: API error (status 500 Internal Server Error)";
     assert_eq!(
@@ -807,6 +854,10 @@ fn suppression_notification_message_is_reason_specific() {
 /// The suppress transition emits one `AutoCompactFailed` carrying exactly the composed, scrubbed message.
 #[tokio::test(flavor = "current_thread")]
 async fn suppression_emits_composed_notification() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -944,6 +995,10 @@ fn switch_target_config(model: &str, base_url: String) -> fuigo_sampler::Sampler
 /// A family switch compacts with the new model over the lossy view: the request must contain nothing but plain `{role, content}` text messages.
 #[tokio::test(flavor = "current_thread")]
 async fn family_switch_compacts_lossy_with_new_model() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1016,6 +1071,10 @@ async fn family_switch_compacts_lossy_with_new_model() {
 /// 401 auto-compact: SUPPRESS_AUTH and a reauthable RetryState (abort for /login).
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
     use crate::session::compaction_config::SUPPRESS_AUTH;
     use crate::session::storage::SessionUpdate;
@@ -1068,6 +1127,7 @@ async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
                             crate::extensions::notification::RetryState::Failed {
                                 error_type,
                                 message,
+                                ..
                             },
                         ) => {
                             assert_eq!(error_type, "auth");
@@ -1106,6 +1166,10 @@ async fn e2e_auto_compact_401_suppresses_auth_and_surfaces_reauth() {
 /// as sticky `size`, with the "too large to compact" notification.
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_auto_compact_413_steps_ladder_then_sticky_size_suppress() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
     use crate::session::compaction_config::SUPPRESS_STICKY;
     use crate::session::storage::SessionUpdate;
@@ -1192,6 +1256,10 @@ async fn e2e_auto_compact_413_steps_ladder_then_sticky_size_suppress() {
 /// Model-switch compact 401 must surface reauth (same path as pre-sampling).
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_model_switch_compact_401_surfaces_reauth() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
     use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_AUTH};
     use crate::session::storage::SessionUpdate;
@@ -1241,6 +1309,7 @@ async fn e2e_model_switch_compact_401_surfaces_reauth() {
                         crate::extensions::notification::RetryState::Failed {
                             error_type,
                             message,
+                            ..
                         },
                     ) = &notif.update
                 {
@@ -1262,6 +1331,10 @@ async fn e2e_model_switch_compact_401_surfaces_reauth() {
 /// Non-auth model-switch compact failures stay log-only (turn continues).
 #[tokio::test(flavor = "current_thread")]
 async fn e2e_model_switch_compact_non_auth_failure_does_not_abort() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_NONE};
     let local = tokio::task::LocalSet::new();
     local
@@ -1298,6 +1371,10 @@ async fn e2e_model_switch_compact_non_auth_failure_does_not_abort() {
 /// After clearing auth suppress, a switch to a smaller window can re-evaluate and compact.
 #[tokio::test(flavor = "current_thread")]
 async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{PreviousModelInfo, SUPPRESS_AUTH, SUPPRESS_NONE};
     let local = tokio::task::LocalSet::new();
     local
@@ -1358,6 +1435,10 @@ async fn clear_auth_suppress_allows_model_switch_compact_reeval() {
 /// A deterministic failure suppresses auto-compaction only on the AUTO path, never for a bare manual `/compact`.
 #[tokio::test(flavor = "current_thread")]
 async fn bare_manual_compact_failure_does_not_suppress_auto() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_NONE;
     let local = tokio::task::LocalSet::new();
     local
@@ -1409,6 +1490,10 @@ async fn bare_manual_compact_failure_does_not_suppress_auto() {
 /// The test takes ~6s: real retry delays run.
 #[tokio::test(flavor = "current_thread")]
 async fn transient_auto_compact_failure_notifies_with_real_error() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_NONE;
     use std::sync::atomic::Ordering::Relaxed;
     let local = tokio::task::LocalSet::new();
@@ -1480,6 +1565,10 @@ async fn transient_auto_compact_failure_notifies_with_real_error() {
 /// So the announced episodes clear and the MCP reminder goes dirty for a re-announcement at the next injection.
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_rearms_failed_server_announcements() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use fuigo_test_support::MockInferenceServer;
     let local = tokio::task::LocalSet::new();
     local
@@ -1528,6 +1617,10 @@ async fn compaction_rearms_failed_server_announcements() {
 /// The release stays sticky across further compactions (no unbounded compaction loop).
 #[tokio::test(flavor = "current_thread")]
 async fn forked_prefix_released_under_pressure_and_stays_released() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_VALIDATING;
     use fuigo_test_support::MockInferenceServer;
     let local = tokio::task::LocalSet::new();
@@ -1598,6 +1691,10 @@ async fn forked_prefix_released_under_pressure_and_stays_released() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn compaction_validation_requires_observed_pressure_reduction() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_VALIDATING};
     tokio::task::LocalSet::new().run_until(async {
         let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
@@ -1616,6 +1713,10 @@ async fn compaction_validation_requires_observed_pressure_reduction() {
 /// So AUTO is not immediately re-enabled while the compaction itself still reports success.
 #[tokio::test(flavor = "current_thread")]
 async fn forked_release_still_over_threshold_suppresses_auto() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::SUPPRESS_STICKY;
     use fuigo_test_support::MockInferenceServer;
     let local = tokio::task::LocalSet::new();
@@ -1679,6 +1780,10 @@ async fn forked_release_still_over_threshold_suppresses_auto() {
 /// The cancel error carries the typed kind AND still extracts to the plain cancel text for text-only consumers (old pagers, log sinks).
 #[test]
 fn cancelled_error_is_typed_and_extracts_to_cancel_text() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::helpers::session_compact::{COMPACT_CANCELLED_MSG, CompactFailure};
     use crate::session::helpers::session_compact::{CompactErrorKind, compact_error_kind};
     let err = CompactFailure::cancelled_error();
@@ -1695,6 +1800,10 @@ fn cancelled_error_is_typed_and_extracts_to_cancel_text() {
 /// Raw producer input is scrubbed, single-lined, and capped at the chokepoint; already-normalized input passes through byte-identical.
 #[test]
 fn compact_error_data_scrubs_and_caps_raw_producer_input() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::helpers::session_compact::{CompactErrorKind, compact_error_data};
     let (service, replacement) = crate::sampling::error::SERVICE_NAME_REWRITES[0];
     let raw = format!("{service} exploded:\nsecond line {}", "z".repeat(400));
@@ -1724,6 +1833,10 @@ fn compact_error_data_scrubs_and_caps_raw_producer_input() {
 /// Prefix strip (nested wrappers included), single-line, and cap.
 #[test]
 fn user_facing_compact_error_strips_prefix_single_lines_and_caps() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::helpers::session_compact::{COMPACT_CANCELLED_MSG, COMPACT_FAILED_PREFIX};
     assert_eq!(
         SessionActor::user_facing_compact_error("compact failed: API error\n  detail  line\t2"),
@@ -1774,6 +1887,10 @@ fn user_facing_compact_error_strips_prefix_single_lines_and_caps() {
 /// `classify_suppress_reason` maps each deterministic-failure shape to its fixed [`SuppressReason`].
 #[test]
 fn classify_suppress_reason_maps_error_text() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let classify = SessionActor::classify_suppress_reason;
     assert_eq!(
         classify("caller does not have permission … spending-limit reached"),
@@ -1820,6 +1937,10 @@ fn classify_suppress_reason_maps_error_text() {
 /// Lock them so a rename can't break monitoring.
 #[test]
 fn suppress_reason_as_str_is_stable() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     assert_eq!(SuppressReason::CreditBlock.as_str(), "credit_block");
     assert_eq!(SuppressReason::Size.as_str(), "size");
     assert_eq!(SuppressReason::Auth.as_str(), "auth");
@@ -1951,6 +2072,10 @@ fn api_error_with_context_window(context_window: u64) -> fuigo_sampler::Sampling
 /// Pre-sampling check uses estimated tokens (includes tool-result delta).
 #[tokio::test(flavor = "current_thread")]
 async fn test_pre_sampling_uses_estimated_tokens() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1969,6 +2094,10 @@ async fn test_pre_sampling_uses_estimated_tokens() {
 /// Model-switch compaction fires when switching to a smaller context window.
 #[tokio::test(flavor = "current_thread")]
 async fn test_model_switch_compaction_triggers_on_downgrade() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -2003,6 +2132,10 @@ async fn test_model_switch_compaction_triggers_on_downgrade() {
 }
 #[tokio::test(flavor = "current_thread")]
 async fn get_transcript_path_returns_some_when_file_exists() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -2030,6 +2163,135 @@ async fn get_transcript_path_returns_some_when_file_exists() {
             assert!(actor.transcript_hint().is_none());
             let _ = std::fs::remove_file(&updates_path);
             let _ = std::fs::remove_dir_all(&session_dir);
+        })
+        .await;
+}
+
+/// P123 (K14, P104): a session whose load-time repair still owes its `.pre-repair` backup. A directory sits where the
+/// backup belongs, so no copy can be published; the gate refuses every rewrite of the history file until it is cleared.
+/// Returns the chat file and the blocking directory.
+fn owe_backup(actor: &SessionActor) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = crate::session::persistence::session_dir(&actor.session_info);
+    std::fs::create_dir_all(&dir).unwrap();
+    let chat = dir.join(crate::session::storage::CHAT_HISTORY_FILE);
+    std::fs::write(&chat, b"{}\n").unwrap();
+    let blocker = dir.join("chat_history.jsonl.pre-repair");
+    std::fs::create_dir(&blocker).unwrap();
+    crate::session::storage::jsonl::load_repair::owe_backup_for_test(&chat);
+    (chat, blocker)
+}
+
+/// What the session sent to its clients, read from the persistence fixture: `(started, failed, repair notes)`.
+async fn compaction_notes(
+    actor: &SessionActor,
+    persistence_rx: &mut mpsc::UnboundedReceiver<PersistenceMsg>,
+) -> (usize, Vec<String>, Vec<String>) {
+    use crate::extensions::notification::SessionUpdate as FuigoSessionUpdate;
+    use crate::session::storage::SessionUpdate;
+    await_fixture_observations(actor).await;
+    let (mut started, mut failed, mut repair) = (0, Vec::new(), Vec::new());
+    while let Ok(msg) = persistence_rx.try_recv() {
+        if let PersistenceMsg::Update(SessionUpdate::Fuigo(notif)) = msg {
+            match notif.update {
+                FuigoSessionUpdate::AutoCompactStarted { .. } => started += 1,
+                FuigoSessionUpdate::AutoCompactFailed { error } => failed.push(error),
+                FuigoSessionUpdate::HistoryRepaired { message } => repair.push(message),
+                _ => {}
+            }
+        }
+    }
+    (started, failed, repair)
+}
+
+/// P123 (P104, Astra P96 r3 MEDIUM): a manual compaction refused because the backup is owed must not first send the
+/// memory-save request to the model. The pre-compaction flush step counts the compaction before it decides to flush,
+/// so a refused compaction leaves the counter at zero.
+#[tokio::test(flavor = "current_thread")]
+async fn a_refused_manual_compaction_does_not_start_a_memory_flush() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    use std::sync::atomic::Ordering::Relaxed;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            owe_backup(&actor);
+            let error = actor.run_compact(None).await.expect_err("the compaction is refused");
+            let message = crate::sampling::error::acp_error_message(&error);
+            assert!(message.contains("could not be backed up"), "says why: {message}");
+            assert_eq!(
+                actor.compaction.count.load(Relaxed),
+                0,
+                "no pre-compaction memory flush step may run for a compaction that is refused"
+            );
+        })
+        .await;
+}
+
+/// P123 (P104, Astra P96 r3 LOW): an automatic compaction refused because the backup is owed shows its failure note
+/// once, then stays quiet (no "started" and no "failed" note) until the backup can be made. The refusal itself is still
+/// returned each time, so the turn loop knows nothing was compacted.
+#[tokio::test(flavor = "current_thread")]
+async fn an_auto_compaction_refused_for_the_backup_shows_its_note_once() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
+            let actor = Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let (_chat, blocker) = owe_backup(&actor);
+            let trigger = || AutoCompactTriggerInfo { tokens_used: 180_000, context_window: 200_000, percentage: 90 };
+            for _ in 0..3 {
+                let error = actor
+                    .run_compact_only(trigger(), false)
+                    .await
+                    .expect_err("an automatic compaction is refused while the backup is owed");
+                let message = crate::sampling::error::acp_error_message(&error);
+                assert!(message.contains("could not be backed up"), "says why: {message}");
+            }
+            let (started, failed, _) = compaction_notes(&actor, &mut persistence_rx).await;
+            assert_eq!(failed.len(), 1, "one failure note for three refused triggers: {failed:?}");
+            assert!(failed[0].contains("backup"), "the note names the cause: {}", failed[0]);
+            assert_eq!(started, 0, "a refused compaction never announces that it started");
+            // Once the backup can be made the gate opens by itself.
+            std::fs::remove_dir(&blocker).unwrap();
+            assert!(
+                crate::session::storage::jsonl::load_repair::history_rewrite_refusal(&actor.session_info, "compact")
+                    .is_none(),
+                "clearing the blocker lets the backup be made and opens the gate"
+            );
+        })
+        .await;
+}
+
+/// P123 (P104, Astra P96 r3 MEDIUM): the background two-pass prefire sends a summarization request; with the backup owed
+/// the compaction it prepares would be refused, so the request must not go out.
+#[tokio::test(flavor = "current_thread")]
+async fn the_prefire_pass_is_not_started_while_the_backup_is_owed() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await;
+            assert!(actor.should_prefire_two_pass().await, "precondition: usage is past the prefire line");
+            owe_backup(&actor);
+            assert!(
+                !actor.should_prefire_two_pass().await,
+                "a prefire request must not be sent for a compaction that is refused"
+            );
         })
         .await;
 }

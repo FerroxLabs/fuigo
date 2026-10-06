@@ -7,3 +7,6 @@ pub mod subagent_prompts;
 pub mod template;
 pub mod user_message;
 pub mod workspace_user;
+
+#[cfg(test)]
+mod p91_memory_tag_tests;

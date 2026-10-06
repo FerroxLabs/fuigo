@@ -89,108 +89,14 @@ fn ensure_owner_only_permissions_inner(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Sets Windows-specific secure permissions on a file.
+/// Sets Windows-specific secure permissions on a file: inherited permissions removed, full control for the current
+/// user only (the equivalent of Unix 0o600).
 ///
-/// This function modifies the file's ACL to:
-/// 1. Remove inherited permissions
-/// 2. Grant full control only to the current user
-///
-/// This is equivalent to Unix mode 0o600.
+/// The implementation lives in `fuigo_secrets::owner_only` (P145) so that crates below this one in the dependency graph
+/// (the `events.jsonl` and `resources_state.json` writers) use the same ACL.
 #[cfg(windows)]
 pub fn set_windows_secure_permissions(path: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
-    use windows::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetNamedSecurityInfoW,
-        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
-    };
-    use windows::Win32::Security::{
-        ACE_FLAGS, ACL, DACL_SECURITY_INFORMATION, GetTokenInformation,
-        PROTECTED_DACL_SECURITY_INFORMATION, TOKEN_QUERY, TOKEN_USER, TokenUser,
-    };
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    use windows::core::PCWSTR;
-
-    unsafe {
-        // Get current process token
-        let mut token_handle = windows::Win32::Foundation::HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_handle)
-            .map_err(|e| io::Error::new(io::ErrorKind::PermissionDenied, e))?;
-
-        // Get token user size
-        let mut return_length = 0u32;
-        let _ = GetTokenInformation(token_handle, TokenUser, None, 0, &mut return_length);
-
-        // Get token user (current user's SID)
-        let mut token_user_buffer = vec![0u8; return_length as usize];
-        GetTokenInformation(
-            token_handle,
-            TokenUser,
-            Some(token_user_buffer.as_mut_ptr() as *mut _),
-            return_length,
-            &mut return_length,
-        )
-        .map_err(|e| {
-            let _ = CloseHandle(token_handle);
-            io::Error::new(io::ErrorKind::PermissionDenied, e)
-        })?;
-
-        // The TOKEN_USER structure starts with a SID_AND_ATTRIBUTES which has PSID as first field
-        let token_user = &*(token_user_buffer.as_ptr() as *const TOKEN_USER);
-        let user_sid = token_user.User.Sid;
-
-        // Create explicit access entry for current user only
-        // GENERIC_ALL = 0x10000000
-        let explicit_access = EXPLICIT_ACCESS_W {
-            grfAccessPermissions: 0x10000000, // GENERIC_ALL
-            grfAccessMode: SET_ACCESS,
-            grfInheritance: ACE_FLAGS(0), // No inheritance for files
-            Trustee: TRUSTEE_W {
-                pMultipleTrustee: std::ptr::null_mut(),
-                MultipleTrusteeOperation:
-                    windows::Win32::Security::Authorization::NO_MULTIPLE_TRUSTEE,
-                TrusteeForm: TRUSTEE_IS_SID,
-                TrusteeType: TRUSTEE_IS_USER,
-                ptstrName: windows::core::PWSTR(user_sid.0 as *mut u16),
-            },
-        };
-
-        // Create new ACL with only this entry
-        let mut new_acl: *mut ACL = std::ptr::null_mut();
-        let result = SetEntriesInAclW(Some(&[explicit_access]), None, &mut new_acl);
-        if result.0 != 0 {
-            let _ = CloseHandle(token_handle);
-            return Err(io::Error::from_raw_os_error(result.0 as i32));
-        }
-
-        // Convert path to wide string for Windows API
-        let wide_path: Vec<u16> = path
-            .as_os_str()
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-
-        // Set the new DACL on the file, removing inherited permissions
-        let result = SetNamedSecurityInfoW(
-            PCWSTR::from_raw(wide_path.as_ptr()),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            None, // psidOwner: not changing the owner
-            None, // psidGroup: not changing the primary group
-            Some(new_acl),
-            None,
-        );
-
-        // Clean up
-        let _ = LocalFree(Some(HLOCAL(new_acl as *mut _)));
-        let _ = CloseHandle(token_handle);
-
-        if result.0 != 0 {
-            return Err(io::Error::from_raw_os_error(result.0 as i32));
-        }
-    }
-
-    Ok(())
+    fuigo_secrets::owner_only::set_windows_owner_only_acl(path)
 }
 
 #[cfg(test)]

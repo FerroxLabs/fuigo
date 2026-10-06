@@ -1290,6 +1290,8 @@ impl WorkspaceHandle {
                 session_relationship: decode_session_relationship(&payload.session_relationship),
                 schema_version: payload.schema_version.clone(),
                 redirect_kind: None,
+                // The workspace log is not the shell's; crash recovery never reads it.
+                prompt_id: None,
             });
         if let Some(handle) = before_handle {
             self.shared
@@ -2595,6 +2597,8 @@ impl WorkspaceHandle {
                 }
             }
         };
+        // P71: the record's identity fields follow the destination class the queue uploads to.
+        let env = env.for_method(&upload_queue.upload_method());
         let bytes = match env.to_json_bytes() {
             Ok(b) => b,
             Err(e) => {

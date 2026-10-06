@@ -2034,7 +2034,7 @@ fn defaults_round_trip_through_registry() {
             "invert_scroll" => SettingValue::Bool(false),
             "display_refresh_auto_cadence" => SettingValue::Bool(true),
             "coding_data_sharing" => SettingValue::Enum("opt-out"),
-            "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
+            "default_selected_permission" => SettingValue::Enum("allow_once"),
             "hunk_tracker_mode" => SettingValue::Enum("off"),
             "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
@@ -5003,20 +5003,20 @@ fn default_selected_permission_does_not_support_preview() {
     }
 }
 
-/// `current_value_for` maps `UiConfig::default()` (None on disk) onto the `always_allow_all_sessions` canonical (the effective default).
+/// `current_value_for` maps `UiConfig::default()` (None on disk) onto the `allow_once` canonical (the effective default, P152).
 #[test]
-fn default_selected_permission_current_value_defaults_to_always_allow_all_sessions() {
+fn default_selected_permission_current_value_defaults_to_allow_once() {
     use fuigo_pager::settings::current_value_for;
     let ui = UiConfig::default();
     let pager = PagerLocalSnapshot::default();
     assert_eq!(
         current_value_for("default_selected_permission", &ui, &pager),
-        Some(SettingValue::Enum("always_allow_all_sessions")),
-        "None on disk → canonical 'always_allow_all_sessions' (effective default)",
+        Some(SettingValue::Enum("allow_once")),
+        "None on disk → canonical 'allow_once' (effective default)",
     );
 }
 
-/// Enter opens the picker seeded to the current ("always_allow_all_sessions") value.
+/// Enter opens the picker seeded to the current ("allow_once") value.
 #[test]
 fn default_selected_permission_enter_enters_picking_enum() {
     let mut s = make_state();
@@ -5035,8 +5035,8 @@ fn default_selected_permission_enter_enters_picking_enum() {
             assert_eq!(*key, "default_selected_permission");
             assert_eq!(
                 original_value,
-                &SettingValue::Enum("always_allow_all_sessions"),
-                "default UiConfig → original 'always_allow_all_sessions'"
+                &SettingValue::Enum("allow_once"),
+                "default UiConfig → original 'allow_once'"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -5082,7 +5082,7 @@ fn default_selected_permission_picker_enter_dispatches_set_commit() {
         } => (*default, *choices),
         _ => panic!("default_selected_permission must be Enum"),
     };
-    // Picker seeds at the current value ("always_allow_all_sessions"); navigate one row down
+    // Picker seeds at the current value ("allow_once"); navigate one row down
     // Resolve that choice's canonical from the registry rather than hardcoding it; robust against future catalog reordering
     let seed_idx = choices
         .iter()

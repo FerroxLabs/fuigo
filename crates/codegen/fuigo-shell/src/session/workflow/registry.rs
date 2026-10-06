@@ -707,6 +707,12 @@ mod tests {
         std::fs::create_dir_all(&wf_dir).unwrap();
         std::fs::write(wf_dir.join("alpha.rhai"), script("alpha")).unwrap();
         std::fs::write(wf_dir.join("wrong.rhai"), script("other")).unwrap();
+        // Trust is a precondition of this test, not its subject: project scope is only allowed
+        // when the folder's verdict says so, and an unrecorded verdict is re-resolved from
+        // process-global state (`FUIGO_TEST_VERSION` pinned by a concurrent
+        // `simulate_release_build()` turns a `.fuigo/workflows` folder into an untrusted one).
+        // Record the grant for this test's own uniquely-keyed tempdir instead of hoping.
+        crate::agent::folder_trust::record_for_test(&cwd, true);
 
         let registry = WorkflowRegistry::scan(Some(&cwd));
         let project_names: Vec<_> = registry
@@ -745,6 +751,11 @@ mod tests {
 
     #[test]
     fn project_workflows_follow_folder_trust() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        // Trust reads the store under $FUIGO_HOME; hold a private one, exclusive process-wide.
+        let _home = fuigo_test_support::FuigoHome::new();
         let dir = tempfile::tempdir().unwrap();
         git2::Repository::init(dir.path()).unwrap();
         let workflows = dir.path().join(".fuigo/workflows");
@@ -938,6 +949,8 @@ mod tests {
         std::fs::create_dir_all(&workflows).unwrap();
         std::fs::write(&target, script("linked")).unwrap();
         symlink(&target, workflows.join("linked.rhai")).unwrap();
+        // Trust is a precondition, not the subject (see deterministic_scan_uses_git_root_and_skips_invalid_filename).
+        crate::agent::folder_trust::record_for_test(&project, true);
 
         assert!(
             WorkflowRegistry::scan(Some(&project))
@@ -954,6 +967,8 @@ mod tests {
     #[test]
     fn save_is_validated_atomic_and_no_clobber() {
         let dir = tempfile::tempdir().unwrap();
+        // Trust is a precondition, not the subject (see deterministic_scan_uses_git_root_and_skips_invalid_filename).
+        crate::agent::folder_trust::record_for_test(dir.path(), true);
         let path = save_project_workflow(dir.path(), "saved", &script("saved")).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), script("saved"));
 
@@ -976,6 +991,8 @@ mod tests {
         let linked = dir.path().join("linked-project");
         std::fs::create_dir_all(&project).unwrap();
         symlink(&project, &linked).unwrap();
+        // Trust is a precondition, not the subject (see deterministic_scan_uses_git_root_and_skips_invalid_filename).
+        crate::agent::folder_trust::record_for_test(&linked, true);
         let path = save_project_workflow(&linked, "safe", &script("safe")).unwrap();
         // Compare canonical to canonical. `project` itself is only as canonical as the temp
         // root: on macOS `tempdir()` lives under `/var/folders/...`, which is a symlink to
@@ -1000,6 +1017,9 @@ mod tests {
         std::fs::create_dir_all(project.join(".fuigo")).unwrap();
         std::fs::create_dir_all(&attacker).unwrap();
         symlink(&attacker, project.join(".fuigo/workflows")).unwrap();
+        // Trust is a precondition, not the subject (see deterministic_scan_uses_git_root_and_skips_invalid_filename).
+        // Without it the `UntrustedPath` below is returned by the trust gate, not by the symlink check.
+        crate::agent::folder_trust::record_for_test(&project, true);
 
         assert!(matches!(
             save_project_workflow(&project, "safe", &script("safe")),

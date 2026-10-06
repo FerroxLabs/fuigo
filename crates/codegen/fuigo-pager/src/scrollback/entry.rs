@@ -6,13 +6,13 @@ use chrono::{DateTime, Local};
 use super::block::{BlockContent, RenderBlock};
 use super::types::{BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput};
 use crate::appearance::AppearanceConfig;
-use crate::theme::{ThemeKind, cache as theme_cache};
+use crate::theme::cache as theme_cache;
 
 #[derive(Debug, Clone)]
 struct CachedOutput {
     width: u16,
     raw: bool,
-    theme: ThemeKind,
+    theme: theme_cache::RenderKey,
     is_selected: bool,
     cwd: Option<PathBuf>,
     rendered: RenderedBlockOutput,
@@ -26,7 +26,7 @@ struct CachedOutput {
 /// Without a per-entry cache the height would be recomputed for every entry on every redraw.
 /// We only need the line count, so this caches just the resulting `u16` height.
 /// `cwd` is keyed because Expanded/Truncated Edit/Read header wrap can change between absolute and relative paths.
-type CachedTruncatedHeight = (u16, bool, ThemeKind, Option<PathBuf>, u16);
+type CachedTruncatedHeight = (u16, bool, theme_cache::RenderKey, Option<PathBuf>, u16);
 
 /// Unique identifier for a scrollback entry.
 ///
@@ -85,6 +85,9 @@ pub struct ScrollbackEntry {
 
     /// Raw mode: if true and block has_raw_mode(), render markdown as raw.
     pub raw: bool,
+
+    /// Hook data attached to this entry (only meaningful for ToolCall blocks).
+    pub hook_data: Option<super::blocks::tool::ToolCallHookData>,
 
     pub created_at: Option<DateTime<Local>>,
 
@@ -169,6 +172,7 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
+            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -199,6 +203,7 @@ impl ScrollbackEntry {
             display_mode,
             display_mode_pinned: false,
             raw: false,
+            hook_data: None,
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
@@ -354,7 +359,7 @@ impl ScrollbackEntry {
                 || self.block.is_bg_task()
                 || self.block.is_subagent());
 
-        let current_theme = theme_cache::current_kind();
+        let current_theme = theme_cache::render_key();
         let cwd_key = cwd.map(|p| p.to_path_buf());
         {
             let cache = self.cached_output.borrow();
@@ -380,7 +385,7 @@ impl ScrollbackEntry {
             is_selected: effective_selected,
             cwd: cwd_key.clone(),
         };
-        let rendered = self.block.rendered_output(&ctx);
+        let rendered = self.rendered_output_with_hooks(&ctx);
         *self.cached_output.borrow_mut() = Some(CachedOutput {
             width,
             raw: self.raw,
@@ -430,7 +435,7 @@ impl ScrollbackEntry {
         appearance: &AppearanceConfig,
         cwd: Option<&Path>,
     ) -> u16 {
-        let current_theme = theme_cache::current_kind();
+        let current_theme = theme_cache::render_key();
         let cwd_key = cwd.map(|p| p.to_path_buf());
         {
             let cache = self.cached_truncated_height.borrow();
@@ -514,8 +519,9 @@ impl ScrollbackEntry {
         }
     }
 
+    /// Whether this entry is foldable: considers both the block and attached hooks.
     pub fn is_foldable(&self) -> bool {
-        self.block.is_foldable()
+        self.block.is_foldable() || self.hook_data.as_ref().is_some_and(|hd| hd.has_content())
     }
 
     /// True for a thinking block hidden by the Appearance toggle. Takes the flag as a param so hot layout loops can hoist the cache read.
@@ -523,9 +529,66 @@ impl ScrollbackEntry {
         self.block.is_thinking() && !show_thinking
     }
 
-    /// Render without touching the entry's cache (dashboard peek renders at a foreign width).
-    pub fn output_uncached(&self, ctx: &BlockContext) -> BlockOutput {
-        self.block.rendered_output(ctx).output
+    fn rendered_output_with_hooks(&self, ctx: &BlockContext) -> RenderedBlockOutput {
+        let mut rendered = self.block.rendered_output(ctx);
+        let output = &mut rendered.output;
+        if let Some(ref hd) = self.hook_data {
+            use super::blocks::tool::ToolCallBlock;
+            use super::blocks::tool::hook::{
+                render_hook_separator, render_hooks_detail, render_hooks_for_mode,
+                render_hooks_inline_suffix,
+            };
+            let is_lifecycle = matches!(
+                self.block,
+                super::block::RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_))
+            );
+            match ctx.mode {
+                DisplayMode::Collapsed => {
+                    if let Some(suffix_spans) = render_hooks_inline_suffix(hd)
+                        && let Some(first_line) = output.lines.first_mut()
+                    {
+                        // Reserve the badge's width: a header that fills the row is shortened (with an ellipsis) rather than the
+                        // badge being appended past the row's end, where the renderer clips it away
+                        use unicode_width::UnicodeWidthStr;
+                        let suffix_width: usize =
+                            suffix_spans.iter().map(|s| s.content.width()).sum();
+                        let budget = usize::from(ctx.width).saturating_sub(suffix_width);
+                        let header = std::mem::take(&mut first_line.content);
+                        let header_style = header.style;
+                        let mut header = crate::render::line_utils::truncate_line(header, budget);
+                        header.style = header_style;
+                        header.spans.extend(suffix_spans);
+                        first_line.content = header;
+                    }
+                }
+                _ => {
+                    let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
+                    let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
+                    let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
+                    // Lifecycle blocks already use the event name as their header, so a separator before their detail is redundant
+                    if has_any && !is_lifecycle {
+                        output.lines.push(render_hook_separator());
+                    }
+                    output.lines.extend(pre);
+                    output.lines.extend(post);
+                    for (event_name, runs) in &hd.lifecycle {
+                        if is_lifecycle {
+                            output.lines.extend(render_hooks_detail(runs, ctx.mode));
+                        } else {
+                            output
+                                .lines
+                                .extend(render_hooks_for_mode(event_name, runs, ctx.mode));
+                        }
+                    }
+                }
+            }
+        }
+        rendered
+    }
+
+    /// Produce block output with hook lines injected (tool first, then hooks).
+    pub fn output_with_hooks(&self, ctx: &BlockContext) -> BlockOutput {
+        self.rendered_output_with_hooks(ctx).output
     }
 
     pub fn context_with_budget(
@@ -666,6 +729,56 @@ mod tests {
         assert!(matches!(entry.display_mode, DisplayMode::Expanded));
     }
 
+    /// Rendered text and colours of every line, for comparing two renders.
+    fn render_fingerprint(entry: &mut ScrollbackEntry) -> String {
+        let appearance = AppearanceConfig::default();
+        entry
+            .output(60, &appearance, None)
+            .lines
+            .iter()
+            .map(|l| format!("{:?}|{:?}", l.content, l.background))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// `current_kind()` reports a nominal `FuigoNight` while the terminal-native lock is on, but the palette painted is the terminal-default one.
+    /// A cache keyed on the kind alone then kept pre-switch colours across a live `/minimal` and `/fullscreen` switch under `FuigoNight`.
+    #[test]
+    fn render_cache_misses_when_the_terminal_native_lock_toggles() {
+        struct Unlock;
+        impl Drop for Unlock {
+            fn drop(&mut self) {
+                theme_cache::set_terminal_native_lock(false);
+            }
+        }
+        let _theme = theme_cache::pin_theme();
+        theme_cache::set_terminal_native_lock(false);
+        let _unlock = Unlock;
+        let mk = || ScrollbackEntry::new(RenderBlock::user_prompt("hello world"));
+
+        let mut live = mk();
+        let full_before = render_fingerprint(&mut live);
+
+        theme_cache::set_terminal_native_lock(true);
+        let fresh_locked = render_fingerprint(&mut mk());
+        assert_ne!(
+            full_before, fresh_locked,
+            "premise: the locked palette must paint differently, or this test proves nothing"
+        );
+        assert_eq!(
+            render_fingerprint(&mut live),
+            fresh_locked,
+            "an entry rendered before the lock must repaint under it"
+        );
+
+        theme_cache::set_terminal_native_lock(false);
+        assert_eq!(
+            render_fingerprint(&mut live),
+            full_before,
+            "and back again when the lock is released"
+        );
+    }
+
     #[test]
     fn test_entry_cache() {
         let mut entry = ScrollbackEntry::new(RenderBlock::stub("test", Color::Blue));
@@ -737,6 +850,9 @@ mod tests {
 
     #[test]
     fn test_truncated_height_cache_hits_when_key_unchanged() {
+        // The cache key includes the theme's render key (theme kind and terminal-native lock), both process globals.
+        // "Key unchanged" is only true while no theme test changes them between the two calls (P78).
+        let _theme = crate::theme::cache::pin_theme();
         let entry = ScrollbackEntry::new(RenderBlock::stub("hello", Color::Blue));
         let appearance = AppearanceConfig::default();
 

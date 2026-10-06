@@ -209,7 +209,7 @@ pub(crate) fn save_recap_watermark(session_dir: &std::path::Path, main_turns: us
         return;
     }
     let path = session_dir.join(RECAP_WATERMARK_FILE);
-    if let Err(e) = std::fs::write(&path, main_turns.to_string()) {
+    if let Err(e) = fuigo_config::write_file_owner_only(&path, main_turns.to_string()) {
         tracing::warn!(
             error = %e,
             path = %path.display(),

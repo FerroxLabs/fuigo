@@ -697,3 +697,37 @@ fn write_offload_failure_strips_cursor_midmessage_notice() {
     );
     assert!(msg.len() <= TRUNCATED_PROMPT_PREFIX_SIZE);
 }
+
+// ── P145 (S14): the prompt artifacts are session files and are owner-only ─────
+
+#[cfg(unix)]
+fn p145_mode(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// `prompt_context.json` and `system_prompt.txt` are created 0600 (Windows: the owner-only ACL, verified live in R145),
+/// and a loose copy left by an older version is tightened on the next write. They used plain `std::fs::write`.
+#[cfg(unix)]
+#[test]
+fn p145_prompt_artifacts_are_written_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    // A zero umask would make plain std::fs::write produce 0666; the owner-only writer still yields 0600.
+    let previous = unsafe { libc::umask(0o022) };
+    write_prompt_context_in(dir, "{}".to_string()).unwrap();
+    write_system_prompt_in(dir, "You are Fuigo.").unwrap();
+    unsafe { libc::umask(previous) };
+    assert_eq!(p145_mode(&dir.join(PROMPT_CONTEXT_FILENAME)), 0o600);
+    assert_eq!(p145_mode(&dir.join(SYSTEM_PROMPT_FILENAME)), 0o600);
+    assert_eq!(load_system_prompt_from_dir(dir).as_deref(), Some("You are Fuigo."));
+
+    for name in [PROMPT_CONTEXT_FILENAME, SYSTEM_PROMPT_FILENAME] {
+        std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    write_prompt_context_in(dir, "{\"version\":1}".to_string()).unwrap();
+    write_system_prompt_in(dir, "again").unwrap();
+    assert_eq!(p145_mode(&dir.join(PROMPT_CONTEXT_FILENAME)), 0o600);
+    assert_eq!(p145_mode(&dir.join(SYSTEM_PROMPT_FILENAME)), 0o600);
+}

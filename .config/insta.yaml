@@ -1,0 +1,5 @@
+# Test runs must never write snapshot files into the source tree.
+# A mismatch fails the test and prints the diff; accept changes deliberately with `cargo insta` (which sets INSTA_UPDATE itself)
+# or `INSTA_UPDATE=always`. The INSTA_UPDATE env var overrides this setting.
+behavior:
+  update: "no"

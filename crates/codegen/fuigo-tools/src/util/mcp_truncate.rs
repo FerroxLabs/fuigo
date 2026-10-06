@@ -216,10 +216,17 @@ async fn truncate_mcp_text(text: &mut String, trunc_ctx: &McpTruncateContext) {
     });
 
     let file_hint = if let Some(ref path) = output_file_path {
-        if let Some(parent) = path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        match tokio::fs::write(path, text.as_bytes()).await {
+        // The full MCP output is session content: `<session>/mcp/` 0700 and the dump 0600 (P150, S14).
+        let (dump, bytes) = (path.clone(), text.as_bytes().to_vec());
+        let written = tokio::task::spawn_blocking(move || {
+            if let Some(parent) = dump.parent() {
+                let _ = fuigo_config::create_dir_all_owner_only(parent);
+            }
+            fuigo_config::write_file_owner_only(&dump, bytes)
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        match written {
             Ok(()) => format!(" Full output written to: {}.", path.to_string_lossy()),
             Err(e) => {
                 tracing::warn!(
@@ -402,6 +409,14 @@ mod tests {
 
         let dump = dir.path().join("mcp").join("call-test.txt");
         assert_eq!(tokio::fs::read_to_string(&dump).await.unwrap(), full);
+        // P150 (S14): the full MCP output is session content, owner-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode(&dump), 0o600, "the MCP dump must be owner-only");
+            assert_eq!(mode(&dir.path().join("mcp")), 0o700, "mcp/ must be owner-only");
+        }
     }
 
     #[tokio::test]

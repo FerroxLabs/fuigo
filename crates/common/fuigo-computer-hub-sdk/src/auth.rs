@@ -214,6 +214,20 @@ pub trait AuthProvider: Send + Sync + std::fmt::Debug {
     fn identity(&self) -> Option<AuthIdentity> {
         None
     }
+
+    /// May `credential` (the value [`Self::current`] just returned for this connect) be sent to `url`?
+    ///
+    /// Asked before EVERY socket is opened: the initial connect and each reconnect. `Err(reason)` refuses:
+    /// no socket is opened and the connection fails terminally with [`ClientError::DestinationRefused`]
+    /// (the reconnect loop stops). A provider whose credential can change kind between connects (e.g. a
+    /// static key that becomes a session token) decides here, on the exact value. Defaults to `Ok`.
+    fn destination_permits(
+        &self,
+        _url: &url::Url,
+        _credential: &AuthCredential,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 pub type SharedAuthProvider = std::sync::Arc<dyn AuthProvider>;

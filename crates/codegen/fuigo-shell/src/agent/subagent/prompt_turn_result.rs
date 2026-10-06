@@ -165,9 +165,14 @@ pub(super) fn reduce_prompt_turn_result(
             result.error = Some(if was_cancelled {
                 "Subagent was cancelled".to_string()
             } else {
+                // P70b display sink: the child session has finished classifying its own error; from here the text
+                // is only shown, stored and handed to the parent (tool result, hooks, notifications, `meta.json`,
+                // `fuigo/subagent/get`). Credentials sent upstream are replaced once, at the source of all of them.
                 format!(
                     "Session error: {}",
-                    crate::sampling::error::acp_error_text(&error)
+                    fuigo_telemetry::sent_credentials::scrub_owned(
+                        crate::sampling::error::acp_error_text(&error)
+                    )
                 )
             });
             result.output = Arc::from(final_text);

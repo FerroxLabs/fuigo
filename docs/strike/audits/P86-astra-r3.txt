@@ -1,0 +1,37 @@
+# P86 Astra round 3 -- final report (gpt-6-astra, read-only; brief: P86-astra-r3-brief.md; raw transcript on Hetzner /root/fuigo-builds/p86/logs/astra/)
+
+Audited `fc3ccb94..fef6de9d` read-only. No Cargo commands or Rust tests were run. The worktree remains clean. Three credential-boundary defects and a cwd regression remain.
+
+1. **MEDIUM — Registration can invalidate a snapshot after validation but before replay.**  
+   [terminal.rs:785](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:785), [terminal.rs:832](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:832).  
+   A snapshot contains an unregistered `CORP_KEY`. `ensure_persistent_shell_initialized` accepts its generation; the subsequent asynchronous cwd lookup yields; another task registers `CORP_KEY`. Execution resumes and spawns with the old snapshot, which restores the credential despite the freshly filtered process environment. Registration during initialization has the same problem: the returned snapshot is used without rechecking its generation. Discarding the eventual dump cannot undo exposure to this command or its children. **Tests miss both interleavings:** registration occurs between completed commands. Snapshot selection and dispatch need coordination with registration, including validation after initialization.
+
+2. **MEDIUM — An already-validated dump can overwrite a newer-generation shell state.**  
+   [terminal.rs:918](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:918), [terminal.rs:1591](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:1591).  
+   Command A’s dump finishes and passes its generation check at G0, but the actor has not collected it. Registration advances to G1; another queued command initializes G1 state. The actor subsequently collects A’s completed handle and installs its untagged dump into that newer state. `shell_state_generation` remains G1, so later commands replay the old credential without triggering another reset. The actor permits overlapping requests; the intervening request can be a background command. **No test exercises delayed collection across re-initialization.** Carry generation identity with each dump and validate it when installing state.
+
+3. **MEDIUM — Valid Zsh credential names are excluded from the scrub.**  
+   [shell_state.rs:258](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:258).  
+   Zsh accepts `export P86_é=…`, while the scrub admits only ASCII identifiers. With `env_key = "P86_é"` and a login startup file exporting that variable, registration filters the initial process environment but the snapshot capture retains the startup-file value. Generation remains current, allowing replay. A fake-only Zsh 5.9 probe confirmed that the generated scrub removed `GROQ_API_KEY` while `P86_é` survived both `typeset -xp` and inheritance by an external child. **Tests miss this:** credential integration probes force Bash; identifier tests cover ASCII names and injection strings. Support Zsh-valid names through safe quoting or data-based matching.
+
+4. **MEDIUM — Generation resets do not reliably preserve the current directory.**  
+   [terminal.rs:919](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:919), [terminal.rs:805](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/terminal.rs:805), [shell_state.rs:401](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:401).  
+   Two paths violate the documented “same directory” behavior. If a foreground command changes directory while registration occurs, rejecting its entire dump also rejects its new cwd; the next command silently starts in the previous directory. Separately, re-initialization passes the saved cwd into a login shell but accepts the cwd produced by its startup files: a profile containing `cd "$HOME"` moves subsequent commands home. Relative filesystem operations can therefore target the wrong directory. **The added test catches neither:** its `cd` finishes before registration, and its profile never changes directory. Preserve cwd independently of snapshot invalidation and login initialization.
+
+5. **LOW — Concurrent duplicate registration can trigger unnecessary state loss.**  
+   [shell_env_policy.rs:227](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:227), [shell_env_policy.rs:235](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/util/shell_env_policy.rs:235).  
+   Two callers can both classify the same name as fresh before either acquires the write lock. Both then increment the generation, although the second insertion adds nothing. A shell initialized between those increments is discarded again, losing newly created session state without another credential name being added. **No test checks concurrent registration or generation counts.** Increment only when insertion actually grows the set under the write lock.
+
+6. **LOW, pre-existing — Re-initialization can wait indefinitely after stdout closes.**  
+   [shell_state.rs:378](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:378), [shell_state.rs:394](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-tools/src/computer/local/shell_state.rs:394).  
+   The 15-second timeout covers stdout reading, followed by an unbounded `child.wait()`. A startup file or exit handler that redirects/closes stdout and then hangs escapes the timeout and stalls the actor. An isolated shell probe confirmed stdout EOF while the child remained alive. This predates P86, but the new reset path invokes it again during an established session. **Added tests do not cover it.** Bound the complete initialization operation.
+
+The remaining r2 corrections look correct in source: explicit persistent `set` values survive restoration, Bash enumeration resets IFS, blank-only names register exactly, and the rc fixture removes inherited sentinel/key values. Effective-config registration now precedes reload notifications. **Notification ordering still lacks a regression test**, as acknowledged.
+
+Cached login variables are re-filtered during each spawn; static snapshots contain functions and aliases rather than captured environment variables. Explicit background commands do not install their dumps. I found no additional shell-pattern injection, lock-poisoning panic, or demonstrated ordinary-load performance defect.
+
+Release selections resolve to **10 P86 unit tests, 2 default-policy tests, 1 config integration test, 7 extra-ca redirect tests, 1 sampler redirect test, and 6 MCP HTTP-policy tests**. These are source counts, not execution results. The read-only sandbox blocked serializer heredoc temporary files, so the focused Zsh probe does not establish a complete snapshot round trip.
+
+No checked-in first-party hook, MCP server, or plugin dependency on these inherited credentials was found. The nested [`fuigo agent leader` launch](/Volumes/Mando/WaylandBots/Fuigo/wt-p86/crates/codegen/fuigo-shell/src/leader/mod.rs:1734) can require inherited credentials for environment-only authentication and remains outside this scrub path.
+
+DO-NOT-LAND

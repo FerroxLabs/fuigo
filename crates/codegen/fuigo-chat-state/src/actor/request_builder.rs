@@ -214,12 +214,14 @@ pub(crate) fn prune_conversation(conversation: &mut [ConversationItem], config: 
 // Memory reminder injection
 // ============================================================================
 
-use crate::types::MEMORY_CONTEXT_OPEN_TAG;
+use crate::types::{find_memory_context_block, memory_context_block_nonce};
 
 /// Upsert a memory reminder into the conversation's system message.
 ///
-/// If the first item is a `System` message, any previously injected memory
-/// reminder section is replaced in-place; otherwise the reminder is appended.
+/// If the first item is a `System` message, a previously injected block with the
+/// same nonce as `reminder` is replaced in place (text after it is kept);
+/// otherwise the reminder is appended. Text that merely contains a
+/// `<memory-context>` literal is never treated as a block and never cut.
 /// If no system message exists, a new `System` item is prepended.
 ///
 /// Returns `true` when the conversation was changed.
@@ -238,16 +240,16 @@ pub(super) fn inject_memory_reminder(items: &mut Vec<ConversationItem>, reminder
 }
 
 fn upsert_memory_reminder_text(system_prompt: &mut std::sync::Arc<str>, reminder: &str) -> bool {
-    let existing_start = system_prompt
-        .find(MEMORY_CONTEXT_OPEN_TAG)
-        .map(|idx| system_prompt[..idx].trim_end_matches('\n').len());
+    let existing = memory_context_block_nonce(reminder)
+        .and_then(|nonce| find_memory_context_block(system_prompt, nonce, 0));
 
-    let updated: String = if let Some(prefix_len) = existing_start {
-        let prefix = system_prompt[..prefix_len].trim_end_matches('\n');
+    let updated: String = if let Some(range) = existing {
+        let prefix = system_prompt[..range.start].trim_end_matches('\n');
+        let suffix = &system_prompt[range.end..];
         if prefix.is_empty() {
-            reminder.to_string()
+            format!("{reminder}{suffix}")
         } else {
-            format!("{prefix}\n\n{reminder}")
+            format!("{prefix}\n\n{reminder}{suffix}")
         }
     } else if system_prompt.trim_end() == reminder {
         system_prompt.as_ref().to_owned()
@@ -387,3 +389,7 @@ mod tests {
         assert!(matches!(&items[0], ConversationItem::System(_)));
     }
 }
+
+#[cfg(test)]
+#[path = "request_builder_p91_tests.rs"]
+mod p91_tests;

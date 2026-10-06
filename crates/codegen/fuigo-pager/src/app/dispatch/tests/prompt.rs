@@ -1277,6 +1277,7 @@ fn turn_end_drains_next_queued_prompt() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1324,6 +1325,7 @@ fn prompt_response_fifo_handoff_paints_multi_bubble_combined() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1359,6 +1361,7 @@ fn turn_end_with_empty_queue_stays_idle() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1394,6 +1397,7 @@ fn multiple_queued_prompts_drain_one_per_turn() {
             agent_id: AgentId(0),
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         })
     };
@@ -1440,6 +1444,7 @@ fn prompt_response_resets_turn_state() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1477,6 +1482,7 @@ fn turn_end_fetches_prompt_suggestion_when_enabled() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1535,6 +1541,7 @@ fn cancelled_turn_does_not_fetch_prompt_suggestion() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1570,6 +1577,7 @@ fn turn_end_with_draft_does_not_fetch_prompt_suggestion() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1606,6 +1614,7 @@ fn reconnect_pending_turn_end_still_wipes_prompt_suggestion() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1653,6 +1662,7 @@ fn turn_end_with_shared_queue_does_not_fetch_prompt_suggestion() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1796,6 +1806,7 @@ fn prompt_response_context_overflow_suppresses_turn_failed_and_toast() {
                                  model's context window"
                     .to_string()),
                 http_status: None,
+                verdicts: None,
                 prompt_id: None,
             }),
             &mut app,
@@ -1851,6 +1862,7 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
                 agent_id: id,
                 result: Err("Server error (500): Something went wrong on our side.".to_string()),
                 http_status: Some(500),
+                verdicts: None,
                 prompt_id: None,
             }),
             &mut app,
@@ -1903,6 +1915,7 @@ fn prompt_response_formatted_401_suppresses_turn_failed_and_stashes_prompt() {
             agent_id: id,
             result: Err("Request failed (401): Invalid or expired credentials".to_string()),
             http_status: Some(401),
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1929,6 +1942,108 @@ fn prompt_response_formatted_401_suppresses_turn_failed_and_stashes_prompt() {
     );
 }
 
+/// P42 (audit round 6, M2): a refused session destination is not recoverable by `/login`, so the failed
+/// prompt is never stashed for a post-login resubmit. The shell sends it with no `http_status` and no 401
+/// text, under its own error kind. Both orders are covered: the PromptResponse winning the race (the prompt is
+/// still in flight, which is where a 401 status or text would stash it), and the RetryState arriving first
+/// (whose banner must carry the `[endpoints]` remedy and no sign-in prompt). Positive control: the same
+/// harness with a real 401 stashes.
+#[test]
+fn prompt_response_refused_destination_is_not_stashed_for_reauth() {
+    use crate::app::acp_handler::apply_session_event_for_test;
+    use fuigo_shell::extensions::notification::{
+        AUTH_DESTINATION_REFUSED_ERROR_TYPE, AUTH_DESTINATION_REFUSED_REMEDY, RetryState,
+        SessionUpdate as FuigoSessionUpdate, auth_destination_refused_message,
+    };
+    let raw = auth_destination_refused_message(
+        "http://127.0.0.1:9/v1",
+        "  Model:     p42-model\n  Auth:      Oidc\n  Version:   1.0.21",
+    );
+    let kind = crate::app::error_display::wire_error_kind(Some(AUTH_DESTINATION_REFUSED_ERROR_TYPE));
+    // The PromptResponse text as the effect layer formats the shell's typed error (no status on the wire).
+    let refused_text = crate::app::error_display::format_request_failure(None, kind, &raw).message();
+    let has = |app: &AppView, id: AgentId, want: fn(&SessionEvent) -> bool| {
+        let agent = &app.agents[&id];
+        (0..agent.scrollback.len()).any(|idx| {
+            matches!(
+                agent.scrollback.entry(idx).map(|e| &e.block),
+                Some(RenderBlock::SessionEvent(ev)) if want(&ev.event)
+            )
+        })
+    };
+    let run = |retry_state_first: bool, result: String, http_status: Option<u16>| {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.turn_started_at = Some(std::time::Instant::now());
+            agent.session.in_flight_prompt = Some(crate::app::agent::InFlightPrompt {
+                text: "resend me".into(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::entry::EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+            if retry_state_first {
+                apply_session_event_for_test(
+                    &FuigoSessionUpdate::RetryState(RetryState::Failed {
+                        error_type: AUTH_DESTINATION_REFUSED_ERROR_TYPE.into(),
+                        message: raw.clone(),
+                        verdicts: None,
+                    }),
+                    &mut agent.session,
+                    &mut agent.scrollback,
+                );
+            }
+        }
+        dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Err(result),
+                http_status,
+                verdicts: None,
+                prompt_id: None,
+            }),
+            &mut app,
+        );
+        app
+    };
+    let id = AgentId(0);
+    for retry_state_first in [false, true] {
+        let app = run(retry_state_first, refused_text.clone(), None);
+        assert!(
+            app.agents[&id].reauth_stashed_prompt.is_none(),
+            "retry_state_first={retry_state_first}: a refused destination must not be stashed for a post-login resubmit"
+        );
+        assert!(
+            !has(&app, id, |ev| matches!(ev, SessionEvent::ReAuthRequired)),
+            "retry_state_first={retry_state_first}: no sign-in prompt for a refused destination"
+        );
+        if retry_state_first {
+            assert!(
+                has(&app, id, |ev| matches!(
+                    ev,
+                    SessionEvent::RequestFailed { detail, .. }
+                        if detail.contains(AUTH_DESTINATION_REFUSED_REMEDY)
+                )),
+                "the RetryState banner must carry the [endpoints] remedy"
+            );
+        }
+    }
+    // Positive control: a real 401 in the same harness is stashed.
+    let app = run(
+        false,
+        "Request failed (401): Invalid or expired credentials".to_string(),
+        Some(401),
+    );
+    assert_eq!(
+        app.agents[&id].reauth_stashed_prompt.as_ref().map(|p| p.text.as_str()),
+        Some("resend me"),
+        "control: the harness stashes a real 401"
+    );
+}
+
 #[test]
 fn prompt_response_formatted_402_takes_credit_limit_path() {
     let mut app = test_app_with_agent();
@@ -1944,6 +2059,7 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
             agent_id: id,
             result: Err("Request failed (402): Fuigo usage balance exhausted".to_string()),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -1984,6 +2100,7 @@ fn credit_limit_402_does_not_overwrite_stash_when_in_flight_cleared() {
             agent_id: id,
             result: Err("Request failed (402): Fuigo usage balance exhausted".to_string()),
             http_status: Some(402),
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2022,6 +2139,7 @@ fn prompt_response_disk_full_suppresses_turn_failed_and_toast() {
                 agent_id: id,
                 result: Err(fuigo_fast_worktree::ENOSPC_OS_MESSAGE.to_string()),
                 http_status: None,
+                verdicts: None,
                 prompt_id: None,
             }),
             &mut app,
@@ -2070,6 +2188,7 @@ fn prompt_response_routes_idle_title_through_frame_pipeline() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2131,6 +2250,7 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2157,6 +2277,7 @@ fn turn_complete_notification_suppressed_when_queue_non_empty() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2408,6 +2529,7 @@ fn prompt_response_disarms_pending_reconcile() {
                     .cloned(),
             )),
             http_status: None,
+            verdicts: None,
             prompt_id: Some("pid-stuck".into()),
         }),
         &mut app,
@@ -2436,6 +2558,7 @@ fn prompt_response_resets_cancelling_to_idle() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2477,6 +2600,7 @@ fn cancel_with_queued_prompt_drains_on_completion() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2505,6 +2629,7 @@ fn cancel_with_empty_queue_stays_idle() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2558,6 +2683,7 @@ fn cancel_with_multiple_queued_prompts_drains_only_front_prompt() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2604,6 +2730,7 @@ fn cancel_drain_is_blocked_when_editing_front_prompt() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2708,6 +2835,7 @@ fn prompt_response_does_not_drain_during_reconnect() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2721,6 +2849,171 @@ fn prompt_response_does_not_drain_during_reconnect() {
         "should not drain queue during reconnect, got: {effects:?}"
     );
     assert_eq!(app.agents[&id].session.queue_len(), 1);
+}
+
+/// P152 (e2e lane B #2): a prompt sent while the leader is down (the bridge is reconnecting, before the new leader is up)
+/// must not be handed to the dead connection, which drops it silently. It is refused with the reconnect notice and the
+/// text stays in the composer so the user can resend it once the session is restored.
+#[test]
+fn p152_prompt_sent_while_leader_reconnecting_is_kept_not_lost() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    crate::app::leader_outage::on_leader_reconnecting(&mut app, 1);
+    app.agents.get_mut(&id).unwrap().prompt.set_text("keep this prompt");
+
+    let effects = dispatch(Action::SendPrompt("keep this prompt".into()), &mut app);
+
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendPrompt { .. })),
+        "a prompt must not be sent into a dead leader connection, got: {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id].prompt.text(),
+        "keep this prompt",
+        "the unsent prompt must stay in the composer for a resend"
+    );
+    assert_eq!(app.agents[&id].session.queue_len(), 0);
+    assert_eq!(
+        app.agents[&id].toast.as_ref().map(|(t, _)| t.as_str()),
+        Some(super::super::prompt::RECONNECTING_NOTICE),
+        "the user must be told why nothing was sent"
+    );
+}
+
+/// P152 (e2e lanes M #5 and A1): a completed turn proves the session has started, so a leftover zero-server startup
+/// seed must not keep "Starting session…" under the reply.
+#[test]
+fn p152_turn_end_clears_a_stale_starting_session_seed() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    dispatch(Action::SendPrompt("first".into()), &mut app);
+    app.agents.get_mut(&id).unwrap().mcp_init_progress =
+        Some(crate::app::agent_view::McpInitProgress {
+            total: 0,
+            connected: 0,
+            started_at: std::time::Instant::now(),
+        });
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
+            http_status: None,
+            verdicts: None,
+            prompt_id: None,
+        }),
+        &mut app,
+    );
+    let progress = app.agents[&id].mcp_init_progress.as_ref();
+    assert!(
+        progress.is_none_or(|p| p.total > 0),
+        "a finished turn must clear the zero-server startup seed: {progress:?}"
+    );
+}
+
+/// P152 (Astra r1 #2): the event loop peeks the bridge status before each input batch, so a key that is handled before
+/// the queued `Reconnecting` arm still cannot send; a connected status changes nothing.
+#[test]
+fn p152_input_after_a_started_reconnect_cannot_send() {
+    use crate::acp::leader_bridge::ConnectionStatus;
+    let mut app = test_app_with_agent();
+    crate::app::leader_outage::hold_sends_if_reconnecting(
+        &mut app,
+        &ConnectionStatus::Connected { generation: 0 },
+        0,
+    );
+    assert!(!app.reconnect_pending, "a live connection holds nothing");
+    crate::app::leader_outage::hold_sends_if_reconnecting(
+        &mut app,
+        &ConnectionStatus::Connected { generation: 3 },
+        3,
+    );
+    assert!(!app.reconnect_pending, "an already-handled generation holds nothing");
+    crate::app::leader_outage::hold_sends_if_reconnecting(
+        &mut app,
+        &ConnectionStatus::Connected { generation: 4 },
+        3,
+    );
+    assert!(
+        app.reconnect_pending,
+        "a reconnect the loop has not handled yet (Astra r3 H1) holds sends until the re-init"
+    );
+    app.reconnect_pending = false;
+    crate::app::leader_outage::hold_sends_if_reconnecting(
+        &mut app,
+        &ConnectionStatus::Reconnecting { attempt: 1 },
+        0,
+    );
+    let effects = dispatch(Action::SendPrompt("typed during the outage".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|e| !matches!(e, Effect::SendPrompt { .. })),
+        "no send into the dead connection, got: {effects:?}"
+    );
+}
+
+/// P152 (Astra r2 #2): a queued prompt the leader connection lost is answered by the bridge with a transport-loss
+/// error. It never became the running turn, so the old code retired it silently; now the user is told it was not sent,
+/// with its text. Other errors for a queued prompt still leave the running turn alone and print nothing.
+#[test]
+fn p152_a_lost_queued_prompt_is_reported_not_dropped() {
+    fn run(error: &str) -> Vec<String> {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("running".into());
+            agent.shared_queue.push(crate::app::prompt_queue::QueueEntryWire {
+                id: "q1".into(),
+                version: 1,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: "queued during the outage".into(),
+                position: 0,
+                combined_texts: None,
+            });
+        }
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Err(error.to_string()),
+                http_status: None,
+                verdicts: None,
+                prompt_id: Some("q1".into()),
+            }),
+            &mut app,
+        );
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some("running"),
+            "the running turn is untouched"
+        );
+        let sb = &app.agents[&id].scrollback;
+        (0..sb.len())
+            .filter_map(|i| match &sb.get(i)?.block {
+                RenderBlock::System(sys) => Some(sys.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    let lost = run(&format!(
+        "Internal error: {}",
+        crate::acp::leader_bridge::LOST_REQUEST_ERROR_MESSAGE
+    ));
+    assert!(
+        lost.iter()
+            .any(|t| t.contains("A queued message may not have been sent") && t.contains("queued during the outage")),
+        "the lost queued prompt is reported with its text: {lost:?}"
+    );
+    let other = run("Request removed from queue");
+    assert!(
+        other.iter().all(|t| !t.contains("may not have been sent")),
+        "an ordinary queued-prompt error stays silent: {other:?}"
+    );
 }
 
 #[test]
@@ -3037,16 +3330,20 @@ fn prompt_history_loaded_refreshes_open_history_search_with_current_query() {
         agent.session.prompt_history = vec!["first prompt".into(), "second prompt".into()];
         let history = agent.combined_prompt_history();
         assert!(agent.prompt.history_search.activate(&history, ""));
+        // Wait on the matcher's answers themselves, not on a fixed number of polls (P78: a loaded host does not schedule the matcher thread inside 100 ms).
+        // The opening list first: the snapshot before any answer is empty too, so "no results" would otherwise be true before the query was ever matched.
+        agent
+            .prompt
+            .history_search
+            .poll_until("the opening list", |s| s.result_count() == 2);
         agent.prompt.set_text("third");
         agent.prompt.history_search.update_query("third");
-        for _ in 0..100 {
-            agent.prompt.history_search.poll();
-            if agent.prompt.history_search.result_count() == 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        assert_eq!(agent.prompt.history_search.result_count(), 0);
+        agent
+            .prompt
+            .history_search
+            .poll_until("no match for a query no entry contains", |s| {
+                s.result_count() == 0
+            });
     }
 
     dispatch(
@@ -3062,18 +3359,12 @@ fn prompt_history_loaded_refreshes_open_history_search_with_current_query() {
     );
 
     let agent = app.agents.get_mut(&id).unwrap();
-    let mut delivered = false;
-    for _ in 0..100 {
-        if agent.prompt.history_search.poll()
-            && agent.prompt.history_search.result_count() == 1
-            && agent.prompt.history_search.selected_text() == Some("third prompt")
-        {
-            delivered = true;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(delivered, "refresh should preserve the active query");
+    agent
+        .prompt
+        .history_search
+        .poll_until("the refreshed history under the preserved query", |s| {
+            s.result_count() == 1 && s.selected_text() == Some("third prompt")
+        });
     assert_eq!(agent.prompt.history_search.selected, 0);
     assert!(!agent.session.prompt_history_loading);
 
@@ -3527,6 +3818,7 @@ fn cancelled_prompt_response(id: AgentId, cancel_trigger: Option<&str>) -> Actio
         agent_id: id,
         result: Ok(pr),
         http_status: None,
+        verdicts: None,
         prompt_id: None,
     })
 }
@@ -3979,6 +4271,7 @@ fn goal_send_now_painted_block_survives_removed_from_queue_response() {
                     .cloned(),
             )),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -4788,6 +5081,12 @@ mod prompt_history_recording_tests {
     #[test]
     fn a_remember_note_is_recorded_as_plain_text() {
         let mut app = test_app_with_agent();
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .tracker
+            .set_memory_enabled_for_test(Some(true));
 
         dispatch(
             Action::SendRememberNote("deploys need the staging flag".into()),
@@ -4795,6 +5094,86 @@ mod prompt_history_recording_tests {
         );
 
         assert_eq!(history(&app), ["deploys need the staging flag"]);
+    }
+
+    /// The cache is a hint, never a gate, in either direction. Whether the shell said memory is on, off or nothing, the
+    /// note reaches the review modal and the save is sent to the shell, which decides at write time. Off only adds a notice.
+    #[test]
+    fn a_remember_note_always_reaches_the_shell_whatever_the_cache_says() {
+        for state in [Some(true), Some(false), None] {
+            for note_via in ["#", "/remember"] {
+                let mut app = test_app_with_agent();
+                let id = AgentId(0);
+                {
+                    let agent = app.agents.get_mut(&id).unwrap();
+                    agent.session.tracker.set_memory_enabled_for_test(state);
+                    agent.session.session_id = Some(agent_client_protocol::SessionId::new("s-note"));
+                }
+                let before = app.agents.get(&id).unwrap().scrollback.len();
+                let action = if note_via == "#" {
+                    Action::SendRememberNote("deploys need the staging flag".into())
+                } else {
+                    Action::SendPrompt("/remember deploys need the staging flag".into())
+                };
+                dispatch(action, &mut app);
+                let agent = app.agents.get(&id).unwrap();
+                assert!(agent.active_modal.is_some(), "{state:?}/{note_via}: the modal opens");
+                if state == Some(false) {
+                    assert!(agent.scrollback.len() > before, "{state:?}/{note_via}: a notice is shown");
+                }
+
+                let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+
+                assert!(
+                    effects.iter().any(|e| matches!(
+                        e,
+                        crate::app::actions::Effect::SaveMemoryNote { session_id, text, .. }
+                            if session_id.0.as_ref() == "s-note" && text == "deploys need the staging flag"
+                    )),
+                    "{state:?}/{note_via}: the save is sent to the shell with the session id"
+                );
+            }
+        }
+    }
+
+    /// The multi-client case, pager half: a stale `Some(true)` (another client has since turned memory off) and a stale
+    /// `Some(false)` (another client has turned it on) both still send the save. The shell's refusal, or write, is the
+    /// outcome (e2e `a_memory_note_is_decided_by_the_shell_at_write_time`, which saves after `/memory off` and `/memory on`).
+    #[test]
+    fn a_stale_cache_in_either_direction_does_not_change_what_the_pager_sends() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.session_id =
+            Some(agent_client_protocol::SessionId::new("s-note"));
+        // Open a fresh modal while the cache says on, change the cache (the other client acted), then save THAT modal
+        for (i, stale) in [Some(true), Some(false), None].into_iter().enumerate() {
+            let note = format!("note {i}");
+            app.agents.get_mut(&id).unwrap().session.tracker.set_memory_enabled_for_test(Some(true));
+            dispatch(Action::SendRememberNote(note.clone()), &mut app);
+            assert!(app.agents.get(&id).unwrap().active_modal.is_some(), "modal {i} opened");
+            app.agents.get_mut(&id).unwrap().session.tracker.set_memory_enabled_for_test(stale);
+
+            let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+
+            assert!(
+                effects.iter().any(|e| matches!(
+                    e,
+                    crate::app::actions::Effect::SaveMemoryNote { text, .. } if *text == note
+                )),
+                "{stale:?}: the modal's own note is sent"
+            );
+        }
+    }
+
+    /// No session id, nothing to ask: the note is refused with a message rather than written locally.
+    #[test]
+    fn the_modal_save_without_a_session_is_refused() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.session_id = None;
+        dispatch(Action::SendRememberNote("deploys need the staging flag".into()), &mut app);
+        let effects = dispatch(Action::SaveRememberNoteFromModal, &mut app);
+        assert!(!effects.iter().any(|e| matches!(e, crate::app::actions::Effect::SaveMemoryNote { .. })));
     }
 
     #[test]

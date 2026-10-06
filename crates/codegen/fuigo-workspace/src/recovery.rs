@@ -649,6 +649,66 @@ mod tests {
         assert!(sidecar.exists(), "original sidecar reused in place");
     }
 
+    /// A resolver for the storage proxy at `base` (P71: the destination at SEND time).
+    struct ProxyAt(String);
+    impl TraceExportSource for ProxyAt {
+        fn resolve(&self) -> TraceExportConfig {
+            TraceExportConfig {
+                bucket_url: None,
+                service_account_key: None,
+                upload_method: UploadMethod::Proxy {
+                    proxy_base_url: self.0.clone(),
+                    user_token: String::new(),
+                    deployment_key: Some("p71-deployment-key".to_string()),
+                    alpha_test_key: None,
+                },
+                prefix_dir: None,
+                gcs_prefix: None,
+                absolute_paths: false,
+                archive_name_override: None,
+            }
+        }
+    }
+
+    /// P71: an orphan spilled in a prior life (under whatever proxy was configured then) is re-sent by
+    /// startup recovery to the proxy configured NOW. Under a third-party proxy nothing is sent; under a
+    /// FluxRouter-class proxy the bytes arrive unchanged.
+    #[tokio::test]
+    async fn recovery_resend_is_decided_on_the_destination_at_send_time() {
+        use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+        let content = b"P71-SPILLED-ARCHIVE account user-123 /home/rowan";
+        for (host, delivered) in [("third-party", false), ("FluxRouter-class", true)] {
+            let mock = if delivered {
+                RecordingEndpoint::fluxrouter_class().await
+            } else {
+                RecordingEndpoint::third_party().await
+            };
+            let home = tempfile::TempDir::new().unwrap();
+            let queue_dir = home.path().join("upload_queue");
+            std::fs::create_dir_all(&queue_dir).unwrap();
+            // Its own artifact label: `recovers_valid_orphan_pair_in_place` counts `tool_state.json` recoveries
+            // on a process-global counter and must not see these.
+            write_orphan_pair(
+                &queue_dir,
+                "abcdef12_turn4_session_artifact.tar.gz_111_0",
+                content,
+                "session_artifact.tar.gz",
+                now_rfc3339(),
+            );
+            let queue = UploadQueue::spawn(home.path(), Arc::new(ProxyAt(mock.proxy_base_url())), UploadRetryPolicy::default());
+            let report = run_startup_recovery(home.path(), &queue).await;
+            assert_eq!(report.recovered, 1, "{host}: the orphan is re-enqueued");
+            assert_eq!(queue.drain(Duration::from_secs(20)).await, 0);
+            mock.settle(Duration::from_millis(300)).await;
+            if delivered {
+                assert!(mock.received_contains(content), "{host}: FluxRouter-class proxy lost the spilled bytes");
+            } else {
+                assert_eq!(mock.connections(), 0, "{host}: a recovered spill reached a third-party proxy");
+                assert!(!mock.received_contains(b"P71-SPILLED"));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn corrupt_temp_file_is_dropped_on_sha_mismatch() {
         let home = tempfile::TempDir::new().unwrap();
@@ -833,6 +893,28 @@ mod tests {
         );
     }
 
+    /// Set a DIRECTORY's mtime. Windows opens a directory handle only with
+    /// `FILE_FLAG_BACKUP_SEMANTICS`, and setting times needs `FILE_WRITE_ATTRIBUTES`.
+    fn set_dir_mtime(dir: &std::path::Path, mtime: std::time::SystemTime) {
+        let mut options = std::fs::OpenOptions::new();
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        #[cfg(not(windows))]
+        options.read(true);
+        options
+            .open(dir)
+            .expect("open directory to set its mtime")
+            .set_modified(mtime)
+            .expect("set directory mtime");
+    }
+
     /// Mixed sweep: the `max_age` comparison is per-entry, not all-or-nothing.
     #[tokio::test]
     async fn cleanup_removes_only_expired_dirs() {
@@ -840,9 +922,11 @@ mod tests {
         let sessions = home.path().join("sessions");
         let old = sessions.join("sess-old");
         std::fs::create_dir_all(&old).unwrap();
-        // Wide gap (100ms) vs a 50ms threshold so neither side is sensitive to scheduler jitter
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let max_age = Duration::from_millis(50);
+        // Age the old dir by setting its mtime, instead of sleeping past a short threshold: under host load the sweep can start more than a few milliseconds after the fresh dir is created, and a wall-clock gap then decides the result.
+        // On every platform (Windows opens the directory with backup semantics, see `set_dir_mtime`).
+        let hour = Duration::from_secs(3600);
+        set_dir_mtime(&old, std::time::SystemTime::now() - hour);
+        let max_age = hour / 2;
         let fresh = sessions.join("sess-fresh");
         std::fs::create_dir_all(&fresh).unwrap();
 

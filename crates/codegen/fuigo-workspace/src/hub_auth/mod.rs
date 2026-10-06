@@ -1,5 +1,6 @@
 //! Hub [`AuthProvider`] from `~/.fuigo/auth.json` for the standalone
-//! `workspace_server` binary: loopback `ws://` uses a plain bearer, otherwise an auto-refreshing OIDC provider that persists rotated tokens.
+//! `workspace_server` binary: an auto-refreshing OIDC provider that persists rotated tokens. P47: only a hub the
+//! service-endpoint trust class admits (`wss`, not loopback) is given the session token.
 //!
 //! The in-leader `fuigo workspace` exposure does NOT use this path.
 //! It gets an in-memory provider from the leader's `AuthManager` (see `LeaderAuthProvider`) so it never races the leader's own auth.json writer.
@@ -24,32 +25,6 @@ pub(crate) fn init_metrics() {
     proactive::init_metrics();
 }
 
-/// Plain bearer for the loopback / local-dev path (no OIDC refresh).
-/// Carries the owner identity from the same auth.json entry so the workspace can derive `WorkspaceIdentity` without a second read.
-struct BearerWithIdentity {
-    token: String,
-    identity: AuthIdentity,
-}
-
-impl std::fmt::Debug for BearerWithIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never log the bearer token; Debug shows only the (non-secret) identity
-        f.debug_struct("BearerWithIdentity")
-            .field("identity", &self.identity)
-            .finish_non_exhaustive()
-    }
-}
-
-impl AuthProvider for BearerWithIdentity {
-    fn current(&self) -> AuthCredential {
-        AuthCredential::bearer(self.token.clone())
-    }
-
-    fn identity(&self) -> Option<AuthIdentity> {
-        Some(self.identity.clone())
-    }
-}
-
 /// Owner identity parsed from an auth.json entry, which the [`AuthProvider`]s built here return from [`AuthProvider::identity`].
 fn identity_from_entry(entry: &AuthEntry) -> AuthIdentity {
     AuthIdentity {
@@ -59,7 +34,7 @@ fn identity_from_entry(entry: &AuthEntry) -> AuthIdentity {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct AuthEntry {
     key: String,
     #[serde(default)]
@@ -76,6 +51,33 @@ struct AuthEntry {
     principal_id: Option<String>,
     #[serde(default)]
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for AuthEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            key: _,
+            user_id,
+            refresh_token,
+            oidc_issuer,
+            oidc_client_id,
+            principal_type,
+            principal_id,
+            expires_at,
+        } = self;
+        f.debug_struct("AuthEntry")
+            .field("key", &"<redacted>")
+            .field("user_id", user_id)
+            .field("refresh_token", &refresh_token.as_ref().map(|_| "<redacted>"))
+            .field("oidc_issuer", oidc_issuer)
+            .field("oidc_client_id", oidc_client_id)
+            .field("principal_type", principal_type)
+            .field("principal_id", principal_id)
+            .field("expires_at", expires_at)
+            .finish()
+    }
 }
 
 pub fn default_auth_path() -> anyhow::Result<PathBuf> {
@@ -124,15 +126,87 @@ enum OidcProviderKind {
     Proactive,
 }
 
+/// Refreshed tokens that could not be written to `auth.json` (lock timeout or I/O error): the newest unsaved event, if any.
+/// The same shape as the shell's unsaved subscription credential: the rotated tokens stay usable from memory, the failure is
+/// reported loudly, and the write is retried until it lands or a newer refresh supersedes it.
+type UnsavedSlot = Arc<parking_lot::Mutex<Option<RefreshEvent>>>;
+
+/// Attempts after the first for an unsaved write, and the pause before each.
+const UNSAVED_RETRIES: u32 = 6;
+const UNSAVED_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Writes `auth.json` on the calling thread.
 /// The proactive provider already offloads this onto its persist worker, whose seq check drops stale writes.
 /// A nested spawn here would run `write_refreshed_token` after that check and let a stale write land over a newer one.
+/// A failed write is not just logged: the event is kept as unsaved and retried on a detached thread (see [`persist_event`]).
 pub(crate) fn persist_on_refresh(auth_path: PathBuf, scope_key: String) -> OnRefreshCallback {
+    let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
     Arc::new(move |event: &RefreshEvent| {
-        if let Err(e) = write_refreshed_token(&auth_path, &scope_key, event) {
-            tracing::warn!(error = %e, "failed to persist refreshed token to auth.json");
-        }
+        let _ = persist_event(
+            &auth_path,
+            &scope_key,
+            event,
+            &unsaved,
+            AUTH_LOCK_TIMEOUT,
+            UNSAVED_RETRY_DELAY,
+            UNSAVED_RETRIES,
+        );
     })
+}
+
+/// Writes `event`; on failure records it in `unsaved`, warns that disk trails the IdP by one rotation, and returns the
+/// retry thread's handle. A newer event (a later refresh) replaces the unsaved one, and the retry then stands down.
+fn persist_event(
+    path: &Path,
+    scope_key: &str,
+    event: &RefreshEvent,
+    unsaved: &UnsavedSlot,
+    lock_timeout: std::time::Duration,
+    retry_delay: std::time::Duration,
+    retries: u32,
+) -> Option<std::thread::JoinHandle<()>> {
+    match write_refreshed_token_within(path, scope_key, event, lock_timeout) {
+        Ok(()) => {
+            *unsaved.lock() = None;
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "refreshed token could not be saved to auth.json; using it from memory and retrying. \
+                 A new session started before it is saved will present a spent refresh token; \
+                 close other fuigo processes holding auth.json.lock, or run `fuigo login`"
+            );
+            *unsaved.lock() = Some(event.clone());
+            let (path, scope_key, event, unsaved) =
+                (path.to_owned(), scope_key.to_owned(), event.clone(), unsaved.clone());
+            Some(std::thread::spawn(move || {
+                for _ in 0..retries {
+                    std::thread::sleep(retry_delay);
+                    let still_ours = unsaved
+                        .lock()
+                        .as_ref()
+                        .is_some_and(|u| u.access_token == event.access_token);
+                    if !still_ours {
+                        return;
+                    }
+                    if write_refreshed_token_within(&path, &scope_key, &event, lock_timeout).is_ok() {
+                        let mut slot = unsaved.lock();
+                        if slot.as_ref().is_some_and(|u| u.access_token == event.access_token) {
+                            *slot = None;
+                        }
+                        tracing::info!(path = %path.display(), "refreshed token saved to auth.json after an earlier failure");
+                        return;
+                    }
+                }
+                tracing::warn!(
+                    path = %path.display(),
+                    "refreshed token is still not saved to auth.json; giving up retries (the next refresh will try again)"
+                );
+            }))
+        }
+    }
 }
 
 /// SDK `on_refresh` is invoked from the async refresh path, which has no PersistGate.
@@ -200,26 +274,27 @@ fn build_oidc_provider(
     Ok((Arc::new(builder.build()), OidcProviderKind::Sdk))
 }
 
-/// How long [`lock_auth_file`] polls for the shared `auth.json.lock` before skipping the persist.
-/// Covers the shell's normal refresh hold (~1 s); the shell's worst-case 45 s budget is deliberately not waited out.
-/// Losing one persist is recoverable (see [`write_refreshed_token`]); stalling the persist thread for a minute is not worth it.
-const AUTH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long [`lock_auth_file`] polls for the shared `auth.json.lock` before the persist fails.
+/// Equal to the shell's `AUTH_LOCK_TIMEOUT` (10 s), which bounds every `auth.json` writer there; keep the two in step.
+/// A timeout is an error, not a silent skip: nothing is written, and the caller logs that disk trails the IdP by one rotation.
+const AUTH_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// RAII flock on the sibling `auth.json.lock`, the same advisory lock every fuigo-shell `auth.json` writer takes.
 /// Polls `try_lock` rather than a blocking `flock` to bound the wait.
-/// Never breaks a held lock: a stale holder here would be the shell mid-refresh, exactly the writer we must not race.
+/// Never breaks a held lock and never unlinks the lock file: a holder here would be the shell mid-refresh, exactly the writer we must not race.
+/// The shell no longer recovers by unlinking, but older shells still in the fleet do, so the live-inode check below stays.
 struct AuthFileLockGuard {
     _file: std::fs::File,
 }
 
-fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
+fn lock_auth_file(auth_json_path: &Path, timeout: std::time::Duration) -> Option<AuthFileLockGuard> {
     use fs2::FileExt;
     use std::io::Write;
     let lock_path = auth_json_path.with_file_name("auth.json.lock");
-    let deadline = std::time::Instant::now() + AUTH_LOCK_TIMEOUT;
+    let deadline = std::time::Instant::now() + timeout;
     loop {
-        // The shell's stale-lock recovery breaks locks by unlinking and recreating the file, so only a flock on the live inode counts
-        // The shell's own acquire path does the same inode check
+        // Older shells recover a stale lock by unlinking and recreating the file, so only a flock on the live inode counts
+        // The current shell's acquire path does the same inode check
         // A dead inode falls through to the same deadline and sleep as a busy lock; retrying immediately would spin while the check keeps failing
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .read(true)
@@ -230,7 +305,7 @@ fn lock_auth_file(auth_json_path: &Path) -> Option<AuthFileLockGuard> {
             && file.try_lock_exclusive().is_ok()
             && lock_inode_is_live(&file, &lock_path)
         {
-            // Write holder info (`PID:TS`) through the locked fd so the shell can identify (and, if this process dies, break) our hold
+            // Write holder info (`PID:TS`) through the locked fd so a holder can be identified from the lock file (diagnostics only; the flock itself is released by the kernel when this process dies)
             let ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -267,17 +342,25 @@ pub(crate) fn write_refreshed_token(
     scope_key: &str,
     event: &RefreshEvent,
 ) -> anyhow::Result<()> {
+    write_refreshed_token_within(path, scope_key, event, AUTH_LOCK_TIMEOUT)
+}
+
+/// [`write_refreshed_token`] with the lock wait as a parameter, so a test can exercise the timeout without waiting 10 s.
+fn write_refreshed_token_within(
+    path: &Path,
+    scope_key: &str,
+    event: &RefreshEvent,
+    lock_timeout: std::time::Duration,
+) -> anyhow::Result<()> {
     // Read-modify-write under the shared advisory lock
     // An unlocked write races the shell's own refresh writer: whichever writes second rolls back the other's freshly rotated refresh token on disk
     // That guarantees a future `invalid_grant` for every session sharing the file
-    let Some(_lock) = lock_auth_file(path) else {
-        // The rotated token still serves this process from memory, so warn rather than fail
-        // Disk now trails the IdP by one rotation; a fresh process that picks it up will present a spent token
-        tracing::warn!(
-            timeout = ?AUTH_LOCK_TIMEOUT,
-            "auth.json.lock busy; skipping refreshed-token persist (disk left one rotation behind)"
+    let Some(_lock) = lock_auth_file(path, lock_timeout) else {
+        // The rotated token still serves this process from memory, but disk now trails the IdP by one rotation:
+        // a fresh process that picks it up will present a spent token. Fail without writing, as the shell's writers do.
+        anyhow::bail!(
+            "auth.json.lock still held by another writer after {lock_timeout:?}; auth.json left unchanged"
         );
-        return Ok(());
     };
 
     let content = std::fs::read_to_string(path)?;
@@ -361,7 +444,7 @@ fn write_json_atomic(path: &Path, value: &serde_json::Value) -> anyhow::Result<(
 ///
 /// `refresh_cfg.enabled` selects the workspace-owned proactive refresher (the default).
 /// The SDK `OidcAuthProvider` is the explicit kill-switch path (`FUIGO_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED=false`).
-/// Loopback `ws://` ignores the flag and stays on a static bearer.
+/// P47: a `ws://`, loopback or otherwise refused hub URL is an error naming the remedy; no credential is read.
 pub fn provider(
     hub_url: &Url,
     auth_config: Option<&Path>,
@@ -371,20 +454,18 @@ pub fn provider(
         Some(p) => p.to_path_buf(),
         None => default_auth_path()?,
     };
+    // P47: the hub receives the session token from auth.json on every connect, so `hub_url` must be admitted by the
+    // service-endpoint trust class (`wss`, not loopback; the operator's hub URL is the configured service base).
+    // The old local-dev path that handed a plain bearer to a `ws://` loopback hub is gone: a co-located process
+    // could read it. Checked before auth.json is read, so a refused hub never touches the credential.
+    fuigo_extra_ca::service_trust::session_may_reach_service(
+        hub_url.as_str(),
+        Some(hub_url.as_str()),
+        |_| false,
+    )
+    .map_err(|refused| anyhow::anyhow!("{refused}"))?;
     let (scope_key, entry) = read_auth_entry(&auth_path)?;
-
-    let is_loopback = hub_url.scheme() == "ws"
-        && matches!(hub_url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
-
-    if is_loopback {
-        tracing::info!("Using local-dev auth (loopback hub)");
-        Ok(Arc::new(BearerWithIdentity {
-            identity: identity_from_entry(&entry),
-            token: entry.key.clone(),
-        }))
-    } else {
-        build_oidc_provider(scope_key, &entry, auth_path, refresh_cfg).map(|(provider, _)| provider)
-    }
+    build_oidc_provider(scope_key, &entry, auth_path, refresh_cfg).map(|(provider, _)| provider)
 }
 
 #[cfg(test)]
@@ -706,22 +787,171 @@ mod tests {
         assert_eq!(updated["oidc"]["refresh_token"], "rt-keep");
     }
 
+    const LOCKED_FIXTURE: &str = r#"{
+            "oidc": { "key": "eyJ.old", "user_id": "u1", "refresh_token": "rt-old", "oidc_issuer": "https://auth.x.ai" }
+        }"#;
+
+    fn locked_event() -> RefreshEvent {
+        RefreshEvent {
+            access_token: "eyJ.new".into(),
+            new_refresh_token: Some("rt-new".into()),
+            expires_at: None,
+        }
+    }
+
+    /// Takes the shared `auth.json.lock` the way the shell does, from a separate open file description.
+    fn hold_shared_lock(auth_path: &Path) -> std::fs::File {
+        use fs2::FileExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(auth_path.with_file_name("auth.json.lock"))
+            .unwrap();
+        file.lock_exclusive().unwrap();
+        file
+    }
+
     #[test]
-    fn provider_loopback_uses_bearer() {
+    fn auth_lock_timeout_matches_the_shell_bound() {
+        assert_eq!(AUTH_LOCK_TIMEOUT, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn write_refreshed_token_waits_for_a_held_lock_then_fails_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        let before = std::fs::read(&path).unwrap();
+        let _held = hold_shared_lock(&path);
+
+        let wait = std::time::Duration::from_millis(400);
+        let started = std::time::Instant::now();
+        let result = write_refreshed_token_within(&path, "oidc", &locked_event(), wait);
+        let waited = started.elapsed();
+
+        let err = result.expect_err("a held lock must fail the write");
+        assert!(err.to_string().contains("auth.json.lock"), "{err}");
+        assert!(waited >= wait, "returned after {waited:?}, before the {wait:?} bound");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "auth.json must be untouched");
+    }
+
+    #[test]
+    fn write_refreshed_token_waits_out_a_lock_released_within_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        let held = hold_shared_lock(&path);
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(held);
+        });
+
+        let started = std::time::Instant::now();
+        write_refreshed_token_within(&path, "oidc", &locked_event(), std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(250), "must have waited for the holder");
+        releaser.join().unwrap();
+
+        let updated: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(updated["oidc"]["key"], "eyJ.new");
+    }
+
+    #[test]
+    fn a_failed_persist_is_kept_unsaved_and_retried_until_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        let held = hold_shared_lock(&path);
+        let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
+        let short = std::time::Duration::from_millis(100);
+
+        let retry = persist_event(&path, "oidc", &locked_event(), &unsaved, short, short, 50)
+            .expect("a failed write must start a retry");
+        assert_eq!(
+            unsaved.lock().as_ref().map(|e| e.access_token.as_str()),
+            Some("eyJ.new"),
+            "the unsaved event must be kept"
+        );
+        let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["oidc"]["key"], "eyJ.old", "nothing written while the lock is held");
+
+        drop(held);
+        retry.join().unwrap();
+        assert!(unsaved.lock().is_none(), "a landed retry clears the unsaved slot");
+        let on_disk: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["oidc"]["key"], "eyJ.new");
+        assert_eq!(on_disk["oidc"]["refresh_token"], "rt-new");
+    }
+
+    #[test]
+    fn an_unsaved_event_stands_down_when_a_newer_one_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_auth_json(dir.path(), LOCKED_FIXTURE);
+        let _held = hold_shared_lock(&path);
+        let unsaved: UnsavedSlot = Arc::new(parking_lot::Mutex::new(None));
+        let short = std::time::Duration::from_millis(50);
+
+        let retry = persist_event(&path, "oidc", &locked_event(), &unsaved, short, short, 3).unwrap();
+        *unsaved.lock() = Some(RefreshEvent {
+            access_token: "eyJ.newer".into(),
+            new_refresh_token: Some("rt-newer".into()),
+            expires_at: None,
+        });
+        retry.join().unwrap();
+        assert_eq!(
+            unsaved.lock().as_ref().map(|e| e.access_token.as_str()),
+            Some("eyJ.newer"),
+            "the stale retry must not clear or overwrite the newer unsaved event"
+        );
+    }
+
+    /// P47: a cleartext or loopback hub is refused before auth.json is read (the old local-dev path handed it the
+    /// plain session bearer); the error names the refused origin and the remedy. Positive control: a `wss` hub on a
+    /// public host builds the OIDC provider from the same auth.json.
+    #[test]
+    fn p47_provider_refuses_a_cleartext_or_loopback_hub() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_auth_json(
             dir.path(),
             r#"{ "oidc": { "key": "eyJ.tok", "user_id": "u1", "refresh_token": "rt", "oidc_issuer": "https://auth.x.ai", "oidc_client_id": "c1" } }"#,
         );
-        let url = Url::parse("ws://localhost:9988/v1/tools").unwrap();
-        let auth = provider(&url, Some(&path), &ProactiveRefreshConfig::default()).unwrap();
-        match auth.current() {
-            AuthCredential::Bearer { token } => assert_eq!(token, "eyJ.tok"),
-            _ => panic!("expected Bearer"),
+        for hub in [
+            "ws://localhost:9988/v1/tools",
+            // P55 fixed the IPv6 arm of the old local-dev path; P47 removes that path, so `::1` is refused like the rest.
+            "ws://[::1]:9988/v1/tools",
+            "wss://[::1]:9988/v1/tools",
+            "wss://localhost:9988/v1/tools",
+            "wss://127.0.0.1:9988/v1/tools",
+            "ws://hub.example.test/v1/tools",
+        ] {
+            let url = Url::parse(hub).unwrap();
+            let err = provider(&url, Some(&path), &ProactiveRefreshConfig::default())
+                .err()
+                .unwrap_or_else(|| panic!("{hub} must be refused"));
+            let text = err.to_string();
+            assert!(text.contains("The request was not made"), "{hub}: {text}");
+            assert!(!text.contains("eyJ.tok"), "{text}");
         }
-        // Loopback still returns the identity from the same entry
-        let id = auth.identity().expect("loopback identity present");
-        assert_eq!(id.user_id, "u1");
+        // A missing auth.json is not even read for a refused hub: the refusal wins.
+        let missing = dir.path().join("absent.json");
+        let err = provider(
+            &Url::parse("ws://localhost:1/x").unwrap(),
+            Some(&missing),
+            &ProactiveRefreshConfig::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("The request was not made"), "{err}");
+        let ok = provider(
+            &Url::parse("wss://hub.example.test/v1/tools").unwrap(),
+            Some(&path),
+            &ProactiveRefreshConfig {
+                enabled: false,
+                ..ProactiveRefreshConfig::default()
+            },
+        )
+        .expect("a wss hub on a public host gets the OIDC provider");
+        assert!(matches!(ok.current(), AuthCredential::Bearer { .. }));
     }
 
     fn complete_oidc_entry() -> AuthEntry {
@@ -841,25 +1071,34 @@ mod tests {
         }
     }
 
-    #[test]
-    fn provider_loopback_ignores_proactive_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = write_auth_json(
-            dir.path(),
-            r#"{ "oidc": { "key": "eyJ.tok", "user_id": "u1", "refresh_token": "rt", "oidc_issuer": "https://auth.x.ai", "oidc_client_id": "c1" } }"#,
-        );
-        let refresh = ProactiveRefreshConfig {
-            enabled: true,
-            ..ProactiveRefreshConfig::default()
-        };
-        let url = Url::parse("ws://localhost:9988/v1/tools").unwrap();
-        let auth = provider(&url, Some(&path), &refresh).unwrap();
-        match auth.current() {
-            AuthCredential::Bearer { token } => assert_eq!(token, "eyJ.tok"),
-            _ => panic!("expected Bearer"),
+}
+
+#[cfg(test)]
+mod p70_redacted_debug {
+    use super::*;
+
+    /// `{x:?}` and `{x:#?}` hold `<redacted>` (control) and no fragment of any secret.
+    fn assert_redacted(debug: &dyn std::fmt::Debug, secrets: &[&str]) {
+        for out in [format!("{debug:?}"), format!("{debug:#?}")] {
+            assert!(out.contains("<redacted>"), "control: the secret field is printed as redacted: {out}");
+            for secret in secrets {
+                let chars: Vec<char> = secret.chars().collect();
+                for w in chars.windows(6) {
+                    let frag: String = w.iter().collect();
+                    assert!(!out.contains(&frag), "Debug output holds {frag:?} of a secret: {out}");
+                }
+            }
         }
-        let id = auth.identity().expect("loopback identity present");
-        assert_eq!(id.user_id, "u1");
-        // Loopback never calls `build_oidc_provider`, so the proactive flag cannot change the static-bearer path
+    }
+
+    #[test]
+    fn auth_entry_debug_redacts_key_and_refresh_token() {
+        let entry: AuthEntry = serde_json::from_value(serde_json::json!({
+            "key": "p70hk-FAKE-4f5a6b7c",
+            "user_id": "p70-user",
+            "refresh_token": "p70rt-FAKE-8d9e0f1a",
+        }))
+        .expect("auth entry");
+        assert_redacted(&entry, &["p70hk-FAKE-4f5a6b7c", "p70rt-FAKE-8d9e0f1a"]);
     }
 }

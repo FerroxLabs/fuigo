@@ -127,7 +127,7 @@ async fn completion_and_cancel_arbitrate_during_cleanup() {
                 actor.extension_registry = extensions.build();
                 let actor = std::sync::Arc::new(actor);
                 let report = actor.turn_report.claim_for_gate().expect("report claim");
-                let resources = actor.agent.borrow().tool_bridge().shared_resources().await;
+                let resources = actor.tool_bridge_handle().shared_resources().await;
                 let resources_guard = resources.lock().await;
                 let (front, mut front_rx) = pending_input("front");
                 let (next, _) = pending_input("next");
@@ -978,6 +978,67 @@ async fn no_output_rewind_cancel_emits_no_turn_completed() {
             assert!(
                 turn_completed_fields(&msgs).is_none(),
                 "a rewind cancel before any output treats the turn as unsent and must persist no TurnCompleted"
+            );
+        })
+        .await;
+}
+
+/// Audit finding 6 (rewind rail). Mutant discriminated: `finish_rewound_cancel` without `close_open_turn`.
+/// A rewound turn is unsent (no terminal record), but its `turn_started` is already in events.jsonl; the rewind must
+/// close it there, or the next load reports the rewound turn as one lost with its process.
+#[tokio::test(flavor = "current_thread")]
+async fn a_rewind_closes_the_turn_it_started_in_the_events_log() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let events_dir = tempfile::TempDir::new().expect("tempdir");
+            actor.events = crate::session::events::EventTracker::new(events_dir.path());
+
+            // The turn began, as `handle_turn_input` does before any output.
+            actor.events.begin_turn();
+            *actor
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = Some("rw".to_string());
+            let (item, _rx) = pending_input("rw");
+            {
+                let mut state = actor.state.lock().await;
+                state.rewindable = true;
+                state.running_task = Some(running_task_stub("rw"));
+                state.pending_inputs.push_back(item);
+            }
+
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput {
+                        prompt_id: None,
+                    },
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+
+            let events =
+                std::fs::read_to_string(events_dir.path().join("events.jsonl")).unwrap_or_default();
+            let ended: Vec<serde_json::Value> = events
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["type"] == "turn_ended")
+                .collect();
+            assert_eq!(
+                ended.len(),
+                1,
+                "the rewound turn is closed exactly once: {events}"
+            );
+            assert_eq!(ended[0]["outcome"], "cancelled");
+            assert_eq!(ended[0]["cancellation_context"]["rewind"], true);
+            assert!(
+                ended[0].get("cancellation_category").is_none(),
+                "rewinds stay out of the MidTurnAbort category"
             );
         })
         .await;

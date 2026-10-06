@@ -63,6 +63,7 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
             agent_id: id,
             result: Err("Internal error: session failed to respond".to_string()),
             http_status: None,
+            verdicts: None,
             prompt_id: Some(queued_pid.clone()),
         }),
         &mut app,
@@ -94,6 +95,7 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
             agent_id: id,
             result: Err("upstream boom".to_string()),
             http_status: None,
+            verdicts: None,
             prompt_id: Some(running_pid.clone()),
         }),
         &mut app,
@@ -396,6 +398,7 @@ fn lost_cancel_is_resent_while_still_cancelling() {
             cancellation_category: None,
             cancellation_context: None,
             error_kind: None,
+            verdicts: None,
             received_at: std::time::Instant::now(),
         });
     }
@@ -468,6 +471,7 @@ fn cancel_retry_reuses_recorded_subagent_choice() {
             cancellation_category: None,
             cancellation_context: None,
             error_kind: None,
+            verdicts: None,
             received_at: std::time::Instant::now(),
         });
     assert!(reconcile_overdue_cancels(&mut app).is_none());
@@ -515,6 +519,7 @@ fn confirmed_stop_retry_does_not_rearm_auto_resend() {
             cancellation_category: None,
             cancellation_context: None,
             error_kind: None,
+            verdicts: None,
             received_at: std::time::Instant::now(),
         });
     }
@@ -1759,6 +1764,7 @@ fn reconcile_error_formats_marker_and_defers_to_banner() {
                 cancellation_category: None,
                 cancellation_context: None,
                 error_kind: None,
+                verdicts: None,
                 received_at: std::time::Instant::now()
                     - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
             });
@@ -1968,6 +1974,7 @@ fn prompt_response_clears_cancel_turn_panel() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::EndTurn)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,
@@ -2002,6 +2009,7 @@ fn cancel_after_first_activity_does_not_restore() {
             agent_id: id,
             result: Ok(acp::PromptResponse::new(acp::StopReason::Cancelled)),
             http_status: None,
+            verdicts: None,
             prompt_id: None,
         }),
         &mut app,

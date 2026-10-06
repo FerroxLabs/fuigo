@@ -446,9 +446,13 @@ impl CommandAvailability {
 ///
 /// Pager clients drain this and call `CommandRegistry::set_available_tools` to gate tool-dependent commands like `/loop`.
 /// Takes `&[String]` rather than `&[&str]` because serde_json copies each entry into the `Value` regardless.
-pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
+///
+/// `memoryEnabled` is the session's authoritative memory state (`SessionMemory::is_enabled`). Clients that write memory
+/// themselves (the pager's `#` note) read it instead of guessing from which commands or tools happen to be advertised.
+pub(crate) fn build_tools_meta(tool_names: &[String], memory_enabled: bool) -> acp::Meta {
     let mut meta = acp::Meta::new();
     meta.insert("tools".to_owned(), serde_json::json!(tool_names));
+    meta.insert("memoryEnabled".to_owned(), serde_json::json!(memory_enabled));
     meta
 }
 /// Pager-owned slash trigger keys (canonical and aliases) plus shell command names the pager never offers (`hooks-add`, `reload-plugins`, …).

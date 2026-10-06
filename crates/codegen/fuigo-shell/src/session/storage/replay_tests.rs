@@ -5,7 +5,7 @@ use agent_client_protocol as acp;
 use super::replay::{
     ReplayLookupFallback, ReplayPathHint, ReplayToolCollapser, ReplayedUpdate,
     collect_unfinished_subagents, filter_delta_replay_lines, for_each_replay_update_in_file,
-    line_is_available_commands_update, line_is_dropped_on_replay,
+    line_is_available_commands_update, line_is_dropped_on_full_replay, line_is_dropped_on_replay,
     line_is_in_progress_tool_call_update, prepare_replay_lines, replay_would_emit,
     resolve_replay_updates_path, stream_replay_updates_at, stream_replay_updates_at_hinted,
 };
@@ -981,7 +981,7 @@ fn stream_replay_forwards_fuigo_updates_in_file_order() {
     let mut kinds = Vec::new();
     let emission =
         stream_replay_updates_at_hinted(sid, home.path(), ReplayPathHint::default(), |u| {
-            kinds.push(matches!(u, ReplayedUpdate::Fuigo(_)));
+            kinds.push(matches!(u, ReplayedUpdate::Fuigo(..)));
         })
         .unwrap();
     assert_eq!(emission, ReplayEmission::Emitted);
@@ -1037,6 +1037,7 @@ fn fuigo_only_transcript_forwards_but_stays_empty() {
             max_retries: 3,
             reason: "overloaded".into(),
             error_type: None,
+            verdicts: None,
         },
     ));
     std::fs::write(dir.join(UPDATES_FILE), format!("{retry}\n")).unwrap();
@@ -1044,7 +1045,7 @@ fn fuigo_only_transcript_forwards_but_stays_empty() {
     let mut fuigo = 0usize;
     let emission =
         stream_replay_updates_at_hinted(sid, home.path(), ReplayPathHint::default(), |u| {
-            if matches!(u, ReplayedUpdate::Fuigo(_)) {
+            if matches!(u, ReplayedUpdate::Fuigo(..)) {
                 fuigo += 1;
             }
         })
@@ -1309,4 +1310,43 @@ fn child_lookup_sees_session_created_after_prior_miss() {
     let path =
         resolve_replay_updates_path("late-child", home.path(), ReplayPathHint::default()).unwrap();
     assert_eq!(path.as_deref(), Some(dir.join(UPDATES_FILE).as_path()));
+}
+
+/// P123 (K14): the load-time history repair note is saved in the transcript as the record of what was generated, but a
+/// full replay (a `session/load` from the start) does not show it again: the user saw it when the repair was made. A replay
+/// that resumes after a reconnect cursor, and the delta replay, carry events the client has not seen, so they keep it
+/// (Astra P123 r1 MEDIUM).
+#[test]
+fn the_history_repair_note_is_not_replayed_on_a_later_full_load() {
+    let prompt = acp_envelope_with_meta(
+        r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"hello"}}"#,
+        r#"{"eventId":"ev1"}"#,
+    );
+    let note = format!(
+        r#"{{"timestamp":1,"method":"_fuigo/session/update","params":{{"sessionId":"s","update":{{"sessionUpdate":"history_repaired","message":"Session history repaired: removed 1 tool result."}},"_meta":{{"eventId":"ev2"}}}}}}"#
+    );
+    let answer = acp_envelope_with_meta(
+        r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hi"}}"#,
+        r#"{"eventId":"ev3"}"#,
+    );
+    let raw = format!("{prompt}\n{note}\n{answer}\n");
+
+    assert!(line_is_dropped_on_full_replay(&note), "a full replay leaves the note out");
+    assert!(!line_is_dropped_on_replay(&note), "the note is not dropped by every replay");
+    assert!(!line_is_dropped_on_full_replay(&prompt) && !line_is_dropped_on_full_replay(&answer));
+    let full = prepare_replay_lines(&raw, None);
+    assert_eq!(full.lines.len(), 2, "a full replay holds the prompt and the answer, not the note: {:?}", full.lines);
+    assert!(full.lines.iter().all(|line| !line.contains("history_repaired")));
+    // A client that was disconnected before the note comes back with the cursor of the prompt: the note is new to it.
+    let resumed = prepare_replay_lines(&raw, Some("ev1"));
+    assert!(!resumed.mark_replay);
+    assert!(
+        resumed.lines.iter().any(|line| line.contains("history_repaired")),
+        "an incremental replay carries the note the client has not seen: {:?}",
+        resumed.lines
+    );
+    assert!(
+        filter_delta_replay_lines(&raw).iter().any(|line| line.contains("history_repaired")),
+        "the delta replay carries it too"
+    );
 }

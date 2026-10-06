@@ -543,9 +543,24 @@ async fn do_refresh(inner: &Inner, refresh_token: &str) -> Result<RefreshOutcome
         expires_in: Option<u64>,
     }
 
+    // CB-3: the refresh token goes only to an https endpoint on the issuer's origin (or the one
+    // built-in split-host pair, P99). A refusal is a local policy denial (loop stops, stored
+    // credentials kept), not an IdP rejection.
+    let token_url = reqwest::Url::parse(&disc.token_endpoint).map_err(refresh_err)?;
+    if let Err(reason) =
+        fuigo_computer_hub_sdk::check_token_endpoint(&inner.issuer, &token_url, cfg!(test))
+    {
+        return Err(refresh_err(
+            anyhow::Error::new(fuigo_extra_ca::dispatch::DispatchError::Denied(
+                "OIDC token endpoint refused",
+            ))
+            .context(reason),
+        ));
+    }
+
     let tokens: Tokens = require_success(
         client
-            .post(&disc.token_endpoint)
+            .post(token_url)
             .form(&params)
             .timeout(TOKEN_TIMEOUT)
             .send_checked()

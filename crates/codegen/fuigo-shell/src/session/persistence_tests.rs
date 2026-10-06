@@ -78,6 +78,7 @@ fn test_actor_inner(
             last_usage_live: None,
             last_usage_turn: None,
             last_incoming_turn: None,
+            turn_start_guard: None,
         }
         .run(),
     );
@@ -1183,6 +1184,11 @@ async fn probe_writable(handle: &PersistenceHandle) -> io::Result<()> {
 /// The flush's `save_session_data` payload must carry the manual title.
 #[tokio::test]
 async fn manual_rename_next_flush_does_not_revert_backend_title() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "session::persistence::durable_update_tests::manual_rename_next_flush_does_not_revert_backend_title",
+    ) else {
+        return;
+    };
     use std::sync::Arc;
 
     use crate::auth::{AuthManager, FuigoAuth};
@@ -1236,7 +1242,7 @@ async fn manual_rename_next_flush_does_not_revert_backend_title() {
         subagent_depth: None,
         title_is_manual: None,
     };
-    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let client = BackendClient::with_base_url(front.front(&server.origin())).with_auth_manager(auth);
     let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
     let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
 
@@ -1375,6 +1381,11 @@ async fn wait_for_save_session_titles(
 
 #[tokio::test]
 async fn manual_after_auto_last_flush_is_manual() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "session::persistence::durable_update_tests::manual_after_auto_last_flush_is_manual",
+    ) else {
+        return;
+    };
     use std::sync::Arc;
 
     use crate::auth::{AuthManager, FuigoAuth};
@@ -1428,7 +1439,7 @@ async fn manual_after_auto_last_flush_is_manual() {
         subagent_depth: None,
         title_is_manual: None,
     };
-    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let client = BackendClient::with_base_url(front.front(&server.origin())).with_auth_manager(auth);
     let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
     let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
 
@@ -1479,6 +1490,11 @@ async fn manual_after_auto_last_flush_is_manual() {
 
 #[tokio::test]
 async fn auto_after_committed_manual_emits_no_set_title() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "session::persistence::durable_update_tests::auto_after_committed_manual_emits_no_set_title",
+    ) else {
+        return;
+    };
     use std::sync::Arc;
 
     use crate::auth::{AuthManager, FuigoAuth};
@@ -1536,7 +1552,7 @@ async fn auto_after_committed_manual_emits_no_set_title() {
         subagent_depth: None,
         title_is_manual: None,
     };
-    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let client = BackendClient::with_base_url(front.front(&server.origin())).with_auth_manager(auth);
     let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
     let actor = test_actor_with_remote_sync(info.clone(), storage, Some(remote_sync));
 
@@ -1610,6 +1626,11 @@ async fn manual_title_renamed_is_noop_without_remote_sync() {
 /// A later ContentChunk must adopt via the fallback (empty model, no live LLM).
 #[tokio::test]
 async fn reset_title_to_auto_then_generated_title_is_adopted() {
+    let Some(front) = crate::test_support::session_wire::fronted_child(
+        "session::persistence::durable_update_tests::reset_title_to_auto_then_generated_title_is_adopted",
+    ) else {
+        return;
+    };
     use std::sync::Arc;
 
     use crate::auth::{AuthManager, FuigoAuth};
@@ -1684,7 +1705,7 @@ async fn reset_title_to_auto_then_generated_title_is_adopted() {
         subagent_depth: None,
         title_is_manual: Some(true),
     };
-    let client = BackendClient::with_base_url(server.origin()).with_auth_manager(auth);
+    let client = BackendClient::with_base_url(front.front(&server.origin())).with_auth_manager(auth);
     let remote_sync = RemoteSync::new(SESSION_ID.to_owned(), metadata, client);
     let actor = test_actor_inner(
         info.clone(),
@@ -2082,6 +2103,7 @@ async fn disk_full_failure_is_mirrored_on_the_standard_rail() {
     let failed = RetryState::Failed {
         error_type: DISK_FULL_ERROR_TYPE.to_string(),
         message: DISK_FULL_USER_MESSAGE.to_string(),
+        verdicts: None,
     };
     let mut fuigo_rail = Vec::new();
     let mut standard_rail = Vec::new();
@@ -2191,6 +2213,7 @@ async fn disk_full_mirror_takes_the_session_queue_when_one_is_installed() {
             RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                verdicts: None,
             }
         ),
         other => panic!("expected one queued mirror, got {other:?}"),
@@ -2409,4 +2432,224 @@ mod prompt_file_tests {
             ".cwd file sync must happen before the parent-dir sync that would freeze the direntry, got {events:?}"
         );
     }
+}
+
+/// Commit compaction `id` through the actor (checkpoint, witness, then the activation marker), as the compaction flow
+/// does before it rewrites the chat history with `projection`.
+async fn commit_compaction(actor: &ActorGuard, info: &Info, id: &str, projection: &[ConversationItem]) {
+    let checkpoint = crate::extensions::notification::CompactionCheckpointFile {
+        inherited_prefix_len: Some(0),
+        checkpoint_id: id.to_string(),
+        prompt_index_at_compaction: 1,
+        compacted_history: projection.to_vec(),
+        schema_version: 1,
+        created_at: "2026-01-01T00:00:00Z".to_string(),
+        original_user_info: None,
+        reread_file_paths: vec![],
+    };
+    let activation = SessionUpdate::Fuigo(Box::new(FuigoSessionNotification {
+        session_id: info.id.clone(),
+        update: FuigoSessionUpdate::CompactionCheckpoint(Box::new(
+            crate::extensions::notification::CompactionCheckpointInfo {
+                checkpoint_id: id.to_string(),
+                prompt_index_at_compaction: 1,
+                checkpoint_file: format!("compaction_checkpoints/{id}.json"),
+                auto_continue: None,
+                schema_version: 1,
+                created_at: "2026-01-01T00:00:00Z".to_string(),
+            },
+        )),
+        meta: None,
+    }));
+    let (respond_to, committed) = tokio::sync::oneshot::channel();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::CommitCompactionAndAck {
+            checkpoint,
+            activation,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            respond_to,
+        })
+        .unwrap();
+    assert!(committed.await.unwrap().is_ok(), "the compaction commits");
+}
+
+fn chat_texts(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("chat_history.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<ConversationItem>(line).unwrap().text_content())
+        .collect()
+}
+
+/// P111 (Astra r4 #3, r5 #1/#2): a compaction commits, its `chat_history.jsonl` rewrite fails, and later messages are
+/// appended. They land after the pre-compaction history, and that file used to stop matching the DI-03 witness, so a
+/// reload (or a fork) silently took the old history. Now the witness recognises the old history at the start of the
+/// file: a reload and a fork take the compacted history followed by the later messages, the flush barrier reports the
+/// failed write, and a later rewrite that lands makes the file authoritative again.
+#[tokio::test]
+async fn a_failed_compaction_rewrite_followed_by_appends_resumes_compacted_with_them() {
+    let root = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new(format!("p111-r5-unapplied-{}", std::process::id())),
+        cwd: "/test".into(),
+    };
+    let storage = Arc::new(JsonlStorageAdapter::with_root(root.path().to_path_buf()));
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let dir_of = |session: &Info| {
+        crate::util::fuigo_home::sessions_cwd_dir_in(root.path(), &session.cwd).join(session.id.to_string())
+    };
+    let dir = dir_of(&info);
+    let actor = test_actor(info.clone(), storage.clone());
+    for item in [ConversationItem::user("OLD-P0"), ConversationItem::assistant("OLD-A0")] {
+        actor.handle.tx.send(PersistenceMsg::Chat(item)).unwrap();
+    }
+    flush_ack(&actor.handle).await.unwrap();
+    let projection = vec![ConversationItem::system("SYS"), ConversationItem::user("SUMMARY")];
+    commit_compaction(&actor, &info, "c1", &projection).await;
+
+    crate::session::persistence::test_seam::fail_history_replacements(&info.id.0, 1);
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::ReplaceChatHistory(projection.clone()))
+        .unwrap();
+    for item in [ConversationItem::user("NEW-P1"), ConversationItem::assistant("NEW-A1")] {
+        actor.handle.tx.send(PersistenceMsg::Chat(item)).unwrap();
+    }
+    let flushed = flush_ack(&actor.handle).await;
+
+    let resumed = storage.unapplied_compaction_projection(&info).await;
+    assert_eq!(
+        resumed.as_deref().map(|items| items.iter().map(ConversationItem::text_content).collect::<Vec<_>>()),
+        Some(vec!["SYS".to_string(), "SUMMARY".to_string(), "NEW-P1".to_string(), "NEW-A1".to_string()]),
+        "a reload resumes the compacted history and the messages after it, not the pre-compaction history"
+    );
+    assert!(flushed.is_err(), "the failed rewrite is reported by the flush barrier");
+    // A fork of the session (whole copy) gets the same history.
+    let child = Info {
+        id: acp::SessionId::new(format!("p111-r5-unapplied-child-{}", std::process::id())),
+        cwd: "/test".into(),
+    };
+    storage
+        .copy_session_data(&info, &child, crate::session::storage::CopySessionOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(chat_texts(&dir_of(&child)), ["SYS", "SUMMARY", "NEW-P1", "NEW-A1"]);
+
+    // A later rewrite that lands (here the startup re-persist of the recovered history) makes the file authoritative.
+    let recovered = resumed.unwrap();
+    actor.handle.tx.send(PersistenceMsg::ReplaceChatHistory(recovered)).unwrap();
+    flush_ack(&actor.handle).await.unwrap();
+    assert_eq!(chat_texts(&dir), ["SYS", "SUMMARY", "NEW-P1", "NEW-A1"]);
+    assert!(storage.unapplied_compaction_projection(&info).await.is_none());
+    actor.stop().await;
+}
+
+/// P111 (Astra r5 #3): an acknowledged replacement (a rewind's) reports `Committed` when the new history reached
+/// `chat_history.jsonl` and only a later step failed, and `NotCommitted` only while the file holds the previous history,
+/// so a caller that keeps its previous history on failure never disagrees with the file.
+#[tokio::test]
+async fn commit_aware_history_replacement_tells_whether_the_file_was_replaced() {
+    use crate::session::storage::AppendChatError;
+    let dir = tempfile::tempdir().unwrap();
+    let info = Info {
+        id: acp::SessionId::new("p111-r5-commit-aware"),
+        cwd: "/test".into(),
+    };
+    let storage = JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let old = vec![ConversationItem::user("OLD")];
+    storage.replace_chat_history(&info, &old).await.unwrap();
+    let new = vec![ConversationItem::user("NEW")];
+
+    // The bookkeeping after the file replacement fails: the history is stored.
+    break_summary_writes(dir.path());
+    let result = storage.replace_chat_history_commit_aware(&info, &new).await;
+    assert!(matches!(result, Err(AppendChatError::Committed(_))), "{result:?}");
+    assert_eq!(chat_texts(dir.path()), ["NEW"]);
+
+    // The file itself cannot be replaced: the previous history is still there.
+    let chat = dir.path().join("chat_history.jsonl");
+    std::fs::remove_file(&chat).unwrap();
+    std::fs::create_dir_all(chat.join("occupied")).unwrap();
+    let result = storage.replace_chat_history_commit_aware(&info, &old).await;
+    assert!(matches!(result, Err(AppendChatError::NotCommitted(_))), "{result:?}");
+}
+
+/// A committed compaction uploads its checkpoint (marker + file) to remote storage, in order after earlier updates.
+#[tokio::test]
+async fn committed_compaction_queues_its_checkpoint_for_remote_sync() {
+    let info = Info { id: acp::SessionId::new("cp-push"), cwd: "/test".into() };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf()));
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let (sync, mut observed) = RemoteSync::test_raw_observer();
+    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(sync));
+
+    let (marker, file) = crate::session::export::checkpoint_upload_tests::marker_and_file("cp-push-1", "PUSHED-SUMMARY");
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle
+        .tx
+        .send(PersistenceMsg::CommitCompactionAndAck {
+            checkpoint: file,
+            activation: SessionUpdate::Fuigo(Box::new(marker)),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            respond_to,
+        })
+        .unwrap();
+    response.await.unwrap().unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), observed.recv())
+        .await
+        .expect("checkpoint must be queued")
+        .unwrap();
+    assert!(msg.content.contains("_fuigo/compaction_checkpoint") && msg.content.contains("PUSHED-SUMMARY"));
+    actor.stop().await;
+}
+
+/// A compaction that did not commit must not upload anything.
+#[tokio::test]
+async fn cancelled_compaction_queues_no_checkpoint() {
+    let info = Info { id: acp::SessionId::new("cp-push-cancel"), cwd: "/test".into() };
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf()));
+    storage.init_session(&info, default_model_id()).await.unwrap();
+    let (sync, mut observed) = RemoteSync::test_raw_observer();
+    let actor = test_actor_with_remote_sync(info.clone(), storage, Some(sync));
+    let (marker, file) = crate::session::export::checkpoint_upload_tests::marker_and_file("cp-push-2", "NOPE");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor.handle.tx.send(PersistenceMsg::CommitCompactionAndAck {
+        checkpoint: file, activation: SessionUpdate::Fuigo(Box::new(marker)), cancel, respond_to,
+    }).unwrap();
+    assert!(response.await.unwrap().is_err());
+    flush_ack(&actor.handle).await.unwrap();
+    assert!(observed.try_recv().is_err());
+    actor.stop().await;
+}
+
+/// P146 (S17): the copy of a session folder (`CopyFile`) never follows a symlink planted in it, neither a checkpoint
+/// file linked to a file outside the session nor a linked subdirectory; the regular files are still copied.
+#[cfg(unix)]
+#[test]
+fn a_session_copy_never_follows_a_symlink() {
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("sentinel.json"), b"P146-OUTSIDE").unwrap();
+    std::fs::create_dir(outside.path().join("dir")).unwrap();
+    std::fs::write(outside.path().join("dir/inner.txt"), b"P146-OUTSIDE").unwrap();
+    let session = tempfile::tempdir().unwrap();
+    let base = session.path();
+    std::fs::create_dir(base.join("compaction_checkpoints")).unwrap();
+    std::fs::write(base.join("compaction_checkpoints/real.json"), b"inside").unwrap();
+    std::os::unix::fs::symlink(outside.path().join("sentinel.json"), base.join("compaction_checkpoints/linked.json")).unwrap();
+    std::os::unix::fs::symlink(outside.path().join("dir"), base.join("prompts")).unwrap();
+    let mut files = Vec::new();
+    collect_session_files_recursive(base, base, &mut files);
+    let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, vec!["compaction_checkpoints/real.json"], "only the regular file is copied");
+    assert!(files.iter().all(|f| f.data != b"P146-OUTSIDE"));
 }

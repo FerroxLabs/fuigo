@@ -91,8 +91,8 @@ async fn minimal_flush_left_no_hpad() {
         &["No, reject"],
         "permission modal",
     );
-    // Allow once (shortcut `1`) so the turn settles, then wait for idle.
-    harness.inject_keys(b"1").expect("allow once");
+    // Allow once (Enter on the preselected row, P152) so the turn settles, then wait for idle.
+    harness.inject_keys(b"\r").expect("allow once");
     harness
         .wait_for_text("PERMISSION_SETTLED", Duration::from_secs(30))
         .expect("turn settles after allow");

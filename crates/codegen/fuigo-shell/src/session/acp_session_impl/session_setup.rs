@@ -264,7 +264,7 @@ impl SessionActor {
         self.maybe_reconcile_active_goal_without_plan().await;
         let (_, workflows) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        let meta = Some(slash_commands::build_tools_meta(&tool_names));
+        let meta = Some(slash_commands::build_tools_meta(&tool_names, self.memory.is_enabled()));
         tracing::info!(
             session_id = %self.session_info.id.0,
             command_count = commands.len(),
@@ -392,7 +392,11 @@ impl SessionActor {
         };
         let current_model = &current_config.model;
         let base_url = &current_config.base_url;
-        if !crate::util::is_cli_chat_proxy_url(base_url) {
+        // P42: this request carries the session token to the model's own base URL, so it also needs the one
+        // session-delivery predicate; `is_cli_chat_proxy_url` alone admits every loopback URL.
+        if !crate::util::is_cli_chat_proxy_url(base_url)
+            || !crate::auth::session_delivery::session_may_reach(base_url)
+        {
             return;
         }
         tracing::info!(
@@ -406,10 +410,13 @@ impl SessionActor {
         };
         let _ = am.auth().await;
         let provider: Arc<dyn fuigo_auth::AuthCredentialProvider> = Arc::new(
+            // Inference class (P42 gates `base_url` with `session_may_reach` above); no service base.
             crate::auth::credential_provider::ShellAuthCredentialProvider::new(
                 am.clone(),
                 None,
                 None,
+                None,
+                "models_v2_refresh",
             ),
         );
         let middleware_client =
@@ -426,16 +433,7 @@ impl SessionActor {
                 }
                 None
             };
-        #[allow(unused_mut)]
-        let mut request = middleware_client
-            .get(&url)
-            .header("X-XAI-Token-Auth", "xai-grok-cli")
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
-            .header(
-                crate::http::CLIENT_MODE_HEADER,
-                crate::http::process_client_mode(),
-            )
-            .timeout(std::time::Duration::from_secs(5));
+        let request = idle_refresh_models_request(&middleware_client, &url);
         let built = match request.build() {
             Ok(r) => r,
             Err(e) => {
@@ -457,7 +455,7 @@ impl SessionActor {
                 None,
                 crate::auth::attribution::ConsumerKind::IdleResumeModelRefresh,
                 "",
-                stamp.as_ref().map(|s| s.0.as_str()),
+                stamp.as_ref().map(|s| &s.0),
             );
         }
         let result = if !response.status().is_success() {
@@ -572,9 +570,7 @@ impl SessionActor {
         if self.deny_read_globs.is_empty() {
             return;
         }
-        self.agent
-            .borrow()
-            .tool_bridge()
+        self.tool_bridge_handle()
             .update_resource(fuigo_tools::types::resources::DenyReadGlobs(
                 self.deny_read_globs.clone(),
             ))
@@ -698,5 +694,49 @@ impl SessionActor {
             &agent.agents_md_section()?,
             file_count,
         ))
+    }
+}
+
+/// The idle-resume `GET /models-v2` request. P43: the client version is identity-class, so only a
+/// FluxRouter-operated destination gets it.
+fn idle_refresh_models_request(
+    client: &reqwest_middleware::ClientWithMiddleware,
+    url: &str,
+) -> reqwest_middleware::RequestBuilder {
+    client
+        .get(url)
+        .header("X-XAI-Token-Auth", "xai-grok-cli")
+        .headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(url)
+                .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+        )
+        .header(
+            crate::http::CLIENT_MODE_HEADER,
+            crate::http::process_client_mode(),
+        )
+        .timeout(std::time::Duration::from_secs(5))
+}
+
+#[cfg(test)]
+mod p43_identity_tests {
+    /// P43 hostile: the idle-resume model refresh, sent the way the session sends it
+    /// (`execute_with_stamp`), gives a proxy that is not FluxRouter-operated no client version;
+    /// the same request to FluxRouter keeps it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_model_refresh_carries_identity_only_to_fluxrouter() {
+        let client = reqwest_middleware::ClientBuilder::new(crate::http::shared_client()).build();
+        let (base, seen, handle) =
+            crate::remote::identity_tests::spawn_recording_mock("{}").await;
+        let request = super::idle_refresh_models_request(&client, &format!("{base}/models-v2"))
+            .build()
+            .unwrap();
+        let _ = fuigo_auth::execute_with_stamp(&client, request).await;
+        handle.abort();
+        crate::remote::identity_tests::assert_no_identity(&seen, "idle_model_refresh");
+        let fluxrouter =
+            super::idle_refresh_models_request(&client, "https://api.fluxrouter.ai/v1/models-v2")
+                .build()
+                .unwrap();
+        assert_eq!(fluxrouter.headers()["x-fuigo-client-version"], fuigo_version::VERSION);
     }
 }

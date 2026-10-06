@@ -65,5 +65,7 @@ THIRD-PARTY DEPENDENCIES
 --------------------------------------------------------------------------
 
 See THIRD-PARTY-NOTICES for the licences of bundled dependencies, and
-third_party/NOTICE for vendored sources. Both ship unmodified from
-upstream.
+third_party/NOTICE for vendored sources. Both are reproduced as received
+from upstream, except that Fuigo carries local changes to the vendored
+copies of tiff, usvg, dagre_rust and the gcloud policy crates; each such
+entry states its change.

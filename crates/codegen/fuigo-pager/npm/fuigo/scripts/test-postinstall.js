@@ -1166,6 +1166,70 @@ if (process.platform !== 'win32') {
     });
 }
 
+// ─── Installer config (runs the real bin/postinstall.js) ────────────────
+
+if (process.platform !== 'win32') {
+    console.log('\ninstaller config tests\n');
+
+    const { spawnSync } = require('child_process');
+    const platformKey = `${process.platform}-${process.arch}`;
+
+    /**
+     * Lay out a minimal installed package around the shipped bin/postinstall.js:
+     * the platform package with a plain binary, and a stub @iarna/toml (the
+     * release job does not `npm install`, so the real one is absent here).
+     */
+    function sandboxPackage(dir) {
+        const pkgRoot = path.join(__dirname, '..');
+        const pkg = path.join(dir, 'pkg');
+        fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
+        fs.copyFileSync(path.join(pkgRoot, 'bin', 'postinstall.js'), path.join(pkg, 'bin', 'postinstall.js'));
+        fs.copyFileSync(path.join(pkgRoot, 'package.json'), path.join(pkg, 'package.json'));
+        const toml = path.join(pkg, 'node_modules', '@iarna', 'toml');
+        fs.mkdirSync(toml, { recursive: true });
+        fs.writeFileSync(path.join(toml, 'package.json'), '{"name":"@iarna/toml","main":"index.js"}');
+        fs.writeFileSync(path.join(toml, 'index.js'),
+            'module.exports = { parse: (t) => JSON.parse(t.replace(/^#.*$/m, "") || "{}"), stringify: (o) => "# stub\\n" + JSON.stringify(o) };');
+        const platform = path.join(pkg, 'node_modules', '@fuigo', platformKey);
+        fs.mkdirSync(path.join(platform, 'bin'), { recursive: true });
+        fs.writeFileSync(path.join(platform, 'package.json'), `{"name":"@fuigo/${platformKey}","version":"0.0.0"}`);
+        fs.writeFileSync(path.join(platform, 'bin', 'fuigo'), '#!/bin/sh\necho stub\n');
+        return pkg;
+    }
+
+    function runPostinstall(pkg, home) {
+        const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/' };
+        delete env.npm_config_user_agent;
+        delete env.FUIGO_INSTALL_COMPLETIONS;
+        const res = spawnSync(process.execPath, [path.join(pkg, 'bin', 'postinstall.js')], { encoding: 'utf8', env });
+        assert.strictEqual(res.status, 0, `postinstall failed: ${res.stderr}`);
+        return path.join(home, '.fuigo', 'config.toml');
+    }
+
+    const supported = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].includes(platformKey);
+    test('P150: postinstall creates ~/.fuigo/config.toml owner-only (0600) and keeps an existing file\'s mode', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const pkg = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const configPath = runPostinstall(pkg, home);
+            const written = fs.readFileSync(configPath, 'utf8');
+            assert.ok(written.includes('"installer":"npm"'), `installer not recorded: ${written}`);
+            assert.ok(written.includes('registry.invalid'), `registry not recorded: ${written}`);
+            assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o600, `new config.toml mode ${(fs.statSync(configPath).mode & 0o777).toString(8)}`);
+
+            // A file the user made readable on purpose keeps its mode (as Fuigo's own writer does).
+            fs.chmodSync(configPath, 0o644);
+            runPostinstall(pkg, home);
+            assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o644, 'an existing config.toml must keep its mode');
+        } finally {
+            cleanup(dir);
+        }
+    });
+}
+
 // ─── Summary ───────────────────────────────────────────────────────────
 
 console.log(`\n${passed} passed, ${failed} failed`);

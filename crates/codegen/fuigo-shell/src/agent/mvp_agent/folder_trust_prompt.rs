@@ -109,9 +109,10 @@ impl MvpAgent {
         // Re-querying at grant time would need the `sessions` map (a non-`Rc` `RefCell` field) shared into the detached task, which we cannot do
         // That gap is accepted instead
         let mut targets = Vec::new();
-        self.session_registry.for_each_resident(|_, h| {
+        self.session_registry.for_each_resident(|sid, h| {
             if fuigo_workspace::trust::workspace_key(std::path::Path::new(&h.info.cwd)) == key {
                 targets.push(ReloadTarget {
+                    session_id: sid.clone(),
                     cmd_tx: h.cmd_tx.clone(),
                     initial_client_mcp_servers: h.initial_client_mcp_servers.clone(),
                     cwd: PathBuf::from(&h.info.cwd),
@@ -124,6 +125,7 @@ impl MvpAgent {
         }
 
         let gateway = self.gateway.clone();
+        let sessions_announcing = self.sessions_announcing.clone();
         let plugin_handle = self.plugin_registry_handle.clone();
         let compat = self.cfg.borrow().compat_resolved;
         let remote = remote.cloned();
@@ -217,9 +219,12 @@ impl MvpAgent {
             fuigo_workspace::folder_trust::grant_folder_trust(&cwd);
             folder_trust::resolve_and_record(&cwd, remote.as_ref(), false);
 
+            // A snapshot: the reload awaits, and a session starting meanwhile updates the set.
+            let announcing = sessions_announcing.borrow().clone();
             reload_project_servers_after_grant(ReloadAfterGrant {
                 gateway: &gateway,
                 targets,
+                sessions_announcing: &announcing,
                 plugin_handle: &plugin_handle,
                 compat: &compat,
                 prompt_cwd: &cwd,
@@ -237,8 +242,9 @@ impl MvpAgent {
 /// One session to reload after a grant, with its own cwd.
 /// The MCP merge and plugin build then use the session's own project config (matching the per-cwd canonical reloaders), not the prompt's cwd.
 struct ReloadTarget {
+    session_id: acp::SessionId,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
-    initial_client_mcp_servers: Vec<acp::McpServer>,
+    initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     cwd: PathBuf,
 }
 
@@ -247,6 +253,9 @@ struct ReloadAfterGrant<'a> {
     gateway: &'a GatewaySender,
     /// Every session sharing the granted workspace, each with its own cwd.
     targets: Vec<ReloadTarget>,
+    /// Sessions still announcing their startup notes, with their setup's notice scope (P148): the grant's refusals for
+    /// them are recorded there, so that announcement tells them once.
+    sessions_announcing: &'a std::collections::HashMap<acp::SessionId, fuigo_config::key_naming::NoticeScope>,
     plugin_handle: &'a fuigo_agent::plugins::SharedPluginRegistryHandle,
     compat: &'a fuigo_tools::types::CompatConfig,
     /// The prompting session's cwd, used only for the client catalog push.
@@ -265,10 +274,13 @@ async fn reload_project_servers_after_grant(ctx: ReloadAfterGrant<'_>) {
         let session_cwd = target.cwd.as_path();
         // MCP: `merge_managed_mcp_servers` re-reads disk and runs `filter_untrusted_project_mcp`
         // The filter now keeps project servers because the cached verdict was flipped to trusted (same workspace key)
-        let _ = crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+        // Synchronous with the snapshot (no await between them), so an announcing session's scope is still open here.
+        reload_target_mcp_after_grant(
+            &target.session_id,
             &target.cmd_tx,
             session_cwd,
             target.initial_client_mcp_servers,
+            ctx.sessions_announcing,
             plugin_snapshot.as_deref(),
             ctx.compat,
         );
@@ -300,6 +312,40 @@ async fn reload_project_servers_after_grant(ctx: ReloadAfterGrant<'_>) {
     crate::extensions::mcp::notify_servers_updated(ctx.gateway, &local).await;
 }
 
+/// The grant's MCP reload for one session (P148, Astra r3 MEDIUM). A session still announcing its startup notes gets
+/// the merge's refusals recorded into its open setup scope, so its own announcement tells it each once (a queued
+/// re-parse could run after that scope closed, and the note would only be logged). A session that already announced is
+/// sent the refusals it was not told yet.
+fn reload_target_mcp_after_grant(
+    session_id: &acp::SessionId,
+    cmd_tx: &tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    session_cwd: &std::path::Path,
+    initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
+    sessions_announcing: &std::collections::HashMap<acp::SessionId, fuigo_config::key_naming::NoticeScope>,
+    plugin_snapshot: Option<&fuigo_agent::plugins::PluginRegistry>,
+    compat: &fuigo_tools::types::CompatConfig,
+) {
+    if let Some(scope) = sessions_announcing.get(session_id).copied() {
+        let _ = scope.run(|| {
+            crate::session::managed_mcp::merge_and_send_managed_mcp_update(
+                cmd_tx,
+                session_cwd,
+                initial_client_mcp_servers,
+                plugin_snapshot,
+                compat,
+            )
+        });
+    } else {
+        let _ = crate::session::managed_mcp::merge_and_send_managed_mcp_update_with_notices(
+            cmd_tx,
+            session_cwd,
+            initial_client_mcp_servers,
+            plugin_snapshot,
+            compat,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,6 +361,92 @@ mod tests {
             caps = caps.meta(map);
         }
         acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(caps)
+    }
+
+    /// A seed whose server holds a reference to the saved key: every merge refuses it.
+    fn p148_refused_seed() -> crate::session::managed_mcp::ClientMcpSeed {
+        vec![acp::McpServer::Http(
+            acp::McpServerHttp::new("p148-grant-sibling", "https://g.p148.invalid/mcp")
+                .headers(vec![acp::HttpHeader::new("Authorization", "Bearer ${FUIGO_API_KEY}")]),
+        )]
+        .into()
+    }
+
+    /// Drain `rx`: (config notices of either kind, MCP updates).
+    fn p148_drain(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
+    ) -> (Vec<String>, usize) {
+        let (mut notices, mut updates) = (Vec::new(), 0);
+        while let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                crate::session::SessionCommand::NotifyConfigNotice { notice }
+                | crate::session::SessionCommand::NotifyConfigNoticeIfNew { notice } => notices.push(notice),
+                crate::session::SessionCommand::UpdateMcpServers { .. } => updates += 1,
+                _ => {}
+            }
+        }
+        (notices, updates)
+    }
+
+    /// P148 Astra r3 MEDIUM: a grant for a sibling that is still announcing records the refusal it finds into that
+    /// sibling's open setup scope (its announcement then tells it once), and sends the sibling no note of its own. The
+    /// refusal must not be left to the sibling's queued re-parse, which can run after the scope closed.
+    #[test]
+    fn a_grant_records_an_announcing_siblings_refusal_into_its_open_setup_scope() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _key = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
+        let _home = fuigo_test_support::FuigoHome::new();
+        let cwd = tempfile::tempdir().unwrap();
+        let compat = fuigo_tools::types::CompatConfig::default();
+        let sibling = acp::SessionId::new("p148-announcing-sibling");
+        let scope = fuigo_config::key_naming::NoticeScope::new();
+        let announcing = std::collections::HashMap::from([(sibling.clone(), scope)]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        reload_target_mcp_after_grant(&sibling, &tx, cwd.path(), p148_refused_seed(), &announcing, None, &compat);
+
+        let (sent, updates) = p148_drain(&mut rx);
+        assert_eq!(updates, 1, "the sibling's servers are reloaded");
+        assert!(sent.is_empty(), "the grant told the announcing sibling itself (its announcement repeats it): {sent:?}");
+        let recorded = scope.notes();
+        assert_eq!(
+            recorded.iter().filter(|n| n.contains("p148-grant-sibling") && n.contains("FUIGO_API_KEY")).count(),
+            1,
+            "the refusal is not in the sibling's setup scope, so its announcement loses it: {recorded:?}"
+        );
+    }
+
+    /// A session that already announced is sent the grant's refusal (as a note it was not told yet).
+    #[test]
+    fn a_grant_tells_an_already_announced_session_its_refusal() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _key = fuigo_test_support::EnvGuard::unset("FUIGO_API_KEY");
+        let _home = fuigo_test_support::FuigoHome::new();
+        let cwd = tempfile::tempdir().unwrap();
+        let compat = fuigo_tools::types::CompatConfig::default();
+        let session = acp::SessionId::new("p148-announced");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        reload_target_mcp_after_grant(
+            &session,
+            &tx,
+            cwd.path(),
+            p148_refused_seed(),
+            &std::collections::HashMap::new(),
+            None,
+            &compat,
+        );
+
+        let (sent, updates) = p148_drain(&mut rx);
+        assert_eq!(updates, 1);
+        assert!(
+            sent.iter().any(|n| n.contains("p148-grant-sibling") && n.contains("FUIGO_API_KEY")),
+            "the announced session was told nothing: {sent:?}"
+        );
     }
 
     #[test]

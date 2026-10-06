@@ -3493,3 +3493,29 @@ fn plain_picker_fetch_carries_no_query_and_bumps_seq() {
         "picker fetch must be unfiltered and supersede the search, got {effects:?}"
     );
 }
+
+/// P152 (e2e lane B #5): picking a session from `/resume` that is already open in a tab switches to that tab. The RC
+/// switched silently, so the user saw that tab's last line ("Forked") and thought the resume had forked. Say what
+/// happened.
+#[test]
+fn p152_resuming_an_open_session_says_it_switched() {
+    let mut app = test_app_with_two_agents();
+    let effects = dispatch(
+        Action::LoadSession("second-session".into(), None, false),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "no load for an open session: {effects:?}");
+    assert!(
+        matches!(app.active_view, ActiveView::Agent(id) if id == AgentId(1)),
+        "the open session's tab is focused"
+    );
+    let toast = app.agents[&AgentId(1)]
+        .toast
+        .as_ref()
+        .map(|(t, _)| t.clone())
+        .unwrap_or_default();
+    assert!(
+        toast.contains("already open"),
+        "the switch must be explained, got toast {toast:?}"
+    );
+}

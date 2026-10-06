@@ -1,5 +1,6 @@
 //! Anthropic Messages API (`/v1/messages`) wire types.
 
+use crate::serde_helpers::Open;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -217,7 +218,9 @@ pub struct MessagesResponse {
     #[serde(rename = "type")]
     pub r#type: String, // "message"
     pub role: String, // "assistant"
-    pub content: Vec<ContentBlock>,
+    /// `Open` because Anthropic adds content-block types (`server_tool_use`, `web_search_tool_result`, …)
+    /// without a version bump: an unmodelled block is preserved verbatim rather than failing the whole response.
+    pub content: Vec<Open<ContentBlock>>,
     pub model: String,
     pub stop_reason: Option<StopReason>,
     pub usage: MessagesUsage,
@@ -285,11 +288,14 @@ pub enum MessageStreamEvent {
     MessageStop,
     ContentBlockStart {
         index: u32,
-        content_block: ContentBlock,
+        /// `Open`: a block type this client does not model is skipped, not fatal.
+        /// A block type it DOES model with a malformed body still fails the parse.
+        content_block: Open<ContentBlock>,
     },
     ContentBlockDelta {
         index: u32,
-        delta: StreamDelta,
+        /// `Open`: a delta type this client does not model is skipped, not fatal.
+        delta: Open<StreamDelta>,
     },
     ContentBlockStop {
         index: u32,
@@ -483,12 +489,14 @@ mod tests {
         )
         .expect("redacted_thinking content_block_start must deserialize");
         match event {
-            MessageStreamEvent::ContentBlockStart { content_block, .. } => match content_block {
-                ContentBlock::RedactedThinking { data } => {
-                    assert_eq!(data, "EvwBCkgY...opaque");
+            MessageStreamEvent::ContentBlockStart { content_block, .. } => {
+                match content_block.into_known() {
+                    Some(ContentBlock::RedactedThinking { data }) => {
+                        assert_eq!(data, "EvwBCkgY...opaque");
+                    }
+                    other => panic!("expected RedactedThinking, got {other:?}"),
                 }
-                other => panic!("expected RedactedThinking, got {other:?}"),
-            },
+            }
             other => panic!("expected ContentBlockStart, got {other:?}"),
         }
 

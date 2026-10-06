@@ -193,14 +193,11 @@ mod tests {
 
     /// The matcher runs off-thread, so an accept fired before it answers finds no selection and backs out of the browse instead.
     fn await_history_results(agent: &mut AgentView) {
-        for _ in 0..500 {
-            agent.prompt.history_search.poll();
-            if agent.prompt.history_search.selected_text().is_some() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-        panic!("the history matcher never delivered a selection");
+        // On the matcher's answer, not on a count of polls: a loaded host has kept that thread off the CPU for over a second (P78).
+        agent
+            .prompt
+            .history_search
+            .poll_until("a selection", |s| s.selected_text().is_some());
     }
 
     fn chords() -> [KeyEvent; 2] {

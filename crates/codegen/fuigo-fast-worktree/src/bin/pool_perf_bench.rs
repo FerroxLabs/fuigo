@@ -13,6 +13,9 @@
 //!
 //! Usage:
 //!   cargo run --release --bin pool-perf-bench -- [--source /path/to/repo] [--iterations 3]
+// Dev/benchmark tool: never shipped (not linked into `fuigo-pager`), run by hand on a terminal.
+// Printing is its whole interface, so the workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

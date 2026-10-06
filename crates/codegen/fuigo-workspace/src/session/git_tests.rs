@@ -569,6 +569,9 @@ fn register_db_worktree(home: &Path, wt: &Path, source: &Path, label: &str) {
 
 #[test]
 fn get_worktree_info_db_record_without_marker() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let home = dunce::canonicalize(tmp.path()).unwrap().join("fuigo-home");
     std::fs::create_dir_all(&home).unwrap();
@@ -589,6 +592,9 @@ fn get_worktree_info_db_record_without_marker() {
 
 #[test]
 fn get_worktree_info_nested_repo_does_not_inherit_db_record() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let home = dunce::canonicalize(tmp.path()).unwrap().join("fuigo-home");
     std::fs::create_dir_all(&home).unwrap();

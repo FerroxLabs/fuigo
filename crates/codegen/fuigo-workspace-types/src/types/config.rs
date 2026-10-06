@@ -62,7 +62,7 @@ pub struct ToolServerConfig {
 ///
 /// `Default` returns a config with `IsolationMode::None` and `CapabilityMode::ReadWrite`, oriented at the root session, not subagents.
 /// Construct subagent configs by fully-naming the relevant fields (or use a builder helper) rather than relying on `..Default::default()`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentSessionConfig {
     /// Agent identifier (e.g. `"subagent-explore"`).
     pub agent_id: String,
@@ -84,6 +84,31 @@ pub struct AgentSessionConfig {
     /// Extra environment variables to set for the subagent.
     #[serde(default)]
     pub extra_env: BTreeMap<String, String>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for AgentSessionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            agent_id,
+            isolation,
+            capability_mode,
+            tool_config,
+            max_depth,
+            cwd_override,
+            extra_env,
+        } = self;
+        f.debug_struct("AgentSessionConfig")
+            .field("agent_id", agent_id)
+            .field("isolation", isolation)
+            .field("capability_mode", capability_mode)
+            .field("tool_config", tool_config)
+            .field("max_depth", max_depth)
+            .field("cwd_override", cwd_override)
+            .field("extra_env", &extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 /// Project configuration returned by `OpsChunk::ProjectConfig`.

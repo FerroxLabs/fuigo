@@ -288,8 +288,18 @@ fn write_owner_only_atomic(path: &Path, content: &str) -> Result<()> {
 
 /// Last access token an adapter served.
 /// Reauth compares the store against this to tell a fresh token apart from one this client already failed with.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ObservedAccessToken(Arc<parking_lot::Mutex<Option<String>>>);
+
+/// Hand-written `Debug` (P70): reports whether a token was observed, never the token. The destructure is exhaustive,
+/// so a new field fails to compile here until its Debug output is decided (Astra r6).
+impl std::fmt::Debug for ObservedAccessToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self(observed) = self;
+        let observed = observed.lock().as_ref().map(|_| "<redacted>");
+        f.debug_tuple("ObservedAccessToken").field(&observed).finish()
+    }
+}
 
 impl ObservedAccessToken {
     pub(crate) fn snapshot(&self) -> Option<String> {

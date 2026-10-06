@@ -26,7 +26,10 @@ pub(crate) fn manual_auth_reason(err: &AuthError) -> Option<ManualAuthReason> {
             RefreshTokenFailedReason::RefreshTokenRejected => R::RefreshTokenRejected,
             RefreshTokenFailedReason::ProviderInteractiveRequired => R::ProviderInteractiveRequired,
             // Self-healing via the TTL, not a manual re-auth.
-            RefreshTokenFailedReason::ClientRejected | RefreshTokenFailedReason::Other => {
+            // A policy refusal (P149) is fixed by the provider's configuration, not by signing in again.
+            RefreshTokenFailedReason::ClientRejected
+            | RefreshTokenFailedReason::Other
+            | RefreshTokenFailedReason::TokenEndpointRefused => {
                 return None;
             }
         },
@@ -351,7 +354,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: disk token expired",
                 None,
                 Some(serde_json::json!({
-                    "disk_key_prefix": fuigo_auth::bearer_suffix(&disk_auth.key),
+                    "disk_key_prefix": fuigo_auth::bearer_fingerprint(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -363,7 +366,7 @@ impl UnauthorizedRecovery {
                 "auth recovery: adopted disk token",
                 None,
                 Some(serde_json::json!({
-                    "adopted_key_prefix": fuigo_auth::bearer_suffix(&disk_auth.key),
+                    "adopted_key_prefix": fuigo_auth::bearer_fingerprint(&disk_auth.key),
                     "expires_at": disk_auth.expires_at.map(|e| e.to_rfc3339()),
                 })),
             );
@@ -402,7 +405,7 @@ impl UnauthorizedRecovery {
             "auth recovery: fresh mint, refresh skipped",
             None,
             Some(serde_json::json!({
-                "key_prefix": fuigo_auth::bearer_suffix(&auth.key),
+                "key_prefix": fuigo_auth::bearer_fingerprint(&auth.key),
                 "mint_age_seconds": mint_age_seconds,
                 "guard_seconds": FRESH_MINT_GUARD_SECS,
                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
@@ -441,7 +444,7 @@ impl UnauthorizedRecovery {
                             None,
                             Some(serde_json::json!({
                                 "token_type": format!("{tt:?}"),
-                                "new_key_prefix": fuigo_auth::bearer_suffix(&auth.key),
+                                "new_key_prefix": fuigo_auth::bearer_fingerprint(&auth.key),
                                 "expires_at": auth.expires_at.map(|e| e.to_rfc3339()),
                             })),
                         );

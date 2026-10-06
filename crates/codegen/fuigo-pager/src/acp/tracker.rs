@@ -16,14 +16,15 @@ use crate::scrollback::blocks::tool::{
     ReadMediaKind, ReadToolCallBlock, ToolCallBlock, UseToolCallBlock, WebFetchToolCallBlock,
     WebSearchToolCallBlock,
 };
+use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry};
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::scrollback::state::verb_group::verb_group_kind_changed;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Local, TimeZone};
+use fuigo_shell::session::storage::chunk_meta_flag;
 use fuigo_tools::types::output::{BashOutput, ToolOutput};
 use fuigo_tools::types::output::{ReadFileOutput, SearchToolOutput, WebFetchOutput};
-use fuigo_shell::session::storage::chunk_meta_flag;
 use fuigo_tools::util::strip_redundant_session_cd;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -239,6 +240,8 @@ pub enum TurnActivity {
         reason: String,
         /// Sampler error kind when the shell forwarded one.
         error_type: Option<String>,
+        /// The shell's typed verdicts for `reason` (P119); the headline reads these, not the text.
+        verdicts: Option<fuigo_shell::sampling::error_verdicts::ErrorVerdicts>,
     },
     /// The model is streaming tool-call arguments; see [`WritingToolCall`].
     WritingToolCall(WritingToolCall),
@@ -338,6 +341,12 @@ pub struct AcpUpdateTracker {
     /// ToolCallUpdates that arrived before their ToolCall (race condition).
     /// When the ToolCall arrives, we merge and create the entry immediately as completed.
     orphan_updates: HashMap<String, acp::ToolCallUpdate>,
+    /// Scrollback row of every tool call shown this turn, by ACP tool call ID, so a hook batch stamped with its call's ID lands on
+    /// that call's row however many calls of the batch are in flight. Cleared at turn end.
+    tool_entry_ids: HashMap<String, EntryId>,
+    /// Hook runs whose call has no row yet (a `pre_tool_use` batch can arrive before its `ToolCall`); applied when the row is
+    /// created, dropped at turn end for calls that never get one (todo/task/goal/workflow plumbing).
+    orphan_tool_hooks: HashMap<String, Vec<(HookPhase, Vec<HookRunEntry>)>>,
     /// Last computed thinking elapsed (ms) from server timestamps.
     /// Updated on every thought chunk as `agentTimestampMs - streamStartMs`.
     /// Frozen when thinking ends (passed to `finish_running_with_time`).
@@ -411,6 +420,9 @@ pub struct AcpUpdateTracker {
     /// A meta-less follow-up update intentionally preserves the previous `Some` (see the assignment in `handle_update`).
     /// Without that, a partial replay could silently regress the registry to the unknown-toolset state.
     pending_acp_tools: Option<Vec<String>>,
+    /// The session's memory state as the shell last stated it (`AvailableCommandsUpdate.meta.memoryEnabled`).
+    /// `None` until the shell has said; it is never drained, only replaced.
+    memory_enabled: Option<bool>,
     /// Live Edit completions awaiting full-file HL (drained via [`Self::take_pending_edit_hl`]).
     pending_edit_hl: Vec<EntryId>,
 }
@@ -475,9 +487,53 @@ impl Utf8Decoder {
         &self.decoded
     }
 }
+/// Record that tool call `tc_id` is shown as row `id`, then put any hook runs that arrived before the row on it.
+/// Takes the two maps rather than `&mut AcpUpdateTracker` so it can run while a `pending_tools` entry is borrowed.
+fn note_tool_entry_in(
+    tool_entry_ids: &mut HashMap<String, EntryId>,
+    orphan_tool_hooks: &mut HashMap<String, Vec<(HookPhase, Vec<HookRunEntry>)>>,
+    tc_id: &str,
+    id: EntryId,
+    scrollback: &mut ScrollbackState,
+) {
+    tool_entry_ids.insert(tc_id.to_string(), id);
+    if let Some(batches) = orphan_tool_hooks.remove(tc_id) {
+        for (phase, runs) in batches {
+            scrollback.attach_hooks(id, phase, runs);
+        }
+    }
+}
 impl AcpUpdateTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Put a hook batch on the row of the tool call it belongs to, or hold it until that row exists (see `orphan_tool_hooks`).
+    /// Returns whether a row changed.
+    pub fn attach_tool_hooks(
+        &mut self,
+        scrollback: &mut ScrollbackState,
+        tool_call_id: &str,
+        phase: HookPhase,
+        runs: Vec<HookRunEntry>,
+    ) -> bool {
+        // Only the turn-scoped map: every row shown for a call is registered there when it is created, and a call from an earlier
+        // turn (still pending after an image-only boundary, say) must never be found
+        let row = self.tool_entry_ids.get(tool_call_id).copied();
+        match row {
+            Some(id) if scrollback.get_by_id(id).is_some() => {
+                scrollback.attach_hooks(id, phase, runs);
+                true
+            }
+            // A row merged away (Edit coalescing) has nowhere to show the batch
+            Some(_) => false,
+            None => {
+                self.orphan_tool_hooks
+                    .entry(tool_call_id.to_string())
+                    .or_default()
+                    .push((phase, runs));
+                false
+            }
+        }
     }
     pub(crate) fn output_since_last_finish(&self) -> bool {
         self.agent_output_epoch != self.epoch_at_last_finish
@@ -702,6 +758,14 @@ impl AcpUpdateTracker {
     ///
     /// Drained alongside `take_pending_acp_commands()`; the same `AvailableCommandsUpdate` carries both.
     /// `None` means the shell didn't include a `meta.tools` field (older shell, or no update since last drain).
+    /// The shell's last statement of whether this session has memory on; `None` if it has not said.
+    pub fn memory_enabled(&self) -> Option<bool> {
+        self.memory_enabled
+    }
+    #[cfg(test)]
+    pub(crate) fn set_memory_enabled_for_test(&mut self, enabled: Option<bool>) {
+        self.memory_enabled = enabled;
+    }
     pub fn take_pending_acp_tools(&mut self) -> Option<Vec<String>> {
         self.pending_acp_tools.take()
     }
@@ -732,6 +796,7 @@ impl AcpUpdateTracker {
     /// The returned id may no longer be in the scrollback: a completed Edit can coalesce into an adjacent earlier Edit of the same file.
     fn finish_completed_tool(
         &mut self,
+        tc_id: &str,
         block: RenderBlock,
         scrollback: &mut ScrollbackState,
         is_replay: bool,
@@ -742,13 +807,32 @@ impl AcpUpdateTracker {
             self.pending_edit_hl.push(id);
         }
         scrollback.finish_running(id);
+        // Before coalescing: held hook runs land on this call's row first, and a row carrying hooks is never merged away
+        note_tool_entry_in(
+            &mut self.tool_entry_ids,
+            &mut self.orphan_tool_hooks,
+            tc_id,
+            id,
+            scrollback,
+        );
         self.try_coalesce_edit(id, scrollback, is_replay);
         id
     }
+    /// Record that tool call `tc_id` is shown as row `id` (a row created outside the tracker, e.g. a background task's) and
+    /// put any held hook runs on it.
+    pub fn note_tool_row(&mut self, tc_id: &str, id: EntryId, scrollback: &mut ScrollbackState) {
+        note_tool_entry_in(
+            &mut self.tool_entry_ids,
+            &mut self.orphan_tool_hooks,
+            tc_id,
+            id,
+            scrollback,
+        );
+    }
     /// The Edit block of `entry` if it qualifies for coalescing with an adjacent same-file Edit.
-    /// Qualifying means: completed successfully with hunks and a trustworthy one-liner summary.
+    /// Qualifying means: completed successfully with hunks, a trustworthy one-liner summary, and no per-entry attachments a merge would misplace.
     fn coalescable_edit(entry: &ScrollbackEntry) -> Option<&EditToolCallBlock> {
-        if entry.is_running || entry.is_pending_user_input {
+        if entry.is_running || entry.is_pending_user_input || entry.hook_data.is_some() {
             return None;
         }
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = &entry.block else {
@@ -864,6 +948,12 @@ impl AcpUpdateTracker {
         }
         scrollback.mark_structurally_dirty(survivor);
         scrollback.remove_entry(removed);
+        // The merged call's later hook batches belong on the row that now shows it
+        for row in self.tool_entry_ids.values_mut() {
+            if *row == removed {
+                *row = survivor;
+            }
+        }
         self.pending_edit_hl.retain(|id| *id != removed);
         if !is_replay && !self.pending_edit_hl.contains(&survivor) {
             self.pending_edit_hl.push(survivor);
@@ -952,6 +1042,14 @@ impl AcpUpdateTracker {
                 if let Some(t) = parse_tools_meta(update.meta.as_ref()) {
                     self.pending_acp_tools = Some(t);
                 }
+                if let Some(enabled) = update
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get("memoryEnabled"))
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    self.memory_enabled = Some(enabled);
+                }
                 self.pending_acp_commands = Some(update.available_commands);
                 true
             }
@@ -994,6 +1092,8 @@ impl AcpUpdateTracker {
         self.suppressed_tools.clear();
         self.blocking_waits.clear();
         self.orphan_updates.clear();
+        self.tool_entry_ids.clear();
+        self.orphan_tool_hooks.clear();
         self.skip_next_skill_body = false;
     }
     /// Finish the current thinking block, passing elapsed time to the entry.
@@ -1181,7 +1281,7 @@ impl AcpUpdateTracker {
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);
             let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
-            self.finish_completed_tool(block, scrollback, is_replay);
+            self.finish_completed_tool(&tc_id, block, scrollback, is_replay);
             return true;
         }
         let is_completed = matches!(
@@ -1190,11 +1290,18 @@ impl AcpUpdateTracker {
         );
         if is_completed {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
-            self.finish_completed_tool(block, scrollback, is_replay);
+            self.finish_completed_tool(&tc_id, block, scrollback, is_replay);
         } else {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
             let id = scrollback.push_block(block);
             scrollback.set_last_running(true);
+            note_tool_entry_in(
+                &mut self.tool_entry_ids,
+                &mut self.orphan_tool_hooks,
+                &tc_id,
+                id,
+                scrollback,
+            );
             let started_at = Some(std::time::Instant::now());
             self.pending_tools.insert(
                 tc_id,
@@ -1263,7 +1370,7 @@ impl AcpUpdateTracker {
                     {
                         base.update(tcu.fields);
                         let block = tool_call_to_block(&base, self.session_cwd.as_deref());
-                        self.finish_completed_tool(block, scrollback, is_replay);
+                        self.finish_completed_tool(&tc_id_str, block, scrollback, is_replay);
                         return true;
                     }
                 }
@@ -1302,6 +1409,21 @@ impl AcpUpdateTracker {
                     let desc = extract_raw_field(&pending.base, "description");
                     if drop_placeholder {
                         if let Some(id) = pending.entry_id.take() {
+                            // The placeholder's hook runs, and any batch arriving before the replacement row, follow the call
+                            // to the row that shows it next (the BgTask row, registered through `note_tool_row`)
+                            if let Some(data) = scrollback
+                                .get_by_id_mut(id)
+                                .and_then(|e| e.hook_data.take())
+                            {
+                                let held = self.orphan_tool_hooks.entry(tc_id.clone()).or_default();
+                                if !data.pre_hooks.is_empty() {
+                                    held.push((HookPhase::Pre, data.pre_hooks));
+                                }
+                                if !data.post_hooks.is_empty() {
+                                    held.push((HookPhase::Post, data.post_hooks));
+                                }
+                            }
+                            self.tool_entry_ids.remove(&tc_id);
                             scrollback.remove_entry(id);
                         }
                         Some((tc_id.clone(), desc, false))
@@ -1336,6 +1458,13 @@ impl AcpUpdateTracker {
                         let id = scrollback.push_block(block);
                         scrollback.set_last_running(true);
                         pending.entry_id = Some(id);
+                        note_tool_entry_in(
+                            &mut self.tool_entry_ids,
+                            &mut self.orphan_tool_hooks,
+                            &tc_id,
+                            id,
+                            scrollback,
+                        );
                         id
                     };
                     if let Some(bash_output) = bash_output {
@@ -1377,7 +1506,7 @@ impl AcpUpdateTracker {
                 scrollback.finish_running(entry_id);
                 self.try_coalesce_edit(entry_id, scrollback, is_replay);
             } else {
-                self.finish_completed_tool(block, scrollback, is_replay);
+                self.finish_completed_tool(&tc_id, block, scrollback, is_replay);
             }
             true
         } else {
@@ -1395,6 +1524,10 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
+        // A user message starts a new turn, live or replayed, whatever its content (an image-only prompt has no text): tool call IDs,
+        // and hook batches keyed by them, are turn-scoped, and a replay never runs `finish_turn` between historical turns
+        self.tool_entry_ids.clear();
+        self.orphan_tool_hooks.clear();
         let text = extract_text_from_content(&chunk.content);
         if self.skip_next_skill_body {
             self.skip_next_skill_body = false;

@@ -30,6 +30,18 @@ pub(crate) struct SummaryConfig {
     pub(crate) persistence_tx: mpsc::WeakUnboundedSender<PersistenceMsg>,
 }
 
+/// P121 (K6): a rebuilt title client and the model it titles with, handed to a live persistence actor.
+pub struct SummaryHelper {
+    pub(crate) client: OaiCompatClient,
+    pub(crate) model: String,
+}
+
+impl std::fmt::Debug for SummaryHelper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SummaryHelper").field("model", &self.model).finish_non_exhaustive()
+    }
+}
+
 /// Created once per persistence actor. The only public method is [`update`], which is called from the `ContentChunk` handler.
 pub(crate) struct SummaryGenerator {
     state: State,
@@ -103,6 +115,13 @@ impl SummaryGenerator {
                 });
             }
         }
+    }
+
+    /// P121 (K6): title with this client and model from now on (a model switch or a catalog reload).
+    /// A title already being generated finishes on the client it started with.
+    pub(crate) fn replace_helper(&mut self, helper: SummaryHelper) {
+        self.config.sampling_client = helper.client;
+        self.config.model = helper.model;
     }
 
     /// Mark as Done (e.g. when disk already has a summary during load).

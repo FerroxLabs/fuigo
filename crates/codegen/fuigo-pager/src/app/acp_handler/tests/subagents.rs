@@ -975,6 +975,9 @@
 
     #[test]
     fn a_replay_tagged_spawn_outside_a_session_load_is_dropped() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|_| {
             let child_sid = "child-unexpected-replay";
             let mut app = make_app_with_agent("sess-parent");
@@ -1032,6 +1035,9 @@
 
     #[test]
     fn subagent_spawned_during_resume_defers_child_replay_until_open() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|_| {
             let child_sid = "child-resume-defer";
             let mut app = make_app_with_agent("sess-parent");
@@ -1081,6 +1087,9 @@
 
     #[test]
     fn live_spawn_burst_defers_child_replay_until_open() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // The burst size that froze the TUI in the field.
         const BURST_CHILDREN: usize = 25;
 
@@ -1137,6 +1146,9 @@
 
     #[test]
     fn resumed_child_keeps_inherited_history_when_a_live_block_arrives_first() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|home| {
             let child_sid = "child-resume-live-first";
             write_child_updates_jsonl(home, child_sid, &(child_tool_line(child_sid) + "\n"));
@@ -1191,6 +1203,9 @@
 
     #[test]
     fn subagent_resume_finished_then_open_shows_full_transcript() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|_| {
             let child_sid = "child-resume-finished";
             let mut app = make_app_with_agent("sess-parent");
@@ -1255,6 +1270,9 @@
 
     #[test]
     fn an_open_resumed_child_that_finishes_without_streaming_hydrates_in_place() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|home| {
             let child_sid = "child-open-resume-finish";
 
@@ -1507,8 +1525,95 @@
             )
         }
 
+        /// A rebuild starts from an empty view, so the hook-event ids the view recorded before eviction must not make the replay
+        /// drop its own hook events as duplicates (the rebuilt row would lose its runs).
+        #[test]
+        fn a_rebuilt_child_keeps_its_replayed_hook_runs() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
+            let child_sid = "child-evict-hooks";
+            let lines = format!(
+                "{}\n{}\n",
+                child_tool_line(child_sid),
+                child_hook_line(child_sid, "tc1", &format!("{child_sid}-5"))
+            );
+            let mut s = Scenario::spawn(child_sid, Some(lines));
+            s.open();
+            assert_eq!(child_hook_run_count(s.agent(), child_sid), 1, "first read shows the run");
+            s.close();
+            s.finish();
+            assert_eq!(s.tool_calls(), 0, "the finished child is evicted");
+            s.open();
+            assert_eq!(s.tool_calls(), 1, "and rebuilt on open");
+            assert_eq!(
+                child_hook_run_count(s.agent(), child_sid),
+                1,
+                "the rebuilt row keeps its replayed hook run"
+            );
+        }
+
+        /// Astra (round 2): a running child's view can be empty while its tracker holds a hook batch for a row not yet shown.
+        /// Opening it replays disk (here: that same event only, so the read counts as empty); the replay must not hold the event a
+        /// second time, or both copies land when the row arrives.
+        #[test]
+        fn a_held_child_hook_is_not_doubled_by_an_open_time_replay() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
+            let child_sid = "child-held-hook";
+            let id = format!("{child_sid}-7");
+            let mut s = Scenario::spawn(child_sid, Some(child_hook_line(child_sid, "tc-2", &id) + "\n"));
+            let live_hook = fuigo_shell::extensions::notification::SessionNotification {
+                session_id: acp::SessionId::new(child_sid),
+                update: FuigoSessionUpdate::HookExecution {
+                    event_name: "pre_tool_use".into(),
+                    tool_name: None,
+                    tool_call_id: Some("tc-2".into()),
+                    prompt_id: None,
+                    runs: vec![fuigo_shell::extensions::notification::HookRunEntryDto {
+                        name: "plugin/kid/hooks:pre_tool_use[0].hooks[0]".into(),
+                        status: fuigo_shell::extensions::notification::HookRunStatusDto::Success { elapsed_ms: 3 },
+                        output: None,
+                    }],
+                },
+                meta: Some(serde_json::json!({ "eventId": id })),
+            };
+            let raw = serde_json::value::to_raw_value(&live_hook).unwrap();
+            let _ = handle_ext_notification(
+                &acp::ExtNotification::new("fuigo/session/update", raw.into()),
+                &mut s.app,
+            );
+            assert_eq!(
+                s.agent().subagent_views[child_sid].scrollback.len(),
+                0,
+                "fixture: the batch is held, the view still empty"
+            );
+            s.open();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = handle(
+                AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs {
+                    request: acp::SessionNotification::new(
+                        acp::SessionId::new(child_sid),
+                        make_tool_call("Child tool"),
+                    ),
+                    response_tx: tx,
+                }),
+                &mut s.app,
+            );
+            assert_eq!(s.tool_calls(), 1, "fixture: the row arrived");
+            assert_eq!(
+                child_hook_run_count(s.agent(), child_sid),
+                1,
+                "the held batch lands once"
+            );
+        }
+
         #[test]
         fn a_finished_foreground_child_is_evicted_then_rebuilds_on_open() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             enum Trigger {
                 FinishWhileClosed,
                 CloseWhileOpen,
@@ -1562,6 +1667,9 @@
 
         #[test]
         fn an_evict_guard_keeps_the_transcript_in_place() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             enum Guard {
                 OpenAtFinish,
                 RunningOnClose,
@@ -1583,6 +1691,9 @@
 
         #[test]
         fn the_persisted_echo_paints_the_prompt_once_on_open() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             // Same echo-paints-once on open whether the view is freshly spawned or was first evicted back to the empty baseline
             enum Entry {
                 FreshSpawn,
@@ -1630,6 +1741,9 @@
 
         #[test]
         fn a_live_echo_then_open_of_a_running_child_keeps_one_prompt() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-echo-live-then-open";
             let task = "scan src/ for auth";
             write_subagent_meta_json(replay_disk_test_home(), "sess-parent", child_sid, task);
@@ -1660,6 +1774,9 @@
 
         #[test]
         fn a_later_different_user_message_still_appears() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-echo-second-prompt";
             let task = "scan src/ for auth";
             let follow_up = "now check tests/ too";
@@ -1682,6 +1799,9 @@
 
         #[test]
         fn late_block_after_evict_still_rebuilds_on_open() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-late-event";
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
             s.finish();
@@ -1698,6 +1818,9 @@
 
         #[test]
         fn a_nonemitting_rebuild_of_an_evicted_view_retries_until_disk_lands() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             // An evicted view holds nothing to restore, so a non-emitting read stays NeedsReplay and retries once real content lands
             // A read error applies no footer; an Empty read (flush not landed yet) still stamps the finished footer on the bare view
             enum Outcome {
@@ -1733,6 +1856,9 @@
 
         #[test]
         fn partial_flush_rebuild_self_heals_on_next_open_cycle() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-partial-flush";
             // Only a prefix of the final transcript is on disk at finish time.
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
@@ -1766,6 +1892,9 @@
 
         #[test]
         fn finished_background_child_with_content_never_rebuilds() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-bg-no-rebuild";
             let mut s = Scenario::spawn(child_sid, Some(child_tool_line(child_sid) + "\n"));
             s.set_background();
@@ -1788,6 +1917,9 @@
 
         #[test]
         fn a_nonemitting_rebuild_restores_the_populated_view() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             // Content the replay never read back is restored when the rebuild reads nothing
             // A read error stays retriable; an Empty read pins the only copy MemoryOnly
             enum Outcome {
@@ -1845,6 +1977,9 @@
 
         #[test]
         fn finish_keeps_the_only_copy_when_disk_cannot_rebuild_it() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             // Two ways disk cannot rebuild: nothing persisted, or a non-emitting file.
             for (child_sid, updates) in [
                 ("child-no-disk-copy", None),
@@ -1883,6 +2018,9 @@
 
         #[test]
         fn rebuild_after_evict_preserves_child_compaction_markers() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let child_sid = "child-fuigo-marker";
             let updates = format!(
                 "{}\n{}\n{}\n",
@@ -1915,6 +2053,9 @@
 
     #[test]
     fn subagent_spawn_seeds_no_prompt_and_reads_no_disk() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         // meta.json still enriches SubagentInfo.prompt (tasks pane, status rows), but the child view gets no copy of it
         let cases: &[Option<&str>] = &[Some("explore handlers only"), Some("   "), None];
         for (idx, meta) in cases.iter().enumerate() {
@@ -1960,6 +2101,9 @@
 
     #[test]
     fn subagent_spawn_and_open_replay_is_idempotent() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|_| {
             let child_sid = "child-idempotent";
             let mut app = make_app_with_agent("sess-parent");
@@ -1988,6 +2132,9 @@
 
     #[test]
     fn subagent_spawn_live_foreign_cwd_is_never_read() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|home| {
             let child_sid = "child-foreign-cwd";
             write_child_updates_jsonl_under_cwd(
@@ -2027,6 +2174,9 @@
 
     #[test]
     fn subagent_open_resumed_child_reads_foreign_cwd_transcript() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         with_replay_disk_home(|home| {
             let child_sid = "child-resume-foreign";
             write_child_updates_jsonl_under_cwd(

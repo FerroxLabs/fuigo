@@ -46,11 +46,11 @@ pub async fn load_session_via_agent<C: acp::Client + 'static>(
     let (a2c_a, a2c_b) = tokio::io::duplex(DUPLEX_BUFFER_BYTES);
 
     // Agent side.
-    let agent_incoming = LineBufferedRead::spawn_local(c2a_b.compat());
-    let (agent_conn, agent_io) =
-        acp::AgentSideConnection::new(agent, a2c_a.compat_write(), agent_incoming, |fut| {
-            tokio::task::spawn_local(fut);
-        });
+    let (agent_conn, agent_io) = crate::agent::credential_scrub::agent_side_connection(
+        agent,
+        a2c_a.compat_write(),
+        c2a_b.compat(),
+    );
     tokio::task::spawn_local(
         GatewayReceiver::new(gw_rx, agent_conn)
             .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)

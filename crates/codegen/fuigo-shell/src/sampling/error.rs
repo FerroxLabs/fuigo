@@ -62,16 +62,33 @@ pub fn format_rate_limited_user_message(
     server_detail: Option<&str>,
     is_api_key_auth: bool,
 ) -> String {
+    format_rate_limited_user_message_with(server_detail, is_api_key_auth, None)
+}
+
+/// [`format_rate_limited_user_message`] deciding on `verdicts` when the shell sent them (P119): the free-usage
+/// paywall and the consumer-upsell replacement are then read from the typed verdicts, never from `server_detail`,
+/// which the shell may already have scrubbed. Without verdicts (an older shell) the text decides, as before.
+pub fn format_rate_limited_user_message_with(
+    server_detail: Option<&str>,
+    is_api_key_auth: bool,
+    verdicts: Option<&crate::sampling::error_verdicts::ErrorVerdicts>,
+) -> String {
     // Free-usage sniff works on the prefixed wire string (`contains` the code).
-    if server_detail.is_some_and(is_free_usage_exhausted_error) {
+    let free_usage = match verdicts {
+        Some(v) => v.free_usage,
+        None => server_detail.is_some_and(is_free_usage_exhausted_error),
+    };
+    if free_usage {
         return FREE_USAGE_USER_MESSAGE.to_string();
     }
     if let Some(detail) = server_detail.map(str::trim).filter(|s| !s.is_empty()) {
         let detail = strip_sampling_api_error_prefix(detail);
-        if let Some(replacement) =
-            consumer_subscription_upsell_replacement(detail, is_api_key_auth)
-        {
-            return replacement.to_string();
+        let upsell = match verdicts {
+            Some(v) => v.consumer_upsell,
+            None => pushes_consumer_subscription_upsell(detail),
+        };
+        if upsell {
+            return consumer_upsell_replacement_copy(is_api_key_auth).to_string();
         }
         return detail.to_string();
     }
@@ -84,7 +101,7 @@ pub fn format_rate_limited_user_message(
 }
 
 /// Drop `SamplingError::Api`'s Display prefix so users see the IC body, not `API error (status 429 Too Many Requests): …`.
-fn strip_sampling_api_error_prefix(detail: &str) -> &str {
+pub(crate) fn strip_sampling_api_error_prefix(detail: &str) -> &str {
     const PREFIX: &str = "API error (status ";
     const SEP: &str = "): ";
     if let Some(rest) = detail.strip_prefix(PREFIX)
@@ -94,6 +111,13 @@ fn strip_sampling_api_error_prefix(detail: &str) -> &str {
     }
     detail.trim()
 }
+
+/// Hosts the consumer-plan pitch is sold from: the providers whose 429 bodies the generic arm of
+/// [`pushes_consumer_subscription_upsell`] was written against. The pitch always carries its own
+/// sign-up link, so the link is what tells it apart from a provider's real rate-limit message.
+/// `x.ai` is deliberately absent: a four-character needle matches inside unrelated hostnames, and
+/// the pitch links to `grok.com` anyway.
+const CONSUMER_PLAN_UPSELL_HOSTS: [&str; 3] = ["grok.com", "chatgpt.com", "openai.com"];
 
 /// The upstream provider reuses its own consumer-plan upsell copy on 429s ("upgrade to a SuperGrok
 /// subscription for higher limits: https://grok.com/supergrok").
@@ -106,13 +130,26 @@ fn strip_sampling_api_error_prefix(detail: &str) -> &str {
 /// The needle list carries the provider's own spelling on purpose. The `b5e43b9` rebrand rewrote
 /// "SuperGrok" to "Fuigo" in this matcher, which is the one place the rebrand must NOT reach: the
 /// string being matched comes off the wire from the provider, so it still says "SuperGrok".
-fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
+///
+/// The generic arm is scoped to [`CONSUMER_PLAN_UPSELL_HOSTS`], because this matcher now runs on
+/// EVERY provider's 429, not just the one it was written against. Unscoped, any body that happened
+/// to say "upgrade to a … subscription" — a legitimate rate-limit message from an unrelated
+/// provider, reset time included — was thrown away and replaced with Fuigo's copy.
+pub(crate) fn pushes_consumer_subscription_upsell(detail: &str) -> bool {
     let d = detail.to_ascii_lowercase();
-    d.contains("grok.com/supergrok")
+    if d.contains("grok.com/supergrok")
         || d.contains("supergrok subscription")
         || d.contains("upgrade to a fuigo subscription")
-        // Generic shape of the same pitch, whatever the plan is called this quarter.
-        || (d.contains("upgrade to a") && d.contains("subscription"))
+    {
+        return true;
+    }
+    // Generic shape of the same pitch, whatever the plan is called this quarter -- from the
+    // providers that sell one.
+    d.contains("upgrade to a")
+        && d.contains("subscription")
+        && CONSUMER_PLAN_UPSELL_HOSTS
+            .iter()
+            .any(|host| d.contains(host))
 }
 
 /// Our replacement copy for a 429 body that markets a consumer subscription, or `None` to show the
@@ -129,11 +166,17 @@ pub fn consumer_subscription_upsell_replacement(
     if !pushes_consumer_subscription_upsell(strip_sampling_api_error_prefix(detail)) {
         return None;
     }
-    Some(if is_api_key_auth {
+    Some(consumer_upsell_replacement_copy(is_api_key_auth))
+}
+
+/// The auth-appropriate copy that replaces a consumer-subscription pitch.
+/// A client that holds the typed `consumer_upsell` verdict uses it directly, without reading the text.
+pub fn consumer_upsell_replacement_copy(is_api_key_auth: bool) -> &'static str {
+    if is_api_key_auth {
         RATE_LIMITED_USER_MESSAGE_API_KEY
     } else {
         RATE_LIMITED_USER_MESSAGE_OAUTH
-    })
+    }
 }
 
 /// User-facing copy for capacity/overload failures (stream `overloaded_error`, HTTP 529, proxy-wrapped 5xx).
@@ -293,6 +336,12 @@ pub fn session_unavailable_error(message: impl Into<String>) -> acp::Error {
 /// A detail that repeats the message is printed once (the overload copy is both).
 /// `data` with no readable detail (a foreign or purely machine-readable payload) degrades to the JSON-RPC message, never to the object.
 pub fn acp_error_text(err: &acp::Error) -> String {
+    // P119: a disk-full failure whose text the shell scrubbed (a sent value that reads like the OS message) is still a
+    // disk-full failure: the verdict, not the words, says so.
+    if crate::sampling::error_verdicts::error_verdicts_from_error(err).is_some_and(|v| v.disk_full)
+    {
+        return fuigo_fast_worktree::ENOSPC_OS_MESSAGE.to_string();
+    }
     let headline = || {
         if err.message.is_empty() {
             i32::from(err.code).to_string()
@@ -504,7 +553,7 @@ pub(crate) fn prompt_complete_fields(
         Err(err) => {
             let is_rate_limit = i32::from(err.code) == RATE_LIMITED_ERROR_CODE;
             let stop = if is_rate_limit { "rate_limit" } else { "error" };
-            let result = if is_rate_limit {
+            let mut result = if is_rate_limit {
                 serde_json::Value::Null
             } else {
                 err.data
@@ -512,6 +561,10 @@ pub(crate) fn prompt_complete_fields(
                     .map(error_message_from_data)
                     .unwrap_or_else(|| serde_json::Value::String(err.message.clone()))
             };
+            // P70b display sink: `agentResult` / `agent_result` is the failed turn's error text as clients show it
+            // (`fuigo/session/prompt_complete`, the persisted `TurnCompleted`). Credentials sent upstream are replaced.
+            // The error kind is read from the typed data above, not from this text.
+            fuigo_telemetry::sent_credentials::scrub_json_strings(&mut result);
             (serde_json::json!(stop), result, error_kind_from_error(err))
         }
     }
@@ -977,6 +1030,42 @@ mod tests {
     fn format_rate_limited_rewrites_the_providers_own_upsell_wording() {
         let body = "You are sending requests too quickly. Please slow down, or \
              upgrade to a SuperGrok subscription for higher limits.";
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
+        assert_eq!(
+            format_rate_limited_user_message(Some(&wire), false),
+            RATE_LIMITED_USER_MESSAGE_OAUTH
+        );
+        assert_eq!(
+            format_rate_limited_user_message(Some(&wire), true),
+            RATE_LIMITED_USER_MESSAGE_API_KEY
+        );
+    }
+
+    /// The generic arm used to fire on EVERY provider's 429. A third-party provider that words its
+    /// own rate-limit message as an upgrade pitch had that message — reset time included — thrown
+    /// away and replaced with Fuigo's copy. It is now scoped to the hosts the pitch is sold from.
+    #[test]
+    fn format_rate_limited_keeps_an_unrelated_providers_own_upgrade_wording() {
+        let body = "Rate limit exceeded for this workspace. Limits reset at 14:05 UTC, or \
+             upgrade to a Team subscription at https://example-provider.test/pricing.";
+        let wire = format!("API error (status 429 Too Many Requests): {body}");
+        for is_api_key_auth in [false, true] {
+            assert_eq!(
+                format_rate_limited_user_message(Some(&wire), is_api_key_auth),
+                body,
+                "an unrelated provider's 429 body must survive intact"
+            );
+        }
+        assert_eq!(consumer_subscription_upsell_replacement(body, true), None);
+        assert_eq!(consumer_subscription_upsell_replacement(body, false), None);
+    }
+
+    /// Why the generic arm exists at all: the plan gets renamed, the sign-up link does not. A
+    /// pitch that no longer says "SuperGrok" is still caught, because it still links to grok.com.
+    #[test]
+    fn format_rate_limited_still_rewrites_a_renamed_plan_pitch_from_the_upsell_host() {
+        let body = "You are sending requests too quickly. Please slow down, or \
+             upgrade to a Grok Max subscription for higher limits: https://grok.com/plans";
         let wire = format!("API error (status 429 Too Many Requests): {body}");
         assert_eq!(
             format_rate_limited_user_message(Some(&wire), false),

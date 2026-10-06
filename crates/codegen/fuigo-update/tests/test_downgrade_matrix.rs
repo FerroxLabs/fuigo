@@ -338,7 +338,7 @@ async fn npm_drastically_old_registry_does_not_report_update() {
     assert!(!status.update_available);
 }
 
-// ── gh-release: --check is upgrade-only; rollback handled by auto-install ──
+// ── gh-release: --check is upgrade-only, and so is auto-install (R110 U2) ──
 
 #[tokio::test]
 #[serial]
@@ -355,7 +355,7 @@ async fn gh_release_upgrade_reports_update() {
 #[serial]
 async fn gh_release_rollback_not_advertised_by_check() {
     // `update --check` advertises upgrades only
-    // A rollback still converges via the auto-install path (covered by the internal_install_* tests), not here
+    // Only the internal installer converges down on a rolled-back pointer (covered by the internal_install_* tests)
     let g = setup_gh("0.2.7");
     g.set_stable_only_stdout("v0.2.5\n");
 
@@ -382,20 +382,21 @@ async fn gh_release_same_version_no_update() {
 // auto_update_target: the leader/background auto-install decision
 //
 // Unlike the upgrade-only `check_update_status` report, this is the downgrade-aware convergence decision
-// It gates on the installer, so authoritative installers (gh-release/internal) follow a rolled-back pointer while npm never downgrades
+// It gates on the installer: the internal installer follows a rolled-back pointer, while npm and gh-release never downgrade
+// automatically (R110 U2: gh-release's "latest" is derived from the release list, not an authoritative pointer)
 // `fetch_latest_version` keeps these hermetic
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[serial]
-async fn auto_update_target_gh_release_rollback_returns_older() {
+async fn auto_update_target_gh_release_never_returns_older() {
     let g = setup_gh("0.2.26");
     g.set_stable_only_stdout("v0.2.22\n");
 
     assert_eq!(
         auto_update_target(&make_config("stable")).await,
-        Some(("gh-release", "0.2.22".to_string())),
-        "authoritative installer must converge down on a rolled-back pointer"
+        None,
+        "gh-release must not auto-downgrade when the highest release is lower than the running version"
     );
 }
 
@@ -501,16 +502,17 @@ async fn ensure_latest_noop_when_running_and_disk_current() {
 
 #[tokio::test]
 #[serial]
-async fn ensure_latest_relaunches_onto_rolled_back_disk() {
-    // Pointer rolled back to 0.2.22 and the disk already converged
-    // A running 0.2.26 leader must relaunch onto the older binary (gh-release is an authoritative installer, so downgrades are allowed)
+async fn ensure_latest_does_not_relaunch_down_onto_a_lower_gh_release() {
+    // The highest release is 0.2.22 and the disk holds it (only an explicit `fuigo update --force` / `--version` puts a
+    // lower version there for gh-release). R110 U2: a running 0.2.26 leader does not relaunch down automatically; clients
+    // still on the newer version would reject the lower leader and keep evicting it (Astra P110 r2 #1)
     let g = setup_gh("0.2.26");
     g.set_stable_only_stdout("v0.2.22\n");
     fake_managed_install("0.2.22");
 
     let outcome = ensure_latest_on_disk(&make_config("stable")).await.unwrap();
-    assert_eq!(outcome.installed, None, "disk already at pointer");
-    assert!(outcome.relaunch_needed, "downgrade relaunch expected");
+    assert_eq!(outcome.installed, None, "disk already at the highest release");
+    assert!(!outcome.relaunch_needed, "no automatic downgrade relaunch");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

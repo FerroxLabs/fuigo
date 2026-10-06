@@ -192,6 +192,28 @@ async fn subscription_redirect_is_not_followed_and_error_body_is_redacted() {
     assert!(attacker.received.lock().unwrap().is_empty());
     assert_eq!(server.received.lock().unwrap().len(), 1);
 }
+/// P70b: the subscription transport stamps its own bearer after the shared dispatch path, so it records what it
+/// sent itself; the display and log sinks then replace that token if an upstream echoes it.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // the registry lock serializes this test with the ones that reset it
+async fn subscription_records_the_bearer_it_sent_for_the_sink_scrub() {
+    let _g = crate::sent_credentials::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    fuigo_secrets::sent_credentials::clear_for_tests();
+    let server = server(None).await;
+    let client = SamplingClient::new(config(SubscriptionKind::Xai, resolver(&server))).unwrap();
+    let _stream = client
+        .create_response_stream(request("hello".into()))
+        .await
+        .unwrap();
+    assert_eq!(server.received.lock().unwrap().len(), 1);
+    assert_eq!(
+        fuigo_secrets::sent_credentials::scrub("echo fake-token-1"),
+        "echo <redacted>"
+    );
+    fuigo_secrets::sent_credentials::clear_for_tests();
+}
 #[tokio::test]
 async fn subscription_wrong_host_expired_and_deserialized_configs_fail_closed() {
     let server = server(None).await;
@@ -423,4 +445,208 @@ fn subscription_switch_filters_foreign_reasoning_but_preserves_history_and_tool_
         2,
         "stored/source history remains untouched"
     );
+}
+
+// --- P16: subscription error classification -----------------------------------------------
+// `classify` used to answer every non-2xx with one fixed string and `should_retry: Some(false)`,
+// the shared retry veto (`SamplingError::is_retry_vetoed`). A subscription user lost the turn on
+// a transient 503 that an API-key user on the identical status retried. These cover the four
+// losses in that struct literal: the veto, `Retry-After`, `error_code`, and the unread body.
+
+/// One fixed non-2xx answer, with chosen headers and body, on the same `/responses` route.
+async fn error_server(
+    status: StatusCode,
+    extra_headers: Vec<(&'static str, &'static str)>,
+    body: String,
+) -> Server {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/responses", listener.local_addr().unwrap());
+    let received: Capture = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route(
+            "/responses",
+            post(
+                move |State(received): State<Capture>, headers: HeaderMap, sent: String| {
+                    let extra_headers = extra_headers.clone();
+                    let body = body.clone();
+                    async move {
+                        received.lock().unwrap().push((
+                            headers,
+                            serde_json::from_str(&sent).unwrap_or(serde_json::Value::Null),
+                        ));
+                        let mut response = (status, body).into_response();
+                        for (name, value) in extra_headers {
+                            response.headers_mut().insert(
+                                axum::http::HeaderName::from_static(name),
+                                axum::http::HeaderValue::from_static(value),
+                            );
+                        }
+                        response
+                    }
+                },
+            ),
+        )
+        .with_state(received.clone());
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    Server {
+        endpoint,
+        received,
+        task,
+    }
+}
+
+async fn subscription_error(kind: SubscriptionKind, server: &Server) -> SamplingError {
+    SamplingClient::new(config(kind, resolver(server)))
+        .unwrap()
+        .create_response_stream(request("hello".into()))
+        .await
+        .err()
+        .expect("a non-2xx subscription response must produce an error")
+}
+
+/// A transient 5xx is the case the hardcoded veto broke: it is safe to retry because `classify`
+/// only ever inspects a response HEAD, so a non-2xx status line means the provider refused
+/// before producing any completion. That is NOT P14's ambiguous exchange (a read that failed
+/// after a 2xx, where the reply may exist and be lost) — nothing here can reach a 2xx body.
+#[tokio::test]
+async fn subscription_transient_5xx_retries_and_keeps_the_providers_explanation() {
+    let server = error_server(
+        StatusCode::SERVICE_UNAVAILABLE,
+        vec![],
+        r#"{"error":{"message":"Upstream is warming up; try again shortly.","type":"server_error"}}"#
+            .to_string(),
+    )
+    .await;
+    let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    let SamplingError::Api {
+        status,
+        message,
+        should_retry,
+        ..
+    } = &err
+    else {
+        panic!("expected SamplingError::Api, got {err:?}");
+    };
+    assert_eq!(status.as_u16(), 503);
+    assert_eq!(
+        *should_retry, None,
+        "the provider sent no x-should-retry; a hardcoded Some(false) is the defect"
+    );
+    assert!(!err.is_retry_vetoed(), "a transient 5xx must not be vetoed");
+    assert!(err.is_retryable());
+    assert!(
+        message.contains("Upstream is warming up"),
+        "the provider's own explanation must survive: {message}"
+    );
+    assert!(
+        message.contains("No API-key fallback was attempted"),
+        "Fuigo's advice is an addition, not a substitution: {message}"
+    );
+    assert!(
+        matches!(
+            crate::retry::classify_error(&err, 0, 3, 2),
+            crate::retry::RetryDecision::Retry { .. }
+                | crate::retry::RetryDecision::RetryWithClientRebuild { .. }
+        ),
+        "a transient subscription 5xx must retry, exactly as it does for an API key"
+    );
+}
+
+/// The existing multi-vendor header parser (`client::extract_retry_after`) now feeds this path,
+/// so the provider's stated wait and machine-readable code reach the retry loop and the user.
+#[tokio::test]
+async fn subscription_429_carries_the_providers_retry_after_and_error_code() {
+    let server = error_server(
+        StatusCode::TOO_MANY_REQUESTS,
+        vec![("retry-after", "7")],
+        r#"{"error":{"message":"Rate limit reached; it resets in 7 seconds.","type":"rate_limit_exceeded","code":"rate_limit_exceeded"}}"#.to_string(),
+    )
+    .await;
+    let err = subscription_error(SubscriptionKind::Chatgpt, &server).await;
+    assert_eq!(err.retry_after(), Some(7), "Retry-After must not be dropped");
+    assert!(err.is_rate_limited());
+    let SamplingError::Api {
+        error_code,
+        message,
+        ..
+    } = &err
+    else {
+        panic!("expected SamplingError::Api, got {err:?}");
+    };
+    assert_eq!(
+        error_code.as_ref().map(|code| code.as_str()),
+        Some("rate_limit_exceeded")
+    );
+    assert!(message.contains("resets in 7 seconds"), "{message}");
+    assert!(matches!(
+        crate::retry::classify_error(&err, 0, 3, 2),
+        crate::retry::RetryDecision::RetryWithBackoff { backoff, is_rate_limited: true }
+            if backoff == std::time::Duration::from_secs(7)
+    ));
+}
+
+/// An expired subscription must stay fatal. Nothing about dropping the veto may make a 401
+/// retryable: `is_auth_error` short-circuits `classify_error` before any retry arm.
+#[tokio::test]
+async fn subscription_401_stays_fatal() {
+    let server = error_server(
+        StatusCode::UNAUTHORIZED,
+        vec![],
+        r#"{"error":{"message":"Your subscription session has expired.","type":"invalid_request_error"}}"#.to_string(),
+    )
+    .await;
+    let err = subscription_error(SubscriptionKind::Chatgpt, &server).await;
+    assert!(err.is_auth_error());
+    assert!(!err.is_retryable());
+    assert!(matches!(
+        crate::retry::classify_error(&err, 0, 3, 2),
+        crate::retry::RetryDecision::EmitToSession(_)
+    ));
+}
+
+/// The body is read bounded and only ever surfaces through `user_facing_api_error_message`,
+/// which yields status copy for anything that is not a structured JSON envelope. A body past
+/// the cap is truncated, so it stops parsing and cannot reach the user or a log.
+#[tokio::test]
+async fn subscription_oversized_error_body_is_truncated_and_never_echoed() {
+    let body = format!(
+        r#"{{"error":{{"message":"marker-must-not-echo {}","type":"server_error"}}}}"#,
+        "p".repeat(200_000)
+    );
+    let server = error_server(StatusCode::BAD_GATEWAY, vec![], body).await;
+    let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    let rendered = format!("{err} {err:?}");
+    assert!(
+        !rendered.contains("marker-must-not-echo"),
+        "a truncated body must never be shown: {}",
+        &rendered[..rendered.len().min(300)]
+    );
+    assert!(rendered.contains("502"), "{rendered}");
+    assert!(
+        rendered.len() < 2_000,
+        "an error must not carry a 200 KiB body: {} bytes",
+        rendered.len()
+    );
+}
+
+/// A structured message that fits the cap is still bounded by `MAX_USER_ERROR_BODY_CHARS`.
+#[tokio::test]
+async fn subscription_long_structured_error_message_is_capped() {
+    let body = format!(
+        r#"{{"error":{{"message":"{}","type":"server_error"}}}}"#,
+        "x".repeat(4_000)
+    );
+    let server = error_server(StatusCode::INTERNAL_SERVER_ERROR, vec![], body).await;
+    let err = subscription_error(SubscriptionKind::Xai, &server).await;
+    let SamplingError::Api { message, .. } = &err else {
+        panic!("expected SamplingError::Api, got {err:?}");
+    };
+    assert!(
+        message.chars().count() < 500,
+        "provider message must be capped: {} chars",
+        message.chars().count()
+    );
+    assert!(message.contains("No API-key fallback was attempted"));
 }

@@ -333,35 +333,452 @@ fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::F
     }
 }
 
+/// Call `visit(line_number, line)` for every non-blank line of a `rewind_points.jsonl` (1-based numbers, surrounding
+/// whitespace trimmed). Lines are bytes, not text: a record cut short inside a multi-byte character is one damaged line,
+/// never an I/O error that fails the whole read (P114). A missing file visits nothing.
+fn visit_rewind_lines(path: &Path, mut visit: impl FnMut(usize, &[u8])) -> io::Result<()> {
+    let Some(mut reader) = open_rewind_points(path)? else {
+        return Ok(());
+    };
+    let mut line = Vec::new();
+    let mut number = 0usize;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        number += 1;
+        let trimmed = line.trim_ascii();
+        if !trimmed.is_empty() {
+            visit(number, trimmed);
+        }
+    }
+}
+
 /// Stream-parse a `rewind_points.jsonl` file line-by-line (bounded memory; the file can be hundreds of MB), skipping malformed lines with a `warn!`.
 /// A missing file is `Ok(empty)`; a transient I/O error propagates as `Err` so callers don't treat an unreadable file as empty and drop history.
-/// This is the LENIENT reader; the rewrite path uses a STRICT read (see `merge_rewind_points_from`).
+/// This is the LENIENT reader; the load and the rewrite paths keep the malformed lines (see [`read_rewind_points_lines`]).
 fn read_rewind_jsonl_lines<T: serde::de::DeserializeOwned>(path: &Path) -> io::Result<Vec<T>> {
+    let mut out = Vec::new();
+    visit_rewind_lines(path, |_, line| match serde_json::from_slice::<T>(line) {
+        Ok(v) => out.push(v),
+        Err(e) => tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "skipping malformed rewind_points.jsonl line"
+        ),
+    })?;
+    Ok(out)
+}
+
+/// Read all rewind points (full content), skipping malformed rows.
+#[cfg(test)]
+fn read_rewind_points_file(path: &Path) -> io::Result<Vec<RewindPoint>> {
+    read_rewind_jsonl_lines(path)
+}
+
+/// One line of a `rewind_points.jsonl`, in file order (P114).
+#[derive(Debug, Clone)]
+pub enum RewindPointsLine {
+    Point(RewindPoint),
+    /// A line that does not parse, kept byte for byte. An append cut short (a kill, a power loss, `ENOSPC`) leaves one,
+    /// which the next append terminates as its own line (`append_jsonl_line_sync` in the shell).
+    Damaged { line: usize, raw: Vec<u8> },
+}
+
+/// How long a read waits for an append in progress (another process writing a large row) before giving up for now.
+const APPEND_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// What became of the shell's append lock for a read.
+enum AppendLockForRead {
+    /// Held shared: no append is in progress while the file is read.
+    Held(#[allow(dead_code)] std::fs::File),
+    /// The lock file could not be opened or locked: the read is unlocked, so an unfinished last row may be an append
+    /// still in progress.
+    Unavailable,
+    /// The caller holds the append lock exclusively (a rewrite of the file): no append can be in progress, so an
+    /// unfinished last row is damage, not a write still running.
+    HeldByCaller,
+}
+
+/// Take the shell's append lock (`rewind_points.jsonl.lock`, held exclusively by `append_jsonl_line_sync`) shared, so
+/// a read never sees an append in progress (Astra P114 r1 #2). It waits at most [`APPEND_LOCK_WAIT`] without blocking
+/// on the OS lock (r2 #2): an append still running after that is reported as `WouldBlock`, which keeps the deferred
+/// source for a later attempt. Call it off the async event loop (it sleeps while it waits).
+fn lock_rewind_points_for_read(path: &Path) -> io::Result<AppendLockForRead> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    // The shell's append creates this file owner-only (P120); a read that gets there first must not leave it looser.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let lock = match options.open(path.with_extension("jsonl.lock")) {
+        Ok(lock) => {
+            // A lock file an older Fuigo made group- or world-readable is tightened too.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let _ = lock.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            lock
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, path = %path.display(), "rewind_points read without the append lock");
+            return Ok(AppendLockForRead::Unavailable);
+        }
+    };
+    let deadline = std::time::Instant::now() + APPEND_LOCK_WAIT;
+    loop {
+        match fs2::FileExt::try_lock_shared(&lock) {
+            Ok(()) => return Ok(AppendLockForRead::Held(lock)),
+            Err(e) if e.kind() == fs2::lock_contended_error().kind() => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("{} is being written by another Fuigo process", path.display()),
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, path = %path.display(), "rewind_points read without the append lock");
+                return Ok(AppendLockForRead::Unavailable);
+            }
+        }
+    }
+}
+
+/// Read every line of a `rewind_points.jsonl` in file order, keeping the ones that do not parse. A missing file is
+/// `Ok(empty)`; an I/O error is `Err` (nothing was read, and reading again may succeed). Appends are held off while it
+/// reads (see [`lock_rewind_points_for_read`]). Without the lock, an unfinished last row (no newline yet) may be an
+/// append in progress, so the read fails with `WouldBlock` instead of recording it as damage for good (r2 #3).
+pub fn read_rewind_points_lines(path: &Path) -> io::Result<Vec<RewindPointsLine>> {
+    let is_file = match std::fs::metadata(path) {
+        Ok(meta) => meta.is_file(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let lock = if is_file { lock_rewind_points_for_read(path)? } else { AppendLockForRead::Unavailable };
+    read_rewind_points_lines_with(path, lock)
+}
+
+/// [`read_rewind_points_lines`] for a caller that already holds the append lock (`rewind_points.jsonl.lock`) exclusively
+/// across a read-modify-write of the file, as the shell's truncate and merge do (P123): taking the shared lock here
+/// would wait for the caller's own lock, and no append is in progress while it is held, so an unfinished last row is read
+/// as damage.
+pub fn read_rewind_points_lines_holding_append_lock(path: &Path) -> io::Result<Vec<RewindPointsLine>> {
+    match std::fs::metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    }
+    read_rewind_points_lines_with(path, AppendLockForRead::HeldByCaller)
+}
+
+fn read_rewind_points_lines_with(path: &Path, lock: AppendLockForRead) -> io::Result<Vec<RewindPointsLine>> {
     let Some(mut reader) = open_rewind_points(path)? else {
         return Ok(Vec::new());
     };
     let mut out = Vec::new();
-    let mut line = String::new();
-    while reader.read_line(&mut line)? != 0 {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            match serde_json::from_str::<T>(trimmed) {
-                Ok(v) => out.push(v),
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "skipping malformed rewind_points.jsonl line"
-                ),
+    let mut line = Vec::new();
+    let mut number = 0usize;
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(out);
+        }
+        number += 1;
+        let terminated = line.last() == Some(&b'\n');
+        let trimmed = line.trim_ascii();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<RewindPoint>(trimmed) {
+            Ok(point) => out.push(RewindPointsLine::Point(point)),
+            Err(_) if !terminated && matches!(lock, AppendLockForRead::Unavailable) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    format!(
+                        "line {number} of {} is unfinished and may still be being written",
+                        path.display()
+                    ),
+                ));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), line = number, "damaged rewind_points.jsonl line");
+                out.push(RewindPointsLine::Damaged { line: number, raw: trimmed.to_vec() });
             }
         }
-        line.clear();
+    }
+}
+
+/// The file bytes of `lines`, one per line, damaged ones exactly as they were read.
+pub fn encode_rewind_points_lines(lines: &[RewindPointsLine]) -> serde_json::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for line in lines {
+        match line {
+            RewindPointsLine::Point(point) => serde_json::to_writer(&mut out, point)?,
+            RewindPointsLine::Damaged { raw, .. } => out.extend_from_slice(raw),
+        }
+        out.push(b'\n');
     }
     Ok(out)
 }
 
-/// Read all rewind points (full content) for the on-demand historical load.
-fn read_rewind_points_file(path: &Path) -> io::Result<Vec<RewindPoint>> {
-    read_rewind_jsonl_lines(path)
+/// The prompt a damaged row holds the saved files of, read from what survives of it (P114).
+///
+/// A row is a serialized [`RewindPoint`], whose first field is `prompt_index`, and an append that is cut short keeps
+/// its start: a torn row still begins `{"prompt_index":N,`. Every record start in the line is checked, so a line where
+/// an older version concatenated a torn record with the next one is bounded by the larger index. `None` when any record
+/// start in the line is cut before its index is complete, or the line does not begin with one: then nothing tells
+/// which prompt it held. (A record start cannot occur inside saved file contents or paths: their quotes are escaped.)
+///
+/// The prompt comes from the row itself, not from the rows around it: concurrent writers to one session (two processes
+/// on it) or rows left by a failed rewrite before P114 make the neighbours' order prove nothing (Astra P114 r1 #1).
+fn damaged_row_prompt(raw: &[u8]) -> Option<usize> {
+    const START: &[u8] = b"{\"prompt_index\":";
+    if !raw.starts_with(START) || !is_single_value_prefix(raw) {
+        return None;
+    }
+    // Every record header in the line must be whole: a key `"prompt_index"` that opens an object, then `:`, digits and
+    // `,` (P114 r3 #1: a second record cut right after its first key is found here, not passed over).
+    const HEADER: &[u8] = b"{\"prompt_index\"";
+    let mut highest = 0usize;
+    let mut rest = raw;
+    while let Some(at) = rest.windows(HEADER.len()).position(|w| w == HEADER) {
+        let after = &rest[at + HEADER.len()..];
+        let after = after.strip_prefix(b":")?;
+        let digits = after.iter().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 || after.get(digits) != Some(&b',') {
+            return None;
+        }
+        let index: usize = std::str::from_utf8(&after[..digits]).ok()?.parse().ok()?;
+        highest = highest.max(index);
+        rest = &after[digits..];
+    }
+    Some(highest)
+}
+
+/// Whether `raw` can be the start of ONE JSON value cut short, with no second record hidden in its tail (P114 r2 #1).
+///
+/// A second record appended onto a torn one (versions before the newline healing) starts with `{`, which JSON accepts
+/// only where a value is expected; anywhere else the line is not a valid prefix. Where a value is expected (right after
+/// a `:`), a second record that kept its whole `{"prompt_index":N,` start is found by the marker scan; one cut before
+/// that leaves the innermost open object without a complete first key, which is refused here. Inside a string, a
+/// second record's `{` and `{"` read as content, so a line ending in them is refused as well. A single torn row cut
+/// at one of those points is refused too (it then identifies nothing, as before P114).
+fn is_single_value_prefix(raw: &[u8]) -> bool {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Expect {
+        Value,
+        KeyOrEnd,
+        Key,
+        Colon,
+        CommaOrEnd,
+    }
+    // Per open container: is it an object, and how many of its keys are complete.
+    let mut stack: Vec<(bool, usize)> = Vec::new();
+    let mut expect = Expect::Value;
+    let mut i = 0;
+    let mut started = false;
+    while i < raw.len() {
+        let b = raw[i];
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+            continue;
+        }
+        if started && stack.is_empty() {
+            return false; // something after the one top-level value
+        }
+        started = true;
+        match expect {
+            Expect::Value => match b {
+                b'{' => {
+                    stack.push((true, 0));
+                    expect = Expect::KeyOrEnd;
+                    i += 1;
+                }
+                b'[' => {
+                    stack.push((false, 0));
+                    expect = Expect::Value;
+                    i += 1;
+                }
+                b']' if stack.last().is_some_and(|(object, _)| !object) => {
+                    stack.pop();
+                    expect = Expect::CommaOrEnd;
+                    i += 1;
+                }
+                b'"' => match skip_string(raw, i + 1) {
+                    Some(end) => {
+                        i = end;
+                        expect = Expect::CommaOrEnd;
+                    }
+                    None => break, // cut inside a string value
+                },
+                b'-' | b'0'..=b'9' => {
+                    i += 1;
+                    while i < raw.len() && matches!(raw[i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-') {
+                        i += 1;
+                    }
+                    expect = Expect::CommaOrEnd;
+                }
+                b't' | b'f' | b'n' => {
+                    let word: &[u8] = match b {
+                        b't' => b"true",
+                        b'f' => b"false",
+                        _ => b"null",
+                    };
+                    let rest = &raw[i..];
+                    let n = rest.len().min(word.len());
+                    if rest[..n] != word[..n] {
+                        return false;
+                    }
+                    i += n;
+                    expect = Expect::CommaOrEnd;
+                }
+                _ => return false,
+            },
+            Expect::KeyOrEnd | Expect::Key => match b {
+                b'}' if expect == Expect::KeyOrEnd => {
+                    stack.pop();
+                    expect = Expect::CommaOrEnd;
+                    i += 1;
+                }
+                b'"' => match skip_string(raw, i + 1) {
+                    Some(end) => {
+                        if let Some(top) = stack.last_mut() {
+                            top.1 += 1;
+                        }
+                        i = end;
+                        expect = Expect::Colon;
+                    }
+                    None => break, // cut inside a key
+                },
+                _ => return false,
+            },
+            Expect::Colon => {
+                if b != b':' {
+                    return false;
+                }
+                expect = Expect::Value;
+                i += 1;
+            }
+            Expect::CommaOrEnd => match (b, stack.last()) {
+                (b',', Some((true, _))) => {
+                    expect = Expect::Key;
+                    i += 1;
+                }
+                (b',', Some((false, _))) => {
+                    expect = Expect::Value;
+                    i += 1;
+                }
+                (b'}', Some((true, _))) | (b']', Some((false, _))) => {
+                    stack.pop();
+                    expect = Expect::CommaOrEnd;
+                    i += 1;
+                }
+                _ => return false,
+            },
+        }
+    }
+    // Inside a string, another record's first byte `{` is ordinary content and its `"` closes the string; only from
+    // the `p` that follows is the line no longer one value. So a line ending in `{` or `{"` may hide a record cut there.
+    if raw.ends_with(b"{") || raw.ends_with(b"{\"") {
+        return false;
+    }
+    // Cut short: the innermost open object must already have a complete key, or its `{` may be another record's.
+    stack.last().is_none_or(|(object, keys)| !object || *keys > 0)
+}
+
+/// The index just past the closing quote of the JSON string whose body starts at `from`, or `None` when it is cut.
+fn skip_string(raw: &[u8], from: usize) -> Option<usize> {
+    let mut i = from;
+    while i < raw.len() {
+        match raw[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// A row of `rewind_points.jsonl` that cannot be read: the saved file contents of one prompt are lost (P114).
+#[derive(Debug, Clone)]
+pub struct DamagedRewindRow {
+    pub path: PathBuf,
+    /// 1-based line number when the file was read.
+    pub line: usize,
+    /// The prompt whose saved files it held, when what survives of it says so.
+    pub prompt: Option<usize>,
+}
+
+impl DamagedRewindRow {
+    /// Whether a file rewind to `target` (which restores the rows of prompts `target` and later) may need this row.
+    fn needed_by(&self, target: usize) -> bool {
+        self.prompt.is_none_or(|prompt| prompt >= target)
+    }
+
+    fn describe(&self) -> String {
+        let prompt = match self.prompt {
+            Some(prompt) => format!("the saved files of prompt #{prompt}"),
+            None => "the saved files of a prompt it no longer identifies".to_string(),
+        };
+        format!(
+            "{prompt} (line {} of {} when this session read it)",
+            self.line,
+            self.path.display()
+        )
+    }
+}
+
+/// The damaged rows of `lines` (read from `path`).
+fn damaged_rewind_rows(path: &Path, lines: &[RewindPointsLine]) -> Vec<DamagedRewindRow> {
+    lines
+        .iter()
+        .filter_map(|line| match line {
+            RewindPointsLine::Damaged { line, raw } => Some(DamagedRewindRow {
+                path: path.to_path_buf(),
+                line: *line,
+                prompt: damaged_row_prompt(raw),
+            }),
+            RewindPointsLine::Point(_) => None,
+        })
+        .collect()
+}
+
+/// `rewind_points.jsonl` after a file rewind to `from_index`: the rows of prompts `from_index` and later are dropped.
+/// Damaged rows are kept where they are: they record which prompts' saved files are missing, so dropping them would
+/// let a later rewind report a complete restore without them (P114).
+pub fn truncate_rewind_points_lines(lines: Vec<RewindPointsLine>, from_index: usize) -> Vec<RewindPointsLine> {
+    lines
+        .into_iter()
+        .filter(|line| match line {
+            RewindPointsLine::Point(point) => point.prompt_index < from_index,
+            RewindPointsLine::Damaged { .. } => true,
+        })
+        .collect()
+}
+
+/// `rewind_points.jsonl` after a conversation-only rewind to `target_index`: [`merge_rewind_points_from`] on the
+/// readable rows, then every damaged row, kept for the reason [`truncate_rewind_points_lines`] gives.
+pub fn merge_rewind_points_lines(lines: Vec<RewindPointsLine>, target_index: usize) -> Vec<RewindPointsLine> {
+    let mut points = Vec::new();
+    let mut damaged = Vec::new();
+    for line in lines {
+        match line {
+            RewindPointsLine::Point(point) => points.push(point),
+            RewindPointsLine::Damaged { .. } => damaged.push(line),
+        }
+    }
+    let mut out: Vec<RewindPointsLine> = merge_rewind_points_from(points, target_index)
+        .into_iter()
+        .map(RewindPointsLine::Point)
+        .collect();
+    out.extend(damaged);
+    out
 }
 
 /// Counts the entries of a JSON map without allocating its keys or values.
@@ -469,6 +886,10 @@ pub struct FileStateTracker {
     current_prompt_index: Arc<Mutex<Option<usize>>>,
     /// Deferred historical source: `Some(path)` until the points are lazily loaded (then `None`); `None` from the start without a lazy source.
     lazy_source: Arc<Mutex<Option<PathBuf>>>,
+    /// Rows of the historical source that cannot be read (P111, P114). The points they held are missing for the rest
+    /// of this tracker's life, so [`FileStateTracker::try_get_rewind_points_for`] refuses every rewind that may need
+    /// them (each names its prompt when what survives of it says so; see [`damaged_row_prompt`]).
+    damaged_rows: Arc<Mutex<Vec<DamagedRewindRow>>>,
 }
 
 impl Default for FileStateTracker {
@@ -483,6 +904,7 @@ impl FileStateTracker {
             rewind_points: Arc::new(Mutex::new(HashMap::new())),
             current_prompt_index: Arc::new(Mutex::new(None)),
             lazy_source: Arc::new(Mutex::new(None)),
+            damaged_rows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -493,6 +915,7 @@ impl FileStateTracker {
             rewind_points: Arc::new(Mutex::new(HashMap::new())),
             current_prompt_index: Arc::new(Mutex::new(None)),
             lazy_source: Arc::new(Mutex::new(Some(lazy_path))),
+            damaged_rows: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -505,30 +928,46 @@ impl FileStateTracker {
     /// The source is consumed only on a SUCCESSFUL read.
     /// A transient error leaves it set to retry (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) {
+        let _ = self.load_historical().await;
+    }
+
+    /// Load the deferred source. A read error is returned and the lazy source stays set, so nothing partial is merged
+    /// and a later load can retry. Rows that do not parse are recorded in `damaged_rows`, never silently dropped.
+    async fn load_historical(&self) -> io::Result<()> {
         let mut source = self.lazy_source.lock().await;
         // Clone the path so we can clear `source` after a successful read.
         let Some(path) = source.clone() else {
-            return; // already loaded, or never lazy
+            return Ok(()); // already loaded, or never lazy
         };
-        let loaded = match read_rewind_points_file(&path) {
-            Ok(points) => points,
+        // Off the event loop: the read can wait for another process's append and the file can be large (P114 r2 #2).
+        let read_path = path.clone();
+        let read = tokio::task::spawn_blocking(move || read_rewind_points_lines(&read_path))
+            .await
+            .unwrap_or_else(|e| Err(io::Error::other(e)));
+        let lines = match read {
+            Ok(lines) => lines,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     path = %path.display(),
                     "deferred rewind-point load failed; leaving lazy source set to retry"
                 );
-                return;
+                return Err(e);
             }
         };
-        if !loaded.is_empty() {
+        let damaged = damaged_rewind_rows(&path, &lines);
+        {
             let mut points = self.rewind_points.lock().await;
-            for p in loaded {
-                points.entry(p.prompt_index).or_insert(p);
+            for line in lines {
+                if let RewindPointsLine::Point(p) = line {
+                    points.entry(p.prompt_index).or_insert(p);
+                }
             }
         }
+        self.damaged_rows.lock().await.extend(damaged);
         // Success: consume the source so subsequent calls are no-ops.
         *source = None;
+        Ok(())
     }
 
     pub async fn begin_prompt(&self, prompt_index: usize) {
@@ -695,6 +1134,35 @@ impl FileStateTracker {
         point.add_snapshot(snapshot);
     }
 
+    /// The rewind points a file rewind to `target` restores from, or why they cannot all be read.
+    ///
+    /// Like [`get_rewind_points`](Self::get_rewind_points), but fails when the deferred historical points cannot be
+    /// read instead of returning only the in-memory ones, and when a damaged row may hold the saved files of prompt
+    /// `target` or a later one. A rewind that restores files must not plan from a partial set: it would report the
+    /// files of the missing rows as restored when they were not (P111). A damaged row that only earlier prompts can
+    /// hold stops nothing (P114).
+    pub async fn try_get_rewind_points_for(&self, target: usize) -> Result<Vec<RewindPoint>, RewindPointsUnavailable> {
+        let source = self.lazy_source.lock().await.clone();
+        if let Err(error) = self.load_historical().await {
+            return Err(RewindPointsUnavailable::Unreadable { path: source, error });
+        }
+        {
+            let damaged = self.damaged_rows.lock().await;
+            let needed: Vec<DamagedRewindRow> = damaged.iter().filter(|row| row.needed_by(target)).cloned().collect();
+            if !needed.is_empty() {
+                let first_working_target = damaged
+                    .iter()
+                    .map(|row| row.prompt.map(|prompt| prompt + 1))
+                    .try_fold(0, |first, after| after.map(|after| first.max(after)));
+                return Err(RewindPointsUnavailable::Damaged { needed, first_working_target });
+            }
+        }
+        let points = self.rewind_points.lock().await;
+        let mut result: Vec<RewindPoint> = points.values().cloned().collect();
+        result.sort_by_key(|p| p.prompt_index);
+        Ok(result)
+    }
+
     /// Get all rewind points (materializes the deferred historical set).
     pub async fn get_rewind_points(&self) -> Vec<RewindPoint> {
         self.ensure_historical_loaded().await;
@@ -819,6 +1287,60 @@ impl FileStateTracker {
     }
 }
 
+/// Why a file rewind cannot read every saved file content it needs (P111, P114).
+#[derive(Debug)]
+pub enum RewindPointsUnavailable {
+    /// The saved file contents could not be read at all (an I/O error). Nothing was loaded; a later attempt reads them
+    /// again.
+    Unreadable { path: Option<PathBuf>, error: io::Error },
+    /// Rows the rewind may need are damaged. Reading them again cannot help.
+    Damaged {
+        needed: Vec<DamagedRewindRow>,
+        /// The earliest target no damaged row can stop, when every damaged row names its prompt.
+        first_working_target: Option<usize>,
+    },
+}
+
+impl RewindPointsUnavailable {
+    /// The refusal of a file rewind to `target`. `valid_targets_below`: targets of file rewinds must lie below it (the
+    /// conversation's prompt count), when known. `conversation_only_rewind`: the caller offers a conversation-only
+    /// rewind, which needs no saved file contents.
+    pub fn refusal_message(&self, target: usize, valid_targets_below: Option<usize>, conversation_only_rewind: bool) -> String {
+        match self {
+            Self::Unreadable { path, error } => format!(
+                "Cannot rewind files to prompt #{target}: the saved file contents{} could not be read ({error}). \
+                 Nothing was changed. Once the file can be read (check its permissions and free disk space), run the \
+                 same rewind again.",
+                path.as_ref().map(|path| format!(" ({})", path.display())).unwrap_or_default()
+            ),
+            Self::Damaged { needed, first_working_target } => {
+                let rows = needed.iter().map(DamagedRewindRow::describe).collect::<Vec<_>>().join("; ");
+                let working = match first_working_target {
+                    Some(first) if valid_targets_below.is_none_or(|below| *first < below) => {
+                        format!(" A file rewind to prompt #{first} or later still works.")
+                    }
+                    Some(first) => format!(" File rewinds to prompt #{first} or later will work once the session has reached them."),
+                    None => " A damaged row that no longer identifies its prompt may belong to any of them, so no file \
+                             rewind of this session can restore files any more."
+                        .to_string(),
+                };
+                let conversation = if conversation_only_rewind {
+                    " A conversation-only rewind does not need these saved contents: it rewinds the conversation and \
+                     leaves your files as they are."
+                } else {
+                    ""
+                };
+                format!(
+                    "Cannot rewind files to prompt #{target}: the saved file contents it needs are damaged and cannot be \
+                     read: {rows}. (This happens when Fuigo stops or the disk fills while it saves them.) Reading \
+                     them again cannot repair them, and restoring only the other files would leave these unrestored. \
+                     Nothing was changed.{working}{conversation}"
+                )
+            }
+        }
+    }
+}
+
 // Canonical in fuigo-workspace-types; re-exported for existing paths.
 pub use fuigo_workspace_types::rpc::session::{
     ConflictType, FileRewindConflict, FileRewindResponse,
@@ -836,12 +1358,28 @@ pub async fn rewind_files(
     fs: &crate::file_system::AsyncFsWrapper,
     target_prompt_index: usize,
 ) -> FileRewindResponse {
-    let all_points = tracker.get_rewind_points().await;
+    // Strict read of the saved contents: a lazy load that fails or skips rows would make the revert silently partial
+    // and the truncation below would then drop the snapshots of the files it never restored (P111, as in the shell's
+    // rewind handler).
+    let all_points = match tracker.try_get_rewind_points_for(target_prompt_index).await {
+        Ok(points) => points,
+        Err(unavailable) => {
+            return FileRewindResponse {
+                success: false,
+                target_prompt_index,
+                reverted_files: Vec::new(),
+                clean_files: Vec::new(),
+                conflicts: Vec::new(),
+                error: Some(unavailable.refusal_message(target_prompt_index, None, false)),
+            };
+        }
+    };
 
     let mut reverted_files = Vec::new();
     let mut clean_files = Vec::new();
     let mut conflicts = Vec::new();
     let mut had_errors = false;
+    let mut failed_files: Vec<String> = Vec::new();
 
     // Collect files to revert: gather earliest before-snapshot per file
     let mut files_to_revert: HashMap<FlexiblePath, Option<String>> = HashMap::new();
@@ -893,15 +1431,26 @@ pub async fn rewind_files(
             Some(data) => {
                 if let Err(e) = fs.write_file(rel_path, data.as_bytes()).await {
                     tracing::warn!(?rel_path, ?e, "rewind: failed to restore file");
+                    failed_files.push(format!("{rel_path} (could not restore it: {e})"));
                     had_errors = true;
                     continue;
                 }
             }
             None => {
-                if fs.exists(rel_path).await.unwrap_or(false)
-                    && let Err(e) = fs.delete_file(rel_path).await
-                {
-                    tracing::warn!(?rel_path, ?e, "rewind: failed to delete file");
+                // A file the agent created is deleted. An existence check that fails proves nothing about the file, so
+                // it is a failure of that file, never "already deleted" (P111, Astra r4: DI-02 on this path).
+                let failure = match fs.exists(rel_path).await {
+                    Ok(false) => None,
+                    Ok(true) => fs
+                        .delete_file(rel_path)
+                        .await
+                        .err()
+                        .map(|e| format!("could not delete it: {e}")),
+                    Err(e) => Some(format!("could not check whether it exists: {e}")),
+                };
+                if let Some(reason) = failure {
+                    tracing::warn!(?rel_path, %reason, "rewind: file not reverted");
+                    failed_files.push(format!("{rel_path} ({reason})"));
                     had_errors = true;
                     continue;
                 }
@@ -917,7 +1466,12 @@ pub async fn rewind_files(
     }
 
     let error = if had_errors {
-        Some("Some files could not be reverted".to_string())
+        failed_files.sort();
+        Some(format!(
+            "Some files could not be reverted: {}. Their saved contents are kept; fix the cause and run the same rewind \
+             again.",
+            failed_files.join("; ")
+        ))
     } else {
         None
     };
@@ -1692,5 +2246,453 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(read_rewind_points_file(dir.path()).is_err());
         assert!(scan_rewind_point_metas(dir.path()).is_err());
+    }
+
+    /// A filesystem whose existence check fails for one path, the way a permission-denied parent directory makes
+    /// `exists` fail (root ignores the permission bits, so the error is injected here instead of with chmod).
+    struct ExistsFailsFs {
+        inner: MockFs,
+        failing: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::file_system::AsyncFileSystem for ExistsFailsFs {
+        fn root(&self) -> &Path {
+            self.inner.root()
+        }
+        async fn exists(&self, path: &Path) -> Result<bool, crate::file_system::FsError> {
+            if path == self.failing {
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "permission denied").into());
+            }
+            self.inner.exists(path).await
+        }
+        async fn read_file(&self, path: &Path) -> Result<Vec<u8>, crate::file_system::FsError> {
+            self.inner.read_file(path).await
+        }
+        async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), crate::file_system::FsError> {
+            self.inner.write_file(path, data).await
+        }
+        async fn delete_file(&self, path: &Path) -> Result<(), crate::file_system::FsError> {
+            self.inner.delete_file(path).await
+        }
+    }
+
+    /// P111 (Astra r4 #5): the workspace rewind (`rewind_to` -> `rewind_files`) treated an existence-check error on a
+    /// file the agent created as "already deleted": it listed the file as reverted, reported success and dropped the
+    /// saved snapshots. The file must be reported as not reverted, the rewind must fail, and the snapshots must stay.
+    #[tokio::test]
+    async fn rewind_files_reports_an_existence_check_error_as_a_failed_file() {
+        let root = PathBuf::from("/proj");
+        let created = root.join("locked/created.txt");
+        let edited = root.join("edited.txt");
+        let fs = ExistsFailsFs { inner: MockFs::new(root.clone()), failing: created.clone() };
+        fs.inner.write_file(&created, b"agent created").await.unwrap();
+        fs.inner.write_file(&edited, b"agent edit").await.unwrap();
+        let fs = crate::file_system::AsyncFsWrapper::new(Arc::new(fs));
+        let tracker = FileStateTracker::new();
+        tracker.add_before_snapshot_for_prompt(1, &created, &root, None).await;
+        tracker.add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into())).await;
+
+        let response = rewind_files(&tracker, &fs, 1).await;
+
+        assert!(!response.success, "{response:?}");
+        assert!(
+            !response.reverted_files.iter().any(|path| path.contains("created.txt")),
+            "a file whose existence could not be checked is not reverted: {response:?}"
+        );
+        let error = response.error.clone().unwrap_or_default();
+        assert!(error.contains("created.txt") && error.contains("exists"), "{error}");
+        assert_eq!(fs.read_to_string(&created).await.unwrap(), "agent created");
+        let points = tracker.get_rewind_points().await;
+        assert!(
+            points.iter().any(|p| p.prompt_index == 1 && p.file_snapshots.len() == 2),
+            "the saved contents are kept for a retry"
+        );
+    }
+
+    /// P111: the workspace rewind read the saved contents leniently, so an unreadable `rewind_points.jsonl` made it
+    /// restore only the in-memory points and then truncate. It must change nothing and fail instead.
+    #[tokio::test]
+    async fn rewind_files_stops_when_the_saved_contents_cannot_be_read() {
+        let root = PathBuf::from("/proj");
+        let edited = root.join("edited.txt");
+        let mock = MockFs::new(root.clone());
+        mock.write_file(&edited, b"agent edit").await.unwrap();
+        let fs = crate::file_system::AsyncFsWrapper::new(Arc::new(mock));
+        // The deferred source cannot be read: it is a directory.
+        let unreadable = tempfile::tempdir().unwrap();
+        let tracker = FileStateTracker::with_lazy_source(unreadable.path().to_path_buf());
+        tracker.add_before_snapshot_for_prompt(1, &edited, &root, Some("original".into())).await;
+
+        let response = rewind_files(&tracker, &fs, 1).await;
+
+        assert!(!response.success, "{response:?}");
+        assert!(response.reverted_files.is_empty(), "{response:?}");
+        assert_eq!(fs.read_to_string(&edited).await.unwrap(), "agent edit", "nothing was changed");
+    }
+
+    // ── P114: a damaged rewind_points.jsonl row refuses only the rewinds that need it ──
+
+    /// Write raw bytes (verbatim, possibly invalid UTF-8) to a temp `rewind_points.jsonl`.
+    fn write_rewind_bytes(body: &[u8]) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(body).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    /// A torn append of `point`: the process stopped inside a multi-byte character of a saved file, and the next append
+    /// terminated the partial record with a newline (`append_jsonl_line_sync`).
+    fn torn_row(point: &RewindPoint) -> Vec<u8> {
+        let full = serde_json::to_vec(point).unwrap();
+        let accent = full.windows(2).position(|w| w == "é".as_bytes()).expect("the point holds an é");
+        full[..accent + 1].to_vec()
+    }
+
+    fn rewind_file_of(rows: &[Vec<u8>]) -> tempfile::NamedTempFile {
+        let mut body = Vec::new();
+        for row in rows {
+            body.extend_from_slice(row);
+            body.push(b'\n');
+        }
+        write_rewind_bytes(&body)
+    }
+
+    async fn project_fs(files: &[(&str, &str)]) -> (PathBuf, crate::file_system::AsyncFsWrapper) {
+        let root = PathBuf::from("/proj");
+        let mock = MockFs::new(root.clone());
+        for (name, content) in files {
+            mock.write_file(&root.join(name), content.as_bytes()).await.unwrap();
+        }
+        (root, crate::file_system::AsyncFsWrapper::new(Arc::new(mock)))
+    }
+
+    /// P114 (Fable P111 #1): a torn row between readable ones. What survives of it says it held prompt 2's saved files;
+    /// a rewind to prompt 3 needs only prompts 3 and 4 and must restore their files, while rewinds to 1 and 2 must
+    /// refuse, change nothing, and say which file and line is damaged and which rewinds still work, never "try again"
+    /// (retrying cannot repair it).
+    #[tokio::test]
+    async fn a_torn_middle_row_refuses_only_the_rewinds_that_need_it() {
+        let (root, fs) = project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("c.rs", "c now")]).await;
+        let file = rewind_file_of(&[
+            serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap(),
+            torn_row(&point_with_files(2, &[("d.rs", "café before 2")])),
+            serde_json::to_vec(&point_with_files(3, &[("b.rs", "b before 3")])).unwrap(),
+            serde_json::to_vec(&point_with_files(4, &[("c.rs", "c before 4")])).unwrap(),
+        ]);
+        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+
+        for target in [1, 2] {
+            let refused = rewind_files(&tracker, &fs, target).await;
+            assert!(!refused.success, "target {target}: {refused:?}");
+            assert!(refused.reverted_files.is_empty(), "target {target}: {refused:?}");
+            let error = refused.error.clone().unwrap_or_default();
+            assert!(error.contains(&file.path().display().to_string()), "names the file: {error}");
+            assert!(error.contains("line 2"), "names the line: {error}");
+            assert!(error.contains("prompt #2"), "names the prompt: {error}");
+            assert!(error.contains("prompt #3 or later"), "says which rewinds still work: {error}");
+            assert!(error.contains("Nothing was changed"), "{error}");
+            assert!(!error.to_lowercase().contains("try again"), "retrying cannot help: {error}");
+        }
+        for (name, now) in [("a.rs", "a now"), ("b.rs", "b now"), ("c.rs", "c now")] {
+            assert_eq!(fs.read_to_string(&root.join(name)).await.unwrap(), now, "a refused rewind changed {name}");
+        }
+
+        let restored = rewind_files(&tracker, &fs, 3).await;
+        assert!(restored.success, "a rewind that does not need the damaged row works: {restored:?}");
+        assert_eq!(restored.reverted_files.len(), 2, "{restored:?}");
+        assert_eq!(fs.read_to_string(&root.join("b.rs")).await.unwrap(), "b before 3");
+        assert_eq!(fs.read_to_string(&root.join("c.rs")).await.unwrap(), "c before 4");
+        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
+
+        // Still refused afterwards: the damaged row's files are lost for good.
+        let again = rewind_files(&tracker, &fs, 1).await;
+        assert!(!again.success, "{again:?}");
+        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
+    }
+
+    /// P114 (Fable P111 #1): the torn row is the newest one (the process stopped while saving the last prompt's files).
+    /// Rewinds to its prompt or earlier are refused; once the resumed session has later prompts, rewinds to those work.
+    #[tokio::test]
+    async fn a_torn_last_row_refuses_rewinds_to_its_prompt_and_earlier() {
+        let (root, fs) = project_fs(&[("a.rs", "a now"), ("b.rs", "b now"), ("e.rs", "e now")]).await;
+        let file = rewind_file_of(&[
+            serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap(),
+            serde_json::to_vec(&point_with_files(2, &[("b.rs", "b before 2")])).unwrap(),
+            torn_row(&point_with_files(3, &[("d.rs", "café before 3")])),
+        ]);
+        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+
+        for target in [1, 2, 3] {
+            let refused = rewind_files(&tracker, &fs, target).await;
+            assert!(!refused.success, "target {target}: {refused:?}");
+            let error = refused.error.clone().unwrap_or_default();
+            assert!(error.contains("line 3") && error.contains("prompt #3"), "{error}");
+            assert!(!error.to_lowercase().contains("try again"), "{error}");
+        }
+        assert_eq!(fs.read_to_string(&root.join("a.rs")).await.unwrap(), "a now");
+        assert_eq!(fs.read_to_string(&root.join("b.rs")).await.unwrap(), "b now");
+
+        // The resumed session runs prompts 3 and 4; prompt 4 edits e.rs.
+        tracker.begin_prompt(3).await;
+        tracker.begin_prompt(4).await;
+        tracker.add_before_snapshot_for_prompt(4, &root.join("e.rs"), &root, Some("e before 4".into())).await;
+
+        let restored = rewind_files(&tracker, &fs, 4).await;
+        assert!(restored.success, "{restored:?}");
+        assert_eq!(fs.read_to_string(&root.join("e.rs")).await.unwrap(), "e before 4");
+        let refused = rewind_files(&tracker, &fs, 3).await;
+        assert!(!refused.success, "prompt 3 is the damaged row's prompt: {refused:?}");
+    }
+
+    /// P114 (Astra r1 #1): the damaged row's prompt comes from the row itself, never from its neighbours. Two processes
+    /// on one session can append `P0, P1, damaged P2, P1, P2`: the neighbours would bound the damaged row by prompt 1
+    /// and let a rewind to 2 restore only the second process's files. A line an older version concatenated, or one cut
+    /// before its index is complete, identifies its prompt only when every record start in it is whole.
+    #[tokio::test]
+    async fn a_damaged_row_is_identified_by_what_survives_of_it() {
+        let torn2 = torn_row(&point_with_files(2, &[("x.rs", "café x")]));
+        let full7 = serde_json::to_vec(&point_with_files(7, &[("y.rs", "y")])).unwrap();
+        assert_eq!(damaged_row_prompt(&torn2), Some(2));
+        assert_eq!(
+            damaged_row_prompt(&[torn2.clone(), full7.clone()].concat()),
+            None,
+            "a record appended inside a torn one's string: the line is not one value"
+        );
+        // Astra r2 #1: a second record cut inside its own start, appended where a value or a string continues.
+        let p2 = serde_json::to_vec(&point_with_files(2, &[("x.rs", "x")])).unwrap();
+        let at = |needle: &str| p2.windows(needle.len()).position(|w| w == needle.as_bytes()).unwrap() + needle.len();
+        let after_colon = &p2[..at("\"created_at\":")];
+        let in_string = &p2[..at("\"created_at\":\"20")];
+        for cut in [after_colon, in_string] {
+            for tail in [&b"{"[..], &b"{\"prompt_ind"[..], &b"{\"prompt_index\":"[..]] {
+                assert_eq!(damaged_row_prompt(&[cut, tail].concat()), None, "{}", String::from_utf8_lossy(&[cut, tail].concat()));
+            }
+        }
+        // Astra r3 #1: a second record cut right after its first key; a header cut inside its digits (M6).
+        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\""[..]].concat()), None);
+        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\"  "[..]].concat()), None);
+        assert_eq!(damaged_row_prompt(b"{\"prompt_index\":1"), None, "the index may have had more digits");
+        assert_eq!(damaged_row_prompt(&[after_colon, &b"{\"prompt_index\":7"[..]].concat()), None);
+        let whole_second = [after_colon, &full7[..full7.len() - 1]].concat();
+        assert_eq!(damaged_row_prompt(&whole_second), Some(7), "a second record whose start survived is counted");
+        assert_eq!(damaged_row_prompt(&[&b"{\"prompt_index\":1"[..], &full7[..]].concat()), None, "index cut short");
+        assert_eq!(damaged_row_prompt(b"{\"prompt_ind"), None);
+        assert_eq!(damaged_row_prompt(b"garbage{not json"), None);
+        let quoted = serde_json::to_vec(&point_with_files(1, &[("q.rs", "{\"prompt_index\":99,")])).unwrap();
+        assert_eq!(damaged_row_prompt(&quoted[..quoted.len() - 3]), Some(1), "file contents cannot fake a record start");
+
+        let (root, fs) = project_fs(&[("x.rs", "x now"), ("y.rs", "y now")]).await;
+        let file = rewind_file_of(&[
+            serde_json::to_vec(&point_with_files(0, &[])).unwrap(),
+            serde_json::to_vec(&point_with_files(1, &[])).unwrap(),
+            torn2,
+            serde_json::to_vec(&point_with_files(1, &[])).unwrap(),
+            serde_json::to_vec(&point_with_files(2, &[("y.rs", "y before 2")])).unwrap(),
+        ]);
+        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let refused = rewind_files(&tracker, &fs, 2).await;
+        assert!(!refused.success, "the damaged row is prompt 2's: {refused:?}");
+        assert_eq!(fs.read_to_string(&root.join("y.rs")).await.unwrap(), "y now", "nothing restored");
+        assert!(rewind_files(&tracker, &fs, 3).await.success);
+
+        let file = rewind_file_of(&[b"{\"prompt_ind".to_vec(), serde_json::to_vec(&point_with_files(5, &[])).unwrap()]);
+        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        let refused = rewind_files(&tracker, &fs, 9).await;
+        assert!(!refused.success, "{refused:?}");
+        let error = refused.error.unwrap_or_default();
+        assert!(error.contains("line 1") && error.contains("no longer identifies"), "{error}");
+    }
+
+    /// P114: the rewrites keep every damaged row (they record which prompts' saved files are missing).
+    #[test]
+    fn rewrites_keep_damaged_rows() {
+        let torn = torn_row(&point_with_files(2, &[("d.rs", "café")]));
+        let line = |idx: usize| RewindPointsLine::Point(point_with_files(idx, &[("f.rs", "v")]));
+        let damaged = || RewindPointsLine::Damaged { line: 2, raw: torn.clone() };
+        let shape = |lines: &[RewindPointsLine]| -> Vec<Option<usize>> {
+            lines
+                .iter()
+                .map(|l| match l {
+                    RewindPointsLine::Point(p) => Some(p.prompt_index),
+                    RewindPointsLine::Damaged { .. } => None,
+                })
+                .collect()
+        };
+        let merged = merge_rewind_points_lines(vec![line(1), damaged(), line(3), line(4), line(5)], 5);
+        assert_eq!(shape(&merged), vec![Some(1), Some(3), Some(4), None]);
+        let merged = merge_rewind_points_lines(vec![line(1), damaged(), line(3), line(4)], 3);
+        assert_eq!(shape(&merged), vec![Some(1), None]);
+        let truncated = truncate_rewind_points_lines(vec![line(1), damaged(), line(3), line(4)], 2);
+        assert_eq!(shape(&truncated), vec![Some(1), None]);
+        let encoded = encode_rewind_points_lines(&truncated).unwrap();
+        assert!(encoded.ends_with(&[torn.as_slice(), &b"\n"[..]].concat()), "the damaged row is kept byte for byte");
+    }
+
+    /// P114: a conversation-only rewind keeps the damaged row and its prompt, so a file rewind to a later prompt of the
+    /// continued session works and one to its prompt stays refused.
+    #[tokio::test]
+    async fn a_damaged_row_keeps_its_prompt_through_a_merge() {
+        let (root, fs) = project_fs(&[("e.rs", "e now")]).await;
+        let file = rewind_file_of(&[
+            serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap(),
+            torn_row(&point_with_files(2, &[("d.rs", "café before 2")])),
+            serde_json::to_vec(&point_with_files(5, &[("b.rs", "b before 5")])).unwrap(),
+        ]);
+        let tracker = FileStateTracker::with_lazy_source(file.path().to_path_buf());
+        tracker.merge_and_remove_from(2).await;
+        tracker.begin_prompt(2).await;
+        tracker.begin_prompt(3).await;
+        tracker.add_before_snapshot_for_prompt(3, &root.join("e.rs"), &root, Some("e before 3".into())).await;
+
+        let restored = rewind_files(&tracker, &fs, 3).await;
+        assert!(restored.success, "{restored:?}");
+        assert_eq!(fs.read_to_string(&root.join("e.rs")).await.unwrap(), "e before 3");
+        assert!(!rewind_files(&tracker, &fs, 2).await.success, "rewinds to prompt 2 stay refused");
+    }
+
+    /// P132 (P114 follow-up): the lock file a READ creates is owner-only, like the one the shell's append creates.
+    #[cfg(unix)]
+    #[test]
+    fn the_reader_creates_its_lock_file_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut body = serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap();
+        body.push(b'\n');
+        let file = write_rewind_bytes(&body);
+        let lock_path = file.path().with_extension("jsonl.lock");
+        let _ = std::fs::remove_file(&lock_path);
+        read_rewind_points_lines(file.path()).unwrap();
+        let mode = std::fs::metadata(&lock_path).expect("the read creates the lock file").permissions().mode() & 0o777;
+        let _ = std::fs::remove_file(&lock_path);
+        assert_eq!(mode, 0o600, "reader-created lock file mode {mode:o}");
+    }
+
+    /// P114 (Astra r1 #2): a load that overlaps an append in progress (another process writing a large row) must not
+    /// record the unfinished row as damage for good. The load waits for the append lock, then reads the whole row.
+    #[test]
+    fn a_load_waits_for_an_append_in_progress() {
+        let full = serde_json::to_vec(&point_with_files(2, &[("b.rs", "b before 2")])).unwrap();
+        let (head, tail) = full.split_at(full.len() / 2);
+        let mut body = serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap();
+        body.push(b'\n');
+        body.extend_from_slice(head);
+        let file = write_rewind_bytes(&body);
+        let path = file.path().to_path_buf();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("jsonl.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader_path = path.clone();
+        let reader = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let tracker = FileStateTracker::with_lazy_source(reader_path);
+            let result = runtime.block_on(tracker.try_get_rewind_points_for(1));
+            tx.send(result.map(|points| points.iter().map(|p| p.prompt_index).collect::<Vec<_>>()).map_err(|e| format!("{e:?}")))
+                .unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(rx.try_recv().is_err(), "the load waits while the append holds the lock");
+        {
+            use std::io::Write;
+            let mut writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writer.write_all(tail).unwrap();
+            writer.write_all(b"\n").unwrap();
+        }
+        fs2::FileExt::unlock(&lock).unwrap();
+        let loaded = rx.recv_timeout(std::time::Duration::from_secs(30)).expect("the load finishes");
+        reader.join().unwrap();
+        let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+        assert_eq!(loaded, Ok(vec![1, 2]), "the finished row is read, not recorded as damage");
+    }
+
+    /// P135 (P120 rule): the append lock a read creates is owner-only, like every other session file.
+    #[cfg(unix)]
+    #[test]
+    fn the_lock_file_a_read_creates_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let file = write_rewind_bytes(b"");
+        let path = file.path().to_path_buf();
+        let lock_path = path.with_extension("jsonl.lock");
+        let _ = std::fs::remove_file(&lock_path);
+        let _held = lock_rewind_points_for_read(&path).unwrap();
+        let mode = std::fs::metadata(&lock_path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_file(&lock_path);
+        assert_eq!(mode & 0o077, 0, "the lock file is accessible to others: {mode:o}");
+    }
+
+    /// P114 (Astra r2 #2): a load never blocks the session's event loop on another process's append, and gives up after
+    /// a bounded wait with a retryable error, keeping the deferred source.
+    #[test]
+    fn a_load_does_not_block_the_event_loop_on_a_held_append_lock() {
+        let mut body = serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap();
+        body.push(b'\n');
+        let file = write_rewind_bytes(&body);
+        let path = file.path().to_path_buf();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_extension("jsonl.lock"))
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        let tracker = FileStateTracker::with_lazy_source(path.clone());
+        let started = std::time::Instant::now();
+        let (loaded, ticked_at) = runtime.block_on(async {
+            tokio::join!(tracker.try_get_rewind_points_for(1), async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                started.elapsed()
+            })
+        });
+        let waited = started.elapsed();
+        assert!(ticked_at < std::time::Duration::from_secs(2), "the event loop kept running: {ticked_at:?}");
+        assert!(waited >= APPEND_LOCK_WAIT, "it waited for the append: {waited:?}");
+        let error = match loaded {
+            Err(RewindPointsUnavailable::Unreadable { error, .. }) => error,
+            other => panic!("a busy lock is a retryable read error: {other:?}"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock, "{error}");
+        fs2::FileExt::unlock(&lock).unwrap();
+        let points = runtime.block_on(tracker.try_get_rewind_points_for(1)).expect("the source was kept for a retry");
+        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), vec![1]);
+        let _ = std::fs::remove_file(path.with_extension("jsonl.lock"));
+    }
+
+    /// P114 (Astra r2 #3): when the append lock cannot be taken, an unfinished last row may be an append in progress, so
+    /// it is a retryable read error, never damage recorded for good.
+    #[tokio::test]
+    async fn an_unfinished_last_row_read_without_the_lock_is_retried_not_damage() {
+        let full = serde_json::to_vec(&point_with_files(2, &[("b.rs", "b before 2")])).unwrap();
+        let (head, tail) = full.split_at(full.len() / 2);
+        let mut body = serde_json::to_vec(&point_with_files(1, &[("a.rs", "a before 1")])).unwrap();
+        body.push(b'\n');
+        body.extend_from_slice(head);
+        let file = write_rewind_bytes(&body);
+        let path = file.path().to_path_buf();
+        // The lock file cannot be opened: a directory stands in its place.
+        std::fs::create_dir(path.with_extension("jsonl.lock")).unwrap();
+        let tracker = FileStateTracker::with_lazy_source(path.clone());
+        let first = tracker.try_get_rewind_points_for(1).await;
+        assert!(
+            matches!(&first, Err(RewindPointsUnavailable::Unreadable { error, .. }) if error.kind() == io::ErrorKind::WouldBlock),
+            "{first:?}"
+        );
+        {
+            use std::io::Write;
+            let mut writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writer.write_all(tail).unwrap();
+            writer.write_all(b"\n").unwrap();
+        }
+        let points = tracker.try_get_rewind_points_for(1).await.expect("the finished row is read on the retry");
+        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), vec![1, 2]);
+        let _ = std::fs::remove_dir(path.with_extension("jsonl.lock"));
     }
 }

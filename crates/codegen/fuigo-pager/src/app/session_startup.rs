@@ -42,9 +42,6 @@ pub struct DeferredStartupActions {
     pub prompt: Option<String>,
     pub open_dashboard: bool,
     pub pending_chat: bool,
-    /// Welcome history local-disk bypass persisted across the startup gate.
-    #[cfg(feature = "local-workspace")]
-    pub history_load_as_build: bool,
 }
 impl DeferredStartupActions {
     pub fn is_empty(&self) -> bool {
@@ -315,310 +312,6 @@ pub fn chat_mode_flag_conflict(
         return Some(CHAT_MODE_RESTORE_CODE_CONFLICT);
     }
     None
-}
-/// Env: enable local workspace without CLI flags (`1`).
-/// Mode defaults to `own` unless `FUIGO_CHAT_LOCAL_WORKSPACE_MODE` or an attach server id is set.
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE";
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_CWD_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE_CWD";
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_MODE_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE_MODE";
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID";
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME";
-/// Skip interactive first-run confirm (still prints the banner).
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV: &str = "FUIGO_CHAT_LOCAL_WORKSPACE_ACK";
-/// Startup banner and first-run copy.
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_BANNER: &str =
-    "Local workspace runs tools on this machine (FS confined to <cwd>).";
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID: &str = "local-workspace attach requires --local-workspace-attach=<server_id> \
-     (or FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID)";
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_REQUIRES_CHAT: &str = "local-workspace flags/env require --chat";
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_HOME_DENIED: &str =
-    "local-workspace cwd may not be / or $HOME unless FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME=1";
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_HITL_HINT: &str = "Permission prompts for local workspace tools apply to your machine. \
-     Local workspace replaces the chat sandbox.";
-#[cfg(feature = "local-workspace")]
-pub const LOCAL_WORKSPACE_ACK_REQUIRED: &str = "local-workspace requires interactive confirm, FUIGO_CHAT_LOCAL_WORKSPACE_ACK=1, or an ack file";
-/// Declared advertised tool ids for attach FS-only check (comma-separated).
-#[cfg(feature = "local-workspace")]
-pub const FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV: &str =
-    "FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS";
-#[cfg(feature = "local-workspace")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LocalWorkspaceMode {
-    Own,
-    Attach,
-}
-#[cfg(feature = "local-workspace")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalWorkspaceConfig {
-    pub mode: LocalWorkspaceMode,
-    pub cwd: Option<std::path::PathBuf>,
-    pub server_id: Option<String>,
-}
-#[cfg(feature = "local-workspace")]
-static ACTIVE_LOCAL_WORKSPACE: std::sync::Mutex<Option<LocalWorkspaceConfig>> =
-    std::sync::Mutex::new(None);
-#[cfg(feature = "local-workspace")]
-pub fn set_active_local_workspace(cfg: Option<LocalWorkspaceConfig>) -> anyhow::Result<()> {
-    let mut guard = ACTIVE_LOCAL_WORKSPACE.lock().map_err(|_| {
-        anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
-    })?;
-    tracing::info!(
-        target: crate::views::welcome::workspace_mode::WORKSPACE_MODE_LOG,
-        event = if cfg.is_some() {
-            "process_stamp_set"
-        } else {
-            "process_stamp_cleared"
-        },
-        mode = cfg.as_ref().map(|c| format!("{:?}", c.mode)),
-        server_id = cfg.as_ref().and_then(|c| c.server_id.as_deref()),
-        cwd = cfg.as_ref().and_then(|c| c.cwd.as_ref().map(|p| p.display().to_string())),
-        "local-workspace process-wide intent stamp"
-    );
-    *guard = cfg;
-    Ok(())
-}
-#[cfg(feature = "local-workspace")]
-pub fn active_local_workspace() -> anyhow::Result<Option<LocalWorkspaceConfig>> {
-    ACTIVE_LOCAL_WORKSPACE
-        .lock()
-        .map(|g| g.clone())
-        .map_err(|_| {
-            anyhow::anyhow!("local-workspace intent mutex poisoned; refuse attach (fail closed)")
-        })
-}
-#[cfg(not(feature = "local-workspace"))]
-pub fn active_local_workspace() -> anyhow::Result<Option<()>> {
-    Ok(None)
-}
-#[cfg(feature = "local-workspace")]
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
-}
-#[cfg(feature = "local-workspace")]
-fn env_nonempty(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-/// Resolve local-workspace intent, CLI over env (own or attach).
-///
-/// Returns `Ok(None)` when local workspace is not requested.
-#[cfg(feature = "local-workspace")]
-pub fn resolve_local_workspace_config(
-    chat: bool,
-    cli_own: Option<Option<&std::path::Path>>,
-    cli_attach: Option<&str>,
-    cli_cwd: Option<&std::path::Path>,
-) -> anyhow::Result<Option<LocalWorkspaceConfig>> {
-    let env_enable = env_truthy(FUIGO_CHAT_LOCAL_WORKSPACE_ENV);
-    let env_mode = env_nonempty(FUIGO_CHAT_LOCAL_WORKSPACE_MODE_ENV);
-    let env_server_id = env_nonempty(FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
-    let env_cwd = env_nonempty(FUIGO_CHAT_LOCAL_WORKSPACE_CWD_ENV).map(std::path::PathBuf::from);
-    let cli_attach = cli_attach.map(str::trim).filter(|s| !s.is_empty());
-    let cli_requested = cli_own.is_some() || cli_attach.is_some();
-    let env_requested = env_enable || env_mode.is_some() || env_server_id.is_some();
-    if !cli_requested && !env_requested {
-        return Ok(None);
-    }
-    if !chat {
-        anyhow::bail!("{LOCAL_WORKSPACE_REQUIRES_CHAT}");
-    }
-    let mode = if cli_attach.is_some() {
-        LocalWorkspaceMode::Attach
-    } else if cli_own.is_some() {
-        LocalWorkspaceMode::Own
-    } else if let Some(ref m) = env_mode {
-        match m.as_str() {
-            "attach" => LocalWorkspaceMode::Attach,
-            "own" => LocalWorkspaceMode::Own,
-            other => {
-                anyhow::bail!(
-                    "invalid {FUIGO_CHAT_LOCAL_WORKSPACE_MODE_ENV}={other:?}; expected own|attach"
-                )
-            }
-        }
-    } else if env_server_id.is_some() {
-        LocalWorkspaceMode::Attach
-    } else {
-        LocalWorkspaceMode::Own
-    };
-    let cwd = cli_cwd
-        .map(std::path::Path::to_path_buf)
-        .or_else(|| cli_own.and_then(|inner| inner.map(std::path::Path::to_path_buf)))
-        .or(env_cwd)
-        .unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-        });
-    let cwd = if cwd.is_absolute() {
-        cwd
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(cwd)
-    };
-    let cwd = validate_local_workspace_cwd(&cwd)?;
-    match mode {
-        LocalWorkspaceMode::Own => Ok(Some(LocalWorkspaceConfig {
-            mode,
-            cwd: Some(cwd),
-            server_id: None,
-        })),
-        LocalWorkspaceMode::Attach => {
-            let server_id = cli_attach
-                .map(str::to_owned)
-                .or(env_server_id)
-                .filter(|s| !s.is_empty());
-            let Some(server_id) = server_id else {
-                anyhow::bail!("{LOCAL_WORKSPACE_ATTACH_NEEDS_SERVER_ID}");
-            };
-            ensure_attach_fs_only_toolset(&server_id)?;
-            Ok(Some(LocalWorkspaceConfig {
-                mode,
-                cwd: Some(cwd),
-                server_id: Some(server_id),
-            }))
-        }
-    }
-}
-/// Canonicalize `path` and enforce the `/` and `$HOME` denylist.
-///
-/// Returns the canonical directory so callers stamp and persist what was actually checked (symlinks and `..` must not diverge from validation).
-#[cfg(feature = "local-workspace")]
-pub fn validate_local_workspace_cwd(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(path)
-    };
-    let canon = abs.canonicalize().map_err(|e| {
-        anyhow::anyhow!(
-            "local workspace cwd must exist and be canonicalizable: {}: {e}",
-            abs.display()
-        )
-    })?;
-    if !canon.is_dir() {
-        anyhow::bail!(
-            "local workspace cwd must be an existing directory: {}",
-            canon.display()
-        );
-    }
-    if env_truthy(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV) {
-        return Ok(canon);
-    }
-    if canon == std::path::Path::new("/") {
-        anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
-    }
-    if let Some(home_path) = fuigo_dirs::home_dir() {
-        let home_canon = home_path.canonicalize().unwrap_or(home_path);
-        if canon == home_canon {
-            anyhow::bail!("{LOCAL_WORKSPACE_HOME_DENIED}");
-        }
-    }
-    Ok(canon)
-}
-/// Banner and first-run confirm for the local-workspace own and attach modes.
-///
-/// Skip confirm only with `FUIGO_CHAT_LOCAL_WORKSPACE_ACK=1` or a prior ack file.
-/// Non-TTY without ACK refuses (fail closed).
-#[cfg(feature = "local-workspace")]
-pub fn emit_local_workspace_startup_ux(cfg: &LocalWorkspaceConfig) -> anyhow::Result<()> {
-    use std::io::IsTerminal;
-    emit_local_workspace_startup_ux_with(cfg, std::io::stdin().is_terminal())
-}
-/// Testable UX gate: `stdin_is_terminal` is injected.
-#[cfg(feature = "local-workspace")]
-pub fn emit_local_workspace_startup_ux_with(
-    cfg: &LocalWorkspaceConfig,
-    stdin_is_terminal: bool,
-) -> anyhow::Result<()> {
-    let cwd_display = cfg
-        .cwd
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "<session cwd>".to_string());
-    let banner = LOCAL_WORKSPACE_BANNER.replace("<cwd>", &cwd_display);
-    eprintln!("{banner}");
-    eprintln!("{LOCAL_WORKSPACE_HITL_HINT}");
-    if local_workspace_ack_satisfied() {
-        return Ok(());
-    }
-    if !stdin_is_terminal {
-        anyhow::bail!("{LOCAL_WORKSPACE_ACK_REQUIRED}");
-    }
-    eprint!("Continue with local workspace on this machine? [y/N] ");
-    use std::io::Write;
-    let _ = std::io::stderr().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    let ok = matches!(line.trim(), "y" | "Y" | "yes" | "YES");
-    if !ok {
-        anyhow::bail!("local workspace cancelled");
-    }
-    write_local_workspace_ack();
-    Ok(())
-}
-/// True when ACK env or ack file already authorizes local workspace.
-#[cfg(feature = "local-workspace")]
-pub fn local_workspace_ack_satisfied() -> bool {
-    if env_truthy(FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV) {
-        return true;
-    }
-    local_workspace_ack_path().is_some_and(|p| p.is_file())
-}
-/// Persist the first-run local-workspace ACK file (best-effort).
-#[cfg(feature = "local-workspace")]
-pub fn write_local_workspace_ack() {
-    if let Some(path) = local_workspace_ack_path() {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(path, "1\n");
-    }
-}
-/// Fail closed unless advertised tools are FS-only.
-///
-/// Until diag exposes a real tool catalog, attach trusts operator attestation
-/// via `FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS` (comma-separated ids).
-/// Unset or empty means refuse.
-#[cfg(feature = "local-workspace")]
-pub fn ensure_attach_fs_only_toolset(_server_id: &str) -> anyhow::Result<()> {
-    let advertised = probe_advertised_tool_ids();
-    let refs: Option<Vec<&str>> = advertised
-        .as_ref()
-        .map(|ids| ids.iter().map(String::as_str).collect());
-    crate::app::effects::reject_non_fs_only_advertised_tools(refs.as_deref())
-        .map_err(|e| anyhow::anyhow!("{e}"))
-}
-/// Operator-attested advertised tool ids for attach (env only; no fake diag probe).
-#[cfg(feature = "local-workspace")]
-pub fn probe_advertised_tool_ids() -> Option<Vec<String>> {
-    let raw = env_nonempty(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV)?;
-    let ids: Vec<String> = raw
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    Some(ids)
-}
-#[cfg(feature = "local-workspace")]
-fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
-    Some(fuigo_dirs::resolve_fuigo_home()?.join("local_workspace_ack"))
 }
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
@@ -967,9 +660,10 @@ async fn resolve_existing_session(
             original_cwd = %original_cwd,
             "Session found locally under different CWD"
         );
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "Session {} found locally (originally in {})",
-            session_id, original_cwd
+            session_id,
+            original_cwd
         );
         return Ok(ResolvedExisting {
             id: session_id.to_string(),
@@ -996,12 +690,12 @@ async fn resolve_existing_session(
                 restore_code = ctx.restore_code,
                 "Session not found locally; deferring restore to worktree resume handler"
             );
-            eprintln!(
+            fuigo_tty_utils::cli_eprintln!(
                 "Session {:?} not found locally; it will be restored into the new worktree.",
                 session_id
             );
             if !ctx.restore_code {
-                eprintln!("{WORKTREE_NO_RESTORE_CODE_NOTICE}");
+                fuigo_tty_utils::cli_eprintln!("{WORKTREE_NO_RESTORE_CODE_NOTICE}");
             }
             Ok(ResolvedExisting {
                 id: session_id.to_string(),
@@ -1231,10 +925,10 @@ async fn restore_session_from_remote(
 fn emit_pre_tui_restore_line(on_stdout: bool, line: &str) {
     use std::io::Write;
     if on_stdout {
-        println!("{line}");
+        fuigo_tty_utils::cli_println!("{line}");
         let _ = std::io::stdout().flush();
     } else {
-        eprintln!("{line}");
+        fuigo_tty_utils::cli_eprintln!("{line}");
         let _ = std::io::stderr().flush();
     }
 }
@@ -1293,7 +987,7 @@ async fn resolve_session_by_title(
     };
     let id = chosen.info.id.to_string();
     tracing::info!(session_id = %id, "Session resolved by title");
-    eprintln!("Resuming session {} (matched by title)", id);
+    fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", id);
     Ok(Some(ResolvedExisting {
         id,
         original_cwd: None,
@@ -1366,6 +1060,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[test]
     fn parent_session_is_worktree_summary_session_kind() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let repo = crate::test_util::TempGitRepo::init("main");
         let cwd = repo.path.to_string_lossy().to_string();
@@ -1379,6 +1076,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[test]
     fn parent_session_is_worktree_summary_source_workspace_dir() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let repo = crate::test_util::TempGitRepo::init("main");
         let cwd = repo.path.to_string_lossy().to_string();
@@ -1398,6 +1098,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[test]
     fn parent_session_is_worktree_summary_worktree_label() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let repo = crate::test_util::TempGitRepo::init("main");
         let cwd = repo.path.to_string_lossy().to_string();
@@ -1658,6 +1361,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[tokio::test]
     async fn continue_skips_empty_worktree_stamped_husk() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let cwd = fx.cwd_str();
         let real_id = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -1700,6 +1406,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[tokio::test]
     async fn continue_keeps_empty_worktree_fork() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let cwd = fx.cwd_str();
         let older_id = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -1744,6 +1453,9 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[tokio::test]
     async fn most_recent_fork_selection_follows_surface() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let mut fx = crate::test_util::FuigoHomeFixture::new();
         let cwd = fx.cwd_str();
         let interactive_id = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -2169,8 +1881,11 @@ mod tests {
     #[serial_test::serial(FUIGO_HOME)]
     #[tokio::test]
     async fn chat_resume_passthrough_keeps_cwd_collision_refusal() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let home = tempfile::tempdir().expect("home tempdir");
-        unsafe { std::env::set_var("FUIGO_HOME", home.path()) };
+        let _fuigo_home = crate::test_util::EnvVarGuard::set("FUIGO_HOME", home.path());
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         let cwd_str = cwd.path().to_string_lossy().to_string();
         let id = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -2248,6 +1963,9 @@ mod tests {
         #[serial_test::serial(FUIGO_HOME)]
         #[tokio::test]
         async fn title_fallback_ignores_headless_matches() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let mut fx = FuigoHomeFixture::new();
             let cwd_str = fx.cwd_str();
             fx.write_summary(
@@ -2266,6 +1984,9 @@ mod tests {
         #[serial_test::serial(FUIGO_HOME)]
         #[tokio::test]
         async fn headless_title_resume_keeps_headless_matches() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let mut fx = FuigoHomeFixture::new();
             let cwd_str = fx.cwd_str();
             let id = "aaaaaaaa-1111-2222-3333-444444444444";
@@ -2291,6 +2012,9 @@ mod tests {
         #[serial_test::serial(FUIGO_HOME)]
         #[tokio::test]
         async fn title_fallback_resumes_single_match_case_insensitively() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let mut fx = FuigoHomeFixture::new();
             let cwd_str = fx.cwd_str();
             let id = "bbbbbbbb-1111-2222-3333-444444444444";
@@ -2323,6 +2047,9 @@ mod tests {
         #[serial_test::serial(FUIGO_HOME)]
         #[tokio::test]
         async fn id_hit_beats_title_fallback() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let mut fx = FuigoHomeFixture::new();
             let cwd_str = fx.cwd_str();
             fx.write_summary(
@@ -2350,6 +2077,9 @@ mod tests {
         #[serial_test::serial(FUIGO_HOME)]
         #[tokio::test]
         async fn worktree_defer_flags_local_miss_and_local_hit_does_not() {
+            if fuigo_test_support::env::rerun_in_own_process() {
+                return;
+            }
             let mut fx = FuigoHomeFixture::new();
             let cwd_str = fx.cwd_str();
             fx.write_summary(&cwd_str, "release-notes", serde_json::json!({}));
@@ -2414,198 +2144,5 @@ mod tests {
                 other => panic!("expected Resume, got {other:?}"),
             }
         }
-    }
-    #[cfg(feature = "local-workspace")]
-    fn advertised_tools_env() -> fuigo_test_support::EnvGuard {
-        fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
-            "workspace.fs_list,workspace.fs_read_file,workspace.fs_write_file,workspace.fs_exists,workspace.fs_delete_file,workspace.put_files,workspace.get_files",
-        )
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_attach_from_cli() {
-        let _env = advertised_tools_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = resolve_local_workspace_config(true, None, Some("srv-dogfood"), Some(tmp.path()))
-            .unwrap()
-            .expect("attach config");
-        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
-        assert_eq!(cfg.server_id.as_deref(), Some("srv-dogfood"));
-        let canon = tmp.path().canonicalize().unwrap();
-        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
-    #[test]
-    fn resolve_local_workspace_empty_cli_attach_falls_back_to_env() {
-        let _env = advertised_tools_env();
-        let _sid = fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV,
-            "srv-from-env",
-        );
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = resolve_local_workspace_config(true, None, Some(""), Some(tmp.path()))
-            .unwrap()
-            .expect("empty CLI attach should fall back to env server id");
-        assert_eq!(cfg.mode, LocalWorkspaceMode::Attach);
-        assert_eq!(cfg.server_id.as_deref(), Some("srv-from-env"));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_CWD)]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE)]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_MODE)]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID)]
-    #[test]
-    fn resolve_local_workspace_cwd_only_is_not_a_request() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _cwd = fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_CWD_ENV,
-            tmp.path().to_str().unwrap(),
-        );
-        let _enable = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ENV);
-        let _mode = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_MODE_ENV);
-        let _sid = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
-        let cfg = resolve_local_workspace_config(true, None, None, Some(tmp.path())).unwrap();
-        assert!(
-            cfg.is_none(),
-            "cwd-only CLI/env must not activate local workspace: {cfg:?}"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_own_from_cli() {
-        let _env = advertised_tools_env();
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = resolve_local_workspace_config(true, Some(Some(tmp.path())), None, None)
-            .unwrap()
-            .expect("own config");
-        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
-        assert!(
-            cfg.server_id.is_none(),
-            "own leaves server_id to supervisor"
-        );
-        let canon = tmp.path().canonicalize().unwrap();
-        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_own_env_defaults() {
-        let _env = advertised_tools_env();
-        let _enable = fuigo_test_support::EnvGuard::set(FUIGO_CHAT_LOCAL_WORKSPACE_ENV, "1");
-        let _mode = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_MODE_ENV);
-        let _sid = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_SERVER_ID_ENV);
-        let cwd = tempfile::tempdir().unwrap();
-        let _cwd = fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_CWD_ENV,
-            cwd.path().to_str().unwrap(),
-        );
-        let cfg = resolve_local_workspace_config(true, None, None, None)
-            .unwrap()
-            .expect("env own");
-        assert_eq!(cfg.mode, LocalWorkspaceMode::Own);
-        assert!(cfg.server_id.is_none());
-        let canon = cwd.path().canonicalize().unwrap();
-        assert_eq!(cfg.cwd.as_deref(), Some(canon.as_path()));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_requires_chat() {
-        let _env = advertised_tools_env();
-        let err = resolve_local_workspace_config(false, None, Some("srv"), None).unwrap_err();
-        assert!(
-            err.to_string().contains("require --chat"),
-            "unexpected: {err}"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
-    #[serial_test::serial(HOME)]
-    #[serial_test::serial(USERPROFILE)]
-    #[test]
-    fn resolve_local_workspace_defaults_cwd_and_denies_home() {
-        let _tools = fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
-            "workspace.fs_list",
-        );
-        let _allow = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
-        let home = tempfile::tempdir().unwrap();
-        let home_str = home.path().to_str().unwrap();
-        let _home = fuigo_test_support::EnvGuard::set("HOME", home_str);
-        let _userprofile = fuigo_test_support::EnvGuard::set("USERPROFILE", home_str);
-        let err =
-            resolve_local_workspace_config(true, None, Some("srv"), Some(home.path())).unwrap_err();
-        assert!(err.to_string().contains("ALLOW_HOME"), "unexpected: {err}");
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_refuses_uncheckable_toolset() {
-        let _tools =
-            fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV);
-        let tmp = tempfile::tempdir().unwrap();
-        let err =
-            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
-        assert!(
-            err.to_string().contains("uncheckable") || err.to_string().contains("FS-only"),
-            "unexpected: {err}"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS)]
-    #[test]
-    fn resolve_local_workspace_refuses_non_fs_toolset() {
-        let _tools = fuigo_test_support::EnvGuard::set(
-            FUIGO_CHAT_LOCAL_WORKSPACE_ADVERTISED_TOOLS_ENV,
-            "workspace.fs_list,workspace.bash",
-        );
-        let tmp = tempfile::tempdir().unwrap();
-        let err =
-            resolve_local_workspace_config(true, None, Some("srv"), Some(tmp.path())).unwrap_err();
-        assert!(err.to_string().contains("FS-only"), "unexpected: {err}");
-        assert!(
-            err.to_string().contains("workspace.bash"),
-            "unexpected: {err}"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[test]
-    fn local_workspace_banner_mentions_local_machine() {
-        assert!(LOCAL_WORKSPACE_BANNER.contains("on this machine"));
-        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("your machine"));
-        assert!(LOCAL_WORKSPACE_HITL_HINT.contains("replaces the chat sandbox"));
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ACK)]
-    #[serial_test::serial(FUIGO_HOME)]
-    #[test]
-    fn local_workspace_non_tty_requires_ack() {
-        let _ack = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ACK_ENV);
-        let home = tempfile::tempdir().unwrap();
-        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path().to_str().unwrap());
-        let cfg = LocalWorkspaceConfig {
-            mode: LocalWorkspaceMode::Attach,
-            cwd: Some(std::path::PathBuf::from("/tmp/repo")),
-            server_id: Some("srv".into()),
-        };
-        let err = emit_local_workspace_startup_ux_with(&cfg, false).unwrap_err();
-        assert!(
-            err.to_string().contains("ACK") || err.to_string().contains("ack"),
-            "unexpected: {err}"
-        );
-    }
-    #[cfg(feature = "local-workspace")]
-    #[serial_test::serial(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME)]
-    #[test]
-    fn validate_local_workspace_cwd_denies_root() {
-        let _allow = fuigo_test_support::EnvGuard::unset(FUIGO_CHAT_LOCAL_WORKSPACE_ALLOW_HOME_ENV);
-        let err = validate_local_workspace_cwd(std::path::Path::new("/")).unwrap_err();
-        assert!(err.to_string().contains("ALLOW_HOME"), "{err}");
     }
 }

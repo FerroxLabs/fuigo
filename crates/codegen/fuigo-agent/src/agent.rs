@@ -40,6 +40,14 @@ pub struct Agent {
     /// Build-time toggle for server-side search tools.
     /// ANDed at request time with the per-model `SessionActor::supports_backend_search`.
     backend_search_enabled: bool,
+
+    /// Entries in this agent's `tools` allowlist that matched no known tool.
+    ///
+    /// P01. These used to make the whole allowlist be discarded and the full toolset
+    /// granted, so one typo turned a restriction into a grant. The allowlist now always
+    /// applies and the unmatched entries are recorded here, so a caller can tell the user
+    /// which names did nothing instead of leaving it to a log line nobody reads.
+    unresolved_tool_allowlist_entries: Vec<String>,
 }
 
 impl Agent {
@@ -64,7 +72,23 @@ impl Agent {
             compaction_policy,
             hosted_tools,
             backend_search_enabled,
+            unresolved_tool_allowlist_entries: Vec::new(),
         }
+    }
+
+    /// Record allowlist entries that matched no known tool. See the field docs. P01.
+    #[must_use]
+    pub fn with_unresolved_tool_allowlist_entries(mut self, entries: Vec<String>) -> Self {
+        self.unresolved_tool_allowlist_entries = entries;
+        self
+    }
+
+    /// Allowlist entries that matched no known tool, for surfacing to the user.
+    ///
+    /// Empty in the normal case. Non-empty means the user named tools that do not exist
+    /// -- a typo, or a tool renamed by an upgrade -- and those names restricted nothing.
+    pub fn unresolved_tool_allowlist_entries(&self) -> &[String] {
+        &self.unresolved_tool_allowlist_entries
     }
 
     // ── From definition ──────────────────────────────────────────────
@@ -204,6 +228,20 @@ impl Agent {
     /// Re-render the system prompt for a different definition, reusing the existing ToolBridge.
     /// Used for mid-session mode switching.
     pub async fn render_prompt_for_definition(&self, definition: &AgentDefinition) -> String {
+        self.prompt_context_for_definition(definition)
+            .render(&self.tool_bridge)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// The prompt context [`Self::render_prompt_for_definition`] renders: this agent's context with
+    /// `definition`'s prompt mode, body, system prompt, browser-verification and AGENTS.md choices.
+    ///
+    /// Synchronous, so a host that keeps the agent in a `RefCell` can take this and a clone of
+    /// [`Self::tool_bridge`] inside one short borrow and render without holding the borrow across
+    /// the await (a `Ref` parked there makes a concurrent `borrow_mut`, such as a harness rebuild,
+    /// panic).
+    pub fn prompt_context_for_definition(&self, definition: &AgentDefinition) -> PromptContext {
         let mut ctx = self.prompt_context.clone();
         ctx.prompt_mode = definition.prompt_mode.clone();
         ctx.prompt_body = definition.prompt_body.clone();
@@ -215,6 +253,6 @@ impl Agent {
             ctx.agents_md_files.clear();
         }
 
-        ctx.render(&self.tool_bridge).await.unwrap_or_default()
+        ctx
     }
 }

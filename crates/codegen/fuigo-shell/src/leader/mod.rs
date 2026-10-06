@@ -67,12 +67,12 @@ pub use lock::{
     ws_url_suffix_from_paths,
 };
 pub use protocol::{
-    ClientCapabilities, ClientId, ClientMode, ControlCommand, ControlPayload,
-    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason,
+    ClientCapabilities, ClientId, ClientMode, ControlCommand, ControlPayload, LEADER_NOTICE_METHOD,
+    LEADER_PROTOCOL_VERSION, LeaderCapabilities, ShutdownReason, leader_notice_payload,
 };
 use serde::{Deserialize, Serialize};
 pub use server::{
-    LeaderServerControlState, LeaderServerMetadata, ServerError, ServerHandle, run_leader_server,
+    LeaderServerControlState, LeaderServerMetadata, RelayRefusalBoard, ServerError, ServerHandle, run_leader_server,
     spawn_leader_server,
 };
 use std::fs;
@@ -111,6 +111,273 @@ pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
 /// A missing or unparseable version keeps the leader.
 fn should_evict(leader_version: Option<&str>, client_version: &str) -> bool {
     leader_version.is_some_and(|v| leader_is_older_than(v, client_version))
+}
+/// Whether `leader_version` is a strictly-newer parseable semver than `baseline` (P124).
+/// Unparseable versions (e.g. dev `"unknown"`) return `false`, like [`leader_is_older_than`].
+pub fn leader_is_newer_than(leader_version: &str, baseline: &str) -> bool {
+    match (
+        semver::Version::parse(leader_version),
+        semver::Version::parse(baseline),
+    ) {
+        (Ok(leader), Ok(baseline)) => leader > baseline,
+        _ => false,
+    }
+}
+/// The message a client prints when it adopts a leader that runs a strictly newer Fuigo than the client (P124).
+/// `None` when the leader is the same, older, unversioned or unparseable (nothing to say).
+///
+/// A client never evicts a newer leader (that would thrash machines running two versions), so before this it simply
+/// served a session from the newer binary without saying so, which is what an explicit downgrade looked like.
+pub fn newer_leader_notice(leader_version: Option<&str>, client_version: &str) -> Option<String> {
+    let leader_version = leader_version.filter(|v| leader_is_newer_than(v, client_version))?;
+    Some(format!(
+        "Fuigo {client_version} is connected to a shared background session (the leader) that runs the newer Fuigo \
+         {leader_version}, so it behaves like {leader_version}, not {client_version}. If you went back to \
+         {client_version} on purpose, run `fuigo leader kill` and start Fuigo again."
+    ))
+}
+/// The notice last announced by [`note_adopted_leader`]; reconnects adopt the same leader again and must not repeat it.
+static LAST_NEWER_LEADER_NOTICE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Tell the user, once per distinct message, that the leader this client just adopted is newer than the client (P124).
+fn note_adopted_leader(conn: &LeaderConnection) {
+    let leader_version = conn.registration().leader_binary_version.as_deref();
+    let Some(text) = newer_leader_notice(leader_version, CLIENT_LEADER_VERSION).or_else(|| {
+        stale_client_notice(
+            leader_version,
+            installed_version_for_eviction().as_deref(),
+            CLIENT_LEADER_VERSION,
+            &crate::util::fuigo_home::fuigo_home().join("bin").join(managed_fuigo_bin_name()),
+        )
+    }) else {
+        return;
+    };
+    let Ok(mut last) = LAST_NEWER_LEADER_NOTICE.lock() else {
+        return;
+    };
+    if last.as_deref() == Some(text.as_str()) {
+        return;
+    }
+    warn!(
+        leader_version = ?conn.registration().leader_binary_version,
+        client_version = CLIENT_LEADER_VERSION,
+        "Adopted a leader whose version differs from this client (newer leader, or the installed older one a newer client keeps)"
+    );
+    fuigo_file_utils::destination_gate::announce_notice(&text);
+    *last = Some(text);
+}
+/// What became of one leader asked to stop after an explicit downgrade (P124).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DowngradeStopResult {
+    /// The leader accepted and will exit after its bounded grace period; clients reconnect.
+    Stopping { from_version: String },
+    /// The leader was left running: it is not newer than the installed version, or a relaunch is already in progress.
+    Declined(String),
+    /// The leader is newer but predates `StopForDowngrade`: the user must run `fuigo leader kill`.
+    Unsupported { leader_version: String },
+    /// The leader could not be reached or answered with an error.
+    Unreachable(String),
+}
+/// Ask the leader on `socket_path` to stop because `installed_version` (strictly older than the leader) was just installed
+/// by an explicit downgrade (P124). The version handshake: the leader's registered version is checked here, and the leader
+/// checks it again authoritatively, so a leader that is not strictly newer is never signalled or stopped.
+pub async fn stop_leader_for_downgrade(
+    socket_path: PathBuf,
+    installed_version: &str,
+) -> DowngradeStopResult {
+    let client = match LeaderClient::connect(
+        socket_path,
+        "fuigo-pager-update",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    )
+    .await
+    {
+        Ok(client) => client,
+        Err(e) => return DowngradeStopResult::Unreachable(e.to_string()),
+    };
+    let leader_version = client.registration().leader_binary_version.clone();
+    let result = match leader_version {
+        Some(version) if leader_is_newer_than(&version, installed_version) => {
+            if !client.registration().supports_downgrade_stop() {
+                DowngradeStopResult::Unsupported {
+                    leader_version: version,
+                }
+            } else {
+                match client
+                    .send_control(ControlCommand::StopForDowngrade {
+                        to_version: installed_version.to_string(),
+                    })
+                    .await
+                {
+                    Ok(Ok(ControlPayload::Relaunching { from_version, .. })) => {
+                        DowngradeStopResult::Stopping { from_version }
+                    }
+                    Ok(Ok(ControlPayload::RelaunchDeclined { reason })) => {
+                        DowngradeStopResult::Declined(reason)
+                    }
+                    Ok(Ok(other)) => {
+                        DowngradeStopResult::Unreachable(format!("unexpected answer {other:?}"))
+                    }
+                    Ok(Err(e)) => DowngradeStopResult::Unreachable(e.message),
+                    Err(e) => DowngradeStopResult::Unreachable(e.to_string()),
+                }
+            }
+        }
+        Some(version) => DowngradeStopResult::Declined(format!(
+            "leader version {version} is not newer than {installed_version}"
+        )),
+        None => DowngradeStopResult::Declined("leader reports no version".to_string()),
+    };
+    client.cancel();
+    result
+}
+/// Whether a `fuigo update` that installed `installed` while this process ran `running` was an explicit downgrade (P124 r1 #2):
+/// the user asked for a version (`--version X` or `--force`) and what was installed is strictly older than what ran.
+/// An ordinary update, or one that installed nothing ("Already up to date"), is never a downgrade, so it never stops a leader.
+pub fn is_explicit_downgrade(explicit_request: bool, installed: &str, running: &str) -> bool {
+    explicit_request && leader_is_older_than(installed, running)
+}
+/// Leader versions that are STILL below this process's version floor after it spawned a leader itself (P124 r2 #1, r3 #1).
+/// The managed binary is the one that produced them, so evicting such a version again only respawns the same version.
+/// Without this, clients still running a newer binary after an explicit downgrade evict each other's leaders in turn (Astra P110 r2 #1).
+/// Learned ONLY from a completed spawn: merely discovering a stale leader (even repeatedly) never records anything, so an
+/// ordinary version-floor replacement is unchanged.
+static FUTILE_EVICTIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Whether `leader_version` IS the version installed on disk while this client is newer than that install (P129).
+/// Then the client itself is the stale binary: a respawn runs the managed (installed) binary, which is the leader's own version,
+/// so evicting only churns it (one eviction per fresh process after an explicit downgrade, e2e residue a3).
+/// An unknown or unparseable install is never matched, which keeps the plain P124 behaviour.
+fn leader_is_installed_and_client_is_stale(
+    leader_version: &str,
+    installed_version: Option<&str>,
+    client_version: &str,
+) -> bool {
+    let Some(installed) = installed_version else {
+        return false;
+    };
+    match (
+        semver::Version::parse(leader_version),
+        semver::Version::parse(installed),
+    ) {
+        (Ok(leader), Ok(installed_parsed)) => {
+            leader == installed_parsed && leader_is_older_than(installed, client_version)
+        }
+        _ => false,
+    }
+}
+/// The version of the managed binary a leader spawn from this process would run (P129), or `None` when that is not knowable.
+/// Same source as `fuigo update`'s disk probe (the target name of the `<fuigo_home>/bin/fuigo` symlink), and only for a managed
+/// client (`current_exe` under `fuigo_home`, the case where [`resolve_binary_impl`] spawns through that symlink). A dev or out-of-tree
+/// binary spawns itself, so there is no "installed" version to defer to. A dangling or unparseable link yields `None`.
+pub fn managed_installed_version(fuigo_home: &Path, current_exe: Option<&Path>) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let exe = current_exe?;
+        if !path_is_under(exe, fuigo_home) {
+            return None;
+        }
+        let managed_bin = fuigo_home.join("bin").join(managed_fuigo_bin_name());
+        let target = std::fs::read_link(&managed_bin).ok()?;
+        std::fs::metadata(&managed_bin).ok()?;
+        version_from_versioned_binary_name(target.file_name()?.to_str()?, "fuigo")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (fuigo_home, current_exe);
+        None
+    }
+}
+/// Everything between the `{bin_prefix}-` prefix and the first platform-OS component is the version, validated as semver.
+/// Handles `fuigo-0.1.150-macos-aarch64` and the npm layout `fuigo-0.1.150`; pre-releases parse whole. Unknown layouts give `None`.
+/// The single place that understands the versioned-binary naming; `fuigo-update` delegates to it.
+pub fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
+    const PLATFORM_OS: &[&str] = &["macos", "linux", "darwin", "windows"];
+    let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
+    let parts: Vec<&str> = suffix.split('-').collect();
+    let platform_start = parts
+        .iter()
+        .position(|p| PLATFORM_OS.contains(p))
+        .unwrap_or(parts.len());
+    let ver_str = parts[..platform_start].join("-");
+    semver::Version::parse(&ver_str).ok()?;
+    Some(ver_str)
+}
+/// Whether to evict the leader running `leader_version`: it is below the floor ([`should_evict`]), its version was not found futile,
+/// and it is not the installed version that this (newer, stale) client would only respawn (P129).
+/// Pure: a decision never changes the record.
+fn evict_decision(
+    leader_version: Option<&str>,
+    client_version: &str,
+    installed_version: Option<&str>,
+    futile: &std::sync::Mutex<Vec<String>>,
+) -> bool {
+    let Some(version) = leader_version.filter(|v| should_evict(Some(v), client_version)) else {
+        return false;
+    };
+    if leader_is_installed_and_client_is_stale(version, installed_version, client_version) {
+        return false;
+    }
+    futile
+        .lock()
+        .is_ok_and(|futile| !futile.iter().any(|v| v == version))
+}
+/// The notice a newer-than-installed client prints when it keeps (does not evict) the installed-version leader (P129).
+/// `None` unless the leader is the installed version and the client is newer than it.
+pub fn stale_client_notice(
+    leader_version: Option<&str>,
+    installed_version: Option<&str>,
+    client_version: &str,
+    managed_bin: &Path,
+) -> Option<String> {
+    let leader_version = leader_version?;
+    if !leader_is_installed_and_client_is_stale(leader_version, installed_version, client_version) {
+        return None;
+    }
+    let managed = managed_bin.display();
+    Some(format!(
+        "This Fuigo ({client_version}) is newer than the installed Fuigo {leader_version}, so it is using the shared background \
+         session (the leader) of {leader_version} instead of replacing it, and behaves like {leader_version}. \
+         To run the installed version, start `{managed}` (the `fuigo` on your PATH may be a different install); to use {client_version}, run `fuigo update --version {client_version}`."
+    ))
+}
+/// Remember that a leader this process spawned runs `leader_version`, if that is still below the floor.
+fn remember_futile(
+    leader_version: Option<&str>,
+    client_version: &str,
+    futile: &std::sync::Mutex<Vec<String>>,
+) {
+    let Some(version) = leader_version.filter(|v| should_evict(Some(v), client_version)) else {
+        return;
+    };
+    if let Ok(mut futile) = futile.lock()
+        && !futile.iter().any(|v| v == version)
+    {
+        futile.push(version.to_string());
+    }
+}
+/// [`evict_decision`] for a live connection against the process-wide record.
+fn evict_leader_conn(conn: &LeaderConnection) -> bool {
+    evict_decision(
+        conn.registration().leader_binary_version.as_deref(),
+        CLIENT_LEADER_VERSION,
+        installed_version_for_eviction().as_deref(),
+        &FUTILE_EVICTIONS,
+    )
+}
+/// [`managed_installed_version`] for this process.
+fn installed_version_for_eviction() -> Option<String> {
+    managed_installed_version(
+        &crate::util::fuigo_home::fuigo_home(),
+        std::env::current_exe().ok().as_deref(),
+    )
+}
+/// A leader this client just spawned that is still below its floor: the installed binary is that old, so never evict that version again.
+fn note_spawned_leader(conn: &LeaderConnection) {
+    remember_futile(
+        conn.registration().leader_binary_version.as_deref(),
+        CLIENT_LEADER_VERSION,
+        &FUTILE_EVICTIONS,
+    );
 }
 /// Base delay between reconnection attempts.
 const RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
@@ -388,7 +655,22 @@ fn descriptor_from_paths(
         target_error,
     }
 }
+/// Whether a live leader's endpoint is a file in fuigo home. On Unix it is the `leader*.sock` Unix domain socket. On
+/// Windows the transport is a named pipe whose name is derived from the socket PATH (`transport::path_to_pipe_name`), and
+/// no file is ever created at that path (P145).
+const LEADER_ENDPOINT_IS_FILE: bool = !cfg!(windows);
 async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
+    discover_leaders_in_with(root, LEADER_ENDPOINT_IS_FILE).await
+}
+/// [`discover_leaders_in`] with the endpoint kind injected, so the Windows rule runs in the Linux tests.
+///
+/// With a file endpoint, a lock and a socket file are paired by suffix (a lock alone is Stale). Without one (Windows),
+/// discovery used to see only `leader.lock`, classify every leader Stale and never ask it anything, so `fuigo leader
+/// list` showed a live leader as "PID ? (Stale)" (its PID is unreadable too: the leader holds a mandatory lock on the
+/// file) and `fuigo leader info` found no reachable leader (P145). Now each lock is paired with the socket path its
+/// leader binds (the sibling `.sock`, the pairing `lock_path_for_socket` defines) and the leader is asked over the
+/// pipe; only a leader that does not answer is Stale.
+async fn discover_leaders_in_with(root: &Path, endpoint_is_file: bool) -> Vec<LeaderDescriptor> {
     let mut candidates: std::collections::BTreeMap<String, (Option<PathBuf>, Option<PathBuf>)> =
         std::collections::BTreeMap::new();
     let Ok(read_dir) = fs::read_dir(root) else {
@@ -407,9 +689,10 @@ async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
             candidates.entry(suffix.to_string()).or_default().0 = Some(path);
             continue;
         }
-        if let Some(suffix) = file_name
-            .strip_prefix("leader")
-            .and_then(|name| name.strip_suffix(".sock"))
+        if endpoint_is_file
+            && let Some(suffix) = file_name
+                .strip_prefix("leader")
+                .and_then(|name| name.strip_suffix(".sock"))
         {
             candidates.entry(suffix.to_string()).or_default().1 = Some(path);
         }
@@ -419,6 +702,47 @@ async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
         let pid_from_lock = lock_path
             .as_deref()
             .and_then(LeaderLock::read_pid_from_path);
+        if let (Some(lock_path), None) = (&lock_path, &socket_path)
+            && let Some(derived) = derived_endpoint_for_lock(lock_path, endpoint_is_file)
+        {
+            let lock_path = lock_path.clone();
+            entries.push(match fetch_live_leader_info(&derived).await {
+                Ok(live_info) => descriptor_from_paths(
+                    Some(lock_path),
+                    Some(derived),
+                    pid_from_lock,
+                    Some(live_info),
+                    LeaderDiscoveryState::Reachable,
+                    None,
+                ),
+                // Nothing answers on the pipe: the same verdict a lock without a socket file gets on Unix.
+                Err(error) if error.code == LeaderTargetErrorCode::SocketUnreachable => descriptor_from_paths(
+                    Some(lock_path),
+                    None,
+                    pid_from_lock,
+                    None,
+                    LeaderDiscoveryState::Stale,
+                    None,
+                ),
+                Err(error) if error.code == LeaderTargetErrorCode::UnsupportedProtocol => descriptor_from_paths(
+                    Some(lock_path),
+                    Some(derived),
+                    pid_from_lock,
+                    None,
+                    LeaderDiscoveryState::UnsupportedProtocol,
+                    Some(LeaderTargetErrorCode::UnsupportedProtocol),
+                ),
+                Err(error) => descriptor_from_paths(
+                    Some(lock_path),
+                    Some(derived),
+                    pid_from_lock,
+                    None,
+                    LeaderDiscoveryState::Ambiguous,
+                    Some(error.code),
+                ),
+            });
+            continue;
+        }
         match (lock_path.clone(), socket_path.clone()) {
             (Some(lock_path), None) => entries.push(descriptor_from_paths(
                 Some(lock_path),
@@ -516,6 +840,11 @@ async fn discover_leaders_in(root: &Path) -> Vec<LeaderDescriptor> {
             .then_with(|| left.socket_path.cmp(&right.socket_path))
     });
     entries
+}
+/// The endpoint path a lock's leader binds when that endpoint is not a file (Windows named pipe): the sibling `.sock`
+/// path, from which the transport derives the pipe name. `None` with file endpoints, where the file itself is scanned.
+fn derived_endpoint_for_lock(lock_path: &Path, endpoint_is_file: bool) -> Option<PathBuf> {
+    (!endpoint_is_file).then(|| lock_path.with_extension("sock"))
 }
 pub async fn discover_leaders() -> Vec<LeaderDescriptor> {
     discover_leaders_in(&crate::util::fuigo_home::fuigo_home()).await
@@ -1142,6 +1471,7 @@ async fn wait_for_pid_exit(pid: u32, timeout: Duration) {
     );
 }
 /// Whether the leader on `conn` is below this client's version floor (see [`should_evict`]).
+#[cfg(test)]
 fn should_evict_conn(conn: &LeaderConnection) -> bool {
     should_evict(
         conn.registration().leader_binary_version.as_deref(),
@@ -1480,7 +1810,8 @@ pub async fn connect_or_spawn(
         if !skip_connect {
             match connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await {
                 Ok(conn) => {
-                    if !should_evict_conn(&conn) {
+                    if !evict_leader_conn(&conn) {
+                        note_adopted_leader(&conn);
                         info!(
                             elapsed_ms = start.elapsed().as_millis() as u64,
                             "Adopted leader"
@@ -1507,7 +1838,8 @@ pub async fn connect_or_spawn(
                     && let Ok(conn) =
                         connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
                 {
-                    if !should_evict_conn(&conn) {
+                    if !evict_leader_conn(&conn) {
+                        note_adopted_leader(&conn);
                         if let Err(e) = lock.release() {
                             warn!(error = %e, "Failed to release lock after adopting leader");
                         }
@@ -1564,6 +1896,7 @@ pub async fn connect_or_spawn(
                     }
                     Err(e) => return Err(e),
                 };
+                note_spawned_leader(&conn);
                 let elapsed_ms = start.elapsed().as_millis() as u64;
                 info!(elapsed_ms, "Spawned and connected to leader");
                 if replacing_stale {
@@ -1590,7 +1923,8 @@ pub async fn connect_or_spawn(
         {
             Ok(conn) => {
                 zombie_timer = None;
-                if !should_evict_conn(&conn) {
+                if !evict_leader_conn(&conn) {
+                    note_adopted_leader(&conn);
                     info!(
                         elapsed_ms = start.elapsed().as_millis() as u64,
                         "Adopted leader"
@@ -2176,6 +2510,221 @@ mod tests {
         );
         fake.cancel();
     }
+    /// P124: a client older than its leader says so; same, older, unversioned and unparseable leaders say nothing.
+    #[test]
+    fn newer_leader_notice_names_both_versions_and_the_remedy() {
+        let text = newer_leader_notice(Some("1.0.22"), "1.0.21").expect("a newer leader is announced");
+        assert!(text.contains("1.0.22") && text.contains("1.0.21"), "{text}");
+        assert!(text.contains("fuigo leader kill"), "{text}");
+        assert!(!text.contains('\u{2014}'), "{text}");
+        for quiet in [Some("1.0.21"), Some("1.0.20"), Some("unknown"), None] {
+            assert_eq!(newer_leader_notice(quiet, "1.0.21"), None, "{quiet:?}");
+        }
+        assert_eq!(newer_leader_notice(Some("1.0.22"), "unknown"), None);
+        assert_eq!(newer_leader_notice(Some("1.0.22-rc1"), "1.0.22"), None);
+        assert!(newer_leader_notice(Some("1.0.22"), "1.0.22-rc1").is_some());
+    }
+    /// P124: adopting a leader that runs a newer Fuigo than this client prints the notice; adopting a same-version leader prints nothing.
+    #[tokio::test]
+    #[serial_test::serial(FUIGO_LEADER_SOCKET)]
+    async fn connect_or_spawn_announces_an_adopted_newer_leader() {
+        let client: semver::Version = CLIENT_LEADER_VERSION
+            .parse()
+            .expect("CLIENT_LEADER_VERSION parses as semver");
+        let newer = format!("{}.{}.{}", client.major, client.minor, client.patch + 7);
+        let env_urls = LeaderEnvUrls {
+            fuigo_ws_url: "wss://test.invalid/p124-adopt".into(),
+            fuigo_ws_origin: "https://test.invalid".into(),
+        };
+        for (version, expect_notice) in [
+            (newer.clone(), true),
+            (CLIENT_LEADER_VERSION.to_string(), false),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let sock_path = temp.path().join("leader.sock");
+            let fake = spawn_fake_leader(
+                sock_path.clone(),
+                FakeLeaderBehavior::Normal {
+                    versions: FakeVersions {
+                        protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                        binary_version: Some(version.clone()),
+                    },
+                    caps: fake_caps(true, false),
+                },
+            )
+            .await;
+            // SAFETY: serialised on FUIGO_LEADER_SOCKET; restored below.
+            unsafe { std::env::set_var(LEADER_SOCKET_ENV, &sock_path) };
+            let before = fuigo_file_utils::destination_gate::withheld_notices().len();
+            let conn = connect_or_spawn(
+                "test",
+                ClientMode::Stdio,
+                &env_urls,
+                ClientCapabilities::default(),
+            )
+            .await
+            .expect("adopts the fake leader");
+            unsafe { std::env::remove_var(LEADER_SOCKET_ENV) };
+            let announced: Vec<String> = fuigo_file_utils::destination_gate::withheld_notices()
+                .into_iter()
+                .skip(before)
+                .filter(|n| n.contains("leader"))
+                .collect();
+            assert_eq!(announced.len(), usize::from(expect_notice), "{version}: {announced:?}");
+            if expect_notice {
+                assert!(announced[0].contains(&version), "{announced:?}");
+            }
+            drop(conn);
+            fake.cancel();
+        }
+    }
+    /// P124 r1 #2: only an explicit request that installed something strictly older than the running binary is a downgrade.
+    #[test]
+    fn explicit_downgrade_needs_an_explicit_request_and_a_lower_installed_version() {
+        assert!(is_explicit_downgrade(true, "1.0.20", "1.0.21"));
+        assert!(!is_explicit_downgrade(false, "1.0.20", "1.0.21"), "an ordinary update is never a downgrade");
+        assert!(!is_explicit_downgrade(true, "1.0.21", "1.0.21"), "'Already up to date' installed nothing");
+        assert!(!is_explicit_downgrade(true, "1.0.22", "1.0.21"), "an upgrade is not a downgrade");
+        assert!(!is_explicit_downgrade(true, "unknown", "1.0.21"));
+        assert!(!is_explicit_downgrade(true, "1.0.20", "unknown"));
+    }
+    /// P124 r2 #1, r3 #1: only a SPAWNED leader still below the floor is remembered; discovering a stale leader, however often,
+    /// never records anything, so ordinary replacement of an older leader is unchanged.
+    #[test]
+    fn only_a_spawned_leader_still_below_the_floor_is_remembered() {
+        let futile = std::sync::Mutex::new(Vec::new());
+        assert!(evict_decision(Some("1.0.20"), "1.0.21", None, &futile));
+        for keep in [Some("1.0.21"), Some("1.0.22"), Some("unknown"), None] {
+            assert!(!evict_decision(keep, "1.0.21", None, &futile), "{keep:?}");
+        }
+        // Meeting the same stale leader again and again (the existing-leader path) still evicts it.
+        for _ in 0..5 {
+            assert!(evict_decision(Some("1.0.20"), "1.0.21", None, &futile));
+        }
+        remember_futile(Some("1.0.22"), "1.0.21", &futile);
+        remember_futile(None, "1.0.21", &futile);
+        assert!(futile.lock().unwrap().is_empty());
+        remember_futile(Some("1.0.20"), "1.0.21", &futile);
+        assert!(!evict_decision(Some("1.0.20"), "1.0.21", None, &futile));
+        assert!(evict_decision(Some("1.0.19"), "1.0.21", None, &futile));
+    }
+    /// P124 r3 #1 against a live registration: meeting a lower leader evicts it every time until a spawn of ours leaves it running.
+    #[tokio::test]
+    async fn a_lower_leader_is_evicted_until_a_spawn_leaves_it_running() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("lower.sock");
+        let fake = spawn_fake_leader(
+            sock_path.clone(),
+            FakeLeaderBehavior::Normal {
+                versions: FakeVersions {
+                    protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                    binary_version: Some("0.0.0-p124-futile".to_string()),
+                },
+                caps: fake_caps(true, true),
+            },
+        )
+        .await;
+        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
+            .await
+            .unwrap();
+        for _ in 0..3 {
+            assert!(evict_leader_conn(&conn), "discovery alone never makes eviction futile");
+        }
+        note_spawned_leader(&conn);
+        assert!(!evict_leader_conn(&conn), "a spawn that left it running makes eviction futile");
+        drop(conn);
+        fake.cancel();
+    }
+    /// P129: a newer client does not evict the leader that IS the installed (lower) version; ordinary upgrades still replace an older leader.
+    #[test]
+    fn a_stale_client_keeps_the_installed_version_leader() {
+        let futile = std::sync::Mutex::new(Vec::new());
+        // client 1.0.21 (stale), installed 1.0.20 == leader: keep, however often it is met.
+        for _ in 0..3 {
+            assert!(!evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.20"), &futile));
+        }
+        // ordinary upgrade: installed is the client's version, the leader is older: evict.
+        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.21"), &futile));
+        // installed newer than the client, leader older: evict.
+        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("1.0.22"), &futile));
+        // leader older than the installed version: it is not the installed one, evict.
+        assert!(evict_decision(Some("1.0.19"), "1.0.21", Some("1.0.20"), &futile));
+        // installed unknown or unparseable: P124 behaviour.
+        assert!(evict_decision(Some("1.0.20"), "1.0.21", None, &futile));
+        assert!(evict_decision(Some("1.0.20"), "1.0.21", Some("latest"), &futile));
+        // prerelease versions compare as semver
+        assert!(!evict_decision(Some("1.0.21-e2e.1"), "1.0.21-e2e.2", Some("1.0.21-e2e.1"), &futile));
+        assert!(evict_decision(Some("1.0.21-e2e.1"), "1.0.21-e2e.2", Some("1.0.21-e2e.2"), &futile));
+    }
+    /// P129: the stale-client notice names the installed version and how to run it; it is silent in every other case.
+    #[test]
+    fn stale_client_notice_names_installed_version_and_remedy() {
+        let text = stale_client_notice(Some("1.0.20"), Some("1.0.20"), "1.0.21", Path::new("/h/.fuigo/bin/fuigo")).expect("stale client is told");
+        assert!(text.contains("1.0.20") && text.contains("1.0.21") && text.contains("/h/.fuigo/bin/fuigo"), "{text}");
+        assert_eq!(stale_client_notice(Some("1.0.20"), Some("1.0.21"), "1.0.21", Path::new("/x")), None);
+        assert_eq!(stale_client_notice(Some("1.0.20"), None, "1.0.21", Path::new("/x")), None);
+        assert_eq!(stale_client_notice(None, Some("1.0.20"), "1.0.21", Path::new("/x")), None);
+        assert_eq!(stale_client_notice(Some("1.0.21"), Some("1.0.21"), "1.0.21", Path::new("/x")), None);
+    }
+    /// P129: the installed version comes from the managed symlink for a managed client only.
+    #[cfg(unix)]
+    #[test]
+    fn managed_installed_version_reads_the_symlink_of_a_managed_client() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        std::fs::create_dir_all(home.join("bin")).unwrap();
+        std::fs::create_dir_all(home.join("versions")).unwrap();
+        let exe_a = home.join("versions").join("fuigo-1.0.21-e2e.2");
+        let exe_b = home.join("versions").join("fuigo-1.0.21-e2e.1");
+        std::fs::write(&exe_a, "a").unwrap();
+        assert_eq!(managed_installed_version(home, Some(&exe_a)), None, "no symlink yet");
+        std::fs::write(&exe_b, "b").unwrap();
+        std::os::unix::fs::symlink(&exe_b, home.join("bin").join("fuigo")).unwrap();
+        assert_eq!(managed_installed_version(home, Some(&exe_a)).as_deref(), Some("1.0.21-e2e.1"));
+        let outside = TempDir::new().unwrap();
+        assert_eq!(managed_installed_version(home, Some(&outside.path().join("fuigo"))), None, "dev binary: no installed version");
+        assert_eq!(managed_installed_version(home, None), None);
+        std::fs::remove_file(&exe_b).unwrap();
+        assert_eq!(managed_installed_version(home, Some(&exe_a)), None, "dangling link");
+    }
+    /// P129 against a live registration: a lower leader that is the installed version is kept even before any spawn of ours.
+    #[tokio::test]
+    async fn a_live_installed_version_leader_is_not_evicted_by_a_newer_client() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("installed.sock");
+        let fake = spawn_fake_leader(
+            sock_path.clone(),
+            FakeLeaderBehavior::Normal {
+                versions: FakeVersions {
+                    protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                    binary_version: Some("0.0.0-p129-installed".to_string()),
+                },
+                caps: fake_caps(true, true),
+            },
+        )
+        .await;
+        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
+            .await
+            .unwrap();
+        let version = conn.registration().leader_binary_version.clone();
+        let futile = std::sync::Mutex::new(Vec::new());
+        assert!(evict_decision(version.as_deref(), "0.0.1", None, &futile), "unknown install: P124 evicts");
+        assert!(
+            !evict_decision(version.as_deref(), "0.0.1", Some("0.0.0-p129-installed"), &futile),
+            "the leader is the installed version: the client is stale"
+        );
+        drop(conn);
+        fake.cancel();
+    }
+    /// P124: the newer-than test is the exact mirror of [`leader_is_older_than`].
+    #[test]
+    fn leader_is_newer_than_is_strict_and_parseable_only() {
+        assert!(leader_is_newer_than("1.0.22", "1.0.21"));
+        assert!(!leader_is_newer_than("1.0.21", "1.0.21"));
+        assert!(!leader_is_newer_than("1.0.20", "1.0.21"));
+        assert!(!leader_is_newer_than("unknown", "1.0.21"));
+        assert!(!leader_is_newer_than("1.0.22", "unknown"));
+    }
     /// Version-floor decision against a live registration: only a strictly older parseable leader version trips eviction;
     /// dev/`unknown` and missing versions are kept (anti-thrash, both directions).
     ///
@@ -2689,6 +3238,40 @@ mod tests {
         let pid = LeaderLock::read_pid_from_path(&lock_path).unwrap();
         assert_eq!(pid, std::process::id());
         assert!(crate::util::is_process_alive(pid));
+    }
+    /// P145: with a named-pipe endpoint (Windows) there is no `leader.sock` file. A live leader must be found through its
+    /// lock (Reachable, with the PID it reports), not listed "PID ? (Stale)"; a lock nobody answers for stays Stale.
+    /// Run here with the endpoint kind injected; the `.sock` file the Unix test server creates is ignored by the scan
+    /// in that mode, so only the lock-derived endpoint can find the leader.
+    #[tokio::test]
+    async fn p145_a_pipe_endpoint_leader_is_found_through_its_lock() {
+        let temp = TempDir::new().unwrap();
+        let lock_path = temp.path().join("leader.lock");
+        fs::write(&lock_path, "").unwrap();
+        let found = discover_leaders_in_with(temp.path(), false).await;
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].classification, LeaderDiscoveryState::Stale, "nobody answers: Stale");
+        assert_eq!(found[0].socket_path, None);
+
+        let handle = spawn_leader_server(temp.path().join("leader.sock")).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let found = discover_leaders_in_with(temp.path(), false).await;
+        assert_eq!(found.len(), 1, "one leader, not a lock entry plus a socket entry: {found:?}");
+        assert_eq!(found[0].classification, LeaderDiscoveryState::Reachable, "{found:?}");
+        assert_eq!(found[0].lock_path.as_deref(), Some(lock_path.as_path()));
+        assert_eq!(found[0].socket_path.as_deref(), Some(temp.path().join("leader.sock").as_path()));
+        assert_eq!(found[0].live_info.as_ref().map(|i| i.pid), Some(std::process::id()));
+        assert_eq!(reachable_leader_pids(&found).len(), 1);
+        handle.cancel.cancel();
+    }
+    #[test]
+    fn p145_derived_endpoint_only_without_a_file_endpoint() {
+        let lock = Path::new("/h/.fuigo/leader-ab12.lock");
+        assert_eq!(derived_endpoint_for_lock(lock, true), None);
+        assert_eq!(
+            derived_endpoint_for_lock(lock, false).as_deref(),
+            Some(Path::new("/h/.fuigo/leader-ab12.sock"))
+        );
     }
     #[tokio::test]
     async fn pid_alive_and_server_reachable_allows_connection() {

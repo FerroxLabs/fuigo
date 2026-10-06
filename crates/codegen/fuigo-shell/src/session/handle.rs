@@ -9,6 +9,34 @@ use fuigo_hunk_tracker::HunkTrackerHandle;
 use fuigo_sampling_types::ReasoningEffort;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::{mpsc, oneshot};
+/// A session's current hook registry, shared between its actor (the only writer, on every hook or plugin reload) and its `SessionHandle`.
+/// Subagents copy their parent's registry from the handle at spawn, so a spawn-time snapshot here would hide every mid-session reload from them,
+/// including the trust grant that admitted the project's hooks and every plugin hook delivered by a reload.
+#[derive(Clone, Default)]
+pub struct LiveHookRegistry(
+    std::sync::Arc<
+        parking_lot::RwLock<Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>>,
+    >,
+);
+impl LiveHookRegistry {
+    pub fn new(registry: Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>) -> Self {
+        Self(std::sync::Arc::new(parking_lot::RwLock::new(registry)))
+    }
+    /// The registry the session fires now.
+    pub fn get(&self) -> Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>> {
+        self.0.read().clone()
+    }
+    pub fn set(&self, registry: Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>) {
+        *self.0.write() = registry;
+    }
+}
+impl std::fmt::Debug for LiveHookRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveHookRegistry")
+            .field("hooks", &self.get().map(|r| r.len()))
+            .finish()
+    }
+}
 /// Coarse lifecycle state of a session as known to the leader/agent.
 ///
 /// A fuigo session is a resumable log on disk with no terminal status field of its own, so "liveness" is residency plus turn state, not a pid.
@@ -82,7 +110,7 @@ pub struct SessionHandle {
     pub mcp_servers: Vec<acp::McpServer>,
     /// Client-provided MCP servers as admitted by the vendor `mcps` kill-switch, before merging with disk/plugin/managed servers.
     /// Hot-reloads re-merge from this seed; a server the kill-switch rejected cannot reappear because its on-disk attribution vanished mid-session.
-    pub initial_client_mcp_servers: Vec<acp::McpServer>,
+    pub initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     /// Stable display path for forked sessions (original project path).
     ///
     /// When set, the hunk tracker extension handler rewrites worktree paths in API responses to this path.
@@ -146,8 +174,8 @@ pub struct SessionHandle {
     pub session_default_agent_profile: Option<String>,
     /// Subagent types this agent can spawn (from Agent(t1, t2) in tools).
     pub allowed_subagent_types: Option<Vec<String>>,
-    /// Hook registry for this session (snapshot from spawn time).
-    pub hook_registry: Option<std::sync::Arc<fuigo_hooks::discovery::HookRegistry>>,
+    /// Hook registry for this session, kept current: the actor republishes it on every reload, so a subagent spawned after `/hooks-trust`, `/hooks reload` or a plugin change inherits what the parent fires NOW.
+    pub hook_registry: LiveHookRegistry,
     /// Typed workspace operations handle (agent sessions use local ops).
     pub workspace_ops: fuigo_workspace::WorkspaceOps,
     /// Subagents inherit the parent's backend so background tasks and monitors survive the subagent's exit.

@@ -172,3 +172,26 @@ async fn capped_runaway_still_has_its_process_group_killed() {
 
     assert!(!survived, "a grandchild outlived the capped run");
 }
+
+/// P120: a status-line command is a user-configured program; it must not inherit Fuigo's own secrets.
+#[test]
+fn p120_status_line_commands_do_not_inherit_fuigo_secrets() {
+    use fuigo_secrets::test_probe as probe;
+    const NAME: &str = "app::status_line::command::tests::p120_status_line_commands_do_not_inherit_fuigo_secrets";
+    const REGISTERED: &str = "P120_STATUS_BEARER";
+    if probe::in_parent(NAME, &[REGISTERED]) {
+        return;
+    }
+    fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+    let dir = probe::scratch_dir("p120-status");
+    let out = dir.join("env.txt");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let row = runtime
+        .block_on(run_command(&format!("env > '{}'; printf done", out.display()), &ctx(), ROW, COMMAND_TIMEOUT))
+        .unwrap();
+    assert_eq!(row, "done");
+    let dump = std::fs::read_to_string(&out).expect("the command ran");
+    probe::assert_clean(&dump, &[]);
+    probe::assert_kept(&dump, REGISTERED);
+    let _ = std::fs::remove_dir_all(&dir);
+}

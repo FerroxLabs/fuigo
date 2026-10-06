@@ -288,6 +288,14 @@ impl ConfigReloader {
                 return Ok(());
             }
         };
+        // P86: every credential variable the new config names is denied to child processes BEFORE
+        // any notification below can make a session spawn one (an MCP server added in the same
+        // edit as an `env_key`). The effective config too: campaign patches add models there.
+        crate::agent::config::deny_credentials_named_in(&new_global);
+        let new_effective = crate::config::load_effective_config();
+        if let Ok(effective) = &new_effective {
+            crate::agent::config::deny_credentials_named_in(effective);
+        }
 
         // MCP servers: compare the [mcp_servers] table in the **global**
         // config (`~/.fuigo/config.toml`) via toml::Value. Project-
@@ -302,7 +310,7 @@ impl ConfigReloader {
         }
 
         let mut accepted_effective = None;
-        match crate::config::load_effective_config() {
+        match new_effective {
             Ok(new_effective) => match changed_memory_config(
                 &self.last_effective_config,
                 &new_effective,
@@ -360,6 +368,20 @@ impl ConfigReloader {
         if old_model_table != new_model_table || old_models_table != new_models_table {
             info!("model config change detected");
             let _ = self.config_update_tx.send(ConfigUpdate::ModelsChanged);
+        }
+
+        // `[endpoints]` is read when the process starts (P150, B25/F5): the agent's endpoints, its model catalog, every
+        // session's `base_url` and the trusted API origins all keep the values it started with. Say so where the
+        // trust records are, rather than leave an edit that seems to do nothing. No value is logged: an endpoint can
+        // carry userinfo or a token.
+        if self.last_global_config.get("endpoints") != new_global.get("endpoints") {
+            info!("[endpoints] change detected; it takes effect when Fuigo restarts");
+            fuigo_telemetry::unified_log::warn(
+                "config.toml [endpoints] changed: the built-in models and open sessions keep the endpoints \
+                 Fuigo started with until it restarts; the new origins are trusted from the next settings reapply",
+                None,
+                None,
+            );
         }
 
         // UI fields (theme, yolo, fork_secondary_model)
@@ -845,6 +867,27 @@ ignore = ["/tmp"]
             .unwrap()
             .resolve_memory(None, None);
         assert_ne!(old, new, "should detect enabled field change");
+    }
+
+    /// A hot reload must keep honouring `--no-memory`: turning `[memory] enabled` on in `config.toml` while the
+    /// flag is set neither reports a change nor ever yields an enabled memory config.
+    #[test]
+    fn memory_config_reload_keeps_honouring_no_memory() {
+        let off: toml::Value = toml::from_str("[memory]\nenabled = false").unwrap();
+        let on: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
+        let on_and_tuned: toml::Value =
+            toml::from_str("[memory]\nenabled = true\n[memory.search]\nmax_results = 3").unwrap();
+
+        assert_eq!(changed_memory_config(&off, &on, Some(false), None), Ok(None));
+        let changed = changed_memory_config(&off, &on_and_tuned, Some(false), None)
+            .unwrap()
+            .expect("the tuned search parameter is a change");
+        assert!(!changed.enabled, "--no-memory beats the reloaded config");
+        // The control: without the flag the same edit does enable memory.
+        let enabled = changed_memory_config(&off, &on, None, None)
+            .unwrap()
+            .expect("enabling memory is a change without the flag");
+        assert!(enabled.enabled);
     }
 
     #[test]

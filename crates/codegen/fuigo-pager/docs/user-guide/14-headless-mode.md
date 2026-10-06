@@ -156,11 +156,18 @@ fuigo -p "Clean up this project" --deny "Bash(rm*)"
 # Allow npm commands, deny sudo
 fuigo -p "Set up the project" --allow "Bash(npm*)" --deny "Bash(sudo*)"
 
-# Allow all bash commands (auto-approve without prompting)
+# Allow bash commands without prompting (see the note below for what this cannot cover)
 fuigo -p "Build the project" --allow "Bash"
 ```
 
 `--allow` and `--deny` can be repeated. Deny rules take precedence over allow rules.
+
+An allow rule matches the words of a shell command, so it cannot vouch for a write the words do not
+show. A shell command that writes a file through a redirect (`echo x > notes.txt`, `cmd >> log`) still
+asks for approval under every `--allow` rule, `Bash` included; in headless mode nobody can give it, so
+the run is blocked (exit `3`). Run such commands with `--always-approve` (deny rules still apply), or
+have the model write files with its file tools, which `Write(...)`/`Edit(...)` rules do cover.
+Redirects to `/dev/null` are not writes and are covered as usual.
 
 ---
 
@@ -182,7 +189,9 @@ A single JSON object emitted after the response completes: response text,
 stop reason, session ID, request ID (plus `thought` when reasoning is present).
 When the prompt reached the model, the same object also carries spend fields
 (`usage`, `num_turns`, `modelUsage`, cost). `stopReason` is the snake_case
-ACP/Messages token (`end_turn`, `max_tokens`, …).
+ACP/Messages token (`end_turn`, `max_tokens`, …). When a tool permission was
+refused, it also carries a `permissionDenied` record (see
+[The denial record, per format](#the-denial-record-per-format)).
 
 ```json
 {
@@ -283,8 +292,8 @@ Event types:
 | `usage`            | Per-response boundary (`messageId`, `stopReason`, `usage`, `signature`), one per model response |
 | `plan`             | The agent's current plan (`entries`)                                                          |
 | `available_commands` | Tool and slash command lists (`tools`, `commands`)                                          |
-| `end`              | Final event with metadata and spend fields when available                                    |
-| `error`            | An error occurred (carries `message`, and spend fields if any)                               |
+| `end`              | Final event with metadata and spend fields when available, plus `permissionDenied` when a permission was refused |
+| `error`            | An error occurred (carries `message`, spend fields if any, and `permissionDenied` when a permission was refused) |
 
 `end` is always the last event. Spend fields on `end` match the json object
 shape (snake_case uncached `input_tokens`, safe cost floats). `end.stopReason`
@@ -336,7 +345,7 @@ The other `init` fields carry real data:
 
 Fuigo omits the schema's pure-placeholder `init` fields it has no data for, rather than emitting dummy values: `claude_code_version`, `output_style`, and `plugins`.
 
-`result` includes `duration_ms`, `duration_api_ms`, `num_turns`, `stop_reason`, `total_cost_usd`, `usage` (Messages API `message.usage` shape), and `modelUsage`. It also includes `errors[]` on the error subtypes. Fuigo omits the schema's always-empty `permission_denials`, because it does not collect permission denials. `structured_output` (with `--json-schema`) is snake_case, matching the schema.
+`result` includes `duration_ms`, `duration_api_ms`, `num_turns`, `stop_reason`, `total_cost_usd`, `usage` (Messages API `message.usage` shape), and `modelUsage`. It also includes `errors[]` on the error subtypes. `permission_denials` is the schema's own field, in the schema's own entry shape (`tool_name`, `tool_use_id`, `tool_input`). Fuigo includes it when headless mode refused a permission request, and omits it otherwise; see [The denial record, per format](#the-denial-record-per-format). `structured_output` (with `--json-schema`) is snake_case, matching the schema.
 
 `model` appears on `init` and every `assistant` frame. It is the real model id when known, and the literal `"unknown"` only when no model is known at emit time.
 
@@ -627,8 +636,194 @@ fuigo -p "Run the test suite" --yolo
 | ---- | ------------------------------------ |
 | `0`  | Success. The prompt completed normally |
 | `1`  | Error. Authentication failure, network error, or runtime error |
+| `2`  | A managed-policy requirement is not met. Fuigo refused to start; update Fuigo or ask your administrator to fix the managed requirements |
+| `3`  | **Blocked.** The run ended because a tool permission was denied and headless mode had nobody to ask, or because an execution budget (a token budget, `FUIGO_MAX_MODEL_CALLS`, `FUIGO_MAX_RUNTIME_SECS`) refused the next model request (see [Blocked by a Permission](#blocked-by-a-permission)) |
+| `4`  | The tokio runtime could not be created (Fuigo never started; nothing was run). No other start-up failure uses this code |
 | `130` | Interrupted by SIGINT (Ctrl+C)                                   |
 | `143` | Terminated by SIGTERM, or torn down because the process that started Fuigo exited (see [Parent-Process Binding](#parent-process-binding)) |
+
+These codes are a compatibility commitment: scripts branch on them, so they are not renumbered.
+They describe `fuigo -p` / `--print` runs. `fuigo wrap <command>` is different — it exits with
+**the wrapped command's own** exit code, whatever that is.
+
+### Blocked by a Permission
+
+Headless mode has no operator to ask, so it never approves a permission request. A run that **ends**
+because of such a refusal exits **`3`**, not `0` and not `1`. So does a run that an execution budget
+ended (a goal's `--budget`, a workflow child's output grant, or the `FUIGO_MAX_MODEL_CALLS` /
+`FUIGO_MAX_RUNTIME_SECS` limits): the budget refused the next model request, the model-call limit
+left only the final answer's call (whether the model answered in that call or tried to act), or the runtime limit passed while a model request was in
+flight. That is the same outcome, reported through the same record, with a budget `rule`. That distinction is the point: `0`
+would make a blocked run look finished, and `1` would make it look like a crash, so a CI job could
+not tell which had happened.
+
+**Stability.** `3` is part of the exit-code commitment above: it means "blocked by a permission" in
+every release and will not be renumbered or reused. The `rule` identifiers below are stable too,
+and are never localized. New rules may be added as new denial sites appear; treat an unknown
+`rule` as a denial all the same.
+
+A refusal that ends the run is reported in two ways: one English line on stderr, and a structured record on
+stdout that a script can read without parsing that English.
+
+#### The stderr line
+
+One line on stderr, for every `--output-format` and whether or not a terminal is attached:
+
+```
+fuigo: blocked — permission denied in headless mode: Write src/main.rs (tool call tc-17).
+Denied by rule `headless_never_approves`. Remedy: pre-approve it before the run — pass
+--allow, raise --permission-mode, or trust a folder whose project config allows it; headless
+mode has nobody to ask. No --allow rule covers a shell command that writes a file by redirect
+(`> file`); --always-approve runs one (--permission-mode auto runs it only if its classifier
+approves), and deny rules still apply. Exiting 3.
+```
+
+For a refusal the run carried past, the line instead reads
+`fuigo: a permission was denied in headless mode and the run continued: …`, with the same rule and
+remedy and no exit code (see [When exit `3` does *not* fire](#when-exit-3-does-not-fire)).
+
+#### The denial record, per format
+
+The record rides on the **terminal** record each format already has, so every consumer still reads
+exactly one terminal record. No format gains a new line type.
+
+| `--output-format` | Where the denial appears |
+| --- | --- |
+| `plain` (default) | stdout is only the model's text. The denial is the stderr line above, plus the exit code |
+| `json` | A `permissionDenied` object on the single terminal JSON document. The document is still exactly one JSON value |
+| `streaming-json` | The same `permissionDenied` object, under the same key, on the terminal `end` line, or on the `error` line when the run failed |
+| `streaming-messages-json` | The schema's own `permission_denials` array on the terminal `result` line. A blocked run's `result` is `is_error: true` and `subtype: "error_during_execution"`. `stop_reason` is `"cancelled"` for a permission refusal and `null` for a budget denial |
+
+The `permissionDenied` object, for `json` and `streaming-json`:
+
+```json
+{
+  "text": "...",
+  "stopReason": "cancelled",
+  "sessionId": "...",
+  "requestId": "...",
+  "permissionDenied": {
+    "rule": "headless_never_approves",
+    "toolCallId": "tc-17",
+    "toolTitle": "Write src/main.rs",
+    "offeredOptionKinds": ["allow_once", "reject_once"],
+    "remedy": "pre-approve it before the run — ...",
+    "endedRun": true,
+    "exitCode": 3
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `rule` | Which rule refused it. Stable identifier, never localized |
+| `toolCallId` | The ACP tool-call id. On `streaming-json` it matches the `tool_call` line for the same call. `null` for a budget denial, which refused a model request rather than a tool call |
+| `toolTitle` | The agent's title for the call, or `null` when it sent none |
+| `offeredOptionKinds` | The permission options the request offered, in order. This is the evidence for `yolo_had_no_allow_option` |
+| `remedy` | What to change so the run is not refused. Data, not a hint to parse |
+| `endedRun` | `true` when the turn ended at this refusal |
+| `exitCode` | `3`. Present **only** when `endedRun` is `true` |
+
+The `streaming-messages-json` entry uses only the schema's three keys. Fuigo does not add its own
+keys to a format it does not own, so `rule` and `remedy` are not on this line; read them from the
+stderr line, or use `streaming-json`:
+
+```json
+{"type":"result","subtype":"error_during_execution","is_error":true,"stop_reason":"cancelled","errors":["cancelled"],"permission_denials":[{"tool_name":"search_replace","tool_use_id":"call_1","tool_input":{"file_path":"src/main.rs","old_string":"a","new_string":"b"}}],"session_id":"abc123","uuid":"...",...}
+```
+
+`tool_name` and `tool_input` are the ones on the `tool_use` block for the same `tool_use_id`, earlier
+in the stream. A budget denial adds **no** `permission_denials` entry, because no tool was refused.
+Its `result` is `is_error: true`, and `errors[]` carries the agent's message, which names the rule and
+the remedy. When the refused call never streamed a `tool_use`, `tool_name` is the agent's title for
+it and `tool_input` is `{}`.
+
+Only the **first** permission refusal of a run is reported; later ones are its consequences. A
+budget denial is the exception: it is what ended the run, so it replaces an earlier permission
+refusal in the record, and the earlier refusal gets its own stderr notice. Absence of the
+record does not prove nothing was refused. A `--deny` rule, a deny-by-default `defaultMode`, or a
+`pre_tool_use` hook is decided inside the agent before any
+permission request reaches headless mode. Those refusals are reported to the model as a failed tool
+call and the run continues. They never trigger exit `3` on their own, so the run exits however it
+ends (`0`, or `1` if it later fails). They produce no record and no stderr line.
+
+#### The rules and their remedies
+
+| `rule` | When | Remedy |
+| --- | --- | --- |
+| `headless_never_approves` | Nothing pre-approved the request, so headless mode refused it | Pre-approve it before the run: pass `--allow`, or raise `--permission-mode`. Trusting the folder helps only when its project config (permission rules) allows the call. Trust alone approves nothing |
+| `yolo_had_no_allow_option` | `--yolo` was passed, but a deny rule or protected path left the request with no allow option to select | Remove the matching entry from `--deny` or from the permissions config |
+| `execution_token_budget_exhausted` | The execution's total-token budget is spent | Raise the goal's token budget (`/goal <objective> --budget <tokens>`) or clear the goal (`/goal clear`). Tokens already spent are not refunded |
+| `execution_output_token_budget_exhausted` | The output-token budget granted to this workflow child is spent | Raise `output_token_budget` for the child. Output tokens already spent are not refunded |
+| `execution_token_usage_unknown` | A token budget is set, but the provider reported no usage for an earlier request, so the budget fails closed | Use a model that reports usage, or run without a token budget |
+| `execution_model_call_limit` | `FUIGO_MAX_MODEL_CALLS` has no model call left for the request (spent, or the last one reserved for the final answer, or a subagent's share of its parent's calls spent) | Raise `FUIGO_MAX_MODEL_CALLS` for the next run. Calls already made are not refunded; under a goal, clear the goal (`/goal clear`) |
+| `execution_runtime_limit` | `FUIGO_MAX_RUNTIME_SECS` has passed | Raise `FUIGO_MAX_RUNTIME_SECS` for the next run. It counts from agent start and cannot be extended in a running agent; under a goal, clear the goal (`/goal clear`) |
+| `execution_budget_denied` | A budget denial under a rule this build does not know (a newer agent) | Read the agent's error message, which names the rule and its remedy |
+
+The budget rules come from the agent's typed error (`data.code: "execution_budget_denied"`, see the
+agent-mode guide, "Errors"). Their stderr line reads `fuigo: blocked — an execution budget
+refused the next model request. Denied by rule … Remedy: … Exiting 3.` For a rule this build does
+not know, `plain` writes two stderr lines: first the agent's own message, which names the rule and
+its remedy, then that line.
+
+#### What a refusal leaves behind
+
+A refused tool call never runs. The permission request comes before the tool executes, and a
+refusal ends the turn without executing it, so the refused edit, command or write is not started and
+nothing of it is half-applied. The conversation records the call as not executed. Everything the run
+did **before** the refusal stays done, including earlier tool calls in the same turn and the files
+they wrote. Fuigo rolls nothing back on a refusal, because nothing of the refused call was applied.
+
+#### Branching on it
+
+```bash
+fuigo -p "Refactor src/auth.rs" --output-format json > out.json
+case $? in
+  0) echo "done" ;;
+  3) echo "blocked: $(jq -r '.permissionDenied.remedy' out.json)" ; exit 1 ;;
+  *) echo "failed" ; exit 1 ;;
+esac
+```
+
+The exit code is the authority. The record says what was refused and why; `$?` says how the run
+ended.
+
+#### When exit `3` does *not* fire
+
+The code marks a run that *ended* at the refusal, and only that:
+
+- Something was refused and the run **carried on and finished anyway**, for example a subagent whose
+  own turn was cancelled while the parent's continued. The exit code is `0`, because the prompt did
+  complete. The record is present with `endedRun: false` and no `exitCode`.
+- The refusal came **after** the terminal record was written. The main case is the post-turn memory
+  flush, which runs after the answer and its terminal record. The exit code is `0`. Only the stderr
+  line reports it, because the terminal record has already been written.
+- The run **failed for its own reason** after a refusal: a crash, a `--timeout`, or `--max-turns`.
+  That is `1`, the same as it would have been without the refusal. A refusal does not relabel a
+  failure, or the remedy would send you off to pre-approve something that was never the problem. The
+  record, if the failure still wrote a terminal record, has `endedRun: false` and no `exitCode`.
+- A budget ended the run on one of the paths not yet typed in this release, so the exit is not `3`:
+  a goal's token `--budget` reached when an answer completes (the goal stops budget-limited and
+  the run exits `0`); the output grant spent on the last salvaged truncated (`max_tokens`)
+  response (exit `1`, an untyped partial receipt); a completion requirement with `maxRetries` of
+  `2` or more retrying past the model-call limit's final answer (exit `1`). These end with an
+  ordinary error or a finished answer, not a budget refusal, so no denial record or refusal line is
+  written for them.
+- The provider answered the model request with an error of its own (a status, an authentication
+  refusal, a rate limit, a stream error) and the runtime limit passed while that failure was being
+  reported. The run fails with the provider's error (exit `1`): the limit did not end that request.
+- The post-turn memory flush **fails** after a run that did end at a refusal. The record already
+  says `endedRun: true`, `exitCode: 3`, but the process exits `1`. Trust `$?`.
+
+In each of these cases where a refusal happened, it is still reported on stderr, whatever the exit
+code turns out to be. There is one exception, which exits `1`: if stdout itself cannot be written, the write
+error is what is reported. If the agent connection closes unexpectedly mid-turn, the exit is `1` and
+stderr carries both the refusal line and the closed-connection error.
+
+To avoid a permission `3`, pre-approve the work: `--allow`, a higher `--permission-mode`, `--yolo`,
+or a trusted folder whose project permission rules allow it. None of these lifts a budget. A
+budget denial needs the budget raised or cleared, as its remedy says. See [Always-approve for automation](#always-approve-for-automation) and
+[22-permissions-and-safety.md](22-permissions-and-safety.md).
 
 ---
 

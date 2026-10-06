@@ -469,7 +469,13 @@ pub struct ChatChoice {
     pub finish_reason: Option<FinishReason>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq)]
+/// Why an OpenAI-compatible completion stopped.
+///
+/// OpenAI-compatible is not OpenAI: gateways and self-hosted servers emit their own values
+/// (`eos`, `error`, `guardrail_intervened`, …) and OpenAI itself adds them. A closed enum here
+/// aborts the terminal chunk and discards a response that has already streamed and already been
+/// billed, so the vocabulary stays open, using the same idiom as `messages::StopReason`.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum FinishReason {
     Stop,
@@ -477,10 +483,65 @@ pub enum FinishReason {
     ToolCalls,
     ContentFilter,
     FunctionCall,
+    /// Catch-all preserving the wire string for logging and faithful re-serialization.
+    /// Must stay the LAST variant: serde tries the named variants above first.
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+/// True when an unmodelled provider stop value means "the output hit a token limit".
+///
+/// Tolerating an unknown vocabulary value must not turn a *loud* wrong answer into a *silent* one.
+/// The normalized `Length` class is what drives truncation handling and compaction: read a length
+/// stop as a clean completion and the turn is reported finished, with a truncated tail presented as
+/// the model's final answer and nothing asking for the rest. That is a worse outcome than the
+/// pre-`Open` abort, so the length family is recognized by value before anything falls back to
+/// `Stop`.
+///
+/// Matching is case-insensitive and trims, because the *same* stop arrives spelled several ways:
+/// `max_tokens` from Anthropic Messages and from every OpenAI-compatible shim that proxies it
+/// verbatim (Bedrock, LiteLLM), `MAX_TOKENS` / `MAX_OUTPUT_TOKENS` SHOUTED from Vertex AI and
+/// Gemini, `length` from an OpenAI-style gateway fronting a Messages backend, and `length_limit`
+/// from gateways that name the limit rather than the cause.
+///
+/// This is deliberately a *recognizer*, not a parser: a value it does not know still normalizes to
+/// `Stop`, which is the tolerant behaviour the open vocabulary exists for.
+pub fn is_length_stop_alias(raw: &str) -> bool {
+    const LENGTH_ALIASES: &[&str] = &[
+        // Anthropic Messages, and OpenAI-compatible shims that pass its value through.
+        "max_tokens",
+        // Vertex AI / Gemini.
+        "max_output_tokens",
+        // OpenAI's own spelling, reaching a backend whose modelled set does not contain it.
+        "length",
+        // Gateways that name the limit rather than the cause.
+        "length_limit",
+        // Anthropic's mid-generation context overflow, for backends that lack the modelled variant.
+        "model_context_window_exceeded",
+    ];
+    let raw = raw.trim();
+    LENGTH_ALIASES
+        .iter()
+        .any(|alias| raw.eq_ignore_ascii_case(alias))
+}
+
+impl FinishReason {
+    /// The verbatim wire string, derived from the serde `snake_case` renames so it cannot drift
+    /// from the wire contract. `Unknown` yields its inner string unchanged.
+    pub fn wire_str(&self) -> String {
+        match serde_json::to_value(self) {
+            Ok(serde_json::Value::String(s)) => s,
+            other => {
+                debug_assert!(false, "FinishReason must serialize to a string, got {other:?}");
+                "stop".to_owned()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ChatResponseMessage {
+    #[serde(deserialize_with = "crate::serde_helpers::response_role")]
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -619,7 +680,11 @@ pub struct ToolCallFunctionDelta {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct ChatChunkDelta {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::serde_helpers::optional_response_role"
+    )]
     pub role: Option<Role>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -1056,7 +1121,7 @@ impl ApiBackend {
 }
 
 /// Sampling client configuration (API key excluded; that stays in the client).
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct SamplingConfig {
     pub base_url: String,
     /// Local directory containing the mTLS client identity for this model.
@@ -1095,6 +1160,49 @@ pub struct SamplingConfig {
     /// When true, inject `stream_tool_calls: true` into the Responses API request body so the upstream emits per-chunk argument deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_tool_calls: Option<bool>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for SamplingConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            base_url,
+            mtls_cert_dir,
+            model,
+            max_completion_tokens,
+            temperature,
+            top_p,
+            max_retries,
+            rate_limit_retry_threshold,
+            api_backend,
+            extra_headers,
+            query_params,
+            env_http_headers,
+            context_window,
+            reasoning_effort,
+            reasoning_summary,
+            stream_tool_calls,
+        } = self;
+        f.debug_struct("SamplingConfig")
+            .field("base_url", &fuigo_auth::redact_url(base_url))
+            .field("mtls_cert_dir", mtls_cert_dir)
+            .field("model", model)
+            .field("max_completion_tokens", max_completion_tokens)
+            .field("temperature", temperature)
+            .field("top_p", top_p)
+            .field("max_retries", max_retries)
+            .field("rate_limit_retry_threshold", rate_limit_retry_threshold)
+            .field("api_backend", api_backend)
+            .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
+            .field("env_http_headers", env_http_headers)
+            .field("context_window", context_window)
+            .field("reasoning_effort", reasoning_effort)
+            .field("reasoning_summary", reasoning_summary)
+            .field("stream_tool_calls", stream_tool_calls)
+            .finish()
+    }
 }
 
 impl Default for SamplingConfig {
@@ -1575,5 +1683,47 @@ mod tests {
         let inner: &dyn TraceContext = &*cloned_trace;
         let downcast = inner.as_any().downcast_ref::<TestTrace>().unwrap();
         assert_eq!(downcast.0, "trace-data");
+    }
+}
+
+#[cfg(test)]
+mod finish_reason_tests {
+    use super::*;
+
+    /// `finish_reason` is the provider's vocabulary, not ours: OpenAI-compatible gateways emit
+    /// values OpenAI never defined. An unmodelled one must not discard an already-billed response,
+    /// and the wire string must survive so the next incident is diagnosable from logs alone.
+    #[test]
+    fn finish_reason_deserializes_all_known_values_and_catches_unknown() {
+        let parse = |raw: &str| -> FinishReason {
+            serde_json::from_str(&format!("\"{raw}\""))
+                .unwrap_or_else(|e| panic!("finish_reason {raw:?} must parse: {e}"))
+        };
+        assert!(matches!(parse("stop"), FinishReason::Stop));
+        assert!(matches!(parse("length"), FinishReason::Length));
+        assert!(matches!(parse("tool_calls"), FinishReason::ToolCalls));
+        assert!(matches!(parse("content_filter"), FinishReason::ContentFilter));
+        assert!(matches!(parse("function_call"), FinishReason::FunctionCall));
+        match parse("guardrail_intervened") {
+            FinishReason::Unknown(s) => assert_eq!(s, "guardrail_intervened"),
+            other => panic!("unknown value must preserve the wire string, got {other:?}"),
+        }
+        assert_eq!(FinishReason::ToolCalls.wire_str(), "tool_calls");
+        assert_eq!(FinishReason::Unknown("eos".to_owned()).wire_str(), "eos");
+        assert_eq!(
+            serde_json::to_string(&FinishReason::Unknown("eos".to_owned())).unwrap(),
+            "\"eos\"",
+            "the catch-all must re-serialize the wire string faithfully"
+        );
+        // And through the `Option<FinishReason>` field it is parsed from in production.
+        let choice: ChatChunkChoice =
+            serde_json::from_str(r#"{"index":0,"delta":{},"finish_reason":"mystery"}"#)
+                .expect("chunk choice must parse");
+        assert_eq!(choice.finish_reason.expect("present").wire_str(), "mystery");
+        // A non-string finish_reason is malformed, not a new variant.
+        assert!(
+            serde_json::from_str::<ChatChunkChoice>(r#"{"index":0,"delta":{},"finish_reason":7}"#)
+                .is_err()
+        );
     }
 }

@@ -12,6 +12,9 @@
 //! # read-only against a real store (no writes):
 //! CHILD_REPLAY_LOOKUP_HOME=$HOME/.fuigo cargo bench -p fuigo-shell --bench child_replay_lookup
 //! ```
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::fs;
 use std::hint::black_box;

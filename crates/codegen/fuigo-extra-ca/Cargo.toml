@@ -12,6 +12,8 @@ reqwest = { workspace = true, features = ["rustls-tls-native-roots", "rustls-tls
 # Both providers stay explicit: ensure_default_crypto_provider picks one per target (ring on Windows ARM64) and unification would mask either's absence.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "ring", "std"] }
 rustls-native-certs = { workspace = true }
+# P54: destination-scoped pseudonyms for body-carried identity (`fluxrouter::destination_pseudonym`).
+sha2 = { workspace = true }
 # spawn_blocking, for the egress guard's delegate resolution.
 tokio = { workspace = true }
 tracing = { workspace = true }

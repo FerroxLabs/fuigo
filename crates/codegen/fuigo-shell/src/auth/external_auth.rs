@@ -47,7 +47,9 @@ const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(7);
 /// Initial, interactive sign-in takes a separate path (`flow::run_external_auth_provider`, which bridges the provider's stderr link).
 /// This handles refresh only.
 pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
-    tracing::info!(cmd = %command, timeout_secs = EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs(), "auth: running external auth provider (headless refresh)");
+    // P70: the configured command line may embed a credential; log its fingerprint, never its text.
+    let cmd_fingerprint = fuigo_auth::bearer_fingerprint(command);
+    tracing::info!(cmd = %cmd_fingerprint, timeout_secs = EXTERNAL_AUTH_REFRESH_TIMEOUT.as_secs(), "auth: running external auth provider (headless refresh)");
 
     let mut cmd = shell_c(command);
     cmd.env("FUIGO_AUTH_EXPIRED", "1");
@@ -57,7 +59,7 @@ pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
         EXTERNAL_AUTH_REFRESH_TIMEOUT,
         RunOptions {
             label: "external auth provider",
-            command_log: CommandLog::Shown(command),
+            command_log: CommandLog::Redacted,
         },
     )
     .await
@@ -71,7 +73,7 @@ pub(crate) async fn run_external_refresh(command: &str) -> Option<FuigoAuth> {
                 RunError::SpawnFailed => "failed to start",
                 RunError::WaitFailed => "errored while running",
             };
-            tracing::warn!(cmd = %command, "auth: external auth provider {reason}");
+            tracing::warn!(cmd = %cmd_fingerprint, "auth: external auth provider {reason}");
             return None;
         }
     };

@@ -99,9 +99,7 @@ pub(crate) fn persist(session_dir: &Path, snapshot: &ResumeStatusSnapshot) {
         tracing::warn!("failed to serialize resume status snapshot");
         return;
     };
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
+    match fuigo_config::owner_only_file_options(std::fs::OpenOptions::new().write(true).create_new(true))
         .open(&path)
     {
         Ok(mut file) => {
@@ -494,6 +492,12 @@ mod tests {
         };
         persist(dir.path(), &snapshot);
         assert!(exists(dir.path()));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(dir.path().join(FILENAME)).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "P150: resume_status.json is a session file, owner-only");
+        }
         let loaded = load_and_clear(dir.path());
         assert_eq!(loaded, snapshot);
         assert!(!exists(dir.path()));

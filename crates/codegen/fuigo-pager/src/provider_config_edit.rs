@@ -10,7 +10,6 @@
 use std::io;
 use std::path::Path;
 
-use crate::config_toml_edit::read_config_document_for_edit;
 
 /// One provider entry plus the model keys that should route through it.
 pub(crate) struct ProviderWrite<'a> {
@@ -25,6 +24,15 @@ pub(crate) struct ProviderWrite<'a> {
     pub auth_scheme: Option<&'a str>,
     /// Literal headers, e.g. `[("anthropic-version", "2023-06-01")]`.
     pub extra_headers: &'a [(&'a str, &'a str)],
+    /// `max_completion_tokens` for the provider table, or None to omit.
+    ///
+    /// Written only when the key is absent, unlike `api_backend` /
+    /// `auth_scheme` / `extra_headers`: those spell the vendor's wire protocol
+    /// and are not the user's to disagree with, whereas this is a token budget
+    /// a user may legitimately have tuned for the model they run. Writing it at
+    /// all is the point of the field -- the flow that creates the entry is the
+    /// only one that can make the number visible and editable.
+    pub max_completion_tokens: Option<u32>,
     /// Model keys to bind to this provider, e.g. `["claude-opus-4-6", "openai/gpt-4o"]`.
     pub models: &'a [&'a str],
 }
@@ -61,13 +69,9 @@ pub(crate) enum ProviderWriteOutcome {
     },
 }
 
-/// Write the provider into `~/.fuigo/config.toml`. Blocking I/O.
-pub(crate) fn write_provider(entry: &ProviderWrite<'_>) -> io::Result<ProviderWriteOutcome> {
-    let path = fuigo_tools::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    write_provider_at(&path, entry)
-}
-
-/// Core of [`write_provider`]; takes the path so tests can use a temp dir.
+/// Write the provider into the `config.toml` at `path` (the user's is
+/// `~/.fuigo/config.toml`; `/provider` passes it). Blocking I/O: it waits for
+/// `config.toml.lock`, so callers run it off the input thread.
 ///
 /// Creates the file and parent dir when missing. Returns
 /// [`ProviderWriteOutcome::SkippedUnparseableConfig`] without writing when the
@@ -100,9 +104,10 @@ pub(crate) fn write_provider(entry: &ProviderWrite<'_>) -> io::Result<ProviderWr
 /// unconditionally: they spell the vendor's wire protocol rather than a routing
 /// choice.
 ///
-/// The whole read-modify-rename runs under `fuigo_config::fs_atomic`'s
-/// `config.toml.lock`, so a concurrent writer that also takes that lock cannot
-/// read the same original and rename away this change. Writers that do not take
+/// The read-modify-rename goes through `fuigo_config::fs_atomic::edit_locked`:
+/// the rename runs under `config.toml.lock` and only onto the version that was
+/// read, so a concurrent writer that also takes that lock cannot have this
+/// change renamed away, or rename it away. Writers that do not take
 /// it still can; the lock's own docs list which ones do.
 pub(crate) fn write_provider_at(
     path: &Path,
@@ -111,16 +116,25 @@ pub(crate) fn write_provider_at(
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    fuigo_config::fs_atomic::locked_read_modify_write(path, || write_provider_locked(path, entry))?
+    fuigo_config::fs_atomic::edit_locked(
+        path,
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(path, bytes, 0o600),
+        |current| plan_provider_write(path, entry, current),
+    )
+    .map_err(io::Error::from)
 }
 
-/// Body of [`write_provider_at`]; the caller holds the `config.toml` write lock.
-fn write_provider_locked(
+/// Body of [`write_provider_at`]: read the config and decide what to write.
+/// Runs inside `edit_locked`, which may call it more than once and renames the
+/// result only if the file is still the version this read.
+fn plan_provider_write(
     path: &Path,
     entry: &ProviderWrite<'_>,
-) -> io::Result<ProviderWriteOutcome> {
-    let Some(mut doc) = read_config_document_for_edit(path) else {
-        return Ok(ProviderWriteOutcome::SkippedUnparseableConfig);
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> io::Result<fuigo_config::fs_atomic::Edit<ProviderWriteOutcome>> {
+    use fuigo_config::fs_atomic::Edit;
+    let Some(mut doc) = crate::config_toml_edit::config_document_for_edit(path, current) else {
+        return Ok(Edit::Keep(ProviderWriteOutcome::SkippedUnparseableConfig));
     };
 
     let root = doc.as_table_mut();
@@ -159,7 +173,7 @@ fn write_provider_locked(
         // model would be bound to a (host, credential) pair nobody chose, so
         // refuse before touching the document — nothing is written.
         if user_customised && let Some(partial) = half_set_pair(&existing_pair) {
-            return Ok(partial);
+            return Ok(Edit::Keep(partial));
         }
         for (key, wanted, existing) in existing_pair {
             match existing {
@@ -184,6 +198,14 @@ fn write_provider_locked(
             for (name, value) in entry.extra_headers {
                 headers[*name] = toml_edit::value(*value);
             }
+        }
+        // A budget the user may have tuned, so an existing value stands. See
+        // `ProviderWrite::max_completion_tokens` for why this differs from the
+        // three wire-protocol keys above.
+        if let Some(max_tokens) = entry.max_completion_tokens
+            && !provider.contains_key("max_completion_tokens")
+        {
+            provider["max_completion_tokens"] = toml_edit::value(i64::from(max_tokens));
         }
     }
 
@@ -211,19 +233,16 @@ fn write_provider_locked(
     )
     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
-    // `fuigo_config::fs_atomic::write_atomically` creates a uniquely named temp
-    // file beside the target with `create_new`, applies `mode` at creation,
-    // renames, and unlinks the temp file on any error.
-    fuigo_config::fs_atomic::write_atomically(path, &doc.to_string(), target_mode(path))?;
-    Ok(ProviderWriteOutcome::Written { kept })
+    // The caller's `stage` (`stage_atomically_from_existing`) creates a uniquely
+    // named temp beside the target with `create_new`, with the mode the config
+    // already has (minus group/world), or `0600` for a new one -- `config.toml`
+    // supports `[model.<key>].api_key` -- and unlinks it on any error.
+    Ok(Edit::Replace {
+        contents: doc.to_string().into_bytes(),
+        value: ProviderWriteOutcome::Written { kept },
+    })
 }
 
-/// Mode to create the replacement file with: the mode the config already has,
-/// or `0600` for one that does not exist yet, because `config.toml` supports
-/// `[model.<key>].api_key` and so may come to hold a credential.
-fn target_mode(path: &Path) -> Option<u32> {
-    fuigo_config::fs_atomic::replacement_mode(path, 0o600)
-}
 
 /// [`ProviderWriteOutcome::PartialProviderPair`] when exactly one of the two
 /// `(key, wanted, existing)` entries is already set on disk; `None` when both
@@ -288,6 +307,7 @@ mod tests {
             api_backend: Some("messages"),
             auth_scheme: Some("x_api_key"),
             extra_headers: &[("anthropic-version", "2023-06-01")],
+            max_completion_tokens: Some(32_000),
             models,
         }
     }
@@ -304,9 +324,88 @@ mod tests {
         }
     }
 
+    /// P13: before this, a `/provider`-written Anthropic entry carried the wire
+    /// protocol but no token budget, so the sampler's own default decided
+    /// `max_tokens` and nothing in the file it just wrote could change it. The
+    /// number has to land in the config the flow creates, or it is not
+    /// discoverable from the flow that created the problem.
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn a_written_provider_entry_states_its_max_completion_tokens() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        kept_of(write_provider_at(&path, &sample("anthropic", &["claude-x"])).unwrap());
+        assert_eq!(
+            parse(&path)["model_providers"]["anthropic"]["max_completion_tokens"].as_integer(),
+            Some(32_000),
+        );
+    }
+
+    /// A budget, not a wire-protocol key: a value the user already chose stands.
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn an_existing_max_completion_tokens_is_left_alone() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[model_providers.anthropic]\nbase_url = \"https://api.anthropic.com/v1\"\nenv_key = \"ANTHROPIC_API_KEY\"\nmax_completion_tokens = 8192\n",
+        )
+        .unwrap();
+        kept_of(write_provider_at(&path, &sample("anthropic", &["claude-x"])).unwrap());
+        assert_eq!(
+            parse(&path)["model_providers"]["anthropic"]["max_completion_tokens"].as_integer(),
+            Some(8192),
+        );
+    }
+
+    /// `None` writes nothing: the OpenAI-compatible providers state no budget
+    /// rather than inheriting Anthropic's, the same discipline `extra_headers`
+    /// already follows with its empty slice.
+    #[test]
+    #[serial_test::serial(FUIGO_HOME)]
+    fn a_provider_with_no_budget_writes_no_max_completion_tokens() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let _home = EnvGuard::set("FUIGO_HOME", dir.path());
+        let path = dir.path().join("config.toml");
+        write_provider_at(
+            &path,
+            &ProviderWrite {
+                id: "openai",
+                base_url: "https://api.openai.com/v1",
+                env_key: "OPENAI_API_KEY",
+                api_backend: Some("responses"),
+                auth_scheme: Some("bearer"),
+                extra_headers: &[],
+                max_completion_tokens: None,
+                models: &["gpt-4o"],
+            },
+        )
+        .unwrap();
+        assert!(
+            parse(&path)["model_providers"]["openai"]
+                .get("max_completion_tokens")
+                .is_none()
+        );
+    }
+
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn provider_rebinding_refuses_conflicting_model_settings_atomically() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         for (key, value) in [
             ("env_key", "\"OLD_PROVIDER_KEY\""),
             ("env_key", r#"["ANTHROPIC_API_KEY", "OLD_PROVIDER_KEY"]"#),
@@ -337,6 +436,9 @@ mod tests {
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn provider_rebinding_accepts_matching_model_settings() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("config.toml");
@@ -351,6 +453,9 @@ mod tests {
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn provider_rebinding_accepts_single_element_env_key_array() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("config.toml");
@@ -366,6 +471,9 @@ mod tests {
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn provider_rebinding_accepts_an_inline_key_owned_by_the_provider() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("config.toml");
@@ -418,6 +526,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn writes_provider_table_with_scalars_and_nested_extra_headers() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -444,6 +555,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn omits_optional_fields_when_none() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -457,6 +571,7 @@ api_key = "same-owned-key"
                 api_backend: None,
                 auth_scheme: None,
                 extra_headers: &[],
+                max_completion_tokens: None,
                 models: &["local-model"],
             },
         )
@@ -473,6 +588,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn binds_every_model_key_to_the_provider() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -501,6 +619,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_is_refused_and_writes_nothing() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("config.toml");
@@ -517,6 +638,7 @@ api_key = "same-owned-key"
                 api_backend: Some("messages"),
                 auth_scheme: Some("x_api_key"),
                 extra_headers: &[],
+                max_completion_tokens: None,
                 models: &["claude-x"],
             },
         )
@@ -543,6 +665,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_is_refused_with_base_url_set_and_env_key_absent() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -569,6 +694,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_gets_no_model_binding() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -609,6 +737,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_half_set_pair_leaves_no_host_credential_pair_for_resolution_to_find() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -640,6 +771,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn merges_into_existing_tables_without_dropping_keys() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -686,6 +820,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn keeps_a_customised_base_url_and_env_key_and_reports_them() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -732,6 +869,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn reports_nothing_kept_when_the_existing_values_already_match() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -750,6 +890,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn quoted_model_keys_round_trip_exactly() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -784,6 +927,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn writes_env_var_name_and_has_no_field_for_a_secret() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -797,6 +943,7 @@ api_key = "same-owned-key"
                 api_backend: Some("responses"),
                 auth_scheme: Some("bearer"),
                 extra_headers: &[],
+                max_completion_tokens: None,
                 models: &["gpt-4o"],
             },
         )
@@ -816,6 +963,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn unparseable_config_is_reported_as_skipped_and_left_byte_identical() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -836,13 +986,20 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn leaves_no_temp_file_beside_the_target() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
-        let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
+        // The config sits in its own directory: with FUIGO_HOME set, this process's fresh logger creates `logs/` under the home,
+        // and the assertion is about what the write leaves beside the config, not about the home's other contents
+        let cfg_dir = dir.path().join("cfg");
+        fs::create_dir_all(&cfg_dir).unwrap();
+        let path = cfg_dir.join(fuigo_config::USER_CONFIG_FILENAME);
 
         write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"])).unwrap();
 
-        let mut names: Vec<String> = fs::read_dir(dir.path())
+        let mut names: Vec<String> = fs::read_dir(&cfg_dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
@@ -861,6 +1018,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn an_unreadable_config_is_skipped_without_writing_anything() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -886,37 +1046,35 @@ api_key = "same-owned-key"
     }
 
     /// The temp-file cleanup property, exercised where the write itself fails:
-    /// a readable config whose replacement cannot be created beside it.
-    ///
-    /// The obstacle is the length of the temp name, not directory permissions.
-    /// `write_atomically` creates `<config name>.<pid>.<nonce>.tmp` next to the
-    /// target, so a config whose own name is `NAME_MAX - 5` bytes has a
-    /// readable name, a creatable `.lock` name, and a temp name that no
-    /// filesystem will accept. A `chmod 0500` on the directory cannot be used:
-    /// the suite runs as root in its build container, root bypasses the
-    /// permission bits, and the write then succeeds. (It also never reached the
-    /// temp file even off root -- the `config.toml.lock` beside it is created
-    /// first and failed first.)
+    /// the temp is created and then the write into it fails (an injected fault,
+    /// `fuigo_config::fs_atomic::stage_fault`). P49 bounded temp names, so the
+    /// old obstacle -- a config name too long to take the temp suffix -- no
+    /// longer fails; and a `chmod 0500` directory cannot be used, since the
+    /// suite runs as root, which bypasses permission bits.
     #[cfg(unix)]
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_failed_write_leaves_no_temp_file_behind() {
-        /// `NAME_MAX` on every filesystem this runs on (ext4, xfs, APFS, overlayfs).
-        const NAME_MAX: usize = 255;
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
-        // Leaves room for `.lock` (exactly NAME_MAX) but not for the shortest
-        // possible `.<pid>.<nonce>.tmp` suffix (8 bytes).
-        let long_name = "c".repeat(NAME_MAX - ".lock".len());
-        let path = dir.path().join(&long_name);
+        let path = dir.path().join("config.toml");
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
 
-        let err = write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"]))
-            .expect_err("a write whose temp file cannot be created must fail");
+        fuigo_config::fs_atomic::stage_fault::FAIL_WRITE.with(|f| f.set(true));
+        let result = write_provider_at(&path, &sample("anthropic", &["claude-opus-4-6"]));
+        fuigo_config::fs_atomic::stage_fault::FAIL_WRITE.with(|f| f.set(false));
+        let err = result.expect_err("a write that fails filling its temp must fail");
+        assert!(
+            err.to_string().contains("injected write failure"),
+            "the write must fail filling the temp, not somewhere earlier: {err}"
+        );
         assert_eq!(
-            err.raw_os_error(),
-            Some(libc::ENAMETOOLONG),
-            "the write must fail creating the temp file, not somewhere earlier: {err}"
+            fs::read_to_string(&path).unwrap(),
+            "[ui]\ntheme = \"dark\"\n",
+            "the config is untouched"
         );
 
         let strays: Vec<String> = fs::read_dir(dir.path())
@@ -936,6 +1094,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn second_write_produces_identical_content() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -953,6 +1114,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn creates_missing_parent_dir_and_file() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join("nested/deeper/config.toml");
@@ -971,6 +1135,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn non_table_model_providers_is_an_error_and_does_not_write() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -989,7 +1156,10 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn concurrent_writes_never_produce_a_torn_file() {
-        let dir = tempdir().unwrap();
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = crate::test_util::memory_backed_tempdir();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
 
@@ -1040,7 +1210,10 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn concurrent_writes_of_different_providers_all_survive() {
-        let dir = tempdir().unwrap();
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = crate::test_util::memory_backed_tempdir();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         let ids: Vec<String> = (0..8).map(|n| format!("vendor{n}")).collect();
@@ -1092,7 +1265,10 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_provider_write_racing_a_settings_shaped_write_keeps_both() {
-        let dir = tempdir().unwrap();
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let dir = crate::test_util::memory_backed_tempdir();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
         fs::write(&path, "[ui]\ntheme = \"dark\"\n").unwrap();
@@ -1163,6 +1339,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn a_provider_write_takes_the_shared_config_lock() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
         let path = dir.path().join(fuigo_config::USER_CONFIG_FILENAME);
@@ -1182,6 +1361,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn preserves_an_existing_restrictive_mode() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());
@@ -1201,6 +1383,9 @@ api_key = "same-owned-key"
     #[test]
     #[serial_test::serial(FUIGO_HOME)]
     fn creates_a_new_config_readable_only_by_its_owner() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempdir().unwrap();
         let _home = EnvGuard::set("FUIGO_HOME", dir.path());

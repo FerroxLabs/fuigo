@@ -1,5 +1,5 @@
 //! The caller wires an [`Auth401AttributionCallback`] into [`crate::SamplerConfig::attribution_callback`].
-//! The sampler invokes it at each UNAUTHORIZED arm with the bearer fragment that went on the wire.
+//! The sampler invokes it at each UNAUTHORIZED arm with the fingerprint of the bearer that went on the wire.
 //! An observer can then split "sent a stale snapshot" from "sent the live token and was still rejected".
 //! `None` (the default) makes the 401 sites silent.
 //!
@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-pub use fuigo_auth::bearer_fragment::BEARER_SUFFIX_LEN;
+pub use fuigo_auth::BearerFingerprint;
 
 /// A 401-emitting site in [`crate::SamplingClient`]; its string identifier becomes the `consumer` field so queries can break 401s down by API path.
 /// This covers sampler endpoints only; tool clients use `fuigo_tools::ToolConsumer`.
@@ -46,12 +46,12 @@ impl SamplingConsumer {
 ///
 /// Implementations must be cheap and non-blocking; this runs on the user-visible 401 error path.
 ///
-/// Do not remove the `Debug` bound: [`crate::SamplerConfig`] derives `Debug` and holds an `Option<Arc<dyn Auth401AttributionCallback>>`.
+/// The `Debug` bound is kept for implementors' own diagnostics; [`crate::SamplerConfig`]'s hand-written `Debug` (P70) prints only whether a callback is set.
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
-    /// `sent_bearer_suffix` is the [`BEARER_SUFFIX_LEN`]-char tail of the bearer sent on the wire.
-    /// It is truncated before crossing this boundary so the full credential never leaves [`crate::SamplingClient`].
+    /// `sent_bearer` is the [`BearerFingerprint`] of the bearer sent on the wire, computed before crossing this
+    /// boundary so neither the credential nor any fragment of it leaves [`crate::SamplingClient`].
     /// `None` means no bearer header was sent at all.
-    fn record_401(&self, consumer: SamplingConsumer, sent_bearer_suffix: Option<&str>);
+    fn record_401(&self, consumer: SamplingConsumer, sent_bearer: Option<&BearerFingerprint>);
 }
 
 /// Shared, cheap-to-clone alias for the attribution callback.

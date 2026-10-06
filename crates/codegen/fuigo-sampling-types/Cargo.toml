@@ -16,11 +16,14 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 fuigo-circuit-breaker = { workspace = true }
+fuigo-auth = { workspace = true }
 fuigo-compaction = { path = "../../common/fuigo-compaction" }
 fuigo-tools = { path = "../fuigo-tools" }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
+# P70b: the test that pins the user-facing cap against the sink scrub.
+fuigo-secrets = { workspace = true }
 
 [lints]
 workspace = true

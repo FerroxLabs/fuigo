@@ -11,6 +11,43 @@ fn info() -> Info {
     }
 }
 
+/// P88: 1.0.10-1.0.19 replace a resumed session's chat history with a lossy rebuild whenever the latest checkpoint
+/// carries `inherited_prefix_len`. Checkpoints written now must read as legacy there (field absent), and the files
+/// those releases wrote must still read here.
+#[test]
+fn compaction_checkpoint_prefix_key_reads_as_legacy_in_older_releases() {
+    let checkpoint = crate::extensions::notification::CompactionCheckpointFile {
+        inherited_prefix_len: Some(3),
+        checkpoint_id: "renamed-prefix".into(),
+        prompt_index_at_compaction: 2,
+        compacted_history: vec![ConversationItem::system("projection")],
+        schema_version: 1,
+        created_at: "2026-10-03T00:00:00Z".into(),
+        original_user_info: None,
+        reread_file_paths: vec![],
+    };
+    let written = serde_json::to_value(&checkpoint).unwrap();
+    assert_eq!(written["resolved_prefix_len"], 3);
+    assert!(written.get("inherited_prefix_len").is_none(), "{written}");
+
+    // The 1.0.17 reader's view of the same file: its only prefix field is `#[serde(default)] inherited_prefix_len`.
+    #[derive(serde::Deserialize)]
+    struct Release1017View {
+        #[serde(default)]
+        inherited_prefix_len: Option<usize>,
+    }
+    let old_reader: Release1017View = serde_json::from_value(written).unwrap();
+    assert_eq!(old_reader.inherited_prefix_len, None);
+
+    let mut from_1017 = serde_json::to_value(&checkpoint).unwrap();
+    let object = from_1017.as_object_mut().unwrap();
+    object.remove("resolved_prefix_len");
+    object.insert("inherited_prefix_len".into(), serde_json::json!(0));
+    let read: crate::extensions::notification::CompactionCheckpointFile =
+        serde_json::from_value(from_1017).unwrap();
+    assert_eq!(read.inherited_prefix_len, Some(0));
+}
+
 #[tokio::test]
 async fn compaction_checkpoint_round_trip_and_directory_failure() {
     let dir = tempfile::tempdir().unwrap();

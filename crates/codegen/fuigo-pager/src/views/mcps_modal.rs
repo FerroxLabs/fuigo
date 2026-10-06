@@ -142,6 +142,12 @@ pub struct McpsServerSession {
     pub auth_required: bool,
     #[serde(default)]
     pub setup_required: bool,
+    /// Managed-policy verdict for a server the merge dropped.
+    #[serde(default)]
+    pub blocked_reason: Option<String>,
+    /// Recorded cause of a failed start or handshake (P152).
+    #[serde(default)]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
@@ -183,6 +189,9 @@ pub struct McpServerInfo {
     pub name: String,
     pub display_name: Option<String>,
     pub status: McpServerDisplayStatus,
+    /// Why the server is not usable, when the shell says (P152): a policy block or the recorded start/handshake failure.
+    /// Shown under an `[unavailable]` server instead of the generic "server may not be connected".
+    pub status_reason: Option<String>,
     pub tool_count: usize,
     pub auth_required: bool,
     pub setup_required: bool,
@@ -301,10 +310,21 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                 .as_ref()
                 .is_some_and(|session| session.setup_required)
                 || matches!(status, McpServerDisplayStatus::SetupRequired);
+            let status_reason = match status {
+                McpServerDisplayStatus::Unavailable => entry.session.as_ref().and_then(|session| {
+                    session
+                        .blocked_reason
+                        .clone()
+                        .or_else(|| session.unavailable_reason.clone())
+                        .filter(|reason| !reason.trim().is_empty())
+                }),
+                _ => None,
+            };
             McpServerInfo {
                 name: entry.name,
                 display_name: entry.display_name,
                 status,
+                status_reason,
                 tool_count,
                 auth_required,
                 setup_required,
@@ -378,6 +398,7 @@ mod tests {
             name: name.to_string(),
             display_name: None,
             status,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -421,6 +442,8 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
+                    blocked_reason: None,
+                    unavailable_reason: None,
                 }),
             }],
         })
@@ -545,6 +568,8 @@ mod tests {
                     tools: vec![],
                     auth_required: false,
                     setup_required: false,
+                    blocked_reason: None,
+                    unavailable_reason: None,
                 }),
             }
         }
@@ -588,6 +613,8 @@ mod tests {
                     tools: vec![],
                     auth_required: true,
                     setup_required: true,
+                    blocked_reason: None,
+                    unavailable_reason: None,
                 }),
             }],
         });
@@ -654,6 +681,7 @@ mod tests {
             name: "alpha".into(),
             display_name: None,
             status: McpServerDisplayStatus::Ready,
+            status_reason: None,
             tool_count: 3,
             auth_required: false,
             setup_required: false,

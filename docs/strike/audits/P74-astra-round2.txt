@@ -1,0 +1,19 @@
+# Astra (codex exec --model gpt-6-astra --sandbox read-only --skip-git-repo-check "<brief>" < /dev/null), P74 round 2
+# raw transcript sha256 (not committed: contains the tool session log): bdc5286a03f8d38c5e001e0adc6983a3b77def7e5883ea8b410de8fbb63a63ca
+## Brief
+Round 2 audit of Fuigo packet P74 in the current directory (git worktree, branch strike/p74). Round 1 (on b233110d) found no BLOCKER/HIGH/MEDIUM and three LOWs in crates/build/fuigo-proto-build/src/lib.rs: (1) PATH changes do not invalidate code generation (suggested rerun-if-env-changed=PATH); (2) lookup discards empty PATH entries (= cwd) and accepts non-executable files; (3) a non-UTF-8 PATH-resolved path now fails the build. Commit bb23dc8a addresses (2) and (3) and DECLINES (1) with a documented rationale (tracking PATH would reintroduce spurious rebuilds whenever shells/IDEs/test harnesses use different PATHs, which is the cost the packet removes). Review `git diff b233110d bb23dc8a` and re-check the whole packet diff `git diff bc739009 bb23dc8a` for any new defect. Judge whether declining (1) is acceptable or a HIGH. Report findings BLOCKER/HIGH/MEDIUM/LOW with file:line. End with exactly one line: VERDICT: PASS | VERDICT: PASS WITH LOWS -- <reason> | VERDICT: FAIL -- <reason> (FAIL iff any BLOCKER or HIGH). Do not modify files.
+## Final answer
+Reviewed both requested diffs at `bb23dc8a`. **No BLOCKER, HIGH, or MEDIUM findings.**
+
+- **LOW — Accepted PATH invalidation limitation:** [crates/build/fuigo-proto-build/src/lib.rs:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:45). Changing PATH to select another compiler can leave generated output unchanged until another tracked input changes or the generating package is cleaned. Declining (1) is acceptable for P74’s rebuild-cost objective: ordinary compiler-file and proto changes remain tracked, and explicit cleaning provides recovery. There is no evidence warranting escalation to HIGH.
+
+- **LOW — The documented `PROTOC=` workaround does not itself invalidate generation:** [crates/build/fuigo-proto-build/src/lib.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:49). `PROTOC` is read at runtime without `rerun-if-env-changed=PROTOC`; the inspected callers and locked build dependencies do not add that tracking. Setting it after a cached build therefore need not rerun generation. Tracking the previously selected file does not track changes to the variable. Correct the advice to require cleaning too, or track `PROTOC` explicitly. [Cargo change-detection documentation](https://doc.rust-lang.org/cargo/reference/build-scripts.html#change-detection).
+
+- **LOW — Executability filtering remains incomplete:** [crates/build/fuigo-proto-build/src/lib.rs:84](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:84). Testing *any* execute bit does not establish permission for the calling user. For example, another user’s mode-`0700` compiler in a searchable directory passes this predicate, while execution skips it and selects a later compiler. Cargo then watches the wrong file. This narrows, but does not completely close, Round 1 finding (2). [Permission semantics](https://man7.org/linux/man-pages/man7/path_resolution.7.html), [exec search behavior](https://man7.org/linux/man-pages/man3/exec.3.html).
+
+Empty PATH entries now resolve to cwd, and PATH-resolved non-UTF-8 paths no longer fail at directive emission. No additional defects found in the binary resolver, offline propagation, or workflow changes.
+
+`actionlint`, shell syntax validation, and diff whitespace checks passed. Rust tests and CI were not executed in this read-only audit. No files modified.
+
+VERDICT: PASS WITH LOWS -- PATH tracking may remain declined; correct the PROTOC workaround documentation and retain the permission-selection edge case as LOW.
+exit=0

@@ -338,6 +338,9 @@ fn discovery_priority_order() {
 /// When no .claude/settings.json exists anywhere, find returns paths but load returns None for each.
 #[test]
 fn discovery_with_no_settings_files() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // `find_claude_settings_paths` ends with the user tier, so "none should load" is only true
     // when the home it resolves is one this test owns.
     let _home = isolated_home();
@@ -359,6 +362,9 @@ fn discovery_with_no_settings_files() {
 
 #[test]
 fn project_claude_absent_when_home_is_git_repo() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // When $HOME is itself a git repo (dotfiles), the repo-root walk from a cwd under home must not treat `~/.claude` as project-tier
     // Project-tier env is injected into every spawned subprocess
     // Serialize and guard $HOME: find_repo_root reaches home via `.git`, and the guard reads fuigo_dirs::home_dir()
@@ -386,6 +392,9 @@ fn project_claude_absent_when_home_is_git_repo() {
 
 #[test]
 fn default_mode_accept_edits_produces_allow_edit_rule() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -409,6 +418,9 @@ fn default_mode_accept_edits_produces_allow_edit_rule() {
 
 #[test]
 fn default_mode_accept_edits_no_permissions_still_produces_rule() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -429,6 +441,9 @@ fn default_mode_accept_edits_no_permissions_still_produces_rule() {
 
 #[test]
 fn claude_only_returns_claude_settings_source() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -449,6 +464,9 @@ fn claude_only_returns_claude_settings_source() {
 
 #[test]
 fn no_claude_settings_returns_none() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     assert!(
@@ -458,6 +476,9 @@ fn no_claude_settings_returns_none() {
 
 #[test]
 fn default_mode_accept_edits_explicit_deny_takes_priority() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -560,6 +581,9 @@ fn load_settings_no_env_field() {
 
 #[test]
 fn load_claude_env_merges_with_precedence() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // Isolate FUIGO_HOME so the claude-import marker reads clean; an imported dev machine would otherwise early-return an empty map
     // The project tier overrides any real `~/.claude`, so the per-key assertions hold without isolating HOME
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -592,6 +616,9 @@ fn load_claude_env_merges_with_precedence() {
 
 #[test]
 fn load_claude_env_empty_when_no_settings() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // Isolate FUIGO_HOME (claude-import marker) and HOME (global `~/.claude`)
     // Neither a dev machine's import marker nor its real `~/.claude` env can then trip the empty-map assertion
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -606,6 +633,9 @@ fn load_claude_env_empty_when_no_settings() {
 
 #[test]
 fn load_claude_env_with_project_drops_repo_env_when_untrusted() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // The repo-tree `.claude/settings.json` env is injected into every spawned subprocess (BASH_ENV / GIT_SSH_COMMAND / …)
     // An untrusted folder must drop it
     // Isolate FUIGO_HOME so the claude-import marker reads clean (an imported dev machine would otherwise early-return an empty map)
@@ -1877,6 +1907,9 @@ fn parse_bare_unknown_stays_glob_pattern() {
 
 #[test]
 fn merge_permissions_across_project_and_global_settings() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
@@ -1931,6 +1964,9 @@ fn merge_permissions_across_project_and_global_settings() {
 
 #[test]
 fn merge_deny_from_project_with_allow_from_parent() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -1978,6 +2014,9 @@ fn merge_deny_from_project_with_allow_from_parent() {
 
 #[test]
 fn default_mode_from_specific_file_wins() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -2023,6 +2062,9 @@ fn default_mode_from_specific_file_wins() {
 
 #[test]
 fn default_mode_inherited_from_parent_when_not_set() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -2068,6 +2110,9 @@ fn default_mode_inherited_from_parent_when_not_set() {
 
 #[test]
 fn single_file_still_works() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     // Isolate HOME so host/CI `~/.claude` rules don't bleed into the count; paths merge global and project settings
     // Concurrent env tests race without the lock
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -2092,6 +2137,9 @@ fn single_file_still_works() {
 /// Untrusted clone must not honor project `.claude/settings.json` permission rules or `defaultMode` (including bypassPermissions).
 #[test]
 fn untrusted_project_claude_permissions_are_not_honored() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
@@ -2154,6 +2202,9 @@ fn untrusted_project_claude_permissions_are_not_honored() {
 /// Project-rule filtering is independent of that; global survival is checked only when our temp home is the live `user_fuigo_home()`.
 #[test]
 fn untrusted_project_config_toml_permissions_are_not_honored() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
@@ -2246,6 +2297,9 @@ allow = ["Bash(evil *)"]
 
 #[test]
 fn bypass_permissions_produces_catch_all_allow() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -2273,6 +2327,9 @@ fn bypass_permissions_produces_catch_all_allow() {
 
 #[test]
 fn bypass_permissions_with_explicit_deny_still_has_deny() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -2294,6 +2351,9 @@ fn bypass_permissions_with_explicit_deny_still_has_deny() {
 
 #[test]
 fn bypass_permissions_overrides_accept_edits_cross_file() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let repo_dir = tmp.path().join("repo");
@@ -2363,6 +2423,9 @@ fn inputs_with_managed<'a>(
 /// Pin active: no catch-all Allow Any; explicit rules stay; the block is recorded as a skip for inspect.
 #[test]
 fn bypass_permissions_blocked_by_policy_pin() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -2392,6 +2455,9 @@ fn bypass_permissions_blocked_by_policy_pin() {
 /// A bypass-only file under the pin still resolves (zero rules) so the skip keeps provenance and reaches inspect instead of an early `None`.
 #[test]
 fn bypass_permissions_blocked_pin_only_file_still_resolves() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -2419,6 +2485,9 @@ fn bypass_permissions_blocked_pin_only_file_still_resolves() {
 /// The pin covers bypass only: acceptEdits (edits-only auto-approve) keeps its synthetic Allow Edit rule.
 #[test]
 fn accept_edits_unaffected_by_policy_pin() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -2918,6 +2987,9 @@ async fn claude_double_star_allow_dropped_under_pin() {
 // like `explicit_default_mode_blocks_permission_mode_hint`.
 #[test]
 fn dont_ask_sets_prompt_policy_through_public_api() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -2943,6 +3015,9 @@ fn dont_ask_sets_prompt_policy_through_public_api() {
 // like `explicit_default_mode_blocks_permission_mode_hint`.
 #[test]
 fn dont_ask_nested_under_permissions_sets_prompt_policy() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -2970,6 +3045,9 @@ fn dont_ask_nested_under_permissions_sets_prompt_policy() {
 // like `explicit_default_mode_blocks_permission_mode_hint`.
 #[test]
 fn auto_nested_under_permissions_sets_prompt_policy() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -3054,6 +3132,9 @@ fn parse_managed_settings_reads_nested_default_mode() {
 /// When every permission rule string fails to parse, skip-only resolution must not panic.
 #[test]
 fn skip_only_invalid_permissions_resolves_without_panic() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -3098,6 +3179,9 @@ fn nested_wrong_type_does_not_fall_back_to_root_default_mode() {
 
 #[test]
 fn unrecognized_project_mode_claims_scope_over_global_accept_edits() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let repo = tmp.path().join("repo");
@@ -3257,6 +3341,9 @@ async fn managed_bypass_under_pin_records_skip_without_catchall() {
 // like `explicit_default_mode_blocks_permission_mode_hint`.
 #[test]
 fn nested_dont_ask_with_allow_rules_preserves_allow_and_deny_policy() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -3357,6 +3444,9 @@ fn root_default_mode_still_works_as_compat_fallback() {
 
 #[test]
 fn default_mode_known_values_no_warnings() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _home = isolated_home();
     let tmp = tempfile::tempdir().unwrap();
     let claude_dir = tmp.path().join(".claude");
@@ -3684,6 +3774,9 @@ fn permission_mode_hint_apply_matrix() {
 /// The test is sync and uses `block_on` so `ENV_LOCK` is not held across `.await` (clippy `await_holding_lock`), like the untrusted-project tests.
 #[test]
 fn explicit_default_mode_blocks_permission_mode_hint() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let rt = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -3706,7 +3799,7 @@ fn explicit_default_mode_blocks_permission_mode_hint() {
         std::fs::create_dir_all(&claude_dir).unwrap();
         std::fs::write(claude_dir.join("settings.json"), settings).unwrap();
         let _home = EnvVarGuard::set("HOME", tmp.path());
-        let _fuigo_home = EnvVarGuard::set("FUIGO_HOME", &tmp.path().join(".fuigo"));
+        let _fuigo_home = EnvVarGuard::set("FUIGO_HOME", tmp.path().join(".fuigo"));
         let _marker = EnvVarGuard::unset("_FUIGO_CLAUDE_MARKER_OVERRIDE");
 
         let resolved = rt

@@ -1,6 +1,10 @@
 use super::*;
 use fuigo_sampling_types::SyntheticReason;
 use fuigo_sampling_types::{BackendToolCallItem, BackendToolKind, rs};
+fn at<T>(xs: &[T], i: usize) -> &T {
+    xs.get(i)
+        .unwrap_or_else(|| panic!("expected index {i}, len {}", xs.len()))
+}
 #[test]
 fn summarization_prep_drops_backend_tool_calls() {
     let items = vec![
@@ -2142,6 +2146,7 @@ The user asked to read main.rs and lib.rs. main.rs prints hello world, lib.rs ha
 #[test]
 fn generation_zero_compaction_keeps_legacy_project_instructions() {
     let state_context = CompactionStateContext {
+            images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: Some("destination rules".into()),
         agent_message_anchor: None,
@@ -2172,6 +2177,7 @@ fn generation_zero_compaction_keeps_legacy_project_instructions() {
 #[test]
 fn relocated_compaction_uses_destination_project_instructions() {
     let state_context = CompactionStateContext {
+            images: Default::default(),
         cwd_generation: 1,
         destination_project_instructions: Some("destination rules".into()),
         agent_message_anchor: None,
@@ -2202,6 +2208,7 @@ fn relocated_compaction_uses_destination_project_instructions() {
 #[test]
 fn relocated_compaction_does_not_restore_source_instructions_when_destination_has_none() {
     let state_context = CompactionStateContext {
+            images: Default::default(),
         cwd_generation: 1,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -2235,6 +2242,7 @@ fn relocated_compaction_does_not_restore_source_instructions_when_destination_ha
 #[test]
 fn build_compacted_history_tags_agents_md_with_project_instructions() {
     let state_context = CompactionStateContext {
+            images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -2282,6 +2290,7 @@ fn build_compacted_history_tags_agents_md_with_project_instructions() {
 #[test]
 fn build_compacted_history_omits_agents_md_when_none() {
     let state_context = CompactionStateContext {
+            images: Default::default(),
         cwd_generation: 0,
         destination_project_instructions: None,
         agent_message_anchor: None,
@@ -3011,5 +3020,351 @@ fn fit_counts_encrypted_reasoning_against_budget() {
     assert!(
         out.iter().any(|i| i.text_content() == "recent answer"),
         "recent turn must survive"
+    );
+}
+const IMAGE_FILES_BLOCK: &str = "<image_files>\n1. /sessions/s1/assets/image-1.png\n</image_files>";
+/// A prompt as the shell stores it: `<image_files>` block, wrapped query, then the image parts.
+fn image_prompt(query: &str, urls: &[&str]) -> ConversationItem {
+    let mut parts = vec![ContentPart::Text {
+        text: format!("{IMAGE_FILES_BLOCK}\n\n<user_query>\n{query}\n</user_query>").into(),
+    }];
+    parts.extend(
+        urls.iter()
+            .map(|url| ContentPart::Image { url: (*url).into() }),
+    );
+    ConversationItem::user_with_parts(parts)
+}
+fn image_urls(parts: &[ContentPart]) -> Vec<&str> {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            ContentPart::Image { url } => Some(url.as_ref()),
+            ContentPart::Text { .. } => None,
+        })
+        .collect()
+}
+fn image_history_input(state_context: &CompactionStateContext) -> CompactedHistoryInput<'_> {
+    CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "<user_info>OS: linux</user_info>".to_string(),
+        agents_md_reminder: None,
+        state_context,
+        compaction_summary: "summary".to_string(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    }
+}
+#[tokio::test]
+async fn compacted_last_query_item_has_files_block_then_query_then_images() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt(
+            "what is this?",
+            &[
+                "data:image/png;base64,first",
+                "data:image/png;base64,second",
+            ],
+        ),
+        ConversationItem::assistant("A screenshot."),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    assert_eq!(compacted.len(), 5);
+    let expected = ConversationItem::user_with_parts(vec![
+        ContentPart::Text {
+            text: format!("{IMAGE_FILES_BLOCK}\n\n<user_query>\nwhat is this?\n</user_query>")
+                .into(),
+        },
+        ContentPart::Image {
+            url: "data:image/png;base64,first".into(),
+        },
+        ContentPart::Image {
+            url: "data:image/png;base64,second".into(),
+        },
+    ]);
+    assert_eq!(
+        serde_json::to_value(&expected).unwrap(),
+        serde_json::to_value(at(&compacted, 2)).unwrap()
+    );
+}
+#[tokio::test]
+async fn compacted_last_query_prepends_block_when_prose_mentions_tag() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt(
+            "why is <image_files> empty?",
+            &["data:image/png;base64,first"],
+        ),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    assert_eq!(
+        at(&compacted, 2).text_content(),
+        format!("{IMAGE_FILES_BLOCK}\n\n<user_query>\nwhy is <image_files> empty?\n</user_query>")
+    );
+}
+#[tokio::test]
+async fn compacted_last_query_does_not_duplicate_files_block_without_wrapper() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: format!("{IMAGE_FILES_BLOCK}\n\nplain question").into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,first".into(),
+            },
+        ]),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    assert_eq!(
+        state_context.images.last_turn_image_files.as_deref(),
+        Some(IMAGE_FILES_BLOCK)
+    );
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    assert_eq!(
+        at(&compacted, 2).text_content(),
+        wrap_user_query(format!("{IMAGE_FILES_BLOCK}\n\nplain question"))
+    );
+}
+/// Without images or an `<image_files>` block the compacted history is byte-identical to the
+/// plain `ConversationItem::user(wrap_user_query(q))` shape.
+#[tokio::test]
+async fn compacted_last_query_without_images_is_unchanged() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nhello\n</user_query>"),
+        ConversationItem::assistant("Hi!"),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    let expected = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user_meta("<user_info>OS: linux</user_info>"),
+        ConversationItem::user(wrap_user_query("hello")),
+        ConversationItem::assistant("Hi!"),
+        ConversationItem::user_meta(format_compact_summary_content("summary")),
+    ];
+    assert_eq!(
+        serde_json::to_value(&expected).unwrap(),
+        serde_json::to_value(&compacted).unwrap()
+    );
+}
+#[tokio::test]
+async fn synthetic_image_carrier_is_not_picked_as_last_turn() {
+    let mut carrier = ConversationItem::user_meta("Called the read_file tool");
+    carrier.add_image("data:image/png;base64,synthetic");
+    let mut interjection = ConversationItem::interjection("also look at this");
+    interjection.add_image("data:image/png;base64,interjected");
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt("what is this?", &["data:image/png;base64,human"]),
+        ConversationItem::assistant("looking"),
+        carrier,
+        interjection,
+    ];
+    let ctx = CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    assert_eq!(ctx.last_user_query.as_deref(), Some("what is this?"));
+    assert_eq!(
+        image_urls(&ctx.images.last_turn_image_parts),
+        vec!["data:image/png;base64,human"]
+    );
+}
+/// The carried item is again the last real user turn on the next compaction: it anchors
+/// `recent_messages` and its images and block are carried unchanged.
+#[tokio::test]
+async fn second_compaction_carries_images_again() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nold task\n</user_query>"),
+        ConversationItem::assistant("done"),
+        image_prompt("what is this?", &["data:image/png;base64,carried"]),
+    ];
+    let first_context = CompactionStateContext::build(&conversation, CompactionInputs::default())
+        .await
+        .for_compaction();
+    let first = build_compacted_history(image_history_input(&first_context));
+    let mut resumed = first.clone();
+    resumed.push(ConversationItem::auto_continue(AUTO_CONTINUE_PROMPT));
+    resumed.push(ConversationItem::assistant("It is a screenshot."));
+    let second_context = CompactionStateContext::build(&resumed, CompactionInputs::default()).await;
+    assert_eq!(
+        second_context.images.last_turn_image_files.as_deref(),
+        Some(IMAGE_FILES_BLOCK)
+    );
+    assert_eq!(
+        image_urls(&second_context.images.last_turn_image_parts),
+        vec!["data:image/png;base64,carried"]
+    );
+    assert_eq!(
+        second_context
+            .recent_messages
+            .iter()
+            .map(ConversationItem::text_content)
+            .collect::<Vec<_>>(),
+        vec!["It is a screenshot."],
+        "the carried image item must anchor recent_messages"
+    );
+    let second = build_compacted_history(image_history_input(&second_context.for_compaction()));
+    assert_eq!(
+        serde_json::to_value(at(&first, 2)).unwrap(),
+        serde_json::to_value(at(&second, 2)).unwrap()
+    );
+}
+const ATTACHED_PATHS_NOTE_LEAD: &str = "Images the user attached earlier in this session (before the summary above) are saved at the absolute paths below. They live under the session directory, not the workspace. If one matters for the current task, open it with read_file; do not ask the user to re-send it.";
+fn attached_paths_note(paths: &[&str]) -> ConversationItem {
+    let mut note = format!("<image_files>\n{ATTACHED_PATHS_NOTE_LEAD}\n");
+    for (i, path) in paths.iter().enumerate() {
+        note.push_str(&format!("{}. {path}\n", i + 1));
+    }
+    note.push_str("</image_files>");
+    ConversationItem::user_meta(note)
+}
+fn compaction_meta_texts(items: &[ConversationItem]) -> Vec<String> {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ConversationItem::User(user)
+                    if user.synthetic_reason == Some(SyntheticReason::CompactionMeta)
+            )
+        })
+        .map(ConversationItem::text_content)
+        .collect()
+}
+#[tokio::test]
+async fn compacted_history_emits_paths_note_after_summary() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt("what is this?", &["data:image/png;base64,first"]),
+        ConversationItem::assistant("A screenshot."),
+        ConversationItem::user("<user_query>\nnow refactor\n</user_query>"),
+        ConversationItem::assistant("refactoring"),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(CompactedHistoryInput {
+        system_reminder: Some("<system-reminder>state</system-reminder>".to_string()),
+        ..image_history_input(&state_context)
+    });
+    let expected = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user_meta("<user_info>OS: linux</user_info>"),
+        ConversationItem::user(wrap_user_query("now refactor")),
+        ConversationItem::assistant("refactoring"),
+        ConversationItem::user_meta(format_compact_summary_content("summary")),
+        attached_paths_note(&["/sessions/s1/assets/image-1.png"]),
+        ConversationItem::system_reminder("<system-reminder>state</system-reminder>"),
+    ];
+    assert_eq!(
+        serde_json::to_value(&expected).unwrap(),
+        serde_json::to_value(&compacted).unwrap()
+    );
+}
+/// The last turn's own paths ride with the re-added query, so with no earlier attachment there is no note.
+#[tokio::test]
+async fn compacted_history_omits_paths_note_when_empty() {
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt("what is this?", &["data:image/png;base64,first"]),
+        ConversationItem::assistant("A screenshot."),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(image_history_input(&state_context));
+    let expected = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user_meta("<user_info>OS: linux</user_info>"),
+        ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: format!("{IMAGE_FILES_BLOCK}\n\n<user_query>\nwhat is this?\n</user_query>")
+                    .into(),
+            },
+            ContentPart::Image {
+                url: "data:image/png;base64,first".into(),
+            },
+        ]),
+        ConversationItem::assistant("A screenshot."),
+        ConversationItem::user_meta(format_compact_summary_content("summary")),
+    ];
+    assert_eq!(
+        serde_json::to_value(&expected).unwrap(),
+        serde_json::to_value(&compacted).unwrap()
+    );
+}
+/// The note is an `<image_files>` block, so the next compaction harvests it again; a newer prompt's
+/// paths join it, after the older ones, once that prompt is no longer the last turn, even when the
+/// summary echoes that prompt's block.
+#[tokio::test]
+async fn paths_note_chains_across_compactions() {
+    let second_block = "<image_files>\n1. /sessions/s1/assets/image-2.png\n</image_files>";
+    let conversation = vec![
+        ConversationItem::system("sys"),
+        image_prompt("what is this?", &["data:image/png;base64,first"]),
+        ConversationItem::assistant("A screenshot."),
+        ConversationItem::user("<user_query>\nnow refactor\n</user_query>"),
+        ConversationItem::assistant("refactoring"),
+    ];
+    let first_context = CompactionStateContext::build(&conversation, CompactionInputs::default())
+        .await
+        .for_compaction();
+    let first = build_compacted_history(image_history_input(&first_context));
+    assert_eq!(
+        compaction_meta_texts(&first),
+        vec![
+            "<user_info>OS: linux</user_info>".to_owned(),
+            format_compact_summary_content("summary"),
+            attached_paths_note(&["/sessions/s1/assets/image-1.png"]).text_content(),
+        ]
+    );
+    let mut resumed = first.clone();
+    resumed.push(ConversationItem::user_with_parts(vec![
+        ContentPart::Text {
+            text: format!("{second_block}\n\n<user_query>\nand this?\n</user_query>").into(),
+        },
+        ContentPart::Image {
+            url: "data:image/png;base64,second".into(),
+        },
+    ]));
+    resumed.push(ConversationItem::assistant("Another screenshot."));
+    let second_context = CompactionStateContext::build(&resumed, CompactionInputs::default())
+        .await
+        .for_compaction();
+    assert_eq!(
+        second_context.images.attached_paths,
+        vec!["/sessions/s1/assets/image-1.png"]
+    );
+    let second = build_compacted_history(CompactedHistoryInput {
+        compaction_summary: format!("The user attached {second_block}"),
+        ..image_history_input(&second_context)
+    });
+    assert!(at(&second, 2).text_content().starts_with(second_block));
+    let mut resumed = second.clone();
+    resumed.push(ConversationItem::user(
+        "<user_query>\nship it\n</user_query>",
+    ));
+    resumed.push(ConversationItem::assistant("shipping"));
+    let third_context = CompactionStateContext::build(&resumed, CompactionInputs::default())
+        .await
+        .for_compaction();
+    let third = build_compacted_history(image_history_input(&third_context));
+    assert_eq!(
+        compaction_meta_texts(&third),
+        vec![
+            "<user_info>OS: linux</user_info>".to_owned(),
+            format_compact_summary_content("summary"),
+            attached_paths_note(&[
+                "/sessions/s1/assets/image-1.png",
+                "/sessions/s1/assets/image-2.png",
+            ])
+            .text_content(),
+        ]
     );
 }

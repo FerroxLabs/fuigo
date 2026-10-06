@@ -31,8 +31,16 @@ account = "other@example.com"
 }
 
 #[tokio::test]
+// The unnamed group is not optional: a `#[serial(FUIGO_HOME)]`-only test excludes
+// nothing but the six other members of that name, and ran concurrently with the
+// 85 `FUIGO_HOME` writers in the unnamed group. Every other `serial(FUIGO_HOME)`
+// site in this crate carries both attributes; this one did not.
+#[serial_test::serial]
 #[serial_test::serial(FUIGO_HOME)]
 async fn set_consent_answer_is_monotonic_per_account() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let home = tempfile::tempdir().expect("home");
     let _guard = fuigo_test_support::env::EnvGuard::set("FUIGO_HOME", home.path());
 
@@ -104,5 +112,40 @@ async fn set_consent_answer_is_monotonic_per_account() {
         answers().len(),
         2,
         "answering a second notice must not evict the first",
+    );
+}
+
+/// The write path must follow the guard, not a home some earlier test resolved.
+/// `fuigo_home()` used to be pinned by the first caller in the process, so a guarded
+/// test's consent answer landed in whichever directory that was -- on the build box,
+/// the developer's real `~/.fuigo/config.toml`.
+#[tokio::test]
+#[serial_test::serial]
+async fn consent_write_lands_in_the_guarded_home() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let first = fuigo_test_support::FuigoHome::new();
+    set_consent_answer(Some("a@example.com".into()), "tos".into(), 1, false)
+        .await
+        .expect("first home");
+    let first_config = first.path().join("config.toml");
+    assert!(
+        first_config.is_file(),
+        "the answer must be written under the guarded FUIGO_HOME ({})",
+        first.path().display()
+    );
+    drop(first);
+
+    let second = fuigo_test_support::FuigoHome::new();
+    set_consent_answer(Some("c@example.com".into()), "tos".into(), 1, false)
+        .await
+        .expect("second home");
+    let written = std::fs::read_to_string(second.path().join("config.toml"))
+        .expect("the second guard's home must receive its own write, not the first's");
+    assert!(written.contains("c@example.com"), "{written}");
+    assert!(
+        !written.contains("a@example.com"),
+        "a stale home leaked into the second guard: {written}"
     );
 }

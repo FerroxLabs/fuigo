@@ -72,6 +72,9 @@ impl AgentView {
                     refresh_agents_modal: Some(tab),
                 })
             }
+            crate::views::agents_modal::AgentsModalOutcome::Persist(write) => {
+                InputOutcome::Action(Action::AgentsModalConfigWrite(write))
+            }
             crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
             crate::views::agents_modal::AgentsModalOutcome::Unchanged => InputOutcome::Unchanged,
         }
@@ -104,6 +107,11 @@ impl AgentView {
             | crate::views::agents_modal::AgentsModalOutcome::EditInEditor { .. } => {
                 // Mouse interactions don't trigger view/edit; ignore
                 InputOutcome::Unchanged
+            }
+            // Not produced by the mouse today; if it ever is, the modal is
+            // already marked as saving, so the write must still run.
+            crate::views::agents_modal::AgentsModalOutcome::Persist(write) => {
+                InputOutcome::Action(Action::AgentsModalConfigWrite(write))
             }
             crate::views::agents_modal::AgentsModalOutcome::Changed => InputOutcome::Changed,
             crate::views::agents_modal::AgentsModalOutcome::Unchanged => InputOutcome::Unchanged,
@@ -2240,6 +2248,7 @@ mod extensions_action_target_tests {
             name: name.into(),
             display_name: None,
             status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -2852,6 +2861,7 @@ mod managed_section_no_funnel_tests {
             name: name.into(),
             display_name: None,
             status: McpServerDisplayStatus::Ready,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -3173,6 +3183,7 @@ mod extensions_modal_confirmation_tests {
             name: name.into(),
             display_name: None,
             status: crate::views::mcps_modal::McpServerDisplayStatus::Initializing,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,

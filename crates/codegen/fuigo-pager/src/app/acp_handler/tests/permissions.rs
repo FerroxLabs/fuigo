@@ -152,7 +152,7 @@
             ),
         ] {
             let req = hook_ask_permission_req(raw_input, acp_title, options);
-            let (title, description, command) = build_permission_display(&req, None, false);
+            let (title, description, command) = build_permission_display(&req, None);
             assert_eq!(title, expected_title);
             assert_eq!(command.as_deref(), expected_command);
             assert_eq!(description.first().map(String::as_str), Some(ask_line));

@@ -1,5 +1,8 @@
 //! `fuigo mcp doctor`: runtime health check for MCP servers.
 
+// CLI printer: stdout goes through `fuigo_tty_utils::cli_println!` (a raw `println!` aborts the
+// process when stdout's reader is gone, R060).
+#![deny(clippy::print_stdout)]
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -537,11 +540,11 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
 // ── Human-readable output ───────────────────────────────────────
 
 pub fn print_report(report: &DoctorReport) {
-    println!();
-    println!("MCP Doctor");
-    println!();
+    fuigo_tty_utils::cli_println!();
+    fuigo_tty_utils::cli_println!("MCP Doctor");
+    fuigo_tty_utils::cli_println!();
 
-    println!("  Config sources");
+    fuigo_tty_utils::cli_println!("  Config sources");
     for source in &report.sources {
         let status = match &source.status {
             ConfigSourceState::Found { server_count } => {
@@ -554,19 +557,19 @@ pub fn print_report(report: &DoctorReport) {
             ConfigSourceState::NotFound => "not found".to_string(),
             ConfigSourceState::Skipped { reason } => format!("skipped ({})", reason),
         };
-        println!("    {:<40} {}", source.path, status);
+        fuigo_tty_utils::cli_println!("    {:<40} {}", source.path, status);
     }
-    println!();
+    fuigo_tty_utils::cli_println!();
 
     if report.servers.is_empty() {
-        println!("  No MCP servers configured.");
-        println!("  Run `fuigo mcp add --help` to get started.");
-        println!();
+        fuigo_tty_utils::cli_println!("  No MCP servers configured.");
+        fuigo_tty_utils::cli_println!("  Run `fuigo mcp add --help` to get started.");
+        fuigo_tty_utils::cli_println!();
         return;
     }
 
     for server in &report.servers {
-        println!(
+        fuigo_tty_utils::cli_println!(
             "  {} ({}: {})",
             server.name, server.transport, server.target
         );
@@ -574,18 +577,18 @@ pub fn print_report(report: &DoctorReport) {
             let icon = if check.passed { "\u{2713}" } else { "\u{2717}" };
             let detail = check.detail.as_deref().unwrap_or("");
             if detail.is_empty() {
-                println!("    {} {}", icon, check.label);
+                fuigo_tty_utils::cli_println!("    {} {}", icon, check.label);
             } else {
-                println!("    {} {} ({})", icon, check.label, detail);
+                fuigo_tty_utils::cli_println!("    {} {} ({})", icon, check.label, detail);
             }
             if let Some(hint) = &check.hint {
-                println!("    \u{2192} {}", hint);
+                fuigo_tty_utils::cli_println!("    \u{2192} {}", hint);
             }
         }
-        println!();
+        fuigo_tty_utils::cli_println!();
     }
 
-    println!(
+    fuigo_tty_utils::cli_println!(
         "Found {} healthy, {} failing.{}",
         report.healthy_count,
         report.failing_count,
@@ -595,7 +598,7 @@ pub fn print_report(report: &DoctorReport) {
             ""
         }
     );
-    println!();
+    fuigo_tty_utils::cli_println!();
 }
 
 #[cfg(test)]

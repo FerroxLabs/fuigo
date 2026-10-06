@@ -19,6 +19,7 @@ pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
 /// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
 pub(crate) fn git_command() -> Command {
     let mut cmd = Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets(&mut cmd);
     fuigo_tty_utils::detach_std_command(&mut cmd);
     cmd.stdin(Stdio::null());
     cmd.envs(fuigo_tty_utils::pager_env());
@@ -1366,5 +1367,32 @@ mod tests {
         assert_eq!(mine[0].head_commit.as_deref(), Some(report.commit.as_str()));
         // session_id is threaded through to the DB record (create-path parity).
         assert_eq!(mine[0].session_id.as_deref(), Some("subagent-42"));
+    }
+}
+
+/// P120: the git this crate spawns can run repository hooks; a hook must not inherit Fuigo's secrets.
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[test]
+    fn p120_git_hooks_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "p120_tests::p120_git_hooks_do_not_inherit_fuigo_secrets";
+        if probe::in_parent(NAME, &[]) {
+            return;
+        }
+        let dir = probe::scratch_dir("p120-fwt-git");
+        let out = dir.join("hook-env.txt");
+        let run = |args: &[&str]| {
+            let output = git_command().current_dir(&dir).args(args).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        };
+        run(&["init", "-q"]);
+        probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
+        run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"]);
+        let dump = std::fs::read_to_string(&out).expect("the pre-commit hook ran");
+        probe::assert_clean(&dump, &[]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -65,6 +65,7 @@ pub struct DiffSizeExceededFile {
 pub async fn git_cli(cwd: &Path, args: &[&str]) -> Result<String> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli");
     let mut cmd = Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.current_dir(cwd).arg("--no-optional-locks");
     for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
         cmd.env(key, val);
@@ -129,6 +130,7 @@ pub async fn jj_cli_mut(cwd: &Path, args: &[&str]) -> Result<String> {
 async fn jj_cli_inner(cwd: &Path, args: &[&str], ignore_wc: bool) -> Result<String> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, ignore_wc, "jj_cli");
     let mut cmd = Command::new("jj");
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.current_dir(cwd)
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
@@ -2725,6 +2727,7 @@ pub async fn restage_git_paths(cwd: &Path, git_ref: &GitStateRef, session_id: &s
 async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_raw");
     let mut cmd = Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.current_dir(cwd).arg("--no-optional-locks");
     for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
         cmd.env(key, val);
@@ -2748,6 +2751,7 @@ async fn git_cli_raw(cwd: &Path, args: &[&str]) -> Result<(bool, String)> {
 async fn git_cli_status(cwd: &Path, args: &[&str]) -> Result<(i32, String)> {
     tracing::debug!(cwd = %cwd.display(), args = ?args, "git_cli_status");
     let mut cmd = Command::new("git");
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     cmd.current_dir(cwd).arg("--no-optional-locks");
     for &(key, val) in fuigo_tty_utils::GIT_AUTH_SUPPRESSION_ENVS.iter() {
         cmd.env(key, val);
@@ -3612,3 +3616,44 @@ pub fn build_restore_decision(
 #[cfg(test)]
 #[path = "git_restore_code_tests.rs"]
 mod restore_code_tests;
+/// P120: the git this module spawns can run repository hooks; a hook must not inherit Fuigo's secrets, but git keeps
+/// the user's own `GITHUB_TOKEN` even when a config registers it as an MCP bearer variable (v1.0.20 behaviour).
+#[cfg(all(test, unix))]
+mod p120_tests {
+    use super::*;
+    use fuigo_secrets::test_probe as probe;
+
+    #[tokio::test]
+    async fn p120_git_hooks_do_not_inherit_fuigo_secrets() {
+        const NAME: &str = "p120_tests::p120_git_hooks_do_not_inherit_fuigo_secrets";
+        // The user's own credential, named by their config as an MCP bearer variable: git credential helpers (gh) read it.
+        const REGISTERED: &str = "GITHUB_TOKEN";
+        if probe::in_parent(NAME, &[REGISTERED]) {
+            return;
+        }
+        fuigo_tools::util::shell_env_policy::register_credential_env_names([REGISTERED]);
+        let dir = probe::scratch_dir("p120-ws-git");
+        let out = dir.join("hook-env.txt");
+        git_cli(&dir, &["init", "-q"]).await.unwrap();
+        probe::write_env_dump_script(&dir.join(".git/hooks/pre-commit"), &out);
+        let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-q", "-m", "x"];
+        for label in ["git_cli", "git_cli_raw", "git_cli_status"] {
+            let _ = std::fs::remove_file(&out);
+            match label {
+                "git_cli" => {
+                    git_cli(&dir, &commit).await.unwrap();
+                }
+                "git_cli_raw" => {
+                    assert!(git_cli_raw(&dir, &commit).await.unwrap().0, "{label}");
+                }
+                _ => {
+                    assert_eq!(git_cli_status(&dir, &commit).await.unwrap().0, 0, "{label}");
+                }
+            }
+            let dump = std::fs::read_to_string(&out).expect("the pre-commit hook ran");
+            probe::assert_clean(&dump, &[]);
+            probe::assert_kept(&dump, REGISTERED);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

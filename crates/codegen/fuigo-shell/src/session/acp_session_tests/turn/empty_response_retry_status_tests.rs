@@ -186,20 +186,27 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
             let (outcome, frames, elapsed, submissions) = run_turn(&server, policy).await;
 
             let reason = "empty response from model (reasoning_only)";
-            let retrying = |attempt| RetryState::Retrying {
-                attempt,
-                max_retries: 3,
-                reason: reason.to_string(),
-                error_type: Some("empty_response".to_string()),
+            let retrying = |attempt| {
+                let mut state = RetryState::Retrying {
+                    attempt,
+                    max_retries: 3,
+                    reason: reason.to_string(),
+                    error_type: Some("empty_response".to_string()),
+                    verdicts: None,
+                };
+                state.stamp_verdicts();
+                state
             };
             // Spending the cap is an exhaustion, like the rate-limit path: the user watched
             // "(1/3)" and "(2/3)" climb, so the closing line names the attempts it took.
-            let exhausted = RetryState::Exhausted {
+            let mut exhausted = RetryState::Exhausted {
                 attempts: 3,
                 reason: reason.to_string(),
                 is_rate_limited: false,
                 error_type: Some("empty_response".to_string()),
+                verdicts: None,
             };
+            exhausted.stamp_verdicts();
             assert_eq!(
                 frames,
                 vec![
@@ -260,11 +267,16 @@ fn shell_transient_retries_are_mirrored_once_each() {
             assert!(outcome.is_ok(), "two 503s then success completes the turn");
             assert_eq!(submissions, 3);
             let status: Vec<&Frame> = frames.iter().filter(|f| is_retry_frame(f)).collect();
-            let state = |attempt| RetryState::Retrying {
-                attempt,
-                max_retries: 3,
-                reason: "Server error; retrying request".to_string(),
-                error_type: Some("api".to_string()),
+            let state = |attempt| {
+                let mut state = RetryState::Retrying {
+                    attempt,
+                    max_retries: 3,
+                    reason: "Server error; retrying request".to_string(),
+                    error_type: Some("api".to_string()),
+                    verdicts: None,
+                };
+                state.stamp_verdicts();
+                state
             };
             assert_eq!(
                 status,
@@ -481,12 +493,14 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
             while let Ok(event) = event_rx.try_recv() {
                 actor.handle_session_event(event, &mut replay_buffer).await;
             }
-            let retrying = RetryState::Retrying {
+            let mut retrying = RetryState::Retrying {
                 attempt: 1,
                 max_retries: 3,
                 reason: "Server error; retrying request".to_string(),
                 error_type: Some("api".to_string()),
+                verdicts: None,
             };
+            retrying.stamp_verdicts();
             actor
                 .send_fuigo_notification(FuigoSessionUpdate::RetryState(retrying.clone()))
                 .await;
@@ -576,6 +590,7 @@ async fn a_mirror_queued_from_outside_the_actor_is_ordered_and_separated() {
             let disk_full = RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                verdicts: None,
             };
             actor
                 .handle_session_event(
@@ -1101,6 +1116,7 @@ async fn a_mirror_queued_during_session_teardown_still_reaches_the_client() {
             let disk_full = RetryState::Failed {
                 error_type: DISK_FULL_ERROR_TYPE.to_string(),
                 message: DISK_FULL_USER_MESSAGE.to_string(),
+                verdicts: None,
             };
             // What the persistence actor does when a session-end write runs out of space.
             event_tx
@@ -1126,4 +1142,58 @@ async fn a_mirror_queued_during_session_teardown_still_reaches_the_client() {
             );
         })
         .await;
+}
+
+/// P121 (K8). An Esc after a request was dispatched but before its first output rewinds the turn
+/// without a terminal receipt. The request it had in flight reports no usage and never will, so the
+/// rewind must account for it (a conservative estimate under a token budget) instead of leaving it
+/// pending and uncounted on the goal's execution.
+#[test]
+fn a_rewound_turn_charges_the_request_it_had_in_flight() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            let (actor, _frames) = actor_under_test_for_session(
+                &server,
+                SessionKind::Main,
+                fuigo_sampler::RetryPolicy::default(),
+                true,
+                drain_frames,
+                "session-rewind-charge",
+            )
+            .await;
+            let session = actor.session_info.id.to_string();
+            let execution = open_execution_with_budget(&actor, "req-rewind-charge", 1_000_000).await;
+            fuigo_sampling_types::ExecutionAdmission::admit(
+                execution.as_ref(),
+                fuigo_sampling_types::RequestPurpose::Work,
+                uuid::Uuid::new_v4().to_string(),
+            )
+            .await
+            .expect("the request is admitted");
+            *actor.current_prompt_id.lock().expect("current_prompt_id mutex poisoned") =
+                Some("rw".to_string());
+            let (item, _rx) = super::turn_completion_emit_tests::pending_input("rw");
+            {
+                let mut state = actor.state.lock().await;
+                state.rewindable = true;
+                state.running_task = Some(running_task_stub("rw"));
+                state.pending_inputs.push_back(item);
+            }
+            let _ = actor
+                .cancel_running_task(crate::session::CancelOptions {
+                    history: crate::session::CancelHistoryDisposition::RewindIfNoOutput { prompt_id: None },
+                    user_initiated: true,
+                    ..Default::default()
+                })
+                .await;
+            let state = execution.snapshot().await.expect("execution snapshot");
+            assert!(state.pending.is_empty(), "the in-flight request is settled: {state:?}");
+            assert!(state.total_tokens > 0, "and charged an estimate: {state:?}");
+            assert!(!state.unknown_usage, "{state:?}");
+            execution.release(&session);
+        })
+    });
 }

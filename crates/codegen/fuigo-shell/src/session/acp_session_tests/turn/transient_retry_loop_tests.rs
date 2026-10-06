@@ -54,6 +54,7 @@ fn retrying_events(retries: &CapturedRetries) -> Vec<(u32, u32, String)> {
                 max_retries,
                 reason,
                 error_type: _,
+                ..
             } => Some((*attempt, *max_retries, reason.clone())),
             _ => None,
         })

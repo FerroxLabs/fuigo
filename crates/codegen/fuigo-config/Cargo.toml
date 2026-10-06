@@ -19,6 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 shellexpand = "3.1"
 thiserror = { workspace = true }
+unicode-normalization = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 urlencoding = { workspace = true }
@@ -32,10 +33,21 @@ fuigo-version = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true }
 
+# libc / windows: `write_through` carries xattrs/ACLs (Linux, macOS) and the
+# DACL (Windows) onto a replaced file.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
+# Fault-injection seams in `write_through`, for other crates' tests only
+# (enabled from their [dev-dependencies]; resolver 2 keeps it out of builds).
+test-seams = []
 
 [lints]
 workspace = true

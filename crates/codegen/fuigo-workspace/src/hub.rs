@@ -1101,12 +1101,35 @@ mod tests {
     fn make_bg_tracking_handle() -> WorkspaceHandle {
         make_bg_handle_with_config(bg_config())
     }
+    /// A background command that runs until the test lets it go, instead of for a fixed `sleep N`.
+    /// A fixed sleep races the host: on a loaded box the task can finish before the test has observed it running, and the counter the test is waiting for never reads what it expects.
+    /// The loop ends when [`BgGate::release`] removes the hold file, or when the directory is dropped with the test, so nothing outlives it.
+    struct BgGate {
+        dir: tempfile::TempDir,
+    }
+    impl BgGate {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("gate dir");
+            std::fs::write(dir.path().join("hold"), "").expect("hold file");
+            Self { dir }
+        }
+        fn cmd(&self) -> String {
+            format!(
+                "while [ -e '{}' ]; do sleep 0.05; done",
+                self.dir.path().join("hold").display()
+            )
+        }
+        fn release(&self) {
+            let _ = std::fs::remove_file(self.dir.path().join("hold"));
+        }
+    }
+    /// Polls until `pred` holds; the budget is the caller's, scaled up because a poll costs nothing once the condition holds and a tight one only fails when the host is busy.
     async fn wait_until(
         tracker: &crate::activity::ActivityTracker,
         pred: impl Fn(&fuigo_tool_protocol::ToolServerStatusPayload) -> bool,
         timeout: Duration,
     ) -> fuigo_tool_protocol::ToolServerStatusPayload {
-        let deadline = tokio::time::Instant::now() + timeout;
+        let deadline = tokio::time::Instant::now() + timeout * 8;
         loop {
             let snap = tracker.snapshot();
             if pred(&snap) || tokio::time::Instant::now() >= deadline {
@@ -1177,11 +1200,12 @@ mod tests {
     async fn backgrounded_bash_increments_then_decrements_through_real_wiring() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         run_tool_in_session(
                 &handle,
                 "main",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         let busy = wait_until(
@@ -1192,6 +1216,7 @@ mod tests {
         .await;
         assert_eq!(busy.background_tasks, 1, "running bg bash must increment");
         assert!(busy.idle_since_ms.is_none(), "idle withheld while bg runs");
+        gate.release();
         let idle = wait_until(
             &tracker,
             |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
@@ -1218,11 +1243,12 @@ mod tests {
         .cloned();
         let handle = make_bg_handle_with_config(cfg);
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         run_tool_in_session(
             &handle,
             "main",
             "run_terminal_cmd",
-            serde_json::json!({ "command": "sleep 2", "description": "test", "timeout": 300 }),
+            serde_json::json!({ "command": gate.cmd(), "description": "test", "timeout": 300 }),
         )
         .await;
         let busy = wait_until(
@@ -1236,6 +1262,7 @@ mod tests {
             "auto-backgrounded task must increment"
         );
         assert!(busy.idle_since_ms.is_none());
+        gate.release();
         let idle = wait_until(
             &tracker,
             |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
@@ -1252,11 +1279,12 @@ mod tests {
     async fn monitor_increments_then_decrements_through_real_wiring() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         run_tool_in_session(
             &handle,
             "main",
             "monitor",
-            serde_json::json!({ "command": "sleep 2", "description": "test monitor" }),
+            serde_json::json!({ "command": gate.cmd(), "description": "test monitor" }),
         )
         .await;
         let busy = wait_until(
@@ -1266,6 +1294,7 @@ mod tests {
         )
         .await;
         assert_eq!(busy.background_tasks, 1, "a started monitor must increment");
+        gate.release();
         let idle = wait_until(
             &tracker,
             |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
@@ -1282,18 +1311,19 @@ mod tests {
     async fn concurrent_background_tasks_track_independently() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let (gate_a, gate_b) = (BgGate::new(), BgGate::new());
         run_tool_in_session(
                 &handle,
                 "main",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate_a.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         run_tool_in_session(
                 &handle,
                 "main",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 5", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate_b.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         let two = wait_until(
@@ -1307,6 +1337,7 @@ mod tests {
             "both concurrent bg tasks must count"
         );
         assert!(two.idle_since_ms.is_none(), "not idle with two bg tasks");
+        gate_a.release();
         let one = wait_until(
             &tracker,
             |s| s.background_tasks == 1 && s.idle_since_ms.is_none(),
@@ -1321,6 +1352,7 @@ mod tests {
             one.idle_since_ms.is_none(),
             "still not idle while one remains"
         );
+        gate_b.release();
         let zero = wait_until(
             &tracker,
             |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
@@ -1337,6 +1369,7 @@ mod tests {
     async fn forked_child_background_task_feeds_tracker() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         let mut cfg = crate::config::AgentSessionConfig::new("child");
         cfg.parent_session_id = Some("main".to_owned());
         cfg.capability_mode = CapabilityMode::All;
@@ -1346,7 +1379,7 @@ mod tests {
                 &handle,
                 "child",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         let busy = wait_until(
@@ -1359,6 +1392,7 @@ mod tests {
             busy.background_tasks, 1,
             "a forked subagent's bg task must feed the connection-level tracker"
         );
+        gate.release();
         let zero = wait_until(
             &tracker,
             |s| s.background_tasks == 0,
@@ -1449,6 +1483,7 @@ mod tests {
     async fn update_tool_config_preserves_tracker_feed() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         handle
             .update_tool_config("main", "main", bg_config())
             .await
@@ -1457,7 +1492,7 @@ mod tests {
                 &handle,
                 "main",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         let busy = wait_until(
@@ -1475,6 +1510,7 @@ mod tests {
     async fn re_resolve_all_sessions_preserves_tracker_feed() {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
+        let gate = BgGate::new();
         let rebuilt = handle
             .shared()
             .re_resolve_all_sessions("test_preserves_feed", true)
@@ -1484,7 +1520,7 @@ mod tests {
                 &handle,
                 "main",
                 "run_terminal_cmd",
-                serde_json::json!({ "command": "sleep 2", "description": "test", "is_background": true }),
+                serde_json::json!({ "command": gate.cmd(), "description": "test", "is_background": true }),
             )
             .await;
         let busy = wait_until(

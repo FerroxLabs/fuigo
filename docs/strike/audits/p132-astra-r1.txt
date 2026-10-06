@@ -1,0 +1,40 @@
+
+codex
+Audited clean `strike/p132@8b380d34` against `15c21ddf`. Source-only; no cargo or tests run.
+
+1. **FIXED — P127 checkpoint refusal.** Checkpoint-only refusals skip the empty POST, return `Ok`, and latch/warn except 413. Mixed batches, metadata-only saves and excluded statuses remain unchanged. Pending clears and metadata upsert still runs: [client.rs:588](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/client.rs:588), [sync.rs:149](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/sync.rs:149).
+
+2. **FIXED — P127 pulled checkpoint permissions.** Uses `owner_only::write`, which creates/tightens files to 0600: [pull.rs:309](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/pull.rs:309), [owner_only.rs:56](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/owner_only.rs:56).
+
+3. **NOT FIXED — P114 overall.** Reader-created locks use 0600: [file_state.rs:412](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-workspace/src/session/file_state.rs:412). Successful forks create the target before dropping staging: [copy.rs:392](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:392). However, cleanup does not establish exclusive creation ownership and has the races below; `Explicit` shares the ownership flaw.
+
+4. **FIXED — P121.** `session_switches` moves `HelperEpoch` without notifying the catalog watcher; the handler directly rebuilds the switching session’s title helper, and classifier requests still check the epoch: [models.rs:326](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/models.rs:326), [model_switch.rs:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/handlers/model_switch.rs:275), [sampler_turn.rs:957](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:957).
+
+5. **FIXED — P122.** The requested `include_str!("mod.rs")` test checks that `bound_tasks` is the first declared field: [local_ref.rs:346](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:346).
+
+New regressions versus `15c21ddf`:
+
+- **MEDIUM — `.cwd` deletion race.** After cleanup snapshots directory entries, another session can finish creation. Cleanup then deletes `.cwd`; `remove_dir` fails because the session exists, leaving its marker missing. Long-path CWD lookup by session ID consequently fails: [copy.rs:892](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:892), [persistence.rs:666](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/persistence.rs:666).
+- **MEDIUM — false directory ownership.** `exists()` followed by recursive creation allows another creator to win between calls. `CreatedCwdDir` nevertheless claims ownership and can remove that creator’s still-empty parent, causing concurrent staging to fail. Both modes are affected: [copy.rs:913](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:913), [copy.rs:920](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:920).
+
+No BLOCKER/HIGH regressions found.
+tokens used
+124,278
+Audited clean `strike/p132@8b380d34` against `15c21ddf`. Source-only; no cargo or tests run.
+
+1. **FIXED — P127 checkpoint refusal.** Checkpoint-only refusals skip the empty POST, return `Ok`, and latch/warn except 413. Mixed batches, metadata-only saves and excluded statuses remain unchanged. Pending clears and metadata upsert still runs: [client.rs:588](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/client.rs:588), [sync.rs:149](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/sync.rs:149).
+
+2. **FIXED — P127 pulled checkpoint permissions.** Uses `owner_only::write`, which creates/tightens files to 0600: [pull.rs:309](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/remote/pull.rs:309), [owner_only.rs:56](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/owner_only.rs:56).
+
+3. **NOT FIXED — P114 overall.** Reader-created locks use 0600: [file_state.rs:412](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-workspace/src/session/file_state.rs:412). Successful forks create the target before dropping staging: [copy.rs:392](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:392). However, cleanup does not establish exclusive creation ownership and has the races below; `Explicit` shares the ownership flaw.
+
+4. **FIXED — P121.** `session_switches` moves `HelperEpoch` without notifying the catalog watcher; the handler directly rebuilds the switching session’s title helper, and classifier requests still check the epoch: [models.rs:326](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/models.rs:326), [model_switch.rs:275](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/handlers/model_switch.rs:275), [sampler_turn.rs:957](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:957).
+
+5. **FIXED — P122.** The requested `include_str!("mod.rs")` test checks that `bound_tasks` is the first declared field: [local_ref.rs:346](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:346).
+
+New regressions versus `15c21ddf`:
+
+- **MEDIUM — `.cwd` deletion race.** After cleanup snapshots directory entries, another session can finish creation. Cleanup then deletes `.cwd`; `remove_dir` fails because the session exists, leaving its marker missing. Long-path CWD lookup by session ID consequently fails: [copy.rs:892](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:892), [persistence.rs:666](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/persistence.rs:666).
+- **MEDIUM — false directory ownership.** `exists()` followed by recursive creation allows another creator to win between calls. `CreatedCwdDir` nevertheless claims ownership and can remove that creator’s still-empty parent, causing concurrent staging to fail. Both modes are affected: [copy.rs:913](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:913), [copy.rs:920](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:920).
+
+No BLOCKER/HIGH regressions found.

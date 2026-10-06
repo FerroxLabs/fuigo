@@ -5,9 +5,21 @@
 //! (tracing is unavailable there).
 
 pub use fuigo_tty_utils::{
-    ProcessGroup, ProcessScope, detach_command, detach_search_command, global_process_scope,
-    new_process_group,
+    ProcessGroup, ProcessScope, detach_command, global_process_scope, new_process_group,
 };
+
+/// Prepare a search child (`rg` and friends): the policy base environment, then
+/// [`fuigo_tty_utils::detach_search_command`]. P113 (Astra r2 #4): the search tools spawned their child with the
+/// agent's whole environment, so a credential the denylist keeps from every other child (a provider key, Fuigo's own
+/// secrets, a configured `env_key` or MCP token) reached `rg`, or a wrapper named by `RG_BIN_PATH`. Clears the
+/// command's environment: call it before setting any variable on `cmd`.
+pub fn detach_search_command(cmd: &mut tokio::process::Command) {
+    crate::util::shell_env_policy::install_policy_base_env(
+        cmd,
+        Some(&crate::util::ShellEnvironmentPolicy::default()),
+    );
+    fuigo_tty_utils::detach_search_command(cmd);
+}
 
 /// Reap an already-killed search child, bounded by
 /// [`fuigo_tty_utils::KILL_REAP_TIMEOUT`]; on `None` warn and leave the corpse

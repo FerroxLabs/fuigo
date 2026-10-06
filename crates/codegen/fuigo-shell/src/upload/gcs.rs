@@ -24,6 +24,65 @@ use fuigo_file_utils::gcs::StorageConfig;
 use fuigo_file_utils::storage_client::Auth401AttributionCallback;
 use fuigo_file_utils::{TraceExportConfig, UploadMethod};
 use std::sync::Arc;
+/// P47: a proxy upload whose credential KIND is known, for callers with a resolved `FuigoAuth` and no
+/// `AuthManager` (the `fuigo trace` command). `UploadMethod::Proxy.user_token` cannot say what it carries, so the
+/// static fallback in `fuigo-file-utils` treats it as a session token. This wrapper supplies the credential as a
+/// static provider instead, with the right rule: a static `AuthMode::ApiKey` credential is
+/// `BearerDestination::Unrestricted` (its own rules), a session credential is checked by the service-endpoint trust
+/// class against the proxy base. A deployment key, or no credential, leaves the fallback in charge.
+pub struct ClassifiedProxyUpload {
+    inner: TraceExportConfig,
+    credentials: Option<Arc<dyn AuthCredentialProvider>>,
+}
+impl ClassifiedProxyUpload {
+    pub fn new(inner: TraceExportConfig, auth: Option<&crate::auth::FuigoAuth>) -> Self {
+        let credentials = match (&inner.upload_method, auth) {
+            (
+                UploadMethod::Proxy {
+                    proxy_base_url,
+                    deployment_key: None,
+                    ..
+                },
+                Some(auth),
+            ) => {
+                let destination = if crate::auth::session_delivery::is_session_credential(auth) {
+                    crate::auth::session_delivery::service_bearer_destination(
+                        Some(proxy_base_url.clone()),
+                        "trace_cmd_upload",
+                    )
+                } else {
+                    fuigo_auth::BearerDestination::Unrestricted
+                };
+                let creds =
+                    crate::util::fuigo_auth_credentials::FuigoAuthCredentials::new(Some(auth.key.clone()));
+                Some(Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
+                    Box::new(creds),
+                    Some(auth.key.clone()),
+                    destination,
+                )) as Arc<dyn AuthCredentialProvider>)
+            }
+            _ => None,
+        };
+        Self { inner, credentials }
+    }
+}
+/// P47 / P71: whether `error` is a refused destination (nothing was sent; no retry can change it): the bearer may not
+/// go there (P47), or the destination may not receive file content at all (P71, `destination_gate`).
+pub fn is_destination_refusal(error: &anyhow::Error) -> bool {
+    fuigo_auth::find_bearer_refusal(error.as_ref()).is_some()
+        || fuigo_file_utils::destination_gate::is_withheld(error)
+}
+impl StorageConfig for ClassifiedProxyUpload {
+    fn bucket_url(&self) -> &str {
+        self.inner.bucket_url()
+    }
+    fn upload_method(&self) -> &UploadMethod {
+        self.inner.upload_method()
+    }
+    fn proxy_credentials(&self) -> Option<Arc<dyn AuthCredentialProvider>> {
+        self.credentials.clone()
+    }
+}
 /// See the module docs for why this exists.
 ///
 /// `auth_manager == None` is supported (for tests, direct-mode upload, and a few sites without an `AuthManager` in scope).
@@ -51,6 +110,7 @@ impl StorageConfig for TraceExportConfigWithAuth {
     fn proxy_credentials(&self) -> Option<Arc<dyn AuthCredentialProvider>> {
         let am = self.auth_manager.as_ref()?;
         let UploadMethod::Proxy {
+            proxy_base_url,
             deployment_key,
             alpha_test_key,
             ..
@@ -62,6 +122,8 @@ impl StorageConfig for TraceExportConfigWithAuth {
             am.clone(),
             deployment_key.clone(),
             alpha_test_key.clone(),
+            Some(proxy_base_url.clone()),
+            "trace_upload",
         )))
     }
     fn proxy_attribution(&self) -> Option<Arc<dyn Auth401AttributionCallback>> {
@@ -120,10 +182,12 @@ pub(crate) async fn upload_to_auth_diagnostics(
         absolute_paths: false,
         archive_name_override: None,
     };
+    // P149 (S14/K16): the diagnostic log leaves the machine, so it gets the trace-upload scrub.
+    let log_bytes = super::trace::scrub_upload_payload(log_bytes, "application/x-ndjson");
     match fuigo_file_utils::gcs::upload_bytes(
         &config.with_auth(Some(auth_manager)),
         &object_path,
-        log_bytes,
+        &log_bytes,
         "application/x-ndjson",
     )
     .await

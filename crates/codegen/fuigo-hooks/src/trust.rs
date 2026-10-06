@@ -101,20 +101,57 @@ pub fn disable_hook(hook_name: &str) -> Result<(), String> {
 }
 
 fn disable_hook_with_file(hook_name: &str, file: &Path) -> Result<(), String> {
-    if is_hook_disabled_with_file(hook_name, file) {
-        return Ok(());
-    }
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file)
-        .map_err(|e| format!("failed to open disabled-hooks file: {e}"))?;
-    writeln!(f, "{hook_name}").map_err(|e| format!("failed to write disabled-hooks file: {e}"))?;
-    Ok(())
+    use fuigo_config::fs_atomic::Edit;
+    edit_disabled_hooks(file, |current| {
+        let content = match current {
+            Ok(bytes) => String::from_utf8(bytes.unwrap_or_default().to_vec()).map_err(|_| {
+                "failed to open disabled-hooks file: stream did not contain valid UTF-8".to_owned()
+            })?,
+            // Unreadable: it was treated as "not disabled" and appended to; a
+            // replacement built from nothing would drop every line, so refuse.
+            Err(e) => return Err(format!("failed to open disabled-hooks file: {e}")),
+        };
+        if content
+            .lines()
+            .any(|l| !l.trim().is_empty() && !l.trim().starts_with('#') && l.trim() == hook_name)
+        {
+            return Ok(Edit::Keep(()));
+        }
+        let mut updated = content;
+        if !updated.is_empty() && !updated.ends_with('\n') {
+            updated.push('\n');
+        }
+        updated.push_str(hook_name);
+        updated.push('\n');
+        Ok(Edit::Replace {
+            contents: updated.into_bytes(),
+            value: (),
+        })
+    })
+}
+
+/// Read-modify-write `disabled-hooks` through the shared helper
+/// (`fuigo_config::fs_atomic::edit_locked`, on `disabled-hooks.lock`): a
+/// disable and an enable in two processes cannot lose each other's change, and
+/// the file is replaced (written through a symlink, its mode kept; a new file
+/// gets `0o666 & !umask` as the old append created it), never truncated in
+/// place, so a reader never sees it empty and runs a hook the user disabled.
+fn edit_disabled_hooks<T>(
+    file: &Path,
+    edit: impl FnMut(fuigo_config::fs_atomic::Current<'_>) -> Result<fuigo_config::fs_atomic::Edit<T>, String>,
+) -> Result<T, String> {
+    use fuigo_config::fs_atomic::EditError;
+    use fuigo_config::write_through::{NewFileMode, stage_file_atomically_with};
+    fuigo_config::fs_atomic::edit_locked(
+        file,
+        |bytes| stage_file_atomically_with(file, bytes, NewFileMode::Default),
+        edit,
+    )
+    .map_err(|e| match e {
+        EditError::Edit(e) => e,
+        EditError::Lock(e) => format!("failed to lock disabled-hooks file: {e}"),
+        EditError::Write(e) => format!("failed to write disabled-hooks file: {e}"),
+    })
 }
 
 /// Enable a hook by name (remove from `$FUIGO_HOME/disabled-hooks`).
@@ -126,37 +163,44 @@ pub fn enable_hook(hook_name: &str) -> Result<bool, String> {
 }
 
 fn enable_hook_with_file(hook_name: &str, file: &Path) -> Result<bool, String> {
-    let content = match std::fs::read_to_string(file) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(format!("failed to read disabled-hooks file: {e}")),
-    };
-    let mut found = false;
-    let new_lines: Vec<&str> = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed == hook_name {
-                found = true;
-                false
-            } else {
-                true
-            }
-        })
-        .collect();
-    if !found {
+    use fuigo_config::fs_atomic::Edit;
+    // Nothing to enable in a missing file; take no lock for it.
+    if matches!(std::fs::metadata(file), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
         return Ok(false);
     }
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    use std::io::Write;
-    let mut f = std::fs::File::create(file)
-        .map_err(|e| format!("failed to open disabled-hooks file: {e}"))?;
-    for line in new_lines {
-        writeln!(f, "{line}").map_err(|e| format!("failed to write disabled-hooks file: {e}"))?;
-    }
-    Ok(true)
+    edit_disabled_hooks(file, |current| {
+        let content = match current {
+            Ok(None) => return Ok(Edit::Keep(false)),
+            Ok(Some(bytes)) => std::str::from_utf8(bytes)
+                .map_err(|_| "failed to read disabled-hooks file: stream did not contain valid UTF-8".to_owned())?,
+            Err(e) => return Err(format!("failed to read disabled-hooks file: {e}")),
+        };
+        let mut found = false;
+        let new_lines: Vec<&str> = content
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') && trimmed == hook_name {
+                    found = true;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if !found {
+            return Ok(Edit::Keep(false));
+        }
+        let mut updated = String::new();
+        for line in new_lines {
+            updated.push_str(line);
+            updated.push('\n');
+        }
+        Ok(Edit::Replace {
+            contents: updated.into_bytes(),
+            value: true,
+        })
+    })
 }
 
 /// Returns the path to `$FUIGO_HOME/disabled-hooks`, or `None` when no user fuigo home resolves.
@@ -204,3 +248,7 @@ mod tests {
         assert!(projects.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "trust_p61_tests.rs"]
+mod p61_tests;

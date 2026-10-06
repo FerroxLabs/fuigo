@@ -1,5 +1,7 @@
 mod edit;
 mod execute;
+pub(crate) mod hook;
+mod lifecycle;
 pub mod list_dir;
 pub(crate) mod memory_search;
 mod other;
@@ -17,6 +19,8 @@ pub use edit::{
     render_diff_hunk_highlighted, render_diff_hunks_highlighted, render_diff_hunks_with_styles,
 };
 pub use execute::ExecuteToolCallBlock;
+pub use hook::{HookPhase, HookRunEntry, HookRunStatus, ToolCallHookData};
+pub use lifecycle::LifecycleEventBlock;
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
 pub use other::OtherToolCallBlock;
@@ -164,6 +168,9 @@ pub enum ToolCallBlock {
     /// Skill invocation (user skills / slash commands via the Skill tool).
     Skill(OtherToolCallBlock),
     Other(OtherToolCallBlock),
+    /// Lifecycle event (e.g. `user_prompt_submit`, `session_start`).
+    /// Not a real tool call: a plugin hook's lifecycle row, outside tool statistics and `/export`'s tool list.
+    Lifecycle(LifecycleEventBlock),
 }
 
 /// Delegate to inner variant, with tool bullet prepended to output.
@@ -183,6 +190,7 @@ macro_rules! delegate_tool {
             ToolCallBlock::SentMessage(b) => b.$method($($arg),*),
             ToolCallBlock::Skill(b) => b.$method($($arg),*),
             ToolCallBlock::Other(b) => b.$method($($arg),*),
+            ToolCallBlock::Lifecycle(b) => b.$method($($arg),*),
         }
     };
 }
@@ -332,7 +340,8 @@ impl ToolCallBlock {
                 | ToolCallBlock::MemorySearch(_)
                 | ToolCallBlock::SentMessage(_)
                 | ToolCallBlock::Skill(_)
-                | ToolCallBlock::Other(_),
+                | ToolCallBlock::Other(_)
+                | ToolCallBlock::Lifecycle(_),
                 _,
             ) => {}
         }
@@ -354,6 +363,7 @@ impl ToolCallBlock {
             ToolCallBlock::SentMessage(b) => b.is_success(),
             ToolCallBlock::Skill(b) => b.is_success(),
             ToolCallBlock::Other(b) => b.is_success(),
+            ToolCallBlock::Lifecycle(_) => true,
         }
     }
 
@@ -376,6 +386,8 @@ impl ToolCallBlock {
             ToolCallBlock::SentMessage(b) => b.started_at = Some(instant),
             ToolCallBlock::Skill(b) => b.started_at = Some(instant),
             ToolCallBlock::Other(b) => b.started_at = Some(instant),
+            // Lifecycle events have no timing.
+            ToolCallBlock::Lifecycle(_) => {}
         }
     }
 
@@ -451,6 +463,8 @@ impl ToolCallBlock {
                     b.started_at = Some(std::time::Instant::now());
                 }
             }
+            // Lifecycle events have no timing.
+            ToolCallBlock::Lifecycle(_) => {}
         }
     }
 
@@ -555,6 +569,7 @@ impl ToolCallBlock {
                 b.output.clone(),
                 b.error.clone(),
             ]),
+            ToolCallBlock::Lifecycle(b) => join_searchable([Some(b.name.clone())]),
         }
     }
 
@@ -577,13 +592,15 @@ impl ToolCallBlock {
             | ToolCallBlock::Edit(_)
             | ToolCallBlock::UseTool(_)
             | ToolCallBlock::SentMessage(_)
-            | ToolCallBlock::Other(_) => None,
+            | ToolCallBlock::Other(_)
+            | ToolCallBlock::Lifecycle(_) => None,
         }
     }
 
     /// The bucket a row falls into for aggregated header LABELS; a superset of [`Self::verb_group_kind`].
     /// The action kinds excluded from eager verb folding still get a bucket when a truncation header describes the rows it hides.
-        /// Variants are listed explicitly so a new `ToolCallBlock` variant must decide here too.
+    /// `None` is returned only for lifecycle rows, which are never worth labeling.
+    /// Variants are listed explicitly so a new `ToolCallBlock` variant must decide here too.
     pub fn label_kind(&self) -> Option<VerbGroupKind> {
         match self {
             ToolCallBlock::Execute(_) => Some(VerbGroupKind::Command),
@@ -591,6 +608,7 @@ impl ToolCallBlock {
             ToolCallBlock::UseTool(_) => Some(VerbGroupKind::McpCall),
             ToolCallBlock::SentMessage(_) => Some(VerbGroupKind::Message),
             ToolCallBlock::Other(_) => Some(VerbGroupKind::OtherTool),
+            ToolCallBlock::Lifecycle(_) => None,
             ToolCallBlock::Read(_)
             | ToolCallBlock::ListDir(_)
             | ToolCallBlock::Search(_)
@@ -681,6 +699,7 @@ mod tests {
             )),
             ToolCallBlock::Skill(OtherToolCallBlock::new("Skill", "deploy")),
             ToolCallBlock::Other(OtherToolCallBlock::new("todo_write", "update")),
+            ToolCallBlock::Lifecycle(LifecycleEventBlock::new("session_start")),
         ];
         for block in &blocks {
             // Exhaustive on purpose: a new variant fails compilation here until it gets an explicit verb-grouping decision
@@ -698,7 +717,8 @@ mod tests {
                 | ToolCallBlock::Edit(_)
                 | ToolCallBlock::UseTool(_)
                 | ToolCallBlock::SentMessage(_)
-                | ToolCallBlock::Other(_) => None,
+                | ToolCallBlock::Other(_)
+                | ToolCallBlock::Lifecycle(_) => None,
             };
             assert_eq!(block.verb_group_kind(), expected, "block: {block:?}");
         }
@@ -730,6 +750,10 @@ mod tests {
         assert_eq!(
             ToolCallBlock::Other(OtherToolCallBlock::new("todo_write", "update")).label_kind(),
             Some(VerbGroupKind::OtherTool)
+        );
+        assert_eq!(
+            ToolCallBlock::Lifecycle(LifecycleEventBlock::new("session_start")).label_kind(),
+            None
         );
         // Verb-groupable kinds defer to the fold's own classification.
         assert_eq!(

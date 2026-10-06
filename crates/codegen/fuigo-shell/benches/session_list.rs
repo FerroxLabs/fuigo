@@ -15,6 +15,9 @@
 //!
 //! Run: `cargo bench -p fuigo-shell --bench session_list`
 //! Allow roughly 4-8 minutes after compilation for the configured samples.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::HashSet;
 use std::fs;

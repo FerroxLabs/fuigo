@@ -1,14 +1,18 @@
 # fuigo-crash-handler
 
-Crash handler for SIGBUS/SIGSEGV with best-effort backtrace capture.
+Crash handler for SIGBUS/SIGSEGV/SIGABRT with best-effort backtrace capture, per-process crash slots, and ASLR-safe symbolication.
 
 ## How it works
 
-`install()` registers a `sigaction` handler. On crash it writes a binary blob (`GCRX` format) to `crash_dir/last-crash.bin` and restores the terminal via pre-computed escape sequences. The handler uses only async-signal-safe operations for file I/O, terminal restore, and re-raise.
+`install()` opens this process's own slot, `crash_dir/crash-<pid>-<start>.bin` (`<start>` is the OS process start-time token), records the main image's load base, extent and build identity, installs a classifying panic hook, and registers a `sigaction` handler. On crash the handler writes a binary blob (`GCRX` v2) into the pre-opened slot and restores the terminal via pre-computed escape sequences. The handler uses only async-signal-safe operations (atomics, pre-built statics, `write`/`lseek`/`close`, `getpid`, `time`, `pthread_self`). A clean exit deletes the empty slot (`atexit`, Unix); a forked child never writes to or deletes its parent's slot.
 
-On next launch, `check_previous_crash()` reads the blob, resolves IPs to symbols via `backtrace`, writes `last-crash-report.txt`, and archives it (keeping the last 5 reports).
+On next launch, `check_previous_crashes()` reports only slots whose owner is dead (pid gone, or pid reused by a process with a different start time); live sessions' slots are never touched. Each dead blob is claimed with an atomic rename (reported once even when sessions start together), symbolicated, written to `history/crash-<time>-<pid>.txt` (owner-only; last 10 kept) and `last-crash-report.txt`, then removed. Empty slots of dead owners are swept silently; pre-1.0.21 `last-crash.bin` blobs are reported without symbols.
 
-No-ops on non-unix platforms. On musl-based Linux (release builds), the handler still records signal/address/version but skips frame capture since musl does not provide `backtrace()`.
+Symbolication re-bases each in-image instruction pointer (`ip - crashed_base + current_base`) so it works across ASLR, and only when the reader is the same build (version, image size, build id / `LC_UUID` / PE stamp, executable size); otherwise the report lists `fuigo+0x<offset>` for offline `addr2line`/`atos`.
+
+The panic hook records a class code (`Broken pipe`/`os error 32`, `No space left on device`/`os error 28`, or other — the same strings the Sentry filter drops), the panicking thread's name (32 bytes, no path separators) and thread id; never the panic message. A SIGABRT on that thread is reported as a Rust panic; benign classes keep their report but `startup_notice()` stays silent for them.
+
+Nothing is uploaded: this crate has no network code.
 
 ## Limitations
 
@@ -31,11 +35,10 @@ use std::path::PathBuf;
 
 let crash_dir = PathBuf::from("/home/user/.myapp/crash");
 
-// check_previous_crash MUST be called before install(), because
-// install() opens last-crash.bin with O_TRUNC.
-if let Some(r) = fuigo_crash_handler::check_previous_crash(&crash_dir) {
-    eprintln!("Crashed last session: {}", r.signal_name);
-    eprintln!("Report: {}", r.report_path.display());
+// Order does not matter: each process has its own slot.
+let reports = fuigo_crash_handler::check_previous_crashes(&crash_dir, env!("CARGO_PKG_VERSION"));
+if let Some(notice) = fuigo_crash_handler::startup_notice(&reports) {
+    eprintln!("{notice}");
 }
 
 // install() before any threads or async runtime — sigaltstack is per-thread.

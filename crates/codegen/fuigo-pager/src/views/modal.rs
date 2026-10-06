@@ -1534,6 +1534,7 @@ mod doc_picker_tip_tests {
     }
     #[test]
     fn doc_picker_renders_tip_with_path() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect {
             x: 0,
             y: 0,

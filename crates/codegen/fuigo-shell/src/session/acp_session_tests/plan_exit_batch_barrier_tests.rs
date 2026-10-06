@@ -83,9 +83,7 @@ async fn seeded_active_plan_actor_with_edit_tools() -> (
         tracker.activate_from_tool();
     }
     actor
-        .agent
-        .borrow()
-        .tool_bridge()
+        .tool_bridge_handle()
         .update_resource(fuigo_tools::types::resources::PlanFilePath(
             plan_path.clone(),
         ))
@@ -241,9 +239,7 @@ async fn mixed_permission_cancel_skips_exit_reverse_request() {
                 tracker.activate_from_tool();
             }
             actor
-                .agent
-                .borrow()
-                .tool_bridge()
+                .tool_bridge_handle()
                 .update_resource(fuigo_tools::types::resources::PlanFilePath(plan_path))
                 .await;
 

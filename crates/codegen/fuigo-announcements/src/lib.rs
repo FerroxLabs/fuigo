@@ -3,7 +3,7 @@
 //! This crate provides the common logic used by `fuigo-shell` and `fuigo-pager` for handling announcements (banner notifications).
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -131,12 +131,81 @@ pub async fn read_hidden_announcement_ids() -> BTreeSet<String> {
     }
 }
 
-/// Write hidden announcement ids to `~/.fuigo/announcements.json`.
-pub async fn write_hidden_announcement_ids(ids: &BTreeSet<String>) {
+/// Record dismissals in `~/.fuigo/announcements.json`: every id in `changed`
+/// ends up hidden exactly when it is in `hidden`; every other id in the file is
+/// kept as it is on disk.
+///
+/// A change, not a whole set (P72): this used to write the caller's whole
+/// in-memory set, so a second pager (or the shell) that had hidden or shown an
+/// announcement since this one loaded the file had that undone. The write is
+/// the shared read-modify-write (`fuigo_config::fs_atomic::edit_state_file`),
+/// serialized across processes, and replaces the file atomically (it was
+/// written in place, so a reader could see it torn). Off the async runtime.
+///
+/// # Errors
+///
+/// The lock wait gave up, the file could not be read (it is then left alone
+/// rather than replaced), or the write failed.
+pub async fn update_hidden_announcement_ids(
+    hidden: BTreeSet<String>,
+    changed: BTreeSet<String>,
+) -> std::io::Result<()> {
     let path = announcements_state_path();
-    if let Some(s) = serialize_hidden_announcement_ids(ids) {
-        let _ = tokio::fs::write(&path, s).await;
+    tokio::task::spawn_blocking(move || update_hidden_announcement_ids_at(&path, &hidden, &changed))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// [`update_hidden_announcement_ids`] on an explicit file, on this thread.
+///
+/// # Errors
+///
+/// As [`update_hidden_announcement_ids`].
+pub fn update_hidden_announcement_ids_at(
+    path: &Path,
+    hidden: &BTreeSet<String>,
+    changed: &BTreeSet<String>,
+) -> std::io::Result<()> {
+    use fuigo_config::fs_atomic::Edit;
+    if changed.is_empty() {
+        return Ok(());
     }
+    fuigo_config::fs_atomic::edit_state_file(
+        path,
+        |bytes| {
+            fuigo_config::write_through::stage_file_atomically_with(
+                path,
+                bytes,
+                fuigo_config::write_through::NewFileMode::Default,
+            )
+        },
+        |current| {
+            let (mut ids, exists) = match current {
+                // Malformed reads as nothing hidden, as `read_hidden_announcement_ids` does.
+                Ok(Some(bytes)) => (parse_hidden_announcement_ids(&String::from_utf8_lossy(bytes)), true),
+                Ok(None) => (BTreeSet::new(), false),
+                Err(e) => return Err(std::io::Error::new(e.kind(), e.to_string())),
+            };
+            let before = ids.clone();
+            for id in changed {
+                if hidden.contains(id) {
+                    ids.insert(id.clone());
+                } else {
+                    ids.remove(id);
+                }
+            }
+            if exists && ids == before {
+                return Ok(Edit::Keep(()));
+            }
+            let contents = serialize_hidden_announcement_ids(&ids)
+                .ok_or_else(|| std::io::Error::other("could not serialize announcement state"))?;
+            Ok(Edit::Replace {
+                contents: contents.into_bytes(),
+                value: (),
+            })
+        },
+    )
+    .map_err(std::io::Error::from)
 }
 
 fn announcements_state_path() -> PathBuf {
@@ -235,6 +304,55 @@ mod bindings_export {
 
 #[cfg(test)]
 mod tests {
+
+    /// P72: two pagers recording dismissals at the same time keep each
+    /// other's: each writes only the ids it changed, and the file's other ids
+    /// stay as they are on disk.
+    #[test]
+    fn two_writers_hiding_at_once_keep_each_others_dismissals() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("announcements.json");
+        std::fs::write(&path, r#"{"hidden_ids":["shown-by-b"]}"#).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let writer = |tag: &'static str| {
+            let (path, barrier) = (path.clone(), barrier.clone());
+            std::thread::spawn(move || {
+                let mut hidden = BTreeSet::new();
+                barrier.wait();
+                for i in 0..30 {
+                    let id = format!("{tag}{i}");
+                    hidden.insert(id.clone());
+                    update_hidden_announcement_ids_at(&path, &hidden, &BTreeSet::from([id])).unwrap();
+                }
+                if tag == "b" {
+                    // b shows one it never had in memory; only that id goes.
+                    update_hidden_announcement_ids_at(
+                        &path,
+                        &hidden,
+                        &BTreeSet::from(["shown-by-b".to_owned()]),
+                    )
+                    .unwrap();
+                }
+            })
+        };
+        let a = writer("a");
+        let b = writer("b");
+        a.join().unwrap();
+        b.join().unwrap();
+        let ids = parse_hidden_announcement_ids(&std::fs::read_to_string(&path).unwrap());
+        for tag in ["a", "b"] {
+            for i in 0..30 {
+                assert!(ids.contains(&format!("{tag}{i}")), "{tag}{i}");
+            }
+        }
+        assert!(!ids.contains("shown-by-b"));
+        assert_eq!(ids.len(), 60);
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["announcements.json"]);
+    }
     use super::*;
 
     #[test]

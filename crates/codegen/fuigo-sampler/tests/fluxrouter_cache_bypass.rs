@@ -6,6 +6,9 @@
 //! Fresh-process tests. The child points real `SamplingClient`s (all six dispatches) and a `SamplerActor` turn per
 //! wire format at plain-HTTP base URLs; an environment proxy delivers every request to the parent's mock, which
 //! records the body each destination actually received. The base URL host is the only variable.
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};

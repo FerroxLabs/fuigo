@@ -172,6 +172,164 @@ enum UserEchoMode {
     /// Notification drain: model-only content (the UI shows it via side channels: monitor gutter, task pane) that no pane should render live.
     PersistOnly,
 }
+/// P89. How a turn ended, for the execution's terminal receipt: whether the turn was only
+/// interrupted (so an active goal's next turn may reopen the record) or a limit stopped it.
+///
+/// A limit is a budget denial, `--max-turns`, or anything the bounded-execution layer itself ended
+/// the turn with (`execution_incomplete`); the record's own counters are checked again when the
+/// receipt is issued, so a cause misread here can never reopen a spent budget.
+pub(super) fn turn_end_of(
+    result: &Result<TurnOutcome, acp::Error>,
+) -> crate::session::execution_state::TurnEnd {
+    use crate::session::execution_state::TurnEnd;
+    match result {
+        Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }) => TurnEnd::Succeeded,
+        Ok(TurnOutcome::Completed { .. })
+        | Ok(TurnOutcome::Cancelled { .. })
+        | Ok(TurnOutcome::StationarityEnded { .. }) => TurnEnd::Interrupted,
+        Ok(TurnOutcome::MaxTurnsReached { .. }) => TurnEnd::Stopped,
+        Err(err) => turn_end_of_error(err),
+    }
+}
+
+/// P144. Whether the process runtime limit (`FUIGO_MAX_RUNTIME_SECS`) has passed.
+fn runtime_limit_passed() -> bool {
+    fuigo_sampler::execution_budget::process_budget()
+        .ok()
+        .flatten()
+        .is_some_and(|budget| budget.expired())
+}
+
+/// P144. Whether the runtime limit has passed: the process deadline (`process_expired`), or the
+/// execution has no time left (`execution_remaining`: the earlier of its durable deadline and an
+/// inherited parent's, the bound the transport clamps each request to).
+fn deadline_passed(process_expired: bool, execution_remaining: Option<std::time::Duration>) -> bool {
+    process_expired || execution_remaining.is_some_and(|remaining| remaining.is_zero())
+}
+
+/// P144. A failure the provider answered with its own cause: any model-request failure except the
+/// ones that mean no answer came (`http`: the transport gave up, its timeout ends at the deadline;
+/// `idle_timeout`; `cancelled`) and the deadline's own refusals ("execution deadline exhausted ..."
+/// before transport or during subscription authentication, status-less `api`). A provider answer can
+/// arrive with or without a status (a server-sent stream error, an encrypted-content 400, a workflow
+/// child's error), so a status is not required. The runtime limit did not end that request, so it
+/// keeps its cause even when the deadline passed while it was being reported (Astra r2/r3).
+fn provider_answered(err: &acp::Error) -> bool {
+    use fuigo_sampler::SamplingErrorKind as K;
+    let data = err.data.as_ref();
+    let text = |key: &str| data.and_then(|data| data.get(key)).and_then(serde_json::Value::as_str);
+    if err.code == acp::Error::auth_required().code || data.is_some_and(|data| data.get("http_status").is_some()) {
+        return true;
+    }
+    let deadline_refusal = [text("message"), Some(err.message.as_str())]
+        .into_iter()
+        .flatten()
+        .any(|message| message.contains("deadline exhausted"));
+    match text("error_kind").and_then(|kind| kind.parse::<K>().ok()) {
+        Some(K::Http | K::IdleTimeout | K::Cancelled) | None => false,
+        Some(_) => !deadline_refusal,
+    }
+}
+
+/// P144. Whether a turn that ended with `result` is reported as the runtime limit's denial: the
+/// deadline has passed, and the turn was cancelled or failed for a reason that is not already a typed
+/// budget denial or an execution receipt.
+fn ends_at_runtime_limit(deadline_passed: bool, result: &Result<TurnOutcome, acp::Error>) -> bool {
+    deadline_passed
+        && match result {
+            Ok(TurnOutcome::Cancelled { .. }) => true,
+            Err(err) => {
+                !crate::acp_error::ExecutionBudgetDenial::is_budget_denial(err)
+                    && !provider_answered(err)
+                    && err.data.as_ref().and_then(|data| data.get("error_kind")).and_then(serde_json::Value::as_str)
+                        != Some(crate::acp_error::ERROR_KIND_EXECUTION_INCOMPLETE)
+            }
+            _ => false,
+        }
+}
+
+#[cfg(test)]
+mod runtime_limit_end_tests {
+    use super::{TurnOutcome, ends_at_runtime_limit};
+    use crate::acp_error::{AcpErrorKind, ExecutionBudgetDenial, ExecutionBudgetRule, error_data_with_fields};
+    use agent_client_protocol as acp;
+
+    #[test]
+    fn a_cancelled_or_failed_turn_past_the_deadline_is_the_runtime_limit() {
+        let cancelled = || Ok(TurnOutcome::Cancelled { category: None, context: None });
+        let failed = || Err(crate::acp_error::internal_error("request timed out"));
+        assert!(ends_at_runtime_limit(true, &cancelled()));
+        assert!(ends_at_runtime_limit(true, &failed()));
+        assert!(!ends_at_runtime_limit(false, &cancelled()), "no deadline passed: a cancel stays a cancel");
+        assert!(!ends_at_runtime_limit(false, &failed()), "no deadline passed: a failure stays a failure");
+        assert!(!ends_at_runtime_limit(true, &Ok(TurnOutcome::MaxTurnsReached { limit: 1 })), "--max-turns keeps its stop");
+        let typed = ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::ModelCallLimit).to_acp_error();
+        assert!(!ends_at_runtime_limit(true, &Err(typed)), "an existing denial keeps its rule");
+        let receipt = acp::Error::internal_error().data(error_data_with_fields(
+            AcpErrorKind::ExecutionIncomplete,
+            "receipt",
+            serde_json::json!({ "partial": true }),
+        ));
+        assert!(!ends_at_runtime_limit(true, &Err(receipt)), "an execution receipt keeps its shape");
+    }
+
+    /// P144 (Astra r2). A failure the provider answered with its own cause (a status it sent, an
+    /// authentication refusal, a rate limit) keeps that cause even when the deadline has passed by the
+    /// time the turn returns: reporting it can take seconds (the failed-event drain), and the limit did
+    /// not end that request. A transport failure with no answer (the request's timeout ends at the
+    /// deadline) and the pre-transport deadline refusal are still the runtime limit.
+    #[test]
+    fn a_provider_answered_failure_keeps_its_cause_past_the_deadline() {
+        use crate::sampling::error::terminal_error_data;
+        use fuigo_sampler::SamplingErrorKind as K;
+        let said = |message: &str, status: Option<u16>, kind: K| {
+            Err(acp::Error::internal_error().data(terminal_error_data(message.into(), status, kind)))
+        };
+        let err = |status: Option<u16>, kind: K| said("provider said no", status, kind);
+        assert!(!ends_at_runtime_limit(true, &err(Some(500), K::Api)), "a status the provider sent");
+        assert!(!ends_at_runtime_limit(true, &err(None, K::Auth)), "an authentication refusal");
+        assert!(!ends_at_runtime_limit(true, &err(None, K::RateLimited)), "a rate limit");
+        let unauthorized = Err(acp::Error::auth_required().data(terminal_error_data("401".into(), None, K::Api)));
+        assert!(!ends_at_runtime_limit(true, &unauthorized), "a 401 is an authentication refusal");
+        // Astra r3: a provider answer can arrive status-less (a server-sent stream error, an
+        // encrypted-content 400, a workflow child's error); it is still the provider's own cause.
+        assert!(!ends_at_runtime_limit(true, &err(None, K::Api)), "a status-less provider answer");
+        assert!(!ends_at_runtime_limit(true, &err(None, K::Serialization)), "an unreadable provider answer");
+        assert!(ends_at_runtime_limit(true, &err(None, K::Http)), "a transport failure with no answer");
+        assert!(ends_at_runtime_limit(true, &err(None, K::IdleTimeout)), "a stream that went silent");
+        assert!(ends_at_runtime_limit(true, &err(None, K::Cancelled)), "a request cut short");
+        for refusal in [
+            "execution deadline exhausted before transport",
+            "execution deadline exhausted during subscription authentication",
+        ] {
+            let pre_transport = Err(acp::Error::invalid_params().data(terminal_error_data(refusal.into(), None, K::Api)));
+            assert!(ends_at_runtime_limit(true, &pre_transport), "the deadline's own refusal: {refusal}");
+        }
+    }
+
+    /// P144 (Astra r2/r3). The deadline has passed when the process deadline has, or the execution has
+    /// no time left (`remaining_time`: the earlier of its durable deadline and an inherited parent's,
+    /// the same bound the transport clamps to).
+    #[test]
+    fn either_deadline_passing_is_the_runtime_limit() {
+        use super::deadline_passed;
+        use std::time::Duration;
+        assert!(deadline_passed(true, None), "the process deadline");
+        assert!(deadline_passed(false, Some(Duration::ZERO)), "the execution's own or inherited deadline");
+        assert!(!deadline_passed(false, Some(Duration::from_millis(1))), "time left");
+        assert!(!deadline_passed(false, None), "no deadline at all");
+    }
+}
+
+/// [`turn_end_of`] for a turn that failed with `err`.
+pub(super) fn turn_end_of_error(err: &acp::Error) -> crate::session::execution_state::TurnEnd {
+    use crate::session::execution_state::TurnEnd;
+    let bounded_execution = crate::acp_error::ExecutionBudgetDenial::is_budget_denial(err)
+        || err.data.as_ref().and_then(|data| data.get("error_kind")).and_then(serde_json::Value::as_str)
+            == Some(crate::acp_error::ERROR_KIND_EXECUTION_INCOMPLETE);
+    if bounded_execution { TurnEnd::Stopped } else { TurnEnd::Interrupted }
+}
+
 fn user_echo_mode(prompt_id: &str, input_origin: &InputOrigin) -> UserEchoMode {
     if super::interjection::is_interject_fallback(prompt_id)
         || matches!(
@@ -336,7 +494,18 @@ impl SessionActor {
                 &serde_json::json!({ "traceparent": tp }),
             );
         }
-        self.handle_turn_input_inner(request).instrument(span).await
+        let result = self.handle_turn_input_inner(request).instrument(span).await;
+        if result.is_err() {
+            // An error returned before the common outcome handling (image persistence, prompt parsing, the
+            // execution budget) would otherwise leave `turn_started` unclosed, and the next load would call the
+            // reported error a turn lost with its process. A no-op when the outcome handling already closed it.
+            self.events.close_open_turn(
+                crate::session::events::TurnOutcomeLabel::Error,
+                None,
+                None,
+            );
+        }
+        result
     }
     async fn handle_turn_input_inner(
         self: &Arc<Self>,
@@ -664,6 +833,11 @@ impl SessionActor {
         } else {
             None
         };
+        // A lost turn from a previous process whose marker is still being written (its recovery outlived the append
+        // bound) is closed first, so this turn's `turn_started` never lands inside it.
+        crate::session::interrupted_turn::close_deferred_turn_before_new_turn(
+            &crate::session::persistence::session_dir(&self.session_info),
+        );
         self.emit_event(crate::session::events::Event::TurnStarted {
             session_id: self.session_id_string(),
             turn_number,
@@ -673,6 +847,7 @@ impl SessionActor {
             session_relationship: crate::session::events::SessionRelationship::Primary,
             schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
             redirect_kind,
+            prompt_id: Some(prompt_id.to_owned()),
         });
         self.observability_bridge
             .emit(
@@ -713,9 +888,9 @@ impl SessionActor {
         ) {
             {
                 let max_calls = budget.as_ref().and_then(|budget| budget.remaining_calls()).unwrap_or(u64::MAX);
-                let root_id = self.goal_tracker.lock().snapshot()
+                let goal_id = self.goal_tracker.lock().snapshot()
                     .filter(|goal| goal.status == crate::session::goal_tracker::GoalStatus::Active)
-                    .map(|goal| goal.goal_id.clone()).unwrap_or_else(|| prompt_id.to_owned());
+                    .map(|goal| goal.goal_id.clone());
                 let deadline_ms = budget.as_ref().and_then(|budget| budget.remaining()).map(|remaining| chrono::Utc::now().timestamp_millis()
                     .saturating_add(i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX)));
                 let limits = {
@@ -736,11 +911,31 @@ impl SessionActor {
                 // bound for rounds of its own (`resolve_subagent_max_turns`) and its actions are
                 // this record's liabilities (`Change::ChildTools`), not its rounds, so a parent
                 // that spawned a child still has every one of its N rounds when the child returns.
-                Some(crate::session::execution_state::Execution::open(
-                    &self.notifications.persistence_tx, &self.session_info.id.to_string(), &root_id, prompt_id,
-                    max_calls, deadline_ms, self.max_turns.map(|limit| limit as u64), limits,
-                    self.startup_hints.execution_parent_grant.clone(),
-                ).await.map_err(|_| crate::acp_error::session_storage("Execution state could not be made durable"))?)
+                // P89: an active goal's turns share one record keyed by the goal id; `open_goal`
+                // reopens it after a turn that was only interrupted, and refuses (with the reason
+                // and the remedy) one a limit stopped. Any other turn is its own execution.
+                let session_id = self.session_info.id.to_string();
+                let max_tool_rounds = self.max_turns.map(|limit| limit as u64);
+                let parent_grant = self.startup_hints.execution_parent_grant.clone();
+                let tx = &self.notifications.persistence_tx;
+                let opened = match &goal_id {
+                    Some(goal_id) => crate::session::execution_state::Execution::open_goal(
+                        tx, &session_id, goal_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits, parent_grant,
+                    ).await,
+                    None => crate::session::execution_state::Execution::open(
+                        tx, &session_id, prompt_id, prompt_id, max_calls, deadline_ms, max_tool_rounds, limits, parent_grant,
+                    ).await,
+                };
+                Some(opened.map_err(|error| {
+                    if let Some(denial) = crate::session::execution_state::budget_denial_of(&error) {
+                        // A spent limit (P44, P89): a denial, not a storage failure.
+                        return denial.to_acp_error();
+                    }
+                    if let Some(ended) = crate::session::execution_state::goal_ended_of(&error) {
+                        return crate::acp_error::execution_incomplete(ended.0);
+                    }
+                    crate::acp_error::session_storage("Execution state could not be made durable")
+                })?)
             }
         } else { None };
         let mut chunk_meta = serde_json::Map::new();
@@ -812,6 +1007,11 @@ impl SessionActor {
             if !trimmed.is_empty() {
                 self.chat_state_handle.cache_prompt_text(trimmed);
             }
+            // The session's snapshot lock is held for the turn start, from before the first echo until the chat item is
+            // written and flushed: the guard's drop ends it on every exit (an invalid prompt, a failed image save, a cancel,
+            // a panic), so a fork never waits on a turn that is gone (P135, K17).
+            let snapshot_turn =
+                crate::session::persistence::SnapshotTurn::begin(&self.notifications.persistence_tx);
             let echo_mode = user_echo_mode(prompt_id, &input_origin);
             for block in prompt_blocks.iter() {
                 let update = acp::SessionUpdate::UserMessageChunk(
@@ -974,6 +1174,7 @@ impl SessionActor {
                 };
                 fuigo_telemetry::session_ctx::log_event_dual(self.telemetry_enabled, ev);
             }
+            self.await_inherited_mcp_registration().await;
             self.maybe_inject_mcp_reminder().await;
             self.maybe_inject_mcp_connecting_reminder().await;
             self.maybe_inject_date_rollover_reminder().await;
@@ -1080,12 +1281,17 @@ impl SessionActor {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
             }
-            if self
-                .chat_state_handle
-                .push_user_message_and_ack(user_chat)
-                .await
-                .is_some()
-            {
+            // The commit runs as its own task, which ends the snapshot hold once the chat item has been handed to the
+            // persistence actor. A cancel that drops this turn mid-commit would otherwise end the hold first (the guard's
+            // drop reaches the persistence actor at once, while the chat-state actor forwards the queued chat item later), and
+            // a fork could snapshot the echo without its chat item (Astra P135 r1 H1).
+            let commit_chat_state = self.chat_state_handle.clone();
+            let commit = tokio::spawn(async move {
+                let pushed = commit_chat_state.push_user_message_and_ack(user_chat).await;
+                drop(snapshot_turn);
+                pushed
+            });
+            if matches!(commit.await, Ok(Some(()))) {
                 self.mark_front_message_committed().await;
                 let (flush_tx, flush_rx) = oneshot::channel();
                 if self
@@ -1242,6 +1448,41 @@ impl SessionActor {
             Ok(TurnOutcome::Cancelled { .. }) | Ok(TurnOutcome::MaxTurnsReached { .. })
         ) {
             self.cancel_running_turn_subagents(prompt_id);
+        }
+        // P144: the runtime limit (`FUIGO_MAX_RUNTIME_SECS`) had passed when this turn ended. The
+        // in-flight request's timeout ends at the deadline, so the turn can end cancelled or failed
+        // before the supervisor's cancel reaches it; either way the limit ended the run, so it ends as
+        // the runtime limit's typed denial (`fuigo -p` exits 3, B4), like the cancel rail does
+        // (`cancel_running_task`). Judged the moment the turn returns, before any reporting or
+        // cleanup, so a failure that happened before the deadline keeps its own cause, and every
+        // consumer below sees the same result. A typed denial, an execution receipt and a failure the
+        // provider answered with its own cause are kept. Either deadline counts: the transport clamps
+        // to the earlier of the process deadline and the execution's durable one (Astra r2).
+        // The clocks are read the moment the turn returns, before any await below (the snapshot is a
+        // persistence round trip that can itself cross the deadline, Astra r3).
+        let ended_at_ms = chrono::Utc::now().timestamp_millis();
+        let limit_passed = deadline_passed(
+            runtime_limit_passed(),
+            _execution.as_ref().and_then(|execution| {
+                fuigo_sampling_types::ExecutionAdmission::remaining_time(&**execution)
+            }),
+        );
+        let ended_state = match &_execution {
+            Some(execution) => execution.snapshot().await.ok(),
+            None => None,
+        };
+        // The budget a finalized turn ended on, judged at that same moment, not after the cleanup
+        // below: that can cross the deadline and would relabel a call-limit answer as the runtime limit.
+        let finalization_denial = ended_state.as_ref().and_then(|state| {
+            crate::session::execution_state::budget_finalization_denial_at(state, ended_at_ms)
+        });
+        if ends_at_runtime_limit(limit_passed, &result) {
+            let rule = crate::acp_error::ExecutionBudgetRule::RuntimeLimit;
+            result = Err(match &ended_state {
+                Some(state) => crate::session::execution_state::budget_denial(state, rule),
+                None => crate::acp_error::ExecutionBudgetDenial::without_token_figures(rule),
+            }
+            .to_acp_error());
         }
         let mut flush_error = self.flush_to_disk().await.err();
         self.file_state_tracker
@@ -1540,10 +1781,17 @@ impl SessionActor {
             if crate::session::execution_state::should_terminalize(goal_active, succeeded, state.phase) {
                 execution.record_edited_paths(self.chat_state_handle.get_agent_edited_paths().await).await
                     .map_err(|_| crate::acp_error::session_storage("Execution evidence not durable"))?;
-                let receipt = execution.terminal(succeeded).await
+                let receipt = execution.terminal_after(turn_end_of(&result)).await
                     .map_err(|_| crate::acp_error::session_storage("Execution terminal receipt not durable"))?;
                 if receipt.partial && matches!(&result, Ok(TurnOutcome::Completed { .. })) {
-                    result = Err(crate::acp_error::execution_receipt_error(&receipt));
+                    // P144: a turn the loop finalized on a budget ended because that budget left no
+                    // room for more work, so it reports as that budget's denial (`fuigo -p` exits 3,
+                    // B4), still carrying the receipt. The budget was judged when the turn returned
+                    // (`finalization_denial`), before cleanup, off the record still in `Finalizing`.
+                    result = Err(match &finalization_denial {
+                        Some(denial) => crate::acp_error::execution_receipt_denial_error(&receipt, denial),
+                        None => crate::acp_error::execution_receipt_error(&receipt),
+                    });
                 }
             }
         }
@@ -1879,8 +2127,10 @@ impl SessionActor {
             std::sync::atomic::Ordering::Relaxed,
             std::sync::atomic::Ordering::Relaxed,
         );
-        let agent_ref = self.agent.borrow();
-        let completion_req = match agent_ref.completion_requirement() {
+        // Clone the requirement out of the `RefCell` borrow: this function awaits whole turns,
+        // and a `Ref<Agent>` parked across them would make a harness rebuild's `borrow_mut` panic.
+        let completion_req = self.agent.borrow().completion_requirement().cloned();
+        let completion_req = match completion_req {
             Some(req) => req,
             None => {
                 return self
@@ -2334,6 +2584,8 @@ impl SessionActor {
         ) {
             self.chat_state_handle
                 .replace_conversation(memory_conversation);
+            self.note_history_not_rewritten("refreshing the memory context")
+                .await;
         }
         let conv_turn_start = std::time::Instant::now();
         let conv_turn_clock = DualClock::now();
@@ -2618,7 +2870,12 @@ impl SessionActor {
                 let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution state unavailable"))?;
                 if state.phase == crate::session::execution_state::Phase::Terminal || state.completion_admitted {
                     let receipt = execution.terminal(false).await.map_err(|_| crate::acp_error::session_storage("Execution terminal receipt unavailable"))?;
-                    return Err(crate::acp_error::execution_receipt_error(&receipt));
+                    // P144: a continuation (a Stop hook, the goal loop) after the budget's reserved
+                    // final answer ends here; that budget ended the run, so it is its typed denial too.
+                    return Err(match crate::session::execution_state::budget_finalization_denial(&state) {
+                        Some(denial) if receipt.partial => crate::acp_error::execution_receipt_denial_error(&receipt, &denial),
+                        _ => crate::acp_error::execution_receipt_error(&receipt),
+                    });
                 }
                 // `--max-turns` is deliberately NOT one of these. Every bound listed here is an
                 // internal budget (call, deadline, token, durable tool-round), and finalizing on
@@ -2783,7 +3040,14 @@ impl SessionActor {
                     None,
                 );
             }
-            request.execution_admission = execution.clone().map(|e| e as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
+            // Per-request admission: it records THIS request's token-budget refusal, which is what
+            // `handle_sampling_failure` reports if this request fails (Contract D.4).
+            // P121 (K8): what this request's input is, so an Esc that leaves it unreported is charged at
+            // least that much.
+            if let Some(execution) = execution.as_ref() {
+                execution.note_request_context(fuigo_chat_state::estimate_conversation_tokens(&request.items));
+            }
+            request.execution_admission = execution.as_ref().map(|e| e.begin_turn_request() as std::sync::Arc<dyn fuigo_sampling_types::ExecutionAdmission>);
             if finalize_response { request.purpose = fuigo_sampling_types::RequestPurpose::Completion; }
             request.x_fuigo_session_id = Some(self.session_info.id.to_string());
             request.x_fuigo_turn_idx =
@@ -2825,15 +3089,26 @@ impl SessionActor {
                     None
                 };
             }
+            // A workflow child's spent output grant is the same budget denial (Contract D.4).
             request.max_output_tokens = self
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
-                .map_err(crate::acp_error::internal_error)?;
+                .map_err(|message| match self.tool_context.task_output_budget_denial() {
+                    Some(denial) => denial.to_acp_error(),
+                    None => crate::acp_error::internal_error(message),
+                })?;
             if let Some(execution) = &execution {
                 let state = execution.snapshot().await.map_err(|_| crate::acp_error::session_storage("Execution token state unavailable"))?;
                 if let Some(limit) = state.limits.output {
                     let remaining = u32::try_from(limit.saturating_sub(state.output_tokens)).unwrap_or(u32::MAX);
-                    if remaining == 0 { return Err(crate::acp_error::execution_incomplete("Execution output-token budget exhausted")); }
+                    // Contract D.4: the same guard `admit_attempt` applies, caught one step earlier,
+                    // so it reports as the same denial rather than a second, untyped shape.
+                    if remaining == 0 {
+                        return Err(crate::session::execution_state::token_budget_denial(&state).map_or_else(
+                            || crate::acp_error::execution_incomplete("Execution output-token budget exhausted"),
+                            |denial| denial.to_acp_error(),
+                        ));
+                    }
                     request.max_output_tokens = Some(request.max_output_tokens.map_or(remaining, |configured| configured.min(remaining)));
                 }
             }
@@ -2978,6 +3253,7 @@ impl SessionActor {
                             max_retries: display_max,
                             reason: format!("{cause}; retrying request"),
                             error_type: Some(kind.as_str().to_string()),
+                            verdicts: None,
                         },
                     ))
                     .await;
@@ -3023,10 +3299,11 @@ impl SessionActor {
                                              credential); retrying request"
                                         .to_string(),
                                     error_type: None,
+                                    verdicts: None,
                                 },
                             ))
                             .await;
-                            pace_uncharged_resubmit(store, self.auth_manager.as_deref(), delay)
+                            pace_uncharged_resubmit(store, self.auth_manager.as_deref(), super::auth_retry::paced(delay))
                                 .await;
                             continue;
                         }
@@ -3054,10 +3331,11 @@ impl SessionActor {
                                     reason: "Re-authenticated after 401; retrying request"
                                         .to_string(),
                                     error_type: None,
+                                    verdicts: None,
                                 },
                             ))
                             .await;
-                            sleep(delay).await;
+                            sleep(super::auth_retry::paced(delay)).await;
                             continue;
                         }
                         decision @ (AuthRetryDecision::Exhausted
@@ -3214,9 +3492,7 @@ impl SessionActor {
                 );
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
+                    .tool_bridge_handle()
                     .tool_definitions()
                     .await
                     .iter()
@@ -3261,6 +3537,17 @@ impl SessionActor {
                     .iter()
                     .any(|call| !structured_output_tool || call.name != STRUCTURED_OUTPUT_TOOL)
             {
+                // P144: the slot is the final answer's because a budget left nothing else. A model that
+                // acts there anyway was refused by that budget, so the run ends as its typed denial
+                // (`fuigo -p` exits 3, B4), not as an internal error (exit 1). A recall finalization
+                // and a crash-recovery one have no budget behind them and keep the old error.
+                if finalize_execution
+                    && let Some(execution) = &execution
+                    && let Ok(state) = execution.snapshot().await
+                    && let Some(denial) = crate::session::execution_state::budget_finalization_denial(&state)
+                {
+                    return Err(denial.to_acp_error());
+                }
                 return Err(crate::acp_error::internal_error("Tool call rejected during finalization"));
             }
             let over_cap = self.media_gen_over_cap(&tool_calls);
@@ -3296,6 +3583,7 @@ impl SessionActor {
                         max_retries: MAX_MEDIA_GEN_OVER_CAP_RESAMPLES,
                         reason: "Too many parallel media-gen calls; retrying".to_string(),
                         error_type: None,
+                        verdicts: None,
                     },
                 ))
                 .await;

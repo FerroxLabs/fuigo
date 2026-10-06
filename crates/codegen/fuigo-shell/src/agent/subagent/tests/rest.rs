@@ -2299,7 +2299,7 @@ async fn read_parent_sampling_config_ignores_global_default() {
 }
 /// Every subagent config path must carry the live bearer resolver.
 /// A config frozen at spawn 401s for the rest of the subagent's life once the parent rotates its token (the wake-from-sleep failure mode).
-/// The test uses a first-party base URL so the assertion holds whether the catalog memo reports `NotByok` or `Unknown`.
+/// The test uses a configured-API-origin base URL so the assertion holds whether the catalog memo reports `NotByok` or `Unknown`.
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_wires_bearer_resolver() {
     let mut ctx = ctx_with_toggle(HashMap::new());
@@ -2389,8 +2389,11 @@ fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys
             crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
         );
         ctx.auth = Some(auth);
-        ctx.available_models
-            .insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+        // P42: the resolver is only for a destination that may receive the session token.
+        crate::agent::config::Config::install_test_trusted_origins();
+        let mut entry = test_model_entry("grok-4.5");
+        entry.info.base_url = "https://api.fluxrouter.ai/v1".into();
+        ctx.available_models.insert("grok-4.5".to_string(), entry);
         let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
         assert!(config.bearer_resolver.is_some(), "key={key}");
     }
@@ -2404,7 +2407,11 @@ fn resolve_model_override_to_config_never_strips_a_fallback_key() {
         crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
     );
     ctx.auth = None;
-    ctx.available_models.insert("grok-4.5".to_string(), test_model_entry("grok-4.5"));
+    // P42: the resolver is only for a destination that may receive the session token.
+    crate::agent::config::Config::install_test_trusted_origins();
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.base_url = "https://api.fluxrouter.ai/v1".into();
+    ctx.available_models.insert("grok-4.5".to_string(), entry);
     let (config, _) = resolve_model_override_to_config("grok-4.5", &ctx).unwrap();
     assert_eq!(
             config.bearer_resolver.is_some(),
@@ -2790,14 +2797,15 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     assert_eq!(config.base_url, "https://gateway.example/v1");
 }
 #[test]
-fn key_prefix_truncates_to_8_chars() {
+fn key_prefix_is_a_fingerprint_not_a_fragment() {
     let key = Some("eyJ0eXAiOiJhbGciOiJSUzI1NiJ9".to_string());
-    assert_eq!(key_prefix(&key), "eyJ0eXAi");
+    assert_eq!(key_prefix(&key), fuigo_auth::bearer_fingerprint("eyJ0eXAiOiJhbGciOiJSUzI1NiJ9"));
+    assert!(!key_prefix(&key).contains("eyJ0"));
 }
 #[test]
-fn key_prefix_short_key_not_truncated() {
+fn key_prefix_short_key_is_not_logged_whole() {
     let key = Some("abc".to_string());
-    assert_eq!(key_prefix(&key), "abc");
+    assert_eq!(key_prefix(&key), "sha256:ba78/len=3");
 }
 #[test]
 fn key_prefix_none_returns_placeholder() {
@@ -2806,7 +2814,7 @@ fn key_prefix_none_returns_placeholder() {
 #[test]
 fn key_prefix_empty_string() {
     let key = Some(String::new());
-    assert_eq!(key_prefix(&key), "");
+    assert_eq!(key_prefix(&key), "sha256:e3b0/len=0");
 }
 #[test]
 fn non_cursor_persona_injected_as_system_reminder() {

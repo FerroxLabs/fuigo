@@ -262,6 +262,66 @@ impl FakeBinGuard {
         .unwrap();
     }
 
+    /// Make every invocation hang for `secs` (an unreachable registry that never answers).
+    pub fn set_sleep(&self, secs: u32) {
+        std::fs::write(self.dir().join(format!("{}-sleep", self.name)), secs.to_string()).unwrap();
+    }
+
+    /// Make every invocation start a long-lived grandchild (a lifecycle script) and record its pid.
+    pub fn set_grandchild(&self) {
+        std::fs::write(self.dir().join(format!("{}-grandchild", self.name)), "1").unwrap();
+    }
+
+    /// Make only `npm i ...` start a long-lived grandchild (its lifecycle script) and record its pid.
+    pub fn set_install_grandchild(&self) {
+        std::fs::write(self.dir().join(format!("{}-install-grandchild", self.name)), "1").unwrap();
+    }
+
+    /// Pid of the grandchild started by [`Self::set_install_grandchild`].
+    pub fn install_grandchild_pid(&self) -> Option<i32> {
+        std::fs::read_to_string(self.dir().join(format!("{}-install-grandchild.pid", self.name)))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Pid of the grandchild started by [`Self::set_grandchild`].
+    pub fn grandchild_pid(&self) -> Option<i32> {
+        std::fs::read_to_string(self.dir().join(format!("{}-grandchild.pid", self.name)))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Working directories the fake npm ran in, one per invocation.
+    pub fn cwd_log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir().join(format!("{}-cwd.log", self.name)))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Make only `npm i ...` hang for `secs` (the registry answers `npm view`, then the install stalls).
+    pub fn set_install_sleep(&self, secs: u32) {
+        std::fs::write(
+            self.dir().join(format!("{}-install-sleep", self.name)),
+            secs.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Make only `npm view ...` exit with `code` (the registry refuses the preflight).
+    pub fn set_view_exit_code(&self, code: i32) {
+        std::fs::write(
+            self.dir().join(format!("{}-view-exit", self.name)),
+            code.to_string(),
+        )
+        .unwrap();
+    }
+
     pub fn set_exit_code(&self, code: i32) {
         std::fs::write(
             self.dir().join(format!("{}-exit", self.name)),
@@ -299,6 +359,15 @@ pub fn fake_npm_script(dir: &Path) -> String {
     format!(
         r#"#!/bin/sh
 echo "$@" >> {dq}/npm-args.log
+pwd >> {dq}/npm-cwd.log
+if [ -f {dq}/npm-grandchild ]; then sleep 300 & echo $! > {dq}/npm-grandchild.pid; fi
+if [ "$1" = "i" ] && [ -f {dq}/npm-install-grandchild ]; then sleep 300 & echo $! > {dq}/npm-install-grandchild.pid; fi
+if [ -f {dq}/npm-sleep ]; then exec sleep "$(cat {dq}/npm-sleep)"; fi
+if [ "$1" = "i" ] && [ -f {dq}/npm-install-sleep ]; then exec sleep "$(cat {dq}/npm-install-sleep)"; fi
+if [ "$1" = "view" ] && [ -f {dq}/npm-view-exit ]; then
+  if [ -f {dq}/npm-stderr ]; then cat {dq}/npm-stderr >&2; fi
+  exit "$(cat {dq}/npm-view-exit)"
+fi
 if echo "$@" | grep -q '@alpha'; then
   if [ -f {dq}/npm-alpha-stdout ]; then cat {dq}/npm-alpha-stdout; fi
 elif [ -f {dq}/npm-stdout ]; then

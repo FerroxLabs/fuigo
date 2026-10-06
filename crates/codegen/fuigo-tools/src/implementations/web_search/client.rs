@@ -579,18 +579,22 @@ mod tests {
         invocations: std::sync::Mutex<Vec<(ToolConsumer, Option<String>)>>,
     }
     impl crate::attribution::Auth401AttributionCallback for CountingCallback {
-        fn record_401(&self, consumer: ToolConsumer, sent_bearer_suffix: Option<&str>) {
+        fn record_401(
+            &self,
+            consumer: ToolConsumer,
+            sent_bearer: Option<&crate::attribution::BearerFingerprint>,
+        ) {
             self.invocations
                 .lock()
                 .unwrap()
-                .push((consumer, sent_bearer_suffix.map(|s| s.to_string())));
+                .push((consumer, sent_bearer.map(|s| s.as_str().to_string())));
         }
     }
     /// `record_401_attribution` invokes the wired callback with
-    /// `ToolConsumer::WebSearch` and the truncated bearer prefix.
-    /// The full bearer never crosses the trait boundary.
+    /// `ToolConsumer::WebSearch` and the bearer's fingerprint.
+    /// Neither the bearer nor any fragment of it crosses the trait boundary.
     #[test]
-    fn record_401_attribution_passes_truncated_prefix_to_callback() {
+    fn record_401_attribution_passes_fingerprint_to_callback() {
         let cb = std::sync::Arc::new(CountingCallback::default());
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let config = WebSearchConfig::Enabled {
@@ -605,15 +609,13 @@ mod tests {
         let client = WebSearchClient::new(&config, None)
             .expect("client should build")
             .with_attribution_callback(Some(cb_dyn));
-        client.record_401_attribution(Some("bearer-with-long-tail-aaaadistinct"));
+        let bearer = "bearer-with-long-tail-aaaadistinct-FAKE";
+        client.record_401_attribution(Some(bearer));
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, ToolConsumer::WebSearch);
-        assert_eq!(calls[0].1.as_deref(), Some("aaaadistinct"));
-        assert_eq!(
-            calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
-        );
+        assert_eq!(calls[0].1.as_deref(), Some(fuigo_auth::bearer_fingerprint(bearer).as_str()));
+        assert!(!calls[0].1.as_deref().unwrap_or_default().contains("distinct"));
     }
     /// `record_401_attribution` is a no-op when no callback is wired
     /// -- the BYOK / standalone case must not panic or allocate.

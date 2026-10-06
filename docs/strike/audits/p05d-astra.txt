@@ -1,0 +1,26 @@
+# P05d — Astra (gpt-6-astra via codex exec, --sandbox read-only) transcripts, final reports only
+
+## Round 1 — diff audit of cd6810dd..ace8ecbf (APPROVE WITH CHANGES; LOW + NIT + test-robustness note taken into the next commit), brief: astra-p05d-brief.txt
+
+codex
+Read every hunk of `cd6810dd..ace8ecbf`; HEAD is `ace8ecbf`. No files modified. This is a source audit: Cargo tests and Clippy were not executed.
+
+1. **LOW — New default Clippy warning.** [effort_levels.rs:53](/Volumes/Mando/WaylandBots/Fuigo/wt-p05d/crates/codegen/fuigo-pager/src/slash/commands/effort_levels.rs:53) places `mod tests` before `build_effort_arg_items`. This triggers `clippy::items_after_test_module`, which the workspace does not suppress. Plain `cargo clippy --all-targets` warns; `-D warnings` fails. **Fix:** move the test module below the production function. [Clippy documentation](https://rust-lang.github.io/rust-clippy/master/index.html#items_after_test_module)
+
+2. **NIT — Comment describes the removed lint exemption.** [run_loop.rs:1139](/Volumes/Mando/WaylandBots/Fuigo/wt-p05d/crates/codegen/fuigo-shell/src/session/acp_session_impl/run_loop.rs:1139) still claims a file-header `await_holding_refcell_ref` allow assumes no concurrent mutation. P05d removes that allow, and spawned turn tasks already provide concurrency. **Fix:** remove that sentence; retain the explanation that hook reload runs inline to serialize command processing.
+
+Other requested checks:
+
+- **Borrow rewrites:** No remaining production `RefCell` borrow across an await found in the inspected SessionActor/MvpAgent paths, including named guards, conditional borrows and closures. Ordering, error handling and captured values are preserved. None of the removed borrows implements legitimate writer serialization: a conflicting writer would panic rather than wait.
+- **Bridge handles:** `tool_bridge_handle()` drops its brief borrow before returning the cloned `Arc`. It preserves the same bridge allocation and shared state. Compaction’s earlier capture for `list_background_tasks` remains equivalent because rebuilds reuse the terminal backend. The paired compaction resets now consistently retain one bridge.
+- **Policy/prompt extraction:** `update_policies_from_definition` is an empty inherent method on concrete `Agent`; no override exists. The extracted prompt-context body matches the previous implementation, including timestamp, browser verification, AGENTS.md clearing and empty-string error fallback. No other repository caller of `render_prompt_for_definition` was found.
+- **Interleaving test:** It exercises the production helper and the actual resource mutex. The pinned Tokio 1.52.3 `LocalSet::run_until` drives queued tasks when the outer future yields, so this fixture reaches the blocked render before the assertion. No current hang or flakiness found. However, `!is_finished()` alone is not readiness proof; explicitly polling the helper to `Pending` would make the test independent of scheduling internals. Tokio does not generally guarantee scheduling order after `yield_now`. [Tokio documentation](https://docs.rs/tokio/latest/tokio/task/fn.yield_now.html)
+- **Title policy:** Both locals use exactly the previous metadata inputs; no intervening await or configuration mutation changes their values.
+- **Stdout deny:** No executable raw `print!`/`println!` remains under the new attributes, including unit-test modules. The four `println!` calls in `fuigo-pager-bin/build.rs` are outside those attributes because the build script is a separate crate target. No new `print_stdout` test failure identified.
+- **P3/other lints:** Saturation is safe through `usize::MAX`. No additional new default-lint, import, clone, binding or documentation-link problem identified beyond finding 1.
+
+**No HIGH or BLOCKER remains identified.**
+
+**VERDICT: APPROVE WITH CHANGES — production changes appear correct; move the effort tests and correct the stale comment. Full test/Clippy execution remains unverified by this audit.**
+
+[tokens used 164,514 Read every hunk of `cd6810dd..ace8ecbf`;]

@@ -223,9 +223,14 @@ impl GitGate {
 
     pub fn invalidate(&self, root: &Path) {
         let cwd = dunce::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        // A root this gate is tracking resolves to itself even when the process-wide root cache
+        // has been cleared (any unresolvable invalidate clears it). A root is tracked once it has
+        // an epoch OR a slot: a root whose first walk is still in flight has only a slot, and
+        // missing it here sent its invalidation down the invalidate-all path below.
         let canon = lookup_cached_root(&cwd).or_else(|| {
             let state = self.inner.state.lock();
-            state.epochs.contains_key(&cwd).then_some(cwd.clone())
+            (state.epochs.contains_key(&cwd) || state.slots.keys().any(|key| key.root == cwd))
+                .then_some(cwd.clone())
         });
         match canon {
             Some(canon) => {
@@ -248,6 +253,15 @@ impl GitGate {
                 );
                 ROOT_CACHE.lock().clear();
                 let mut state = self.inner.state.lock();
+                // Every tracked root, including one that has never been invalidated and so has no
+                // epoch entry yet: its in-flight walk runs at the implicit epoch 0, and bumping only
+                // existing entries left that walk "current", so later callers joined a walk that
+                // started before the invalidation.
+                let tracked: Vec<PathBuf> =
+                    state.slots.keys().map(|key| key.root.clone()).collect();
+                for root in tracked {
+                    state.epochs.entry(root).or_insert(0);
+                }
                 for epoch in state.epochs.values_mut() {
                     *epoch = epoch.saturating_add(1);
                 }

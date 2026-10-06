@@ -1,0 +1,26 @@
+Astra round 4 (codex 0.160.0, model gpt-6-astra, read-only) on fc3ccb94..bf3e1283 (tree 35368457, identical to the gated tip 55c5e5ae) -- final report only.
+Raw transcript (12850 lines) not committed (kept in the Hetzner lane, logs/astra-r4.raw.txt); sha256 8c49cb961940570bd2e752056c431e509ea6f906c21bb2ed03e68774be1c5625
+
+Audited `fc3ccb94..bf3e1283b327a9528b01ca4c1d2eed2418505e54` on `strike/p89`. Static inspection only; no builds, tests, or file modifications.
+
+1. **HIGH — No-output rewind permits continuation with unresolved usage. Pre-existing; no widening found.**  
+   [cancel.rs:218](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_impl/cancel.rs:218) skips terminalization on rewind. Cancel after dispatch but before output, then continue the goal: [execution_state.rs:1043](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:1043) reuses the registered Working execution despite its unresolved attempt. The cancellation file is byte-identical to the baseline, which also has the same Working-instance reuse and admission behavior. This remains for the separate accounting packet.
+
+2. **LOW — Cancellation and reservation concurrency coverage remains incomplete. P89 coverage limitation, unchanged from round 3.**  
+   [goal_latch_tests.rs:372](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_tests/turn/goal_latch_tests.rs:372) calls `emit_turn_completed` directly rather than aborting a running prompt. [execution_state.rs:2731](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:2731) exercises sequential ownership handoff. Restoring the unlock-before-release race would survive that test. Current locking spans ownership and sampler operations; these omissions establish regression risk, not a demonstrated current race.
+
+**Round-3 finding 1 is fixed by inspection.** At [execution_state.rs:666](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:666), Terminal supersession without usage sets `unknown_usage` before removing the pending attempt. The refusal therefore survives under either total or output budgets. Supersession with usage charges both counters. The new regression at line 2460 would detect removal of the fix; the existing Working-state test at line 2034 preserves the empty-reply policy.
+
+**Successful background continuation remains intact.** [background_grant_may_continue:520](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:520) still permits existing optional grants after a non-partial terminal receipt. Supersession does not alter that receipt. Without a token budget, `unknown_usage` does not deny admission; with either token budget, missing usage now denies subsequent calls as intended. Known-usage retries remain subject to the existing counters and deadline.
+
+The pending-attempt removal audit found no additional terminal escape:
+
+- `Abandon` retains pending attempts; the sweep routes through the corrected `Supersede`, including propagation to parents.
+- `ChildAdmit` adds attempts; `ChildTools` changes tool liabilities only.
+- `Reconcile` clears only `abandoned`; `EditedPaths` does not affect accounting.
+- `Settle` charges supplied usage or marks it unknown.
+- [Reopen:704](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:704) checks the authoritative snapshot before removing anything. Any pending attempt under either token budget prevents reopening.
+
+The remaining diff yielded no additional supported finding. Counters and deadlines survive reopening, transition refusals remain typed through persistence, and the supplied P03 crash fixtures remain non-reopenable.
+
+**Verdict: No BLOCKER/HIGH introduced or widened by this change remains identified; the pre-existing rewind HIGH remains.**

@@ -187,11 +187,42 @@ impl WorkspaceEnvironment {
         }
     }
 
+    /// P71: the record as it may leave for the destination `method` uploads to.
+    ///
+    /// This record is structured, not a file, so the destination rule is a field rule. A class 1
+    /// (FluxRouter-operated proxy) or class 2 (the operator's own bucket) destination gets it
+    /// unchanged. Any other storage proxy (class 3) would not receive the file at all
+    /// (`fuigo_file_utils::destination_gate`); this keeps the record itself free of identity too,
+    /// so no path can hand it on: the account id, team id, host name and hub server id are
+    /// `null` (the schema is kept), the working directory reads [`WITHHELD`], and the repository
+    /// root, remote URL and sandbox id and profile are `null`. The session id, principal type,
+    /// versions and platform are kept.
+    pub(crate) fn for_method(mut self, method: &fuigo_file_utils::UploadMethod) -> Self {
+        if fuigo_file_utils::destination_gate::StorageDestinationClass::of_method(method)
+            .may_receive_content()
+        {
+            return self;
+        }
+        self.user_id = None;
+        self.principal_id = None;
+        self.hostname = None;
+        self.server_id = None;
+        self.cwd = WITHHELD.to_owned();
+        self.repo_root = None;
+        self.remote_url = None;
+        self.sandbox_id = None;
+        self.sandbox_profile = None;
+        self
+    }
+
     /// Serialize to pretty JSON bytes for enqueue.
     pub(crate) fn to_json_bytes(&self) -> serde_json::Result<Vec<u8>> {
         serde_json::to_vec_pretty(self)
     }
 }
+
+/// What a withheld free-text field (the working directory) reads as.
+const WITHHELD: &str = "[identity-withheld]";
 
 /// Resolve `(repo_root, origin_remote_url)` for `cwd` via libgit2; both `None` outside a git repository.
 /// The `origin` URL has embedded credentials stripped before it is stored.
@@ -395,6 +426,62 @@ mod tests {
         assert_eq!(value["sandbox_id"], serde_json::Value::Null);
         assert_eq!(value["principal_id"], serde_json::Value::Null);
         assert_eq!(value["repo_root"], serde_json::Value::Null);
+    }
+
+    fn proxy_method(url: &str) -> fuigo_file_utils::UploadMethod {
+        fuigo_file_utils::UploadMethod::Proxy {
+            proxy_base_url: url.to_string(),
+            user_token: String::new(),
+            deployment_key: None,
+            alpha_test_key: None,
+        }
+    }
+
+    /// P71 hostile: the record bound for a storage proxy that is not FluxRouter-operated (or cannot
+    /// be classified) carries no account id, team id, host name, hub server id, working directory,
+    /// repository root, remote URL, sandbox id or sandbox profile (schema kept); FluxRouter and the
+    /// operator's own bucket get it unchanged.
+    #[test]
+    fn environment_record_is_withheld_only_for_a_third_party_proxy() {
+        let env = || {
+            let mut record = WorkspaceEnvironment::assemble(
+                "sess-5",
+                Path::new("/home/rowan/work"),
+                &team_identity(),
+                Some("server-9".to_string()),
+                Some("sb_abc123".to_string()),
+                Some("devbox-Rowan-Penrose".to_string()),
+                false,
+                Some("host-1".to_string()),
+                Some("/srv/team-456/repo".to_string()),
+                Some("ssh://host-1/rowan-penrose/repo".to_string()),
+            );
+            record.recorded_at = "t".to_string();
+            record
+        };
+        for proxy in ["https://cli-proxy.example/v1", "http://api.fluxrouter.ai/v1", "not a url", ""] {
+            let bytes = env().for_method(&proxy_method(proxy)).to_json_bytes().unwrap();
+            let text = String::from_utf8(bytes.clone()).unwrap().to_lowercase();
+            for leaked in ["user-123", "team-456", "host-1", "server-9", "rowan", "sb_abc123", "/srv/"] {
+                assert!(!text.contains(leaked), "{proxy}: {leaked} in {text}");
+            }
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            for key in [
+                "user_id", "principal_id", "hostname", "server_id", "repo_root", "remote_url",
+                "sandbox_id", "sandbox_profile",
+            ] {
+                assert_eq!(value[key], serde_json::Value::Null, "{proxy}: {key}");
+            }
+            assert_eq!(value["cwd"], WITHHELD, "{proxy}");
+            assert_eq!(value["principal_type"], "Team");
+            assert_eq!(value["session_id"], "sess-5");
+        }
+        for kept in [
+            proxy_method("https://api.fluxrouter.ai/v1"),
+            fuigo_file_utils::UploadMethod::Direct { service_account_key: None },
+        ] {
+            assert_eq!(env().for_method(&kept), env(), "{kept:?}");
+        }
     }
 
     /// A token embedded in an HTTPS `origin` must never survive into the captured `remote_url`.

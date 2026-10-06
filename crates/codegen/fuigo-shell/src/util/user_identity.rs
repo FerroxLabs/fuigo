@@ -126,6 +126,7 @@ async fn resolve_os_user() -> Option<String> {
 
 async fn git_global_email() -> Option<String> {
     let mut cmd = Command::new(git_bin());
+    fuigo_tty_utils::remove_fuigo_owned_secrets_tokio(&mut cmd);
     // `--global` only: a repo-local `.git/config` in a cloned repo could otherwise supply an attacker-controlled email
     cmd.args(["config", "--global", "user.email"]);
     let output = run_detached_with_timeout(

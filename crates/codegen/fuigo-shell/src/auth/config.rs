@@ -49,7 +49,7 @@ pub enum PreferredAuthMethod {
     /// OIDC / OAuth2 session (`cached_token`, interactive `grok.com` / `oidc`, including devbox-minted OIDC).
     Oidc,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FuigoComConfig {
     pub fuigo_ws_origin: String,
@@ -82,6 +82,39 @@ pub struct FuigoComConfig {
     /// See [`PreferredAuthMethod`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_method: Option<PreferredAuthMethod>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. The auth-provider command line may embed a credential.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for FuigoComConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            fuigo_ws_origin,
+            fuigo_ws_url,
+            token_header,
+            oidc,
+            oauth2,
+            auth_provider_command,
+            auth_provider_label,
+            auth_token_ttl,
+            disable_api_key_auth,
+            force_login_team_uuid,
+            preferred_method,
+        } = self;
+        f.debug_struct("FuigoComConfig")
+            .field("fuigo_ws_origin", &fuigo_auth::redact_url(fuigo_ws_origin))
+            .field("fuigo_ws_url", &fuigo_auth::redact_url(fuigo_ws_url))
+            .field("token_header", token_header)
+            .field("oidc", oidc)
+            .field("oauth2", oauth2)
+            .field("auth_provider_command", &auth_provider_command.as_ref().map(|_| "<redacted>"))
+            .field("auth_provider_label", auth_provider_label)
+            .field("auth_token_ttl", auth_token_ttl)
+            .field("disable_api_key_auth", disable_api_key_auth)
+            .field("force_login_team_uuid", force_login_team_uuid)
+            .field("preferred_method", preferred_method)
+            .finish()
+    }
 }
 /// Team login restriction. TOML string or array; an empty array fails closed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +262,18 @@ pub fn is_fuigo_oauth2_issuer(issuer: &str) -> bool {
         return false;
     }
     issuer == FUIGO_OAUTH2_LOCAL_ISSUER || issuer == fuigo_oauth2_issuer()
+}
+/// Whether `issuer` is the local-dev accounts app AND `FUIGO_LOCAL_AUTH` selected it
+/// ([`use_local_auth`]: any value other than empty or `0`).
+///
+/// The only case in a shipped build where the OIDC token endpoint may be plain http: a loopback
+/// address on the issuer's own origin (P99, `oidc::protocol::checked_token_endpoint`).
+pub(crate) fn is_local_dev_issuer(issuer: &str) -> bool {
+    is_local_dev_issuer_when(use_local_auth(), issuer)
+}
+/// [`is_local_dev_issuer`] with the environment passed in, so both conditions can be tested.
+pub(crate) fn is_local_dev_issuer_when(local_auth: bool, issuer: &str) -> bool {
+    local_auth && issuer.trim_end_matches('/') == FUIGO_OAUTH2_LOCAL_ISSUER
 }
 /// auth.json scope key used by the pre-OIDC `fuigo login --legacy` flow.
 /// Matches the key format produced by the original `accounts.x.ai` relay auth.

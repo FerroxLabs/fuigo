@@ -19,20 +19,9 @@ name = "nfs-create-latency-bench"
 path = "src/bin/nfs_create_latency_bench.rs"
 required-features = ["bench"]
 
-[[bin]]
-name = "worktree-lifecycle-bench"
-path = "src/bin/worktree_lifecycle_bench.rs"
-required-features = ["lifecycle-bench"]
-
 [features]
 default-bazel = ["metadata"]
 bench = []
-lifecycle-bench = [
-    "metadata",
-    "dep:sha2",
-    "dep:url",
-    "dep:uuid",
-]
 # SQLite metadata DB for worktree tracking.
 metadata = ["dep:rusqlite", "dep:fuigo-sqlite-journal"]
 
@@ -56,7 +45,6 @@ rapidhash = "4.2.0"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sha2 = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
@@ -64,10 +52,9 @@ fuigo-gix-status = { workspace = true }
 fuigo-sqlite-journal = { workspace = true, optional = true }
 fuigo-tty-utils = { workspace = true }
 tracing-subscriber = { workspace = true }
-url = { workspace = true, optional = true }
-uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
+fuigo-secrets = { workspace = true, features = ["test-support"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 fuigo-test-utils = { workspace = true }

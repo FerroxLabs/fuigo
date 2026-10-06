@@ -10,6 +10,8 @@
 //! deliberately has no `Debug` that could leak one, and [`Discovered::masked`]
 //! is the only rendering intended for display.
 
+use fuigo_tools::util::shell_env_policy::provider_key_env_vars;
+
 /// A provider Fuigo knows how to reach with a bare API key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Provider {
@@ -53,7 +55,32 @@ pub struct Provider {
     /// Anthropic requires `anthropic-version`; the OpenAI-compatible providers
     /// require none, and carry an empty slice rather than a guess.
     pub extra_headers: &'static [(&'static str, &'static str)],
+    /// `[model_providers.<id>].max_completion_tokens` -- a ceiling on generated
+    /// tokens that this provider's wire protocol needs stated up front.
+    ///
+    /// Same discipline as `extra_headers`: a real value where the wire requires
+    /// one, `None` where it does not, never a guess. The Messages API treats
+    /// `max_tokens` as a required, hard, PER-MODEL limit and rejects a request
+    /// above it, so an `api_backend = "messages"` entry must arrive with a
+    /// value every model behind it accepts. The Chat-Completions and Responses
+    /// providers below have no such requirement and carry `None`, leaving the
+    /// budget to the model catalogue or to the user.
+    ///
+    /// It is written into the generated config rather than only defaulted in
+    /// the sampler so the flow that created the entry also shows the number and
+    /// leaves it editable -- the defect was that `/provider` produced a config
+    /// with no key that could correct the sampler's default.
+    pub max_completion_tokens: Option<u32>,
 }
+
+/// Value written for the `anthropic` entry's `max_completion_tokens`.
+///
+/// Matches `fuigo_sampler::client`'s Messages default, which documents the
+/// evidence: 32_000 is the smallest published `max_output_tokens` across
+/// Anthropic's non-retired models as of 2026-09, so it is accepted by every
+/// model an `[model.<id>]` bound to this provider could name. Users who know
+/// their model's real ceiling raise it in the file this writes.
+const ANTHROPIC_MAX_COMPLETION_TOKENS: u32 = 32_000;
 
 /// Providers checked at first run, most preferred first.
 ///
@@ -63,51 +90,58 @@ pub const PROVIDERS: &[Provider] = &[
     Provider {
         id: "fluxrouter",
         label: "FluxRouter",
-        env_vars: &["FUIGO_API_KEY", "FUIGO_CODE_API_KEY", "FLUX_API_KEY"],
+        env_vars: provider_key_env_vars::FLUXROUTER,
         key_prefix: Some("sk-"),
         base_url: "https://api.fluxrouter.ai/v1",
         applies_to_configured_endpoint: true,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "anthropic",
         label: "Anthropic",
-        env_vars: &["ANTHROPIC_API_KEY"],
+        env_vars: provider_key_env_vars::ANTHROPIC,
         key_prefix: Some("sk-ant-"),
         base_url: "https://api.anthropic.com/v1",
         applies_to_configured_endpoint: false,
         api_backend: "messages",
         auth_scheme: "x_api_key",
-        extra_headers: &[("anthropic-version", "2023-06-01")],
+        extra_headers: &[(
+            fuigo_sampler::client::ANTHROPIC_VERSION_HEADER,
+            fuigo_sampler::client::ANTHROPIC_VERSION,
+        )],
+        max_completion_tokens: Some(ANTHROPIC_MAX_COMPLETION_TOKENS),
     },
     Provider {
         id: "openai",
         label: "OpenAI",
-        env_vars: &["OPENAI_API_KEY"],
+        env_vars: provider_key_env_vars::OPENAI,
         key_prefix: Some("sk-"),
         base_url: "https://api.openai.com/v1",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "google",
         label: "Google Gemini",
-        env_vars: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        env_vars: provider_key_env_vars::GOOGLE,
         key_prefix: Some("AIza"),
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "xai",
         label: "xAI (Grok)",
-        env_vars: &["XAI_API_KEY", "GROK_API_KEY"],
+        env_vars: provider_key_env_vars::XAI,
         key_prefix: Some("xai-"),
         // Reachable only when the egress guard is lifted
         // (`FUIGO_ALLOW_UPSTREAM_HOSTS=1`): `fuigo-extra-ca/src/egress.rs`
@@ -118,50 +152,55 @@ pub const PROVIDERS: &[Provider] = &[
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "groq",
         label: "Groq",
-        env_vars: &["GROQ_API_KEY"],
+        env_vars: provider_key_env_vars::GROQ,
         key_prefix: Some("gsk_"),
         base_url: "https://api.groq.com/openai/v1",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "openrouter",
         label: "OpenRouter",
-        env_vars: &["OPENROUTER_API_KEY"],
+        env_vars: provider_key_env_vars::OPENROUTER,
         key_prefix: Some("sk-or-"),
         base_url: "https://openrouter.ai/api/v1",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "deepseek",
         label: "DeepSeek",
-        env_vars: &["DEEPSEEK_API_KEY"],
+        env_vars: provider_key_env_vars::DEEPSEEK,
         key_prefix: None,
         base_url: "https://api.deepseek.com/v1",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
     Provider {
         id: "mistral",
         label: "Mistral",
-        env_vars: &["MISTRAL_API_KEY"],
+        env_vars: provider_key_env_vars::MISTRAL,
         key_prefix: None,
         base_url: "https://api.mistral.ai/v1",
         applies_to_configured_endpoint: false,
         api_backend: "chat_completions",
         auth_scheme: "bearer",
         extra_headers: &[],
+        max_completion_tokens: None,
     },
 ];
 
@@ -281,6 +320,43 @@ pub fn discover_appliable() -> Vec<Discovered> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P13: choosing the Messages backend chooses its wire requirements. The
+    /// table already encoded that for `anthropic-version`; it did not for
+    /// `max_tokens`, which the Messages API also treats as required and
+    /// per-model bounded. Every `messages` entry must state both, and the
+    /// entries that speak an OpenAI-compatible protocol must state neither
+    /// rather than guess.
+    #[test]
+    fn every_messages_provider_states_its_wire_requirements() {
+        for provider in PROVIDERS {
+            if provider.api_backend == "messages" {
+                assert!(
+                    provider
+                        .extra_headers
+                        .iter()
+                        .any(|(name, _)| *name == "anthropic-version"),
+                    "{} speaks messages but states no anthropic-version",
+                    provider.id
+                );
+                let max = provider.max_completion_tokens.unwrap_or_else(|| {
+                    panic!("{} speaks messages but states no max_completion_tokens", provider.id)
+                });
+                assert!(
+                    max <= 32_000,
+                    "{} states max_completion_tokens {max}, above the smallest \
+                     non-retired Anthropic per-model output cap",
+                    provider.id
+                );
+            } else {
+                assert_eq!(
+                    provider.max_completion_tokens, None,
+                    "{} does not speak messages and must not guess a budget",
+                    provider.id
+                );
+            }
+        }
+    }
 
     fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |name| {
@@ -404,6 +480,49 @@ mod tests {
             "  sk-proj-AAAAAAAAAAAAAAAAAAAA\n",
         )]));
         assert_eq!(found[0].key(), "sk-proj-AAAAAAAAAAAAAAAAAAAA");
+    }
+
+    /// P86 (CB-1): every variable a known provider reads its key from is denied to child
+    /// processes. `env_vars` should come from `provider_key_env_vars`; this fails if a provider
+    /// is added with its own inline list, which is how `FLUX_API_KEY` was missed.
+    #[test]
+    fn p86_every_provider_key_variable_is_denied_to_child_processes() {
+        for provider in PROVIDERS {
+            for name in provider.env_vars {
+                assert!(
+                    fuigo_tools::util::shell_env_policy::is_provider_credential(name),
+                    "{} reads {name}, which child processes would inherit",
+                    provider.id
+                );
+            }
+        }
+    }
+
+    /// P113 (CIE-02): every variable Fuigo reads as its OWN credential (`FIRST_PARTY_CREDENTIAL_ENV_VARS`: the saved
+    /// login in `FUIGO_AUTH`, the deployment and extra-auth keys, the OTLP header secrets, the `fuigo agent serve`
+    /// secret) is denied to child processes too, not only to the auth-provider helper, and the other way round
+    /// (Astra r1 #3): every Fuigo secret children are denied is scrubbed from the helper. Fails when a name is added
+    /// to one list and not the other.
+    #[test]
+    fn p113_every_first_party_credential_variable_is_denied_to_child_processes() {
+        let first_party = crate::agent::config::FIRST_PARTY_CREDENTIAL_ENV_VARS;
+        for name in first_party.iter().chain(&["FUIGO_AGENT_SECRET"]) {
+            assert!(
+                fuigo_tools::util::shell_env_policy::is_provider_credential(name),
+                "Fuigo reads {name} as a credential, and child processes would inherit it"
+            );
+            // P113 r3: and `!` commands, client terminals and PTYs (which keep the user's own environment) too.
+            assert!(
+                fuigo_tools::util::shell_env_policy::is_fuigo_secret(name),
+                "Fuigo reads {name} as a credential, and a `!` command would inherit it"
+            );
+        }
+        for name in fuigo_tools::util::shell_env_policy::FUIGO_INTERNAL_CREDENTIAL_ENV_VARS {
+            assert!(
+                first_party.contains(name),
+                "{name} is denied to children but an auth-provider helper would inherit it"
+            );
+        }
     }
 }
 

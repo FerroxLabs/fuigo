@@ -46,5 +46,9 @@ pub mod matcher;
 pub mod result;
 pub mod runner;
 #[cfg(test)]
+mod p118_tests;
+#[cfg(test)]
+mod p147_tests;
+#[cfg(test)]
 mod test_support;
 pub mod trust;

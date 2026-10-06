@@ -6636,11 +6636,11 @@ mod tests {
                     )
                     .await
                 });
-                for _ in 0..1000 {
-                    if seen.load(Ordering::Relaxed) >= 1 {
-                        break;
-                    }
-                    tokio::task::yield_now().await;
+                // Wait on the observable, with a wall-clock budget: a yield count says nothing about when another thread (the gateway, the actor's disk work) gets scheduled on a loaded host.
+                let budget = fuigo_test_support::scaled(std::time::Duration::from_secs(30));
+                let deadline = std::time::Instant::now() + budget;
+                while seen.load(Ordering::Relaxed) < 1 && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 assert_eq!(
                     seen.load(Ordering::Relaxed),
@@ -6656,16 +6656,25 @@ mod tests {
                     )
                     .await
                 });
-                for _ in 0..50 {
-                    tokio::task::yield_now().await;
+                // Release the gate only once B is really in flight beside A, or A could finish before B is counted and no request would observe a depth of 2.
+                let PermissionHandle::Actor { in_flight, .. } = &mgr else {
+                    panic!("an actor handle");
+                };
+                let deadline = std::time::Instant::now() + budget;
+                while in_flight.load(Ordering::Relaxed) < 2 && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
+                assert!(
+                    in_flight.load(Ordering::Relaxed) >= 2,
+                    "request B never became in flight beside A"
+                );
                 gate.notify_one();
 
-                let da = tokio::time::timeout(std::time::Duration::from_secs(5), a)
+                let da = tokio::time::timeout(budget, a)
                     .await
                     .expect("request A must resolve")
                     .expect("task A must not panic");
-                let db = tokio::time::timeout(std::time::Duration::from_secs(5), b)
+                let db = tokio::time::timeout(budget, b)
                     .await
                     .expect("request B must resolve")
                     .expect("task B must not panic");

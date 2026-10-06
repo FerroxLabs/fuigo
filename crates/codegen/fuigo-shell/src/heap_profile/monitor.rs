@@ -1131,4 +1131,50 @@ mod tests {
         drop(dir);
         assert!(!path.exists());
     }
+
+    /// P71: the heap profile and its metadata go to no storage proxy that is neither FluxRouter-operated
+    /// nor the operator's own bucket; a FluxRouter-class proxy receives both files unchanged.
+    #[tokio::test]
+    async fn p71_heap_profile_upload_is_gated_by_destination() {
+        use fuigo_file_utils::gate_testkit::RecordingEndpoint;
+        let dir = tempfile::tempdir().unwrap();
+        let heap = dir.path().join("p.heap");
+        let meta = dir.path().join("p.meta.json");
+        std::fs::write(&heap, b"P71-HEAP-BYTES heap 0xdeadbeef /home/rowan").unwrap();
+        std::fs::write(&meta, b"{\"P71-META\":\"user-123\"}").unwrap();
+        let handles = |base: &str| {
+            let am_dir = tempfile::tempdir().unwrap();
+            let manager = AuthManager::new(am_dir.path(), crate::auth::FuigoComConfig::default());
+            manager.hot_swap(crate::auth::FuigoAuth {
+                key: "p71-static-api-key".into(),
+                auth_mode: crate::auth::AuthMode::ApiKey,
+                ..crate::auth::FuigoAuth::test_default()
+            });
+            std::mem::forget(am_dir);
+            build_upload_handles(
+                Arc::new(manager),
+                None,
+                UploadMethod::Proxy {
+                    proxy_base_url: base.to_string(),
+                    user_token: String::new(),
+                    deployment_key: Some("p71-deployment-key".to_string()),
+                    alpha_test_key: None,
+                },
+            )
+        };
+        let upload = |h: HeapProfileUploadHandles| {
+            let (heap, meta) = (heap.clone(), meta.clone());
+            async move {
+                upload_pair(None, Some(&h), "s/heap/p.heap", &heap, "application/octet-stream", "s/heap/p.meta.json", &meta, "application/json", 40).await
+            }
+        };
+        let third_party = RecordingEndpoint::third_party().await;
+        assert!(!upload(handles(&third_party.proxy_base_url())).await, "a withheld upload is not an ok upload");
+        third_party.settle(std::time::Duration::from_millis(400)).await;
+        assert_eq!(third_party.connections(), 0, "the heap profile reached a third-party proxy");
+        let fluxrouter_class = RecordingEndpoint::fluxrouter_class().await;
+        let _ = upload(handles(&fluxrouter_class.proxy_base_url())).await;
+        assert!(fluxrouter_class.received_contains(b"P71-HEAP-BYTES heap 0xdeadbeef /home/rowan"));
+        assert!(fluxrouter_class.received_contains(b"P71-META"));
+    }
 }

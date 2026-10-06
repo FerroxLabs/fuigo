@@ -138,7 +138,7 @@ impl SessionActor {
             return;
         };
         result.results = demote_ignored_blocks(result.results);
-        self.send_hook_execution("stop", None, None, &result.results)
+        self.send_hook_execution("stop", None, None, None, &result.results)
             .await;
         self.emit_hook_executed_telemetry("stop", None, &result.results)
             .await;
@@ -250,7 +250,7 @@ impl SessionActor {
         results: &[result::HookRunResult],
     ) {
         let name = event.to_string();
-        self.send_hook_execution(&name, None, Some(prompt_id), results)
+        self.send_hook_execution(&name, None, None, Some(prompt_id), results)
             .await;
         self.emit_hook_executed_telemetry(&name, None, results)
             .await;

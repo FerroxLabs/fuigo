@@ -312,37 +312,74 @@ impl PersonaDetailState {
         }
     }
 
-    /// Save current state back to the TOML file using toml_edit to preserve formatting.
-    fn save_to_file(&self) -> Result<(), String> {
+    /// The TOML key `field` is stored under, and its current value here.
+    fn field_entry(&self, field: PersonaField) -> (&'static str, &str) {
+        match field {
+            PersonaField::Name => ("name", &self.name),
+            PersonaField::Description => ("description", &self.description),
+            PersonaField::Model => ("model", &self.model),
+            PersonaField::ReasoningEffort => ("reasoning_effort", &self.reasoning_effort),
+            PersonaField::Isolation => ("default_isolation", &self.default_isolation),
+            PersonaField::Instructions => ("instructions", &self.instructions),
+            PersonaField::InstructionsFile => ("instructions_file", &self.instructions_file),
+        }
+    }
+
+    /// Save the one `field` just edited back to the persona's TOML file
+    /// (`toml_edit`, so formatting and comments are kept; an empty value
+    /// removes the key).
+    ///
+    /// Only that field is written (P72): the old save rewrote every field from
+    /// this view's copy, so a change another pager -- or an editor -- made to
+    /// a different field since the view opened was silently reverted. The
+    /// write is the shared read-modify-write
+    /// (`fuigo_config::fs_atomic::edit_state_file`): serialized across
+    /// processes, staged beside the file and renamed over it (it was written
+    /// in place, so a crash or a reader mid-write saw a torn file), keeping the
+    /// file's mode, owner and ACLs and writing through a symlink.
+    fn save_field_to_file(&self, field: PersonaField) -> Result<(), String> {
+        use fuigo_config::fs_atomic::{Edit, EditError};
         let Some(ref path) = self.source_path else {
             return Err("No source file to save to".to_string());
         };
-        let content =
-            std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
-        let mut doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|e| format!("Failed to parse TOML: {e}"))?;
-
-        // Update simple string fields.
-        let fields: &[(&str, &str)] = &[
-            ("name", &self.name),
-            ("description", &self.description),
-            ("instructions", &self.instructions),
-            ("instructions_file", &self.instructions_file),
-            ("model", &self.model),
-            ("reasoning_effort", &self.reasoning_effort),
-            ("default_isolation", &self.default_isolation),
-        ];
-        for &(key, value) in fields {
-            if value.is_empty() {
-                doc.remove(key);
-            } else {
-                doc[key] = toml_edit::value(value);
-            }
-        }
-
-        std::fs::write(path, doc.to_string()).map_err(|e| format!("Failed to write file: {e}"))?;
-        Ok(())
+        let (key, value) = self.field_entry(field);
+        fuigo_config::fs_atomic::edit_state_file(
+            path,
+            |bytes| {
+                fuigo_config::write_through::stage_file_atomically_with(
+                    path,
+                    bytes,
+                    fuigo_config::write_through::NewFileMode::Default,
+                )
+            },
+            |current| {
+                let content = match current {
+                    Ok(Some(bytes)) => std::str::from_utf8(bytes)
+                        .map_err(|e| format!("Failed to read file: {e}"))?,
+                    // Saving into a persona that was deleted would recreate
+                    // it with a single field.
+                    Ok(None) => return Err("Failed to read file: it no longer exists".to_string()),
+                    Err(e) => return Err(format!("Failed to read file: {e}")),
+                };
+                let mut doc: toml_edit::DocumentMut = content
+                    .parse()
+                    .map_err(|e| format!("Failed to parse TOML: {e}"))?;
+                if value.is_empty() {
+                    doc.remove(key);
+                } else {
+                    doc[key] = toml_edit::value(value);
+                }
+                Ok(Edit::Replace {
+                    contents: doc.to_string().into_bytes(),
+                    value: (),
+                })
+            },
+        )
+        .map_err(|e| match e {
+            EditError::Edit(e) => e,
+            EditError::Lock(e) => format!("Failed to lock file: {e}"),
+            EditError::Write(e) => format!("Failed to write file: {e}"),
+        })
     }
 }
 
@@ -854,7 +891,7 @@ fn handle_editing_key(state: &mut PersonaDetailState, key: &KeyEvent) -> Persona
         if changed {
             state.set_field_value(field, new_value);
             state.dirty = true;
-            if let Err(e) = state.save_to_file() {
+            if let Err(e) = state.save_field_to_file(field) {
                 state.message = Some(format!("Save failed: {e}"));
             } else {
                 state.message = Some("Saved".to_string());

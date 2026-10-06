@@ -51,8 +51,15 @@ fn test_gate(snapshot_ttl: Duration, walk_timeout: Duration) -> GitGate {
     GitGate::with_config(snapshot_ttl, walk_timeout, 1, Duration::from_secs(2))
 }
 
+/// `GitGate::invalidate` resolves the root through the process-wide ROOT_CACHE, which every other gate user clears or refills.
+/// A test that calls it must run in a process of its own (`rerun_in_own_process`), and fails loudly here when it does not.
+fn invalidate_checked(gate: &GitGate, root: &Path) {
+    fuigo_test_support::env::assert_own_process("GitGate::invalidate (the shared ROOT_CACHE)");
+    gate.invalidate(root);
+}
+
 async fn wait_for_count(counter: &AtomicUsize, expected: usize) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if counter.load(Ordering::SeqCst) >= expected {
             return;
@@ -326,6 +333,9 @@ async fn late_ok_after_waiter_timeout_is_snapshotted() {
 
 #[tokio::test]
 async fn invalidate_skips_ttl_and_forces_new_walk() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let repo = init_temp_repo();
     let gate = test_gate(Duration::from_secs(5), Duration::from_secs(5));
     let walks = Arc::new(AtomicUsize::new(0));
@@ -345,7 +355,7 @@ async fn invalidate_skips_ttl_and_forces_new_walk() {
             .unwrap(),
         1
     );
-    gate.invalidate(repo.path());
+    invalidate_checked(&gate, repo.path());
     assert_eq!(
         gate.run(repo.path(), status_op(), mk(Arc::clone(&walks), 2))
             .await
@@ -407,8 +417,20 @@ async fn cancelled_leader_does_not_wedge_slot() {
 
 #[tokio::test]
 async fn invalidate_during_inflight_does_not_return_stale_walk() {
+    // `invalidate` finds the root through the process-wide ROOT_CACHE, which other gate tests clear (the unresolved-root path, a full cache).
+    // A process of its own keeps that cache stable, so this test exercises the targeted path; the cleared-cache and
+    // invalidate-all paths have their own tests below.
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let repo = init_temp_repo();
-    let gate = test_gate(Duration::from_secs(5), Duration::from_secs(5));
+    // Two ODB permits: the post-invalidate walk must be able to START while the first is still held open, or waiting for it below could never succeed.
+    let gate = GitGate::with_config(
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        2,
+        Duration::from_secs(2),
+    );
     let walks = Arc::new(AtomicUsize::new(0));
     let release = tokio::sync::watch::channel(false).0;
 
@@ -435,7 +457,7 @@ async fn invalidate_during_inflight_does_not_return_stale_walk() {
         tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
     };
     wait_for_count(&walks, 1).await;
-    gate.invalidate(repo.path());
+    invalidate_checked(&gate, repo.path());
 
     let second = {
         let gate = gate.clone();
@@ -444,6 +466,8 @@ async fn invalidate_during_inflight_does_not_return_stale_walk() {
         tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
     };
 
+    // Release only once the post-invalidate caller has started its own walk: releasing while its task may not have run yet lets the first walk finish and be seen first.
+    wait_for_count(&walks, 2).await;
     release.send(true).unwrap();
     let after_invalidate = tokio::time::timeout(Duration::from_secs(2), second)
         .await
@@ -455,8 +479,218 @@ async fn invalidate_during_inflight_does_not_return_stale_walk() {
     let _ = first.await;
 }
 
+/// The process-wide root cache is cleared by any invalidate whose root does not resolve (another
+/// session, another test). An invalidate that lands after that, while this root's FIRST walk is in
+/// flight, must still retire that walk: the next caller gets a fresh walk, not the stale one.
+/// Before the fix the root resolved to nothing, the invalidate-all fallback bumped only roots that
+/// already had an epoch, and the in-flight walk at the implicit epoch 0 stayed current.
+#[tokio::test]
+async fn invalidate_after_root_cache_clear_still_retires_the_inflight_walk() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let repo = init_temp_repo();
+    // Two ODB permits: the stale walk keeps one while it is held open, and the fresh walk this
+    // test expects needs the other. `test_gate`'s single permit would starve it.
+    // Waiter timeout (60 s) above the 30 s observation window: a first caller that timed out and
+    // retried at the new epoch would start another HELD walk the second caller could join.
+    let gate = GitGate::with_config(
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+        2,
+        Duration::from_secs(30),
+    );
+    let walks = Arc::new(AtomicUsize::new(0));
+    let release = tokio::sync::watch::channel(false).0;
+    let mk_walk = |walks: Arc<AtomicUsize>, release: tokio::sync::watch::Sender<bool>| {
+        move || {
+            let walks = Arc::clone(&walks);
+            let mut rx = release.subscribe();
+            async move {
+                let n = walks.fetch_add(1, Ordering::SeqCst) + 1;
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(n)
+            }
+        }
+    };
+    let first = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), release.clone());
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    wait_for_count(&walks, 1).await;
+    // What a peer's unresolvable invalidate does to the shared cache.
+    super::ROOT_CACHE.lock().clear();
+    invalidate_checked(&gate, repo.path());
+    // Fresh walks finish at once; only `first` was waiting on `release`.
+    let fresh = tokio::sync::watch::channel(true).0;
+    let second = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), fresh);
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    let after_invalidate = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("post-invalidate status hung")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_invalidate, 2,
+        "the walk begun before the invalidate must not be joined"
+    );
+    release.send(true).unwrap();
+    let _ = first.await;
+}
+
+/// The invalidate-all fallback (a path that resolves to no tracked root) must retire EVERY tracked
+/// root's in-flight walk, including a root that has never been invalidated and so has no epoch
+/// entry yet. Bumping only existing epoch entries left such a walk current.
+#[tokio::test]
+async fn invalidate_all_retires_a_root_that_has_no_epoch_yet() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let repo = init_temp_repo();
+    // Waiter timeout (60 s) above the 30 s observation window: a first caller that timed out and
+    // retried at the new epoch would start another HELD walk the second caller could join.
+    let gate = GitGate::with_config(
+        Duration::from_secs(5),
+        Duration::from_secs(60),
+        2,
+        Duration::from_secs(30),
+    );
+    let walks = Arc::new(AtomicUsize::new(0));
+    let release = tokio::sync::watch::channel(false).0;
+    let mk_walk = |walks: Arc<AtomicUsize>, release: tokio::sync::watch::Sender<bool>| {
+        move || {
+            let walks = Arc::clone(&walks);
+            let mut rx = release.subscribe();
+            async move {
+                let n = walks.fetch_add(1, Ordering::SeqCst) + 1;
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(n)
+            }
+        }
+    };
+    let first = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), release.clone());
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    wait_for_count(&walks, 1).await;
+    // A path that is no repository and no tracked root: the invalidate-all path.
+    let elsewhere = tempfile::tempdir().unwrap();
+    invalidate_checked(&gate, &elsewhere.path().join("not-a-repo"));
+    let fresh = tokio::sync::watch::channel(true).0;
+    let second = {
+        let gate = gate.clone();
+        let root = repo.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), fresh);
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    let after_invalidate = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("post-invalidate status hung")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_invalidate, 2,
+        "invalidate-all must retire the walk begun before it"
+    );
+    release.send(true).unwrap();
+    let _ = first.await;
+}
+
+/// Invalidating a root whose first walk is in flight stays TARGETED after the process-wide root
+/// cache is cleared: the root is recognised from its slot, so another root's snapshot survives.
+/// Without slot recognition the invalidate fell through to invalidate-all and threw away every
+/// root's snapshot.
+#[tokio::test]
+async fn targeted_invalidate_of_an_inflight_root_keeps_other_roots_snapshots() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let repo_a = init_temp_repo();
+    let repo_b = init_temp_repo();
+    // Waiter timeout (60 s) above the 30 s observation window, as above.
+    let gate = GitGate::with_config(
+        Duration::from_secs(60),
+        Duration::from_secs(60),
+        2,
+        Duration::from_secs(30),
+    );
+    let walks = Arc::new(AtomicUsize::new(0));
+    let mk_walk = |walks: Arc<AtomicUsize>, release: tokio::sync::watch::Sender<bool>| {
+        move || {
+            let walks = Arc::clone(&walks);
+            let mut rx = release.subscribe();
+            async move {
+                let n = walks.fetch_add(1, Ordering::SeqCst) + 1;
+                while !*rx.borrow() {
+                    if rx.changed().await.is_err() {
+                        break;
+                    }
+                }
+                Ok(n)
+            }
+        }
+    };
+    let open = tokio::sync::watch::channel(true).0;
+    let b_first = gate
+        .run(
+            repo_b.path(),
+            status_op(),
+            mk_walk(Arc::clone(&walks), open.clone()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b_first, 1, "B's first walk populates its snapshot");
+
+    let hold = tokio::sync::watch::channel(false).0;
+    let a_walk = {
+        let gate = gate.clone();
+        let root = repo_a.path().to_path_buf();
+        let walk = mk_walk(Arc::clone(&walks), hold.clone());
+        tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
+    };
+    wait_for_count(&walks, 2).await;
+    super::ROOT_CACHE.lock().clear();
+    invalidate_checked(&gate, repo_a.path());
+
+    let b_again = gate
+        .run(
+            repo_b.path(),
+            status_op(),
+            mk_walk(Arc::clone(&walks), open),
+        )
+        .await
+        .unwrap();
+    assert_eq!(b_again, 1, "invalidating A must not discard B's snapshot");
+    assert_eq!(
+        walks.load(Ordering::SeqCst),
+        2,
+        "B is served from its snapshot, not re-walked"
+    );
+    hold.send(true).unwrap();
+    let _ = a_walk.await;
+}
+
 #[tokio::test]
 async fn waiter_timeout_after_invalidate_does_not_return_stale_ok() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let repo = init_temp_repo();
     let gate = test_gate(Duration::from_secs(5), Duration::from_millis(40));
     let walks = Arc::new(AtomicUsize::new(0));
@@ -485,7 +719,7 @@ async fn waiter_timeout_after_invalidate_does_not_return_stale_ok() {
         tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
     };
     wait_for_count(&walks, 1).await;
-    gate.invalidate(repo.path());
+    invalidate_checked(&gate, repo.path());
 
     let second = {
         let gate = gate.clone();
@@ -524,6 +758,9 @@ async fn root_cache_expires_so_a_new_nested_repo_is_rediscovered() {
 
 #[tokio::test]
 async fn sustained_invalidate_during_inflight_run_returns_after_at_most_two_walks() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let repo = init_temp_repo();
     let walk_timeout = Duration::from_millis(500);
     let gate = test_gate(Duration::from_millis(1), walk_timeout);
@@ -553,7 +790,7 @@ async fn sustained_invalidate_during_inflight_run_returns_after_at_most_two_walk
         tokio::spawn(async move { gate.run(&root, status_op(), walk).await })
     };
     wait_for_count(&walks, 1).await;
-    gate.invalidate(repo.path());
+    invalidate_checked(&gate, repo.path());
     release.send(true).unwrap();
 
     let mut run = run;
@@ -563,7 +800,7 @@ async fn sustained_invalidate_during_inflight_run_returns_after_at_most_two_walk
                 biased;
                 out = &mut run => break out,
                 () = tokio::task::yield_now() => {
-                    gate.invalidate(repo.path());
+                    invalidate_checked(&gate, repo.path());
                 }
             }
         }

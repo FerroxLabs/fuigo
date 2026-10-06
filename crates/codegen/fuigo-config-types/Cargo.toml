@@ -16,6 +16,8 @@ tracing = { workspace = true }
 fuigo-announcements = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-mcp = { workspace = true }
+# P113 (E2): the credential variables an MCP server's config names are denied to child processes.
+fuigo-tools = { workspace = true }
 
 [features]
 default-bazel = []

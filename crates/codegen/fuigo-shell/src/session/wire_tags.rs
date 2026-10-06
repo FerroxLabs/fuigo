@@ -57,6 +57,13 @@ pub(crate) static REWIND_MARKER: LazyLock<String> = LazyLock::new(|| {
     })
 });
 
+/// The load-time history repair note (`history_repaired`); replay does not show it again (P123).
+pub(crate) static HISTORY_REPAIRED: LazyLock<String> = LazyLock::new(|| {
+    tagged_discriminant(&FuigoSessionUpdate::HistoryRepaired {
+        message: String::new(),
+    })
+});
+
 pub(crate) static TASK_BACKGROUNDED: LazyLock<String> = LazyLock::new(|| {
     tagged_discriminant(&FuigoSessionUpdate::TaskBackgrounded {
         tool_call_id: String::new(),
@@ -116,6 +123,7 @@ mod tests {
         assert_eq!(TOOL_CALL_UPDATE.as_str(), "tool_call_update");
         assert_eq!(TOOL_CALL_STATUS_IN_PROGRESS.as_str(), "in_progress");
         assert_eq!(REWIND_MARKER.as_str(), "rewind_marker");
+        assert_eq!(HISTORY_REPAIRED.as_str(), "history_repaired");
         assert_eq!(TASK_BACKGROUNDED.as_str(), "task_backgrounded");
         assert_eq!(TASK_COMPLETED.as_str(), "task_completed");
         assert_eq!(

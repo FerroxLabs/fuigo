@@ -16,14 +16,11 @@ loom = ["dep:loom"]
 # it via `required-features`.
 test-support = []
 test-util = []
-# Local Computer Hub workspace_server (own/attach + crash-restart). Requires
-local-workspace = []
 # CI default set (preferred over cargo `default` for hermetic CI builds):
 # `config-docs` is on this set (not cargo `default`) so hermetic lib tests
 # parse the committed config-reference page.
 config-docs = []
 default-bazel = [
-    "local-workspace",
     "test-support",
     "config-docs",
 ]
@@ -174,6 +171,7 @@ fuigo-file-utils = { path = "../fuigo-file-utils" }
 fuigo-session-events = { workspace = true }
 fuigo-auth = { workspace = true, features = ["middleware"] }
 fuigo-telemetry = { workspace = true }
+fuigo-secrets = { workspace = true }
 fuigo-http = { workspace = true }
 fuigo-models = { workspace = true }
 prod-mc-cli-chat-proxy-types = { path = "../../../prod/mc/cli-chat-proxy-types" }
@@ -204,6 +202,9 @@ siphasher = { workspace = true }
 windows = { workspace = true }
 
 [dev-dependencies]
+fuigo-secrets = { workspace = true, features = ["test-support"] }
+# P71 test seam: loopback mocks stand in for a FluxRouter-operated proxy. Dev-dependency ONLY (upload_gate_guard pins it).
+fuigo-file-utils = { path = "../fuigo-file-utils", features = ["test-loopback-operator"] }
 rcgen = { workspace = true }
 # `parent_death_arm_calls`, so a test can observe that `run_stdio_agent` really
 # bound the agent to its parent's lifetime. Dev-only: the accessor is absent
@@ -224,7 +225,7 @@ fuigo-bundle = { workspace = true, features = ["test-support"] }
 fuigo-memory = { workspace = true, features = ["test-support"] }
 # sandbox-enforce: keep tests running against the enforcing sandbox build.
 fuigo-workspace = { workspace = true, features = ["test-support", "sandbox-enforce"] }
-fuigo-config = { workspace = true, features = [] }
+fuigo-config = { workspace = true, features = ["test-seams"] }
 ring = { workspace = true }
 tar = { workspace = true }
 flate2 = { workspace = true }

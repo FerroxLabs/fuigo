@@ -205,7 +205,7 @@ pub(crate) async fn run_request_task(
         &request_id,
         &config.model,
         &format!("{:?}", client.api_backend()),
-        &config.base_url,
+        &fuigo_auth::redact_url(&config.base_url),
         &client.auth_info(),
     );
     if let Some(eff) = config.reasoning_effort {

@@ -1,3 +1,6 @@
+// CLI printer: stdout goes through `fuigo_tty_utils::cli_println!` (a raw `println!` aborts the
+// process when stdout's reader is gone, R060).
+#![deny(clippy::print_stdout)]
 use super::*;
 use fuigo_sampler::subscription::{SubscriptionBearer, SubscriptionKind, SubscriptionResolver};
 
@@ -29,7 +32,7 @@ impl SubscriptionResolver for Resolver {
                 .map_err(|_| auth_error())?
                 .access(self.provider, self.account.as_deref())
                 .await
-                .map_err(|_| auth_error())?;
+                .map_err(sampling_error)?;
             Ok(SubscriptionBearer::new(
                 access.bearer().map_err(|_| auth_error())?.to_owned(),
                 access.account,
@@ -37,6 +40,19 @@ impl SubscriptionResolver for Resolver {
             ))
         })
     }
+}
+pub(super) fn sampling_error(error: SubscriptionError) -> fuigo_sampling_types::SamplingError {
+    match error {
+        // A local TLS fault is not a credential problem; "run fuigo login" would send the
+        // user the wrong way. The file path is logged by `flow`.
+        SubscriptionError::LocalTls(_) => local_tls_error(),
+        _ => auth_error(),
+    }
+}
+fn local_tls_error() -> fuigo_sampling_types::SamplingError {
+    fuigo_sampling_types::SamplingError::InvalidConfiguration(
+        "subscription local TLS/CA configuration error (the HTTPS client could not be built, or the provider certificate did not verify against the configured CA bundle); check the file named by FUIGO_EXTRA_CA_BUNDLE or SSL_CERT_FILE (the log names it); not a credential or network problem",
+    )
 }
 fn auth_error() -> fuigo_sampling_types::SamplingError {
     fuigo_sampling_types::SamplingError::InvalidConfiguration(
@@ -76,26 +92,33 @@ const MODEL_CATALOG_MAX_BYTES: usize = 2 * 1024 * 1024;
 /// List only model IDs returned for the explicitly authenticated provider.
 /// A denial is surfaced; no hard-coded entitlement or fallback catalog.
 pub async fn cli_models(provider: SubscriptionProvider) -> Result<()> {
-    use fuigo_extra_ca::subscription::{Recipient, SubscriptionClient};
+    use fuigo_extra_ca::subscription::Recipient;
     let access = default_store()?.access(provider, None).await?;
+    if access.is_unpersisted() {
+        fuigo_tty_utils::cli_eprintln!(
+            "warning: {} credentials were refreshed but could not be saved, so they are lost when \
+             this command exits and the next run will require `fuigo login`. Fix the disk under \
+             the Fuigo home first.",
+            provider.name()
+        );
+    }
     let recipient = match provider {
         SubscriptionProvider::Chatgpt => Recipient::ChatGptInference,
         SubscriptionProvider::Xai => Recipient::XaiInference,
     };
-    let client = SubscriptionClient::new(recipient).map_err(|_| SubscriptionError::Network)?;
+    let client = super::flow::subscription_client(recipient)?;
     let request = model_request(&client, provider, &access)?;
     let body = tokio::time::timeout(std::time::Duration::from_secs(25), async {
-        let response = client
-            .execute(request)
-            .await
-            .map_err(|_| SubscriptionError::Network)?;
+        let response = client.execute(request).await.map_err(|error| {
+            super::flow::transport_error(&error, super::flow::configured_ca_bundle())
+        })?;
         super::flow::read_json_response(response, MODEL_CATALOG_MAX_BYTES).await
     })
     .await
     .map_err(|_| SubscriptionError::Timeout)??;
     let models = parse_model_ids(provider, &body)?;
     for model in models {
-        println!(
+        fuigo_tty_utils::cli_println!(
             "{}",
             serde_json::to_string(&model).map_err(|_| SubscriptionError::InvalidCredentials)?
         );
@@ -257,6 +280,7 @@ mod tests {
                 account: "fixture-account".into(),
                 expires_at: u64::MAX,
                 token: "fake-bearer".into(),
+                unpersisted: false,
             };
             let request = model_request(
                 &SubscriptionClient::new(recipient).unwrap(),

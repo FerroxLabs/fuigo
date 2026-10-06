@@ -4,43 +4,10 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use tokio::sync::mpsc;
-/// A `'static` reference to a value on a single-threaded `LocalSet`.
-///
-/// Encapsulates the raw-pointer pattern used when `spawn_local` tasks need `&T` but the borrow checker requires `'static`.
-/// The pointer is valid as long as:
-///
-/// 1. `T` is heap-allocated and never moved (e.g., behind `Rc` or owned by the ACP connection for the process lifetime).
-/// 2. All access happens on the **same** `LocalSet` thread (no `Send`).
-/// 3. The `LocalRef` does not outlive the `LocalSet`.
-///
-/// These invariants are upheld by construction.
-/// `LocalRef` is `!Send` (via `*const T`) and is only used inside `spawn_local` closures on the agent's `LocalSet`.
-pub(crate) struct LocalRef<T> {
-    ptr: *const T,
-}
-impl<T> LocalRef<T> {
-    /// Create a `LocalRef` from a shared reference.
-    ///
-    /// # Safety contract (enforced by the caller, not by the type system)
-    ///
-    /// The referenced `T` must live for the entire duration of the `LocalSet` and must not be moved or deallocated while any `LocalRef` clone exists.
-    pub(crate) fn new(val: &T) -> Self {
-        Self { ptr: val as *const T }
-    }
-    /// Dereference back to `&T`.
-    ///
-    /// # Safety
-    ///
-    /// Safe because the caller of `new()` guarantees the pointee is alive and pinned, and `LocalRef` is `!Send` (only used on the same thread).
-    pub(crate) fn get(&self) -> &T {
-        unsafe { &*self.ptr }
-    }
-}
-impl<T> Clone for LocalRef<T> {
-    fn clone(&self) -> Self {
-        Self { ptr: self.ptr }
-    }
-}
+mod local_ref;
+pub(crate) use local_ref::LocalRef;
+mod handle;
+pub use handle::MvpAgentHandle;
 use agent_client_protocol::Client as _;
 use agent_client_protocol::{self as acp, AuthenticateResponse};
 use indexmap::IndexMap;
@@ -185,49 +152,6 @@ pub(crate) fn jwt_claim_matches_user_subscription_tier(
         _ => jwt_claim.parse::<u64>().is_ok_and(|n| n != 0),
     }
 }
-/// ACP `_meta` key for the intent to run a chat session on a local workspace (pager stamps it on chat create).
-#[cfg(feature = "local-workspace")]
-const LOCAL_WORKSPACE_META_KEY: &str = "fuigo/local_workspace";
-/// True when `_meta` carries a valid local-workspace intent object (`mode` is `"own"` or `"attach"`).
-#[cfg(feature = "local-workspace")]
-fn local_workspace_intent_present(meta: Option<&acp::Meta>) -> bool {
-    meta.and_then(|m| m.get(LOCAL_WORKSPACE_META_KEY))
-        .and_then(|v| v.as_object())
-        .and_then(|o| o.get("mode"))
-        .and_then(|m| m.as_str())
-        .is_some_and(|mode| mode == "own" || mode == "attach")
-}
-/// Maps a valid local-workspace intent to ExistingWorkspace only.
-///
-/// `server_id` comes from the intent object, else `cloud_existing_workspace`.
-/// Never reads `envId` and never emits `SandboxEnvironment`.
-#[cfg(feature = "local-workspace")]
-fn parse_local_workspace_existing(
-    meta: Option<&acp::Meta>,
-) -> Option<crate::gateway_bridge::ComputerSession> {
-    use crate::gateway_bridge::ComputerSession;
-    let local = meta.and_then(|m| m.get(LOCAL_WORKSPACE_META_KEY))?;
-    let mode = local.get("mode").and_then(|v| v.as_str())?;
-    if mode != "own" && mode != "attach" {
-        return None;
-    }
-    let server_id = meta_non_empty_str(local, "server_id")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "server_id"))
-        })?;
-    let cwd = meta_non_empty_str(local, "cwd")
-        .or_else(|| {
-            meta
-                .and_then(|m| m.get(CLOUD_EXISTING_WORKSPACE_META_KEY))
-                .and_then(|w| meta_non_empty_str(w, "cwd"))
-        });
-    Some(ComputerSession::ExistingWorkspace {
-        server_id,
-        cwd,
-    })
-}
 #[allow(dead_code)]
 fn parse_session_computer_sessions(_meta: Option<&acp::Meta>) -> Option<Vec<()>> {
     None
@@ -241,7 +165,7 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_info: SessionInfo,
     pub cwd: AbsPathBuf,
     pub mcp_servers: Vec<acp::McpServer>,
-    pub initial_client_mcp_servers: Vec<acp::McpServer>,
+    pub initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     pub mcp_meta_config_map: McpMetaConfigMap,
     pub persistence: PersistenceHandle,
     pub chat_history: Vec<crate::sampling::ConversationItem>,
@@ -423,7 +347,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_info,
         cwd,
         mcp_servers: Vec::new(),
-        initial_client_mcp_servers: Vec::new(),
+        initial_client_mcp_servers: Default::default(),
         mcp_meta_config_map: Default::default(),
         persistence: crate::session::persistence::PersistenceHandle::noop(),
         chat_history: Vec::new(),
@@ -721,7 +645,13 @@ struct RetainedResources {
 }
 /// Per-resident-session `(title, last_turn_summary)` display cache; see `resident_roster_titles`.
 type RosterDisplayCache = HashMap<String, (Option<String>, Option<String>)>;
+/// The agent's state. It only ever exists pinned inside the [`MvpAgentHandle`] its constructor returns (P84): its address
+/// is held by its background tasks (`LocalRef`), so it never moves; code reads it as `&MvpAgent` through the handle.
 pub struct MvpAgent {
+    /// Background tasks that hold a `LocalRef` to this agent; dropped before every other field (P83), so it stays FIRST.
+    /// It also makes the agent `!Unpin` (P84).
+    /// LEADER-SAFE(shared): agent-wide, touched only on the agent's thread.
+    bound_tasks: local_ref::BoundTasks,
     /// LEADER-SAFE(shared): `Send + Sync` mirror of per-session activity for the leader's auto-update checker, which cannot read the `!Send` maps.
     /// Expires when the actor exits.
     /// See [`crate::agent::activity::AgentActivity`].
@@ -774,6 +704,11 @@ pub struct MvpAgent {
     /// Agent-owned (mirrors the `DECISIONS` cache, but not a process global) and captured into the detached prompt task.
     /// Cleared for a workspace on GUI untrust (`execute_hooks_action`) so a later re-open can re-prompt.
     interactive_trust_prompted: Rc<RefCell<std::collections::HashSet<PathBuf>>>,
+    /// P148: sessions whose `session/new` has not yet announced its startup config notices, with that setup's notice
+    /// scope. A folder-trust grant for a sibling records their refusals into that scope, so their own announcement
+    /// tells them once: a note sent before then could be dropped unseen, or repeat the one about to follow.
+    sessions_announcing:
+        Rc<RefCell<std::collections::HashMap<acp::SessionId, fuigo_config::key_naming::NoticeScope>>>,
     /// Whether the user's subscription tier is in the remote settings `allowed_tiers` list.
     /// Set by `enforce_fuigo_code_access`; defaults to `true` (API-key and external-auth users bypass the check).
     /// When `false`, the pager shows a gate CTA instead of the prompt.
@@ -895,31 +830,11 @@ pub struct MvpAgent {
     /// Local workspace ops, built lazily via [`Self::ensure_local_workspace_ops`].
     /// The agent never opens Computer Hub as a harness/client; remote cloud sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
     workspace_ops: RefCell<Option<fuigo_workspace::WorkspaceOps>>,
-    /// Per-session owned local `workspace_server` handles (local-workspace `own` mode).
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_supervisors: Rc<
-        RefCell<
-            HashMap<
-                acp::SessionId,
-                crate::gateway_bridge::local_workspace_supervisor::LocalWorkspaceHandle,
-            >,
-        >,
-    >,
-    /// Invalidates in-flight crash restarts when the session supervisor is reaped.
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_generations: Rc<RefCell<HashMap<acp::SessionId, u64>>>,
-    /// Sessions whose own supervisor is mid crash-restart (map entry temporarily empty).
-    #[cfg(all(feature = "local-workspace", unix))]
-    local_workspace_restart_pending: Rc<
-        RefCell<std::collections::HashSet<acp::SessionId>>,
-    >,
-    /// Sessions that already have a local existing workspace (own or attach).
-    /// Mid-session add refuses while this is set; cleared on session end.
-    #[cfg(feature = "local-workspace")]
-    local_workspace_bound: Rc<RefCell<std::collections::HashSet<acp::SessionId>>>,
     /// Idempotency guard: the join-handle supervisor task is spawned at most once (on the first `spawn_and_register_session`).
     /// See `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
+    /// P121 (K6): whether the catalog-reload watcher that rebuilds helper clients is running.
+    helper_watcher_started: std::cell::Cell<bool>,
     /// Dedup guard for `spawn_settings_reapply`; at most one task in flight.
     /// `Rc` so the drop-guard owns a clone without dereferencing the agent.
     settings_reapply_in_flight: std::rc::Rc<std::cell::Cell<bool>>,
@@ -1314,8 +1229,9 @@ impl AuthRequestMeta {
 /// Every authenticated request to cli-chat-proxy (web search, image gen, and any future tools that go through the proxy) must carry these headers.
 ///
 /// Headers injected:
-///  - `x-fuigo-client-version`: required by the proxy's version-gate check.
+///  - `x-fuigo-client-version` / `x-fuigo-client-identifier`: required by the proxy's version-gate check.
 ///    Uses `client_version` when provided, otherwise falls back to cli-chat-proxy compile-time `CARGO_PKG_VERSION`.
+///    Identity-class (P43): only written when `base_url` is FluxRouter-operated.
 ///  - `X-XAI-Token-Auth` / `x-authenticateresponse`: required by the cli-chat-proxy auth middleware when the `base_url` is a known proxy URL.
 ///  - optional extra access header: only set when the corresponding key is `Some` *and* the `base_url` points at a matching non-production host.
 ///    Requires the optional non-production feature.
@@ -1327,16 +1243,23 @@ fn inject_proxy_headers(
     alpha_test_key: Option<&str>,
     base_url: &str,
 ) {
-    headers
-        .entry("x-fuigo-client-version".to_string())
-        .or_insert_with(|| {
-            client_version
-                .map(String::from)
-                .unwrap_or_else(|| fuigo_version::VERSION.to_string())
-        });
-    headers
-        .entry("x-fuigo-client-identifier".to_string())
-        .or_insert_with(crate::http::process_client_identifier);
+    // P43: the client version and identifier are identity-class (P15). Web search goes to
+    // `web_search_model`'s `base_url`, which can be any BYOK provider, and image/video go to
+    // `fuigo_api_base_url`, which a user can repoint. Only a FluxRouter-operated destination
+    // gets them. An entry the caller pre-set (user-configured `extra_headers`) is the user's
+    // own choice for that destination and is left alone.
+    if fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(base_url).is_permitted() {
+        headers
+            .entry("x-fuigo-client-version".to_string())
+            .or_insert_with(|| {
+                client_version
+                    .map(String::from)
+                    .unwrap_or_else(|| fuigo_version::VERSION.to_string())
+            });
+        headers
+            .entry("x-fuigo-client-identifier".to_string())
+            .or_insert_with(crate::http::process_client_identifier);
+    }
     if crate::util::is_cli_chat_proxy_url(base_url) {
         headers
             .entry("X-XAI-Token-Auth".to_string())
@@ -2237,13 +2160,12 @@ impl MvpAgent {
     /// And the gate lift can land up to the bounded refresh budget (`BEST_EFFORT_REFRESH_TIMEOUT`, 20s) later than the pre-detached behavior.
     /// That is because `tier_allowed` is set only after that refresh returns and is identity-revalidated.
     pub(super) fn spawn_tier_recheck(&self) {
-        let agent_ref = LocalRef::new(self);
-        tokio::task::spawn_local(async move {
+        self.spawn_bound(|agent_ref| Box::pin(async move {
             let Some(auth) = agent_ref.get().auth_manager.current() else {
                 return;
             };
             agent_ref.get().enforce_fuigo_code_access(&auth).await;
-        });
+        }));
     }
     /// Spawn a best-effort bundle sync.
     /// Re-fires on every call site (init, cached_token, grok.com/oidc); the cheap pre-checks below absorb repeats so reconnects are cheap.
@@ -2317,7 +2239,7 @@ impl MvpAgent {
 }
 /// Handle a synthetic turn trace request: allocate a turn number, build a trace context, await turn completion, then upload the trace.
 async fn handle_synthetic_turn_trace(
-    agent_ref: LocalRef<MvpAgent>,
+    agent_ref: LocalRef<'_, MvpAgent>,
     request: crate::upload::turn::SyntheticTurnTraceRequest,
 ) {
     use crate::session::SessionCommand;
@@ -2733,5 +2655,7 @@ mod replay;
 mod replay_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod p42_summary_tests;
 #[cfg(test)]
 mod prompt_response_meta_tests;

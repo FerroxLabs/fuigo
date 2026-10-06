@@ -1,4 +1,7 @@
 //! ptyctl CLI — headless PTY controller.
+// Dev tool: never shipped (not linked into `fuigo-pager`); printing is its interface, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use clap::Parser;
 

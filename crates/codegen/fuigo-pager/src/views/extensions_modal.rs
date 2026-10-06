@@ -1718,6 +1718,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             tool_timeout_sec: None,
             tool_timeouts: None,
             expose_image_base64: None,
+            untrusted_source: false,
         }),
     })
 }
@@ -3238,7 +3239,15 @@ pub fn render_extensions_modal(
                             );
                             entry_right_labels.push(format!("({})", server.source));
                             // Summary line: tools count and enabled count
-                            if server.tools.is_empty() {
+                            // P152: say why the server is unavailable instead of guessing, on the collapsed row too
+                            // (collapsed rows render only their summary line, Astra r1 #6).
+                            let reason_line = server
+                                .status_reason
+                                .as_deref()
+                                .map(|reason| format!("Not connected: {reason}"));
+                            if let Some(line) = reason_line.clone() {
+                                entry_desc_lines.push(vec![line]);
+                            } else if server.tools.is_empty() {
                                 entry_desc_lines.push(vec![
                                     "no tools (server may not be connected)".to_string(),
                                 ]);
@@ -3256,7 +3265,7 @@ pub fn render_extensions_modal(
                                     )]);
                                 }
                             }
-                            entry_summary_lines.push(vec![]);
+                            entry_summary_lines.push(reason_line.into_iter().collect());
                             entry_fields.push(vec![]);
                             let tools_group_key = format!("mcp-tools:{si}");
                             entry_is_header.push(false);
@@ -4319,6 +4328,7 @@ mod tests {
             name: "acme".into(),
             display_name: None,
             status: McpServerDisplayStatus::SetupRequired,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: true,
@@ -4430,6 +4440,7 @@ mod tests {
             name: "needs-oauth".into(),
             display_name: None,
             status: McpServerDisplayStatus::NeedsAuth,
+            status_reason: None,
             tool_count: 0,
             auth_required: true,
             setup_required: false,
@@ -4481,6 +4492,7 @@ mod tests {
             name: name.into(),
             display_name: None,
             status: McpServerDisplayStatus::Ready,
+            status_reason: None,
             tool_count: tc,
             auth_required: false,
             setup_required: false,
@@ -4573,6 +4585,7 @@ mod tests {
                 name: "p1-srv".into(),
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
+                status_reason: None,
                 tool_count: 0,
                 auth_required: false,
                 setup_required: false,
@@ -4589,6 +4602,7 @@ mod tests {
                 name: "p2-srv".into(),
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
+                status_reason: None,
                 tool_count: 0,
                 auth_required: false,
                 setup_required: false,
@@ -4638,6 +4652,7 @@ mod tests {
             name: name.into(),
             display_name: None,
             status: McpServerDisplayStatus::Ready,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -6024,6 +6039,7 @@ mod tests {
 
     #[test]
     fn narrow_form_viewport_keeps_unicode_and_cursor_visible() {
+        let _theme = crate::theme::cache::pin_theme();
         let grapheme = "👩🏽\u{200d}💻";
         let text = format!("1234567中e\u{301}{grapheme}b");
         let mut input = single_field_input("test");

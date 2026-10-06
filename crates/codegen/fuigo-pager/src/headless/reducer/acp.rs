@@ -4,7 +4,7 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::headless::attach_result_usage;
+use crate::headless::{HeadlessDenial, attach_result_usage};
 use fuigo_shell::extensions::notification::ResponseUsage;
 
 use super::{
@@ -84,6 +84,9 @@ enum AcpLine {
     ImageCompressed {
         message: String,
     },
+    ConfigNotice {
+        message: String,
+    },
     MemoryFlushStarted,
     MemoryFlushCompleted {
         result: String,
@@ -106,7 +109,25 @@ struct AcpEndLine<'a> {
 }
 
 /// `streaming-json`: native ACP session updates, one object per line.
-pub(crate) struct AcpReducer;
+#[derive(Default)]
+pub(crate) struct AcpReducer {
+    /// The denial record (`HeadlessDenial::wire_record`) for the terminal line, when one was latched.
+    permission_denied: Option<Value>,
+}
+
+impl AcpReducer {
+    /// Stamp `permissionDenied` on a terminal line — the same record, under the same key, as the
+    /// `json` document, so one consumer handles both formats. Added to the existing `end`/`error`
+    /// line rather than emitted as a line of its own: `end` is documented as the last event and a
+    /// consumer reads exactly one terminal record.
+    fn attach_permission_denied(&self, line: &mut Value) {
+        if let Some(record) = &self.permission_denied
+            && let Some(obj) = line.as_object_mut()
+        {
+            obj.insert("permissionDenied".to_string(), record.clone());
+        }
+    }
+}
 
 impl Reducer for AcpReducer {
     fn reduce(&mut self, event: StreamEvent) -> Vec<Value> {
@@ -181,7 +202,12 @@ impl Reducer for AcpReducer {
         {
             obj.insert("error".to_string(), Value::String(error.to_string()));
         }
+        self.attach_permission_denied(&mut line);
         vec![line]
+    }
+
+    fn permission_denied(&mut self, denial: &HeadlessDenial, ended_run: bool) {
+        self.permission_denied = Some(denial.wire_record(ended_run));
     }
 
     fn error(
@@ -197,6 +223,7 @@ impl Reducer for AcpReducer {
         if let Some(usage) = usage {
             attach_result_usage(&mut line, usage);
         }
+        self.attach_permission_denied(&mut line);
         vec![line]
     }
 }
@@ -209,6 +236,7 @@ fn acp_lifecycle_line(l: Lifecycle) -> AcpLine {
         Lifecycle::CompactCancelled => AcpLine::AutoCompactCancelled,
         Lifecycle::AutoContinue { total_tokens } => AcpLine::AutoContinueCompleted { total_tokens },
         Lifecycle::ImageCompressed { message } => AcpLine::ImageCompressed { message },
+        Lifecycle::ConfigNotice { message } => AcpLine::ConfigNotice { message },
         Lifecycle::MemoryFlushStarted => AcpLine::MemoryFlushStarted,
         Lifecycle::MemoryFlushCompleted { result, path } => {
             AcpLine::MemoryFlushCompleted { result, path }

@@ -355,16 +355,18 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
         let mut tool_calls = Vec::new();
 
         for block in resp.content {
-            match block {
-                ContentBlock::Text { text, .. } => {
+            // `Open`: a content-block type this client does not model contributes nothing here
+            // rather than failing the whole response
+            match block.into_known() {
+                Some(ContentBlock::Text { text, .. }) => {
                     if !content.is_empty() {
                         content.push('\n');
                     }
                     content.push_str(&text);
                 }
-                ContentBlock::ToolUse {
+                Some(ContentBlock::ToolUse {
                     id, name, input, ..
-                } => {
+                }) => {
                     tool_calls.push(ToolCall {
                         id: Arc::<str>::from(id),
                         name,
@@ -374,8 +376,10 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
                     });
                 }
                 // Thinking is dropped; see the doc comment above
-                ContentBlock::Thinking { .. } => {}
-                _ => {} // Image and ToolResult are not expected in assistant responses
+                Some(ContentBlock::Thinking { .. }) => {}
+                // Image and ToolResult are not expected in assistant responses; `None` is a block
+                // type this client does not model
+                Some(_) | None => {}
             }
         }
 

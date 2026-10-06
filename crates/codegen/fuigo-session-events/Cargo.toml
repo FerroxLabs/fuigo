@@ -12,6 +12,8 @@ chrono = { workspace = true }
 serde = { workspace = true }
 # JSON-line encoding, plus the free-form cancellation-context payload.
 serde_json = { workspace = true }
+# P113: every string in an event passes the sent-credential scrub before it is written.
+fuigo-secrets = { workspace = true }
 # `IntoStaticStr` on `ToolOutcome`, so consumers get a `&'static str` label
 # matching the serde representation without a second match arm, plus
 # `EnumIter` in tests to pin every variant's label.

@@ -15,6 +15,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         m if m.starts_with("fuigo/compact_conversation") => handle_compact(agent, args).await,
         "fuigo/memory/flush" => handle_flush(agent, args).await,
         "fuigo/memory/rewrite" => handle_rewrite(agent, args).await,
+        "fuigo/memory/save_note" => handle_save_note(agent, args).await,
         _ => Err(crate::acp_error::unknown_ext_method(&args.method)),
     }
 }
@@ -89,6 +90,32 @@ async fn handle_rewrite(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let rewritten = rx
         .await
         .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))?
-        .map_err(crate::acp_error::internal_error)?;
+        ?;
     to_raw_response(&serde_json::json!({ "rewritten": rewritten }))
+}
+
+/// `fuigo/memory/save_note`: append a note to the session's workspace `MEMORY.md`. The session decides, at write time,
+/// whether memory is on; a refusal is a typed `invalid_request` and nothing is written.
+async fn handle_save_note(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SaveNoteRequest {
+        session_id: String,
+        text: String,
+    }
+
+    let req: SaveNoteRequest = parse_params(args)?;
+    let not_found_err = format!("session not found: {}", req.session_id);
+    let sid: acp::SessionId = req.session_id.into();
+    let Some(session) = agent.resident_handle(&sid) else {
+        return Err(crate::acp_error::invalid_params(not_found_err));
+    };
+    let (tx, rx) = oneshot::channel();
+    let _ = session.cmd_tx.send(SessionCommand::SaveMemoryNote {
+        text: req.text,
+        respond_to: tx,
+    });
+    rx.await
+        .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))??;
+    to_raw_response(&serde_json::json!({ "saved": true }))
 }

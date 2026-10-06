@@ -54,6 +54,7 @@ pub fn extract_meta(script: &str) -> Result<WorkflowMeta, MetaError> {
     }
 
     let mut engine = rhai::Engine::new();
+    crate::route_script_output(&mut engine);
     engine.set_max_operations(META_PROBE_MAX_OPS);
     engine.set_max_expr_depths(128, 64);
     engine.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());

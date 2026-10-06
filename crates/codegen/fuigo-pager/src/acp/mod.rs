@@ -8,8 +8,10 @@ pub mod model_state;
 pub mod spawn;
 mod subagent_message;
 pub mod tracker;
+mod relay_refused;
 mod version_mismatch;
 
+pub(crate) use relay_refused::{RelayRefusal, relay_refusal};
 pub(crate) use version_mismatch::{is_version_mismatch_banner, version_mismatch_banner};
 
 /// Ext methods that carry a session-scoped update and may stamp `isReplay`.
@@ -169,8 +171,9 @@ pub struct ConnectFlags {
 /// Connect to an agent: spawn, initialize, authenticate.
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
     startup::enter(StartupPhase::ConfigLoad);
-    let raw_config = fuigo_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    let (raw_config, campaign_free_config) =
+        fuigo_shell::config::load_effective_config_with_campaign_free()
+            .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
         .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
 
@@ -186,6 +189,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         todo_gate: flags.todo_gate,
         laziness_debug_log: flags.laziness_debug_log.as_deref(),
         storage_mode: flags.storage_mode.as_deref(),
+        campaign_free_config: Some(&campaign_free_config),
     });
 
     // Permission mode seeds for every session this agent creates (CLI or config)
@@ -265,6 +269,30 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
     })
 }
 
+/// What the TUI tells a leader about itself when it registers (also on every reconnect).
+pub(crate) fn tui_leader_capabilities(
+    flags: &ConnectFlags,
+    default_model: Option<String>,
+) -> fuigo_shell::leader::ClientCapabilities {
+    fuigo_shell::leader::ClientCapabilities {
+        // Leader agent is pre-running; capabilities carry the mode seeds into session meta
+        yolo_mode: flags.default_yolo_mode,
+        auto_mode: flags.default_auto_mode && !flags.default_yolo_mode,
+        default_model,
+        client_version: Some(PAGER_CLIENT_VERSION.to_string()),
+        code_nav_enabled: false,
+        terminal: flags.terminal,
+        fs_read: flags.fs_read,
+        fs_write: flags.fs_write,
+        status_line: flags.status_line,
+        user_message_echo: true,
+        // P125: the TUI wants the leader's relay-refusal state on every (re)registration.
+        relay_refusal_state: true,
+        // P142: the TUI shows the leader process's one-off notices (`fuigo/leader/notice`).
+        leader_notices: true,
+    }
+}
+
 /// Connect to a leader process and return an `AcpConnection`.
 ///
 /// The leader provides the ACP transport via IPC (raw JSON strings over a Unix socket).
@@ -275,9 +303,7 @@ pub async fn connect_via_leader(
     flags: ConnectFlags,
     raw_config: &toml::Value,
 ) -> Result<AcpConnection> {
-    use fuigo_shell::leader::{
-        ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn,
-    };
+    use fuigo_shell::leader::{ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn};
 
     // These flags are baked into the agent at startup
     // In leader mode the agent is already running, so per-client overrides cannot be applied
@@ -298,19 +324,7 @@ pub async fn connect_via_leader(
         .as_deref()
         .unwrap_or(HEADLESS_CLIENT_TYPE);
     let env_urls = fuigo_shell::leader::LeaderEnvUrls::from(&agent_config.fuigo_com_config);
-    let capabilities = ClientCapabilities {
-        // Leader agent is pre-running; capabilities carry the mode seeds into session meta
-        yolo_mode: flags.default_yolo_mode,
-        auto_mode: flags.default_auto_mode && !flags.default_yolo_mode,
-        default_model: agent_config.models.default.clone(),
-        client_version: Some(PAGER_CLIENT_VERSION.to_string()),
-        code_nav_enabled: false,
-        terminal: flags.terminal,
-        fs_read: flags.fs_read,
-        fs_write: flags.fs_write,
-        status_line: flags.status_line,
-        user_message_echo: true,
-    };
+    let capabilities = tui_leader_capabilities(&flags, agent_config.models.default.clone());
 
     startup::enter(StartupPhase::LeaderConnect);
     let conn = connect_or_spawn(
@@ -410,7 +424,7 @@ pub async fn connect_via_leader(
 fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
     // eprintln rather than tracing::warn: this runs before pager TUI tracing is initialised, so tracing output would be silently dropped
     for flag in unsupported_leader_flags(flags) {
-        eprintln!(
+        fuigo_tty_utils::cli_eprintln!(
             "warning: {flag} has no effect in leader mode \
              (agent config is set at leader startup)"
         );
@@ -439,37 +453,54 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
 
 /// Write config.toml fields based on CLI flags.
 fn apply_config_writes(flags: &ConnectFlags) {
+    use fuigo_config::fs_atomic::EditError;
     let config_path =
         fuigo_shell::util::fuigo_home::fuigo_home().join(fuigo_config::USER_CONFIG_FILENAME);
-    // Held across the read and the write: this is a read-modify-write of the
-    // user's config, and every other writer of that file takes the same lock.
-    match fuigo_config::fs_atomic::locked_read_modify_write(&config_path, || {
-        apply_config_writes_locked(flags, &config_path);
-    }) {
+    // The shared read-modify-write (`fuigo_config::fs_atomic::edit_locked`):
+    // under the lock every writer of this file takes, temp synced outside it,
+    // renamed only over the version read, removed on failure. The mode keeps
+    // the owner bits (`0600` for a new file), as before.
+    match fuigo_config::fs_atomic::edit_locked(
+        &config_path,
+        |bytes| fuigo_config::fs_atomic::stage_atomically_from_existing(&config_path, bytes, 0o600),
+        |current| Ok::<_, std::convert::Infallible>(connect_flags_edit(flags, &config_path, current)),
+    ) {
         Ok(()) => {}
-        Err(e) => {
+        Err(EditError::Lock(e)) => {
             tracing::warn!(error = %e, "failed to lock config.toml; connect flags not persisted")
         }
+        Err(EditError::Write(e)) => tracing::warn!(error = %e, "failed to write config.toml"),
+        Err(EditError::Edit(never)) => match never {},
     }
 }
 
-/// Body of [`apply_config_writes`]; the caller holds the config write lock.
-fn apply_config_writes_locked(flags: &ConnectFlags, config_path: &std::path::Path) {
+/// Body of [`apply_config_writes`]: the edit for the config's current bytes.
+fn connect_flags_edit(
+    flags: &ConnectFlags,
+    config_path: &std::path::Path,
+    current: fuigo_config::fs_atomic::Current<'_>,
+) -> fuigo_config::fs_atomic::Edit<()> {
+    use fuigo_config::fs_atomic::Edit;
     // Use toml_edit to preserve existing config structure
     // Only a missing file is an empty config. Treating a hard read error
     // (EACCES, EIO) as empty would let the atomic write below replace a file
     // this process could not read, erasing every setting in it -- and the write
     // being atomic now makes that erasure clean rather than partial.
-    let content = match std::fs::read_to_string(config_path) {
+    let read: Result<String, String> = match current {
+        Ok(bytes) => std::str::from_utf8(bytes.unwrap_or_default())
+            .map(str::to_owned)
+            .map_err(|_| "stream did not contain valid UTF-8".to_owned()),
+        Err(e) => Err(e.to_string()),
+    };
+    let content = match read {
         Ok(content) => content,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 path = %config_path.display(),
                 "refusing to persist connect flags: config.toml could not be read"
             );
-            return;
+            return Edit::Keep(());
         }
     };
     // An unparseable file is refused rather than defaulted: `unwrap_or_default`
@@ -487,7 +518,7 @@ fn apply_config_writes_locked(flags: &ConnectFlags, config_path: &std::path::Pat
                 path = %config_path.display(),
                 "refusing to persist connect flags: config.toml is non-empty and unparseable"
             );
-            return;
+            return Edit::Keep(());
         }
     };
 
@@ -504,20 +535,17 @@ fn apply_config_writes_locked(flags: &ConnectFlags, config_path: &std::path::Pat
     }
 
     if changed {
-        if let Some(parent) = config_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        // Replaced atomically, never truncated, so a crash mid-write cannot
+        // leave a half-written config behind.
+        Edit::Replace {
+            contents: doc.to_string().into_bytes(),
+            value: (),
         }
-        // Atomic rename rather than a truncating write, so a crash mid-write
-        // cannot leave a half-written config behind.
-        if let Err(e) = fuigo_config::fs_atomic::write_atomically(
-            config_path,
-            &doc.to_string(),
-            fuigo_config::fs_atomic::replacement_mode(config_path, 0o600),
-        ) {
-            tracing::warn!(error = %e, "failed to write config.toml");
-        }
+    } else {
+        Edit::Keep(())
     }
 }
+
 
 /// Build the per-session `_meta` for `InitializeRequest` (TUI and leader).
 fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {

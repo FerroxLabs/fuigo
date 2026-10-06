@@ -141,6 +141,9 @@ fn workflow_catalog_projection_and_open_modal_refresh_are_coalesced() {
 }
 #[test]
 fn workflow_catalog_projection_detects_same_name_metadata_changes() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let command = |description: &str, path: &str| {
         acp::AvailableCommand::new("review", description)
             .meta(
@@ -541,6 +544,7 @@ pub(super) fn prompt_response(app: &mut AppView, prompt_id: &str) {
                     ),
             ),
             http_status: None,
+            verdicts: None,
             prompt_id: Some(prompt_id.to_string()),
         }),
         app,
@@ -1126,6 +1130,7 @@ pub(super) fn fuigo_turn_completed_notif(
             error_kind: None,
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
@@ -1158,6 +1163,7 @@ pub(super) fn fuigo_turn_completed_replay(
             error_kind: None,
             usage: None,
             elapsed_ms,
+            verdicts: None,
         },
         meta: Some(meta),
     };
@@ -1185,6 +1191,7 @@ pub(super) fn fuigo_turn_completed_failed_with_error_kind(
             error_kind: Some(error_kind.to_string()),
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
@@ -1209,6 +1216,7 @@ pub(super) fn fuigo_turn_completed_notif_with_cancel_trigger(
             error_kind: None,
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         },
         meta: Some(
             serde_json::json!({
@@ -1241,6 +1249,7 @@ pub(super) fn fuigo_wake_turn_completed_notif(
             error_kind: None,
             usage: None,
             elapsed_ms: None,
+            verdicts: None,
         },
         meta: Some(meta),
     };
@@ -1282,10 +1291,34 @@ pub(super) fn fuigo_hook_execution_notif_with_runs(
         update: FuigoSessionUpdate::HookExecution {
             event_name: event_name.into(),
             tool_name: None,
+            tool_call_id: None,
             prompt_id: prompt_id.map(str::to_string),
             runs,
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
+    };
+    acp::ExtNotification::new(
+        "fuigo/session/update",
+        serde_json::value::to_raw_value(&payload).unwrap().into(),
+    )
+}
+/// A live `HookExecution` batch stamped with the ACP tool call it belongs to (`None` = an unstamped, older-shell batch).
+pub(super) fn fuigo_hook_execution_notif_for_call(
+    session_id: &str,
+    event_name: &str,
+    tool_call_id: Option<&str>,
+    runs: Vec<fuigo_shell::extensions::notification::HookRunEntryDto>,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp::SessionId::new(session_id),
+        update: FuigoSessionUpdate::HookExecution {
+            event_name: event_name.into(),
+            tool_name: None,
+            tool_call_id: tool_call_id.map(str::to_string),
+            prompt_id: None,
+            runs,
+        },
+        meta: Some(serde_json::json!({ "isReplay": false })),
     };
     acp::ExtNotification::new(
         "fuigo/session/update",
@@ -1624,6 +1657,7 @@ pub(super) fn replay_disk_test_home() -> &'static std::path::Path {
     static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
     HOME.get_or_init(|| {
             let tmp = tempfile::tempdir().expect("tempdir creation");
+            crate::test_util::require_own_process_for("FUIGO_HOME");
             unsafe {
                 std::env::set_var("FUIGO_HOME", tmp.path());
             }
@@ -1694,6 +1728,31 @@ pub(super) fn child_tool_line(child_sid: &str) -> String {
     format!(
             r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
         )
+}
+/// A persisted (`updates.jsonl`) plugin `HookExecution` batch for tool call `tool_call_id`, stamped with `event_id`.
+pub(super) fn child_hook_line(child_sid: &str, tool_call_id: &str, event_id: &str) -> String {
+    serde_json::json!({
+        "method": "_fuigo/session/update",
+        "params": {
+            "sessionId": child_sid,
+            "update": {
+                "sessionUpdate": "hook_execution",
+                "event_name": "post_tool_use",
+                "tool_call_id": tool_call_id,
+                "runs": [{"name": "plugin/kid/hooks:post_tool_use[0].hooks[0]", "status": {"status": "success", "elapsed_ms": 3}}]
+            },
+            "_meta": {"eventId": event_id}
+        }
+    })
+    .to_string()
+}
+/// Hook runs carried by every row of a child view (pre and post).
+pub(super) fn child_hook_run_count(agent: &AgentView, child_sid: &str) -> usize {
+    let child = agent.subagent_views.get(child_sid).expect("child subagent view");
+    (0..child.scrollback.len())
+        .filter_map(|i| child.scrollback.entry(i).and_then(|e| e.hook_data.as_ref()))
+        .map(|d| d.pre_hooks.len() + d.post_hooks.len())
+        .sum()
 }
 pub(super) fn child_user_message_line(child_sid: &str, text: &str) -> String {
     let escaped = serde_json::to_string(text).unwrap();
@@ -2214,6 +2273,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             name: "alpha".into(),
             display_name: None,
             status: McpServerDisplayStatus::Initializing,
+            status_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -2318,6 +2378,7 @@ pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotifi
 }
 mod permissions;
 mod session_events;
+mod typed_verdicts;
 mod follow_ups;
 mod settings;
 mod announcements;
@@ -2329,6 +2390,7 @@ mod turn_completion;
 mod interjection;
 mod session_routing;
 mod plugins;
+mod plugin_hook_visibility;
 mod subagents;
 mod goals;
 mod interactions;
@@ -2337,4 +2399,6 @@ mod models;
 mod mcp;
 mod git_head;
 mod version_mismatch;
+mod relay_refused;
+mod leader_notice;
 mod hooks;

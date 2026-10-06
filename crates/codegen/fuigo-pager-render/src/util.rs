@@ -58,19 +58,24 @@ pub fn display_location_path(path: impl AsRef<Path>) -> String {
 
 /// Abbreviate an absolute path for display: prefer [`fuigo_home()`], then `$HOME`.
 pub fn abbreviate_path(path: &str) -> Cow<'_, str> {
+    abbreviate_path_with(path, &fuigo_home(), fuigo_dirs::home_dir().as_deref())
+}
+
+/// [`abbreviate_path`] against an explicit fuigo home and OS home, so the
+/// rules are testable without writing the process-global `HOME`.
+fn abbreviate_path_with<'a>(path: &'a str, fuigo: &Path, home: Option<&Path>) -> Cow<'a, str> {
     let path_buf = Path::new(path);
-    let fuigo = fuigo_home();
-    if let Ok(rest) = path_buf.strip_prefix(&fuigo) {
-        let prefix = display_fuigo_home_prefix();
+    if let Ok(rest) = path_buf.strip_prefix(fuigo) {
+        let prefix = display_fuigo_home_prefix_for(fuigo);
         if rest.as_os_str().is_empty() {
             return Cow::Owned(prefix);
         }
         return Cow::Owned(format!("{prefix}/{}", rest.display()));
     }
-    if let Some(home) = fuigo_dirs::home_dir() {
+    if let Some(home) = home {
         // Path::strip_prefix is separator-aware; a string prefix plus `starts_with('/')` misses Windows `\` remainders after USERPROFILE
         if !home.as_os_str().is_empty()
-            && let Ok(rest) = path_buf.strip_prefix(&home)
+            && let Ok(rest) = path_buf.strip_prefix(home)
         {
             if rest.as_os_str().is_empty() {
                 return Cow::Borrowed("~");
@@ -456,18 +461,50 @@ mod tests {
         assert_eq!(abbreviated.as_ref(), expected);
     }
 
+    // Through the pure core, not by writing `HOME`: a test that blanked the
+    // process-global `HOME` raced every unserialized reader in this binary
+    // (e.g. `display_fuigo_home_prefix_default_install` saw `fuigo_home()`
+    // resolve to `.fuigo` and reported `$FUIGO_HOME`).
     #[test]
-    #[serial_test::serial]
     fn abbreviate_path_empty_home_does_not_fake_tilde() {
-        let prev = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", "");
-        }
-        assert_eq!(abbreviate_path("/foo").as_ref(), "/foo");
+        let fuigo = std::env::temp_dir().join("abbrev-empty-home-fuigo");
+        assert_eq!(
+            abbreviate_path_with("/foo", &fuigo, Some(Path::new(""))).as_ref(),
+            "/foo"
+        );
+        assert_eq!(abbreviate_path_with("/foo", &fuigo, None).as_ref(), "/foo");
+    }
 
-        match prev {
-            Some(home) => unsafe { std::env::set_var("HOME", home) },
-            None => unsafe { std::env::remove_var("HOME") },
+    /// No test in this binary may write `HOME`/`USERPROFILE`/`FUIGO_HOME`:
+    /// the readers here are unserialized, so any writer is a race.
+    /// A tripwire for the direct literal form that caused the race, not a proof:
+    /// a call split across lines or keyed by a variable is not detected.
+    #[test]
+    fn no_test_in_this_crate_writes_the_home_environment() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut offenders = Vec::new();
+        let needles = [
+            ["set_var(\"", "HOME\""].concat(),
+            ["remove_var(\"", "HOME\""].concat(),
+            ["set_var(\"", "FUIGO_HOME\""].concat(),
+            ["remove_var(\"", "FUIGO_HOME\""].concat(),
+            ["set_var(\"", "USERPROFILE\""].concat(),
+            ["remove_var(\"", "USERPROFILE\""].concat(),
+        ];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).unwrap();
+                    if needles.iter().any(|n| text.contains(n.as_str())) {
+                        offenders.push(path.display().to_string());
+                    }
+                }
+            }
         }
+        assert!(offenders.is_empty(), "home-env writers: {offenders:?}");
     }
 }

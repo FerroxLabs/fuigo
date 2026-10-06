@@ -17,6 +17,11 @@ use super::system_appearance;
 /// Loaded from disk once at startup via `load_from_disk()`, then kept in sync by `set()`.
 static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::FuigoNight as u8);
 static LOADED: AtomicBool = AtomicBool::new(false);
+/// Sequence counter around every write that can change the painted palette (theme kind, terminal-native lock): odd while a write is in progress, bumped again when it is done.
+/// An endpoint comparison of [`RenderKey`] cannot see an A -> B -> A change, and a counter bumped only before the write cannot tell a finished write from one in flight.
+/// Serializes palette writers so the sequence counter's odd/even protocol is valid (a seqlock needs a single writer at a time).
+static PALETTE_WRITE: Mutex<()> = Mutex::new(());
+static RENDER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -77,14 +82,41 @@ pub fn current_kind() -> ThemeKind {
         return ThemeKind::FuigoNight;
     }
     if !LOADED.load(Ordering::Acquire) {
-        // Two threads racing into the seed path is harmless: the disk read is idempotent and `store` is atomic
-        // Worst case both threads call `load_from_disk` once
-        if let Some(kind) = load_from_disk() {
-            store_kind(kind);
-        }
-        LOADED.store(true, Ordering::Release);
+        seed_from(load_from_disk);
     }
     theme_kind_from_u8(CURRENT.load(Ordering::Relaxed))
+}
+
+/// Key for caches of rendered output that depends on the active palette.
+///
+/// `current_kind()` alone is not enough: while the terminal-native lock is engaged it reports a nominal `FuigoNight`, yet
+/// `Theme::current()` then paints the terminal-default palette.
+/// A cache keyed on the kind alone therefore keeps pre-switch colours across a live `/minimal` and `/fullscreen` switch under `FuigoNight`.
+/// The lock state is part of the key so toggling it misses every such cache.
+pub type RenderKey = (ThemeKind, bool);
+
+/// [`RenderKey`] plus the palette-write counter: equal stamps mean no palette write happened in between, even a round trip.
+#[must_use]
+pub fn render_stamp() -> (RenderKey, u64) {
+    // Seqlock read: wait out a write in flight (odd), and retry if one started while the key was read
+    loop {
+        let generation = RENDER_GEN.load(Ordering::Acquire);
+        if generation.is_multiple_of(2) {
+            let key = render_key();
+            // Seqlock read protocol: keep the palette reads above from drifting below the validating load
+            std::sync::atomic::fence(Ordering::Acquire);
+            if RENDER_GEN.load(Ordering::Relaxed) == generation {
+                return (key, generation);
+            }
+        }
+        std::hint::spin_loop();
+    }
+}
+
+/// The current [`RenderKey`].
+#[must_use]
+pub fn render_key() -> RenderKey {
+    (current_kind(), terminal_native_locked())
 }
 
 /// Set the in-memory theme kind without writing to disk.
@@ -92,7 +124,29 @@ pub fn current_kind() -> ThemeKind {
 /// Used by the dispatcher (after `Action::SetTheme` is processed) and by the live-preview path during the picker.
 /// Disk-write happens via `Effect::PersistSetting`, NOT here.
 pub fn set(kind: ThemeKind) {
+    let _seed = SEED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     store_kind(kind);
+    LOADED.store(true, Ordering::Release);
+}
+
+/// Serializes the first-call disk seed against [`set`].
+/// The seed reads the disk first (slow, unlocked) and applies it under this lock only if no `set` landed meanwhile.
+static SEED_LOCK: Mutex<()> = Mutex::new(());
+
+/// Seed `CURRENT` from `load()` unless an explicit [`set`] (or another seeder) already marked the cache loaded.
+///
+/// The disk read runs before the check, so a `set` that lands during the read must win.
+/// The earlier code stored the disk value unconditionally and clobbered such a `set` with a stale one.
+/// That made the theme a test had just pinned flip to the configured one mid-test, under load (`run_job_succeeds_on_temp_file`: `left: TokyoNight, right: FuigoNight`).
+fn seed_from(load: impl FnOnce() -> Option<ThemeKind>) {
+    let seeded = load();
+    let _seed = SEED_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if LOADED.load(Ordering::Acquire) {
+        return;
+    }
+    if let Some(kind) = seeded {
+        store_kind(kind);
+    }
     LOADED.store(true, Ordering::Release);
 }
 
@@ -100,8 +154,13 @@ pub fn set(kind: ThemeKind) {
 /// Every write to `CURRENT` goes through here so the markdown renderer
 /// can never drift from the selected theme.
 fn store_kind(kind: ThemeKind) {
+    let _writer = PALETTE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    RENDER_GEN.fetch_add(1, Ordering::AcqRel);
+    // Seqlock write protocol: the odd bump must be ordered before the palette stores a reader may observe
+    std::sync::atomic::fence(Ordering::Release);
     CURRENT.store(kind as u8, Ordering::Relaxed);
     sync_markdown_polarity();
+    RENDER_GEN.fetch_add(1, Ordering::AcqRel);
 }
 
 // -- Terminal-native palette (minimal-mode lock + `terminal` theme) ----------
@@ -120,8 +179,12 @@ pub fn terminal_native_active() -> bool {
 
 /// Engage or clear the terminal-native theme lock.
 pub fn set_terminal_native_lock(locked: bool) {
+    let _writer = PALETTE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    RENDER_GEN.fetch_add(1, Ordering::AcqRel);
+    std::sync::atomic::fence(Ordering::Release);
     TERMINAL_NATIVE_LOCK.store(locked, Ordering::Relaxed);
     sync_markdown_polarity();
+    RENDER_GEN.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Read the `terminal` theme rollout gate (see [`TERMINAL_THEME_ENABLED`]).
@@ -308,9 +371,10 @@ fn load_auto_theme_config() -> AutoThemeConfig {
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn reset_for_test() {
-    // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool pair is safe to reset without any cross-thread coordination
-    store_kind(ThemeKind::FuigoNight);
-    LOADED.store(false, Ordering::Release);
+    // Tests are serialized via TEST_LOCK, but a test that reads the theme WITHOUT the lock still runs concurrently.
+    // So the reset must leave the cache LOADED (at the default): left unloaded, that reader would seed from the test home's config and overwrite whatever a lock holder pinned.
+    // `set` publishes the default and marks it loaded under SEED_LOCK, through the same palette-write protocol as every other write, with no unloaded window.
+    set(ThemeKind::FuigoNight);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);
     // The test-build default; a prior gating test may have turned it off.
@@ -359,7 +423,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         seed_auto_theme_defaults_for_test();
-        // Set LOADED=true so current_kind() doesn't read from disk.
+        // Redundant after `reset_for_test` (which leaves the cache loaded), kept so this helper does not depend on that.
         set(ThemeKind::FuigoNight);
         system_appearance::clear_mock();
         f();
@@ -369,6 +433,110 @@ mod tests {
 
     fn set_test_auto_config(config: AutoThemeConfig) {
         *AUTO_THEME_CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(config);
+    }
+
+    // -- Render stamp ---------------------------------------------------------
+
+    #[test]
+    fn render_stamp_changes_across_a_round_trip_that_restores_the_key() {
+        with_test_env(|| {
+            let before = render_stamp();
+            set_terminal_native_lock(true);
+            set_terminal_native_lock(false);
+            let after = render_stamp();
+            assert_eq!(before.0, after.0, "premise: the key itself is back where it started");
+            assert_ne!(before, after, "a palette write between the two reads must be visible");
+        });
+    }
+
+    /// A stamp must never be taken while a palette write is in flight (odd sequence), or a worker could start on a half-written palette,
+    /// see the writer finish, and accept the mixed result.
+    #[test]
+    fn render_stamp_waits_out_a_palette_write_in_flight() {
+        with_test_env(|| {
+            assert!(render_stamp().1.is_multiple_of(2), "a settled stamp is even");
+            // Restores an even sequence even if an assertion below panics, so later tests are not left spinning
+            struct Finish;
+            impl Drop for Finish {
+                fn drop(&mut self) {
+                    if !RENDER_GEN.load(Ordering::Acquire).is_multiple_of(2) {
+                        RENDER_GEN.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+            }
+            let _finish = Finish;
+            let _writer = PALETTE_WRITE.lock().unwrap_or_else(|e| e.into_inner());
+            RENDER_GEN.fetch_add(1, Ordering::AcqRel); // a write begins and has not finished
+            let reader = std::thread::spawn(render_stamp);
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            assert!(!reader.is_finished(), "render_stamp returned during a write in flight");
+            RENDER_GEN.fetch_add(1, Ordering::AcqRel); // the write finishes
+            drop(_writer);
+            let stamp = reader.join().expect("reader");
+            assert!(stamp.1.is_multiple_of(2));
+        });
+    }
+
+    // -- First-call disk seed vs explicit `set` -------------------------------
+
+    #[test]
+    fn seed_does_not_clobber_a_set_that_lands_during_the_disk_read() {
+        with_test_env(|| {
+            LOADED.store(false, Ordering::Release);
+            // The disk read is the slow step; a `set` from another thread lands while it runs
+            seed_from(|| {
+                set(ThemeKind::FuigoDay);
+                Some(ThemeKind::TokyoNight)
+            });
+            assert_eq!(
+                current_kind(),
+                ThemeKind::FuigoDay,
+                "a stale disk seed must not overwrite an explicit set"
+            );
+        });
+    }
+
+    #[test]
+    fn seed_applies_the_disk_value_when_nothing_was_set() {
+        with_test_env(|| {
+            LOADED.store(false, Ordering::Release);
+            seed_from(|| Some(ThemeKind::TokyoNight));
+            assert_eq!(current_kind(), ThemeKind::TokyoNight);
+            // Once loaded, a later seed attempt is a no-op
+            seed_from(|| Some(ThemeKind::FuigoDay));
+            assert_eq!(current_kind(), ThemeKind::TokyoNight);
+        });
+    }
+
+    /// `reset_for_test` runs under the test lock, but a reader that does not take the lock still runs.
+    /// Were the cache left unloaded, that reader would seed from the test home's config and overwrite the reset value.
+    /// Deterministic: the unlocked reader is simulated on this thread with an injected loader that names a different theme.
+    #[test]
+    fn reset_for_test_leaves_the_cache_loaded_so_an_unlocked_reader_cannot_reseed() {
+        with_test_env(|| {
+            set(ThemeKind::FuigoDay);
+            reset_for_test();
+            assert!(
+                LOADED.load(Ordering::Acquire),
+                "reset must not expose an unloaded cache to unlocked readers"
+            );
+            seed_from(|| Some(ThemeKind::TokyoNight));
+            assert_eq!(
+                current_kind(),
+                ThemeKind::FuigoNight,
+                "an unlocked reader after a reset must see the reset default, not a disk seed"
+            );
+        });
+    }
+
+    /// A reset is a palette write: the render stamp must change, so a render that straddles it is dropped (P57's rule holds for the reset path).
+    #[test]
+    fn reset_for_test_bumps_the_render_stamp() {
+        with_test_env(|| {
+            let before = render_stamp();
+            reset_for_test();
+            assert_ne!(render_stamp().1, before.1);
+        });
     }
 
     // -- Terminal-native lock (minimal mode) ----------------------------------

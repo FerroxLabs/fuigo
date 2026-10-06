@@ -5,6 +5,9 @@
 //!
 //! Example:
 //!   fast-worktree create /path/to/repo /path/to/worktree --dirty --parallelism 8
+// Dev/benchmark tool: never shipped (not linked into `fuigo-pager`), run by hand on a terminal.
+// Printing is its whole interface, so the workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::PathBuf;
 use std::time::Instant;

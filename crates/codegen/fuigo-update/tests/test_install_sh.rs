@@ -9,7 +9,9 @@
 //! The installer lives in the sibling `fuigo-pager` crate; it is resolved by relative path.
 //! If it cannot be found (e.g. a sandbox that does not vendor it) the test skips rather than fail.
 //! Under the repo's `cargo nextest` workflow the path resolves and the installer is exercised end to end.
-
+// Test, bench or example code: its prints reach a harness or a developer, never a user, so the
+// workspace print deny (R077) is waived here.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;

@@ -36,6 +36,9 @@ pub enum SideQuestionError {
     PrepareClient(String),
     #[error("No response from model")]
     EmptyResponse,
+    /// The execution's token-budget guard refused the side question (Contract D.4).
+    #[error("{0}")]
+    BudgetDenied(crate::acp_error::ExecutionBudgetDenial),
 }
 /// Prompt completion kind returned to the ACP layer.
 #[derive(Debug, Clone)]
@@ -236,6 +239,22 @@ impl CancelTrigger {
             Self::SessionDelete => "session_delete",
             Self::Client(s) => s,
         }
+    }
+    /// P144: the trigger the agent's session supervisor cancels resident sessions with when the runtime
+    /// limit (`FUIGO_MAX_RUNTIME_SECS`) has passed.
+    pub(crate) const RUNTIME_LIMIT_NAME: &'static str = "execution_budget_exhausted";
+    pub(crate) fn runtime_limit() -> Self {
+        Self::Client(Self::RUNTIME_LIMIT_NAME.to_string())
+    }
+    /// Whether this cancel is the runtime limit ending the turn: the supervisor's trigger AND the
+    /// process deadline really passed, so a client that sends the same wire name cannot make its own
+    /// Stop read as a budget denial.
+    pub(crate) fn is_runtime_limit(&self) -> bool {
+        matches!(self, Self::Client(name) if name == Self::RUNTIME_LIMIT_NAME)
+            && fuigo_sampler::execution_budget::process_budget()
+                .ok()
+                .flatten()
+                .is_some_and(|budget| budget.expired())
     }
     /// Wire names that are a user Stop. One list for the shell and the pager banner.
     pub fn is_user_gesture_name(name: &str) -> bool {
@@ -509,6 +528,24 @@ pub enum SessionCommand {
         next_trace_turn: u64,
         request_id: Option<String>,
     },
+    /// Tell the model, at its next prompt, that the turn a previous process was running never finished.
+    NoteInterruptedTurn {
+        turn: crate::session::interrupted_turn::InterruptedTurn,
+    },
+    /// Tell the user, once, that the history was repaired while the session was loaded (P96).
+    /// Sent as a `HistoryRepaired` note and saved in the transcript.
+    NotifyHistoryRepaired {
+        notice: String,
+    },
+    /// Tell the user, once per session, that a config source was refused a reference to the saved API key (P133).
+    NotifyConfigNotice {
+        notice: String,
+    },
+    /// [`Self::NotifyConfigNotice`] unless this session was already sent this exact note (P148): for a reload that
+    /// re-reads config the session's start already reported on (the folder-trust grant), so a note reaches it once.
+    NotifyConfigNoticeIfNew {
+        notice: String,
+    },
     /// Flush pending writes and copy the current session directory contents to memory.
     /// The caller can then tar.gz and upload to GCS (or similar).
     CopyFile {
@@ -541,6 +578,11 @@ pub enum SessionCommand {
     /// Sent fire-and-forget alongside `UpdateMcpServers` on the reconnect rail.
     UpdateAttachPolicy {
         startup_hints: Box<crate::session::StartupHints>,
+    },
+    /// Replace the actor's hot-reload seed (P141, Astra r1): `update_mcp_servers` and a resident `session/load` admit a
+    /// new client set and store it on the handle; the actor's own plugin reload re-merges ITS copy, so it gets the same.
+    SetClientMcpSeed {
+        seed: crate::session::managed_mcp::ClientMcpSeed,
     },
     /// Toggle an MCP server on/off within the session actor's event loop.
     /// Atomic read-modify-write avoids TOCTOU races with background config refreshes.
@@ -764,6 +806,12 @@ pub enum SessionCommand {
     },
     /// Re-discover skills from disk, update the SkillManager baseline, and re-advertise slash commands to the client.
     ReloadSkills,
+    /// P121 (K6): the sampler config this session runs on right now (its live model, endpoint and
+    /// credentials), so a helper client rebuilt after a catalog reload follows the session itself
+    /// rather than whatever the reloaded catalog now says the session's model id means.
+    GetLiveSamplerConfig {
+        respond_to: oneshot::Sender<fuigo_sampler::SamplerConfig>,
+    },
     /// Dispatch session_start hook using the actor's loaded HookRegistry.
     DispatchSessionStartHook {
         /// "new" for brand new sessions, "load" for sessions loaded from disk.
@@ -821,7 +869,14 @@ pub enum SessionCommand {
     RewriteMemoryNote {
         raw_text: String,
         context_summary: String,
-        respond_to: oneshot::Sender<Result<String, String>>,
+        respond_to: oneshot::Sender<Result<String, acp::Error>>,
+    },
+    /// Append a user-written note to the workspace `MEMORY.md`, if and only if THIS session has memory on.
+    /// The session is the authority on that: a client's cached view of it can be stale (another attached client may have
+    /// turned memory off), so the write is decided here, at write time.
+    SaveMemoryNote {
+        text: String,
+        respond_to: oneshot::Sender<Result<(), acp::Error>>,
     },
     /// Inject a user message into the active turn without canceling it.
     /// The text is queued in `pending_interjections` and drained at the next safe point in `process_conversation_turn`.
@@ -981,5 +1036,17 @@ mod cancel_trigger_tests {
         assert!(!CancelTrigger::Shutdown.is_user_gesture());
         assert!(!CancelTrigger::SessionClose.is_user_gesture());
         assert!(!CancelTrigger::SessionDelete.is_user_gesture());
+    }
+
+    /// P144: the runtime-limit cancel is recognized only when the process deadline has really passed.
+    /// This test binary runs with no process budget, so neither the supervisor's trigger nor a client
+    /// sending the same wire name may read as the limit: a client's Stop never becomes a budget denial.
+    #[test]
+    fn the_runtime_limit_trigger_needs_a_passed_deadline() {
+        assert!(fuigo_sampler::execution_budget::process_budget().ok().flatten().is_none(), "precondition");
+        assert_eq!(CancelTrigger::runtime_limit().as_str(), CancelTrigger::RUNTIME_LIMIT_NAME);
+        assert!(!CancelTrigger::runtime_limit().is_runtime_limit());
+        assert!(!CancelTrigger::from_client(CancelTrigger::RUNTIME_LIMIT_NAME).is_runtime_limit());
+        assert!(!CancelTrigger::Esc.is_runtime_limit());
     }
 }

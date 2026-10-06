@@ -74,6 +74,43 @@ pub struct QueryResult {
     pub total_estimate: Option<usize>,
 }
 
+/// Make the index database owner-only (P150, D6/S14) before SQLite opens it. SQLite creates a new database 0644 (its
+/// default file permissions, less the umask) and gives its `-wal`, `-shm` and `-journal` files the database file's
+/// mode, so a missing database is created empty at 0600 (SQLite treats an empty file as a new database) and an
+/// existing one, or a sibling an older version left looser, is tightened by path. Best effort and Unix only: a
+/// filesystem without modes must not stop search; Windows keeps the folder's ACL.
+///
+/// An existing database is never opened here (Astra r3): on Unix, closing any descriptor of a file drops every POSIX
+/// lock the process holds on it, which would release the locks of a transaction another connection has open. Only
+/// `create_new` opens, and it fails without opening when the file exists.
+fn prepare_owner_only(db_path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(db_path);
+        let mut paths = vec![db_path.to_path_buf()];
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut name = db_path.as_os_str().to_owned();
+            name.push(suffix);
+            paths.push(std::path::PathBuf::from(name));
+        }
+        for path in paths {
+            if let Ok(meta) = std::fs::symlink_metadata(&path)
+                && meta.is_file()
+                && meta.permissions().mode() & 0o777 != 0o600
+            {
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = db_path;
+}
+
 /// Wraps a `rusqlite::Connection` pointing at `session_search.sqlite`.
 pub struct SessionSearchIndex {
     db: Connection,
@@ -143,6 +180,9 @@ impl SessionSearchIndex {
         db_path: &Path,
         journal_mode: JournalMode,
     ) -> Result<Self, rusqlite::Error> {
+        // The index duplicates session text (P150, S14): owner-only before SQLite opens it, which also gives the
+        // `-wal`/`-shm`/`-journal` files it creates the database file's mode.
+        prepare_owner_only(&journal_mode.effective_db_path(db_path));
         // busy_timeout and the journal pragma live in the helper (see JournalMode::open)
         let mut db = journal_mode.open(db_path)?;
 
@@ -1456,4 +1496,68 @@ mod tests {
         assert!(qr.results.is_empty());
         assert_eq!(qr.total_estimate, Some(0));
     }
+}
+
+/// P150 (D6, S14; live e2e lane M): the session search index duplicates session text, so the database and the
+/// `-wal`/`-shm` files SQLite makes beside it are owner-only, and a database an older version left 0644 is tightened.
+#[cfg(all(test, unix))]
+#[test]
+fn p150_session_search_index_files_are_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("sessions").join("session_search.sqlite");
+    let index = SessionSearchIndex::open_or_create(&db).unwrap();
+    index.set_meta("p150", "x").unwrap();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(db.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.to_string_lossy().contains("session_search.sqlite") {
+            assert_eq!(mode(&path), 0o600, "{} must be owner-only", path.display());
+            checked += 1;
+        }
+    }
+    assert!(checked >= 1);
+    drop(index);
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    drop(SessionSearchIndex::open_or_create(&db).unwrap());
+    assert_eq!(mode(&db), 0o600, "a looser index is tightened");
+}
+
+/// P150 (Astra r3, HIGH): preparing the database must not open and close a live one. On Unix, closing any descriptor
+/// of a file drops every POSIX lock the process holds on it, so a stray open/close would release the locks of an
+/// active SQLite transaction and let another process write into it. Linux open-file-description locks conflict with
+/// those POSIX locks even inside one process, which makes the release observable.
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn p150_preparing_a_live_index_keeps_its_sqlite_locks() {
+    use std::os::fd::AsRawFd as _;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = tmp.path().join("session_search.sqlite");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch("CREATE TABLE t(x); BEGIN IMMEDIATE; INSERT INTO t VALUES (1);")
+        .unwrap();
+    // Opened once and kept open, so the probe itself closes nothing until the end.
+    let probe_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&db)
+        .unwrap();
+    let locked = || {
+        // SAFETY: a zeroed `flock` is a valid value, and F_OFD_GETLK only reads and writes that struct.
+        let mut fl: libc::flock = unsafe { std::mem::zeroed() };
+        fl.l_type = libc::F_WRLCK as libc::c_short;
+        fl.l_whence = libc::SEEK_SET as libc::c_short;
+        // SQLite's lock bytes start at the pending byte, 0x40000000.
+        fl.l_start = 0x4000_0000;
+        fl.l_len = 1024;
+        // SAFETY: the descriptor is open for the call and `fl` is a valid, exclusively borrowed `flock`.
+        let rc = unsafe { libc::fcntl(probe_file.as_raw_fd(), libc::F_OFD_GETLK, &mut fl) };
+        assert_eq!(rc, 0, "F_OFD_GETLK failed: {}", std::io::Error::last_os_error());
+        fl.l_type != libc::F_UNLCK as libc::c_short
+    };
+    assert!(locked(), "the open transaction holds SQLite's locks");
+    prepare_owner_only(&db);
+    assert!(locked(), "preparing a live database released its SQLite locks");
+    conn.execute_batch("COMMIT;").unwrap();
 }

@@ -830,6 +830,9 @@ mod tests {
 }
 
 // Unix child re-exec under `RLIMIT_NPROC` exercises the real `new()` probe path.
+// Test code: prints reach the harness (R077 print-deny waiver; `cfg(all(test, ..))` is not
+// recognised by clippy's `allow-print-in-tests`).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 #[cfg(all(test, unix))]
 mod thread_exhaustion_tests {
     use super::*;

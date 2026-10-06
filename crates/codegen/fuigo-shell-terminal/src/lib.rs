@@ -35,6 +35,93 @@ pub use streaming_local_terminal::{
     wait_for_terminal_exit,
 };
 
+/// P113 r3: remove Fuigo's own secrets ([`fuigo_tools::util::shell_env_policy::is_fuigo_secret`]: its first-party
+/// keys, internal secrets such as `FUIGO_AGENT_SECRET`, and every credential name a config registered) from a child
+/// that otherwise keeps the user's whole environment (a `!` command, a client terminal). Call it before setting any
+/// explicit variable, so an explicit entry still arrives.
+pub(crate) fn remove_fuigo_secrets(cmd: &mut tokio::process::Command) {
+    for name in fuigo_tools::util::shell_env_policy::inherited_fuigo_secret_names() {
+        cmd.env_remove(name);
+    }
+}
+
+/// P113 r3 probes: `!` commands, client terminals and PTYs keep the user's environment but never Fuigo's own secrets.
+#[cfg(all(test, unix))]
+pub(crate) mod p113_probe {
+    /// Fuigo's own secret variables, planted in the PARENT. Literal on purpose (a probe that read the denylist would
+    /// plant nothing once it was emptied).
+    pub(crate) const SECRETS: &[&str] = &[
+        "FUIGO_API_KEY",
+        "FUIGO_CODE_API_KEY",
+        "FUIGO_AGENT_SECRET",
+        "FUIGO_AUTH",
+        "FUIGO_AUTH_PATH",
+        "FUIGO_DEPLOYMENT_KEY",
+        "FUIGO_EXTRA_AUTH_KEY",
+        "FUIGO_TRACE_UPLOAD_CREDENTIALS_FILE",
+        "FUIGO_INTERNAL_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_HEADERS",
+        "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+        "FUIGO_TELEMETRY_EVENTS_API_KEY",
+        "FUIGO_TELEMETRY_MIXPANEL_TOKEN",
+        // A name a config registered (an MCP `bearer_token_env_var`); the child registers it before spawning.
+        "P113_MCP_BEARER",
+        // Astra r3 #1: a built-in provider name a config registered the same way is Fuigo's too.
+        "GROQ_API_KEY",
+    ];
+
+    /// The shell test the probe runs: the benign variable and the user's own provider key arrived, the explicit
+    /// `FUIGO_AGENT_SECRET` arrived when `explicit`, and none of [`SECRETS`] otherwise did.
+    pub(crate) fn check(explicit: bool) -> String {
+        let absent: String = SECRETS
+            .iter()
+            .filter(|name| !(explicit && **name == "FUIGO_AGENT_SECRET"))
+            .map(|name| format!("${{{name}+x}}"))
+            .collect();
+        let agent = if explicit {
+            " && test \"$FUIGO_AGENT_SECRET\" = fake-p113-explicit"
+        } else {
+            ""
+        };
+        format!(
+            "test \"$P113_BENIGN\" = kept && test \"$OPENAI_API_KEY\" = fake-p113-user{agent} && test -z \"{absent}\""
+        )
+    }
+
+    /// Re-run `test_name` in a fresh test process whose own environment holds every [`SECRETS`] entry, the user's
+    /// `OPENAI_API_KEY` and `P113_BENIGN=kept`. `true` in the parent (which then returns), `false` in the child
+    /// (which registers `P113_MCP_BEARER` and `GROQ_API_KEY` as configured credentials and runs the body).
+    pub(crate) fn parent_env(test_name: &str) -> bool {
+        if std::env::var("P113_CHILD_TEST").as_deref() == Ok(test_name) {
+            fuigo_tools::util::shell_env_policy::register_credential_env_names(["P113_MCP_BEARER", "GROQ_API_KEY"]);
+            return false;
+        }
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.arg(test_name)
+            .args(["--test-threads=1", "--nocapture"])
+            .env("P113_CHILD_TEST", test_name)
+            .env("P113_BENIGN", "kept")
+            .env("OPENAI_API_KEY", "fake-p113-user");
+        for name in SECRETS {
+            cmd.env(name, "fake-p113-ambient");
+        }
+        let output = cmd.output().unwrap();
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .replace("fake-p113-", "[redacted]-");
+        assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
+        assert!(
+            diagnostics.contains("test result: ok. 1 passed"),
+            "the P113 child must run exactly one test: {diagnostics}"
+        );
+        true
+    }
+}
+
 pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 pub const DEFAULT_OUTPUT_BYTE_LIMIT: usize = 30_000;
 

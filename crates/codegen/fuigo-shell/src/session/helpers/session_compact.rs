@@ -1,3 +1,5 @@
+use std::path::{Component, Path};
+
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
     ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
@@ -89,8 +91,17 @@ pub(crate) const COMPACT_ERROR_DETAIL_MAX_BYTES: usize = 300;
 /// Idempotent, so the wire chokepoint below can re-run it on pre-normalized text.
 /// URLs stay: for custom-endpoint users the URL is the diagnosis.
 pub(crate) fn normalize_compact_detail(raw: &str) -> String {
-    let single_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    let scrubbed = crate::sampling::error::rewrite_service_names(&single_line);
+    /// The rewrite without the cap.
+    fn rewrite(raw: &str) -> String {
+        let single_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        crate::sampling::error::rewrite_service_names(&single_line)
+    }
+    // P70b: this text is still classified after it is normalized, so it is not scrubbed here. But the rewrite can
+    // change how a credential in it is spelled (collapsed spaces, a renamed service), and the display and log sinks
+    // match exactly: record the rewritten spelling of any sent credential the text contains. The cap is recognised
+    // at the sinks by its truncation mark.
+    fuigo_telemetry::sent_credentials::record_transformed(raw, rewrite);
+    let scrubbed = rewrite(raw);
     fuigo_tools::util::truncate_str_with_marker(&scrubbed, COMPACT_ERROR_DETAIL_MAX_BYTES)
         .into_owned()
 }
@@ -131,6 +142,105 @@ impl CompactFailure {
 
 // Single definition so turn-path and compaction size detection can't drift.
 pub(crate) use fuigo_compaction::is_context_length_error;
+
+/// Newest verified attached image paths kept in the compaction note.
+pub(crate) const MAX_COMPACTION_IMAGE_PATHS: usize = 32;
+
+/// Candidates that pass the lexical filter, and so cost filesystem calls, examined before giving up.
+/// Bounds the calls an untrusted transcript can cause: a planted list of missing entries stops here.
+pub(crate) const MAX_COMPACTION_IMAGE_PATH_PROBES: usize = 4 * MAX_COMPACTION_IMAGE_PATHS;
+
+/// Keep the newest [`MAX_COMPACTION_IMAGE_PATHS`] attached image paths some session's `assets/` dir holds, in the
+/// chronological order of `paths`, and count the rest (junk and over-cap alike).
+///
+/// The note tells the model to `read_file` these paths, so a harvested block is never trusted. A path stays only if:
+/// - it is absolute with no `.`/`..` components;
+/// - it is exactly `<sessions_root>/<cwd-dir>/<session-id>/assets/<file>`, the only place `persist_user_images` writes.
+///   Any session, not just this one: a fork inherits its parent's transcript, whose `<image_files>` still name the
+///   parent's `assets/` (the fork copy neither copies assets nor rewrites paths), and those files are still there;
+/// - every directory from `sessions_root` down to that `assets/` is a real directory per `symlink_metadata` (a symlinked
+///   session or `assets/` dir would otherwise launder an outside file);
+/// - `symlink_metadata` says the file itself is a regular file (a symlink to one is dropped).
+///
+/// Newest first, so a planted or stale entry never takes a slot from a real asset. Filesystem calls are bounded:
+/// at most [`MAX_COMPACTION_IMAGE_PATH_PROBES`] lexically valid candidates are examined, each costing at most four
+/// `symlink_metadata` calls (three directory checks, cached per `assets/` dir, plus the file).
+pub(crate) async fn retain_session_asset_files(
+    paths: Vec<String>,
+    sessions_root: &Path,
+) -> (Vec<String>, usize) {
+    let total = paths.len();
+    let mut kept = Vec::with_capacity(total.min(MAX_COMPACTION_IMAGE_PATHS));
+    let mut probes = 0usize;
+    let mut real_assets_dirs: Vec<std::path::PathBuf> = Vec::new();
+    for path in paths.into_iter().rev() {
+        if kept.len() == MAX_COMPACTION_IMAGE_PATHS || probes == MAX_COMPACTION_IMAGE_PATH_PROBES {
+            break;
+        }
+        let candidate = Path::new(&path);
+        let Some(assets_dir) = session_assets_dir_of(candidate, sessions_root) else {
+            continue;
+        };
+        probes += 1;
+        if !real_assets_dirs.iter().any(|dir| dir == assets_dir) {
+            if !is_real_dir_chain(sessions_root, assets_dir).await {
+                continue;
+            }
+            real_assets_dirs.push(assets_dir.to_path_buf());
+        }
+        if tokio::fs::symlink_metadata(candidate)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+        {
+            kept.push(path);
+        }
+    }
+    kept.reverse();
+    let dropped = total - kept.len();
+    (kept, dropped)
+}
+
+/// The `assets/` dir `candidate` sits directly in, when it is lexically `<sessions_root>/<cwd>/<session>/assets/<file>`.
+fn session_assets_dir_of<'a>(candidate: &'a Path, sessions_root: &Path) -> Option<&'a Path> {
+    if !candidate.is_absolute()
+        || candidate
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return None;
+    }
+    let relative = candidate.strip_prefix(sessions_root).ok()?;
+    let parts: Vec<Component<'_>> = relative.components().collect();
+    let [
+        Component::Normal(_),
+        Component::Normal(_),
+        Component::Normal(assets),
+        Component::Normal(_),
+    ] = parts.as_slice()
+    else {
+        return None;
+    };
+    if assets.to_str() != Some("assets") {
+        return None;
+    }
+    candidate.parent()
+}
+
+/// Every directory below `sessions_root` down to `assets_dir` is a real directory, not a symlink.
+async fn is_real_dir_chain(sessions_root: &Path, assets_dir: &Path) -> bool {
+    let mut dir = assets_dir;
+    while dir != sessions_root {
+        match tokio::fs::symlink_metadata(dir).await {
+            Ok(metadata) if metadata.is_dir() => {}
+            _ => return false,
+        }
+        let Some(parent) = dir.parent() else {
+            return false;
+        };
+        dir = parent;
+    }
+    true
+}
 
 /// Classify an upstream `SamplingError` for the compaction retry loop.
 ///
@@ -606,7 +716,9 @@ pub(crate) async fn generate_session_compact(
                                 timing.record_delta();
                                 content.push_str(delta_content);
                             }
-                            if let Some(fr) = choice.finish_reason {
+                            // `FinishReason` carries the wire string for an unmodelled value, so
+                            // it is no longer `Copy`; the normalization below is unchanged.
+                            if let Some(fr) = choice.finish_reason.clone() {
                                 let sr = fuigo_sampling_types::StopReason::from(fr);
                                 truncated = matches!(sr, fuigo_sampling_types::StopReason::Length);
                                 stop_reason = Some(sr.as_str().to_string());
@@ -805,15 +917,30 @@ pub(crate) async fn generate_session_compact(
                 }
                 match chunk_result {
                     Ok(event) => {
-                        if !matches!(
-                            &event,
-                            fuigo_sampling_types::messages::MessageStreamEvent::Ping
-                        ) {
+                        // `Ping` is a heartbeat, and a content block or delta whose type this
+                        // client does not model is not progress either: tolerating an unmodelled
+                        // variant must not let a provider refresh this clock forever while
+                        // producing nothing.
+                        use fuigo_sampling_types::messages::MessageStreamEvent as WireEvent;
+                        let is_progress = match &event {
+                            WireEvent::Ping => false,
+                            WireEvent::ContentBlockStart { content_block, .. } => {
+                                content_block.known().is_some()
+                            }
+                            WireEvent::ContentBlockDelta { delta, .. } => delta.known().is_some(),
+                            _ => true,
+                        };
+                        if is_progress {
                             last_progress_at = std::time::Instant::now();
                         }
                         match event {
+                        // `delta` is `Open`: a delta type this client does not model is not text,
+                        // and contributes nothing here rather than failing the compaction turn
                         fuigo_sampling_types::messages::MessageStreamEvent::ContentBlockDelta {
-                            delta: fuigo_sampling_types::messages::StreamDelta::TextDelta { text },
+                            delta:
+                                fuigo_sampling_types::serde_helpers::Open::Known(
+                                    fuigo_sampling_types::messages::StreamDelta::TextDelta { text },
+                                ),
                             ..
                         } => {
                             timing.record_delta();
@@ -885,3 +1012,41 @@ mod large_body_tests;
 #[cfg(test)]
 #[path = "session_compact_reasoning_compaction_regression_tests.rs"]
 mod reasoning_compaction_regression_tests;
+
+#[cfg(test)]
+#[path = "session_compact_retain_session_asset_files_tests.rs"]
+mod retain_session_asset_files_tests;
+
+#[cfg(test)]
+mod p70b_tests {
+    use super::normalize_compact_detail;
+
+    /// P70b: the normalizer respells text that is still classified afterwards, so it does not scrub; it records the
+    /// respelling instead, and the sink's exact match then finds the credential in the normalized text.
+    #[test]
+    fn a_credential_respelled_by_the_normalizer_is_still_scrubbed_at_the_sink() {
+        const CRED: &str = "p70b  compact   cred";
+        fuigo_telemetry::sent_credentials::record(CRED);
+        let detail = normalize_compact_detail(&format!("upstream said:\n bad key {CRED} here"));
+        assert_eq!(detail, "upstream said: bad key p70b compact cred here");
+        assert_eq!(
+            fuigo_telemetry::sent_credentials::scrub(&detail),
+            "upstream said: bad key <redacted> here"
+        );
+    }
+
+    /// P119 (R088 R3-3): the 280-character error cap leaves the beginning of a credential before a truncation mark;
+    /// the normalizer then rewrites a service name inside that beginning, so the text holds neither the credential
+    /// nor a prefix of any recorded spelling.
+    #[test]
+    fn a_cut_credential_respelled_by_the_normalizer_is_still_scrubbed_at_the_sink() {
+        const CRED: &str = "inference-api-p119abcdefgh12345";
+        fuigo_telemetry::sent_credentials::record(CRED);
+        let detail = normalize_compact_detail("upstream said: bad key inference-api-p119abc\u{2026}");
+        assert!(detail.contains("inference backend-p119abc"), "{detail}");
+        assert_eq!(
+            fuigo_telemetry::sent_credentials::scrub(&detail),
+            "upstream said: bad key <redacted>\u{2026}"
+        );
+    }
+}

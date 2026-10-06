@@ -240,6 +240,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn orphan_fuigo_com_name_is_not_a_definition() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_home, _hg, _gg) = isolated_home();
         let cwd = tempfile::tempdir().unwrap();
         let compat = CompatConfig::default();
@@ -254,6 +257,9 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn build_indexes_toml_enabled_false() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_home, _hg, _gg) = isolated_home();
         let repo = project_repo(
             r#"
@@ -281,6 +287,9 @@ enabled = false
     #[test]
     #[serial_test::serial]
     fn discover_contains_merge_when_nothing_disabled() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_home, _hg, _gg) = isolated_home();
 
         let repo = project_repo(
@@ -295,7 +304,7 @@ args = ["ok"]
         compat.cursor.mcps = false;
         let discovered = discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &compat));
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            vec![],
+            Vec::<agent_client_protocol::McpServer>::new(),
             repo.path(),
             None,
             &compat,
@@ -316,6 +325,9 @@ args = ["ok"]
     #[test]
     #[serial_test::serial]
     fn toml_duplicate_url_both_kept_matches_merge() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
         let (_home, _hg, _gg) = isolated_home();
         let repo = project_repo(
             r#"
@@ -331,7 +343,7 @@ url = "https://dup.example.com/mcp"
         compat.cursor.mcps = false;
         let discovered = discover_mcp_definitions_ignoring_disable(&inputs(repo.path(), &compat));
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            vec![],
+            Vec::<agent_client_protocol::McpServer>::new(),
             repo.path(),
             None,
             &compat,

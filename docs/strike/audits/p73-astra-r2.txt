@@ -1,0 +1,33 @@
+# gpt-6-astra read-only audit, P73. Brief given, then the auditor's final answer verbatim.
+# (The full tool transcript was ~0.4-1.5 MB per round and is trimmed; the final answer is complete.)
+
+## BRIEF
+Round 2 audit. Worktree at your cwd (read-only), HEAD vs base 48886772 (`git diff 48886772..HEAD`). Do NOT run cargo. Round 1 (docs/strike/audits/p73-astra-r1.txt) returned REQUEST CHANGES with 1 MEDIUM and 2 LOW, all against the source-scanning guard crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs. Since then: the scanner now recognises `#[cfg(test)] mod` of any visibility (incl. attributes between), standalone `#[test]` fns anywhere, blanks comments/strings/char literals/raw strings before matching (so a `// pin_theme()` comment neither grants nor revokes the lock), and matches a bare imported `set(ThemeKind::..)`. New in this round: (a) a second rule in the same file, `scan_dashboard_serial`: a `#[test]` that reaches `dashboard_enabled()` (dispatch_open_dashboard / dispatch(Action::OpenDashboard) / dashboard_enabled) must carry `#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]`, because that function reads a process env var that sibling tests set to 0; six tests (app/dispatch/tests/dashboard.rs x5, app/dispatch/tests/session/optimistic_home.rs x1) lacked it and were observed failing under load (workspace_dashboard_open_loads_one_snapshot_and_skips_rosters, workspace_dashboard_reopens_store_when_only_stale_snapshot_remains); (b) scrollback/text_selection.rs: `with_bidi(on, f)` helper, and the 'reordering off' read in visual_selectable_cols_shifts_region_past_rtl_ellipsis now runs under the bidi test lock with the latch forced off.
+Report findings by severity (BLOCKER/HIGH/MEDIUM/LOW) with file:line. Check: (1) the R1 findings are actually closed, with concrete counterexamples if not; (2) blank_non_code correctness (nested block comments, raw strings with hashes, char literal vs lifetime, escaped quotes) and that line/column alignment is preserved; (3) false negatives/positives of both rules on rustfmt-formatted code; (4) that the serial attribute on the six tests cannot deadlock or change what they assert; (5) the bidi change. Then end with exactly one line `VERDICT: <APPROVE|APPROVE WITH LOW-SEVERITY NIT|REQUEST CHANGES> - <reason>`.
+
+## FINAL ANSWER
+Audited `48886772..ba49876a` read-only. No Cargo or Rust tests run. No BLOCKER/HIGH findings.
+
+- **MEDIUM — Test discovery still skips valid formatted code.** [theme_pin_guard_tests.rs:244](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:244): backward attribute scanning stops at a multiline attribute’s closing `)]`. A standalone `#[test]` followed by a multiline `#[cfg_attr(...)]`, with both `cache::set(...)` and `dashboard_enabled()` in its body, returns **zero violations from both rules**. Reproduced after rustfmt. Additionally, at line 221, a comment between `#[cfg(test)]` and `pub(super) mod tests` becomes a blank line that prevents module recognition, hiding unpinned helper functions. R1’s ordinary visibility/standalone examples are fixed, but its test-discovery finding is not fully closed.
+
+- **LOW — Raw byte strings can grant fake locks or produce fake mutations.** [theme_pin_guard_tests.rs:88](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:88): the preceding-character check rejects the `r` in `br#…#`. Embedded quotes then expose literal contents as code. These rustfmt-preserved examples reproduce both directions:
+  - `let _ = br#""pin_theme()""#;` followed by an unpinned `cache::set(...)` incorrectly passes.
+  - `let _ = br#""cache::set(x)""#;` alone incorrectly fails.
+  
+  Recognize prefixed raw literals before ordinary quoted-string handling.
+
+- **LOW — String contents still grant the explicit exemption.** [theme_pin_guard_tests.rs:305](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:305): exemption matching searches raw text throughout the function. Consequently, `let _ = "theme-pin:";` followed by `cache::set(...)` passes without a lock or opt-out comment. Restrict exemption recognition to actual comments in the documented location.
+
+- **LOW — Directly imported setters remain partially undetected.** [theme_pin_guard_tests.rs:30](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:30): `set(ThemeKind::FuigoDay)` is now caught, but `let kind = ThemeKind::FuigoDay; set(kind);` still passes. R1’s imported-setter finding is therefore only partially closed. Resolve imports or enforce qualified setter calls.
+
+- **LOW — Dashboard serialization recognition accepts inactive attributes and rejects valid multiple-key locks.** [theme_pin_guard_tests.rs:328](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:328): substring matching accepts `#[cfg_attr(any(), serial_test::serial(FUIGO_AGENT_DASHBOARD))]`, although that condition never installs the lock. Conversely, `#[serial_test::serial(FUIGO_AGENT_DASHBOARD, CONFIG)]` is rejected despite acquiring the required key; multiple keys are supported by the locked `serial_test` 3.2.0 dependency. Both counterexamples survived rustfmt.
+
+The other requested checks:
+
+- **Lexer:** source-equivalent checks passed nested block comments, ordinary raw strings with 0–8 hashes, escaped quotes, character literals versus lifetimes, and preservation of newlines and Unicode scalar positions. This preserves character columns, not UTF-8 byte offsets or visual tab widths.
+- **Six dashboard annotations:** no introduced deadlock path found. Each adds the same outer serial key used by sibling environment writers; the examined paths neither acquire another serial key nor wait for a worker needing this key. Test bodies and assertions are unchanged.
+- **Bidi:** [text_selection.rs:1620](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/scrollback/text_selection.rs:1620) correctly captures, forces, and restores the latch while holding the mutex. Reverse drop order restores it before unlocking, including during unwinding. The off/on assertions acquire the lock sequentially, preserving both assertions without nested acquisition.
+
+A source-equivalent Python scan reported zero current-tree violations across 664 files and reproduced the counterexamples above. This is scanner-analysis evidence, not Rust execution or load-test proof.
+
+VERDICT: REQUEST CHANGES - R1 test-discovery coverage remains incomplete, and both guards retain reproducible false negatives and false positives.

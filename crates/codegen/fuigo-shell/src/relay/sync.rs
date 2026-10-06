@@ -136,7 +136,8 @@ impl RelaySyncState {
         let path = Self::state_path(session_dir);
         let tmp_path = path.with_extension("json.tmp");
         let content = serde_json::to_string(self)?;
-        std::fs::write(&tmp_path, content)?;
+        // Owner-only like every session file (P150, S14); the rename carries the temp's mode over.
+        crate::session::storage::owner_only::write(&tmp_path, content)?;
         std::fs::rename(tmp_path, path)
     }
 
@@ -219,13 +220,19 @@ pub struct RelaySync {
 impl RelaySync {
     /// Returns a `RelaySync` that queues notifications and syncs them to the relay in a background task.
     /// Connection state can be observed via `connection_state()`.
+    ///
+    /// P125: a relay receives the whole session transcript, so a relay FluxRouter does not operate is synced to only
+    /// when the user opted in to its origin (`[relay] trusted_origins` in the user config, or
+    /// `FUIGO_TRUSTED_RELAY_ORIGINS`: [`crate::agent::relay_opt_in::relay_sync_gate`]). Refused: no task, no socket,
+    /// not one byte sent; the refusal says which relay, why and how to trust it.
     pub fn new(
         session_id: String,
         config: RelayConfig,
         agent_type: AgentType,
         session_dir: Option<PathBuf>,
         status_cb: Option<StatusCallback>,
-    ) -> RelaySync {
+    ) -> Result<RelaySync, crate::agent::relay_opt_in::RelayOptInRefused> {
+        config.sync_trust().inspect_err(|refused| refused.record("relay sync"))?;
         let (tx, rx) = mpsc::unbounded_channel();
         let (state_tx, state_rx) = watch::channel(ConnectionState::Disconnected);
         let cancel = CancellationToken::new();
@@ -249,14 +256,14 @@ impl RelaySync {
             pending_count_task,
         ));
 
-        RelaySync {
+        Ok(RelaySync {
             tx,
             session_id,
             agent_type,
             connection_state_rx: state_rx,
             cancel,
             pending_count,
-        }
+        })
     }
 
     /// Skips replay notifications to prevent loops.
@@ -358,6 +365,9 @@ async fn relay_sync_task(
 
     let (from_relay_tx, mut from_relay_rx) = mpsc::unbounded_channel::<String>();
 
+    // P77: decided once, on the relay URL every (re)connection of this config opens.
+    let identity = cfg.config.identity_disclosure();
+
     // Spawn the relay connection (reconnection is handled internally by run_relay_loop)
     let (to_relay_tx, _relay_handle) =
         spawn_relay_connection(cfg.config, from_relay_tx, cancel.clone());
@@ -384,6 +394,7 @@ async fn relay_sync_task(
                             &relay_msg,
                             &mut initialized,
                             cfg.agent_type,
+                            identity,
                             &update_state,
                         ) {
                             tracing::warn!(error = %e, "RelaySync: error handling relay message");
@@ -505,12 +516,42 @@ fn resolve_event_id(notification: &acp::SessionNotification) -> String {
         .unwrap_or_else(|| crate::util::event_id::generate_event_id(&notification.session_id.0))
 }
 
+/// P77: the `_meta` of the `initialize` response sent to the relay.
+///
+/// The OS host name is a stable machine identifier (it often carries the user's name), so it follows the P54 rule for
+/// body-carried identity: a FluxRouter-operated relay (`identity` permitted) receives it, exactly as before; any other
+/// relay receives the response WITHOUT the `hostname` field (the same decision as the session registry's register
+/// body). `sessionId` and the session-scoped `agentId` already tell that relay's sessions apart. The working directory
+/// is the session's own subject matter and is sent as is (same disposition as the leader hub registration; R082).
+fn relay_initialize_meta(
+    identity: fuigo_extra_ca::fluxrouter::IdentityDisclosure,
+    agent_type: AgentType,
+    session_id: &str,
+    hostname: &str,
+    cwd: &str,
+) -> serde_json::Value {
+    let mut meta = json!({
+        "agentType": agent_type,
+        "agentId": format!("{}-{}", agent_type, session_id),
+        "sessionId": session_id,
+        "hostname": hostname,
+        "currentWorkingDirectory": cwd,
+    });
+    if identity.body_identity(hostname).is_none()
+        && let Some(fields) = meta.as_object_mut()
+    {
+        fields.shift_remove("hostname");
+    }
+    meta
+}
+
 fn handle_relay_message(
     session_id: &str,
     to_relay_tx: &mpsc::UnboundedSender<String>,
     msg: &str,
     initialized: &mut bool,
     agent_type: AgentType,
+    identity: fuigo_extra_ca::fluxrouter::IdentityDisclosure,
     update_state: &dyn Fn(ConnectionState),
 ) -> Result<(), String> {
     let json: serde_json::Value =
@@ -540,13 +581,7 @@ fn handle_relay_message(
                     "result": {
                         "protocolVersion": "1",
                         "serverCapabilities": {},
-                        "_meta": {
-                            "agentType": agent_type,
-                            "agentId": format!("{}-{}", agent_type, session_id),
-                            "sessionId": session_id,
-                            "hostname": hostname,
-                            "currentWorkingDirectory": cwd,
-                        }
+                        "_meta": relay_initialize_meta(identity, agent_type, session_id, &hostname, &cwd),
                     }
                 });
 
@@ -769,6 +804,19 @@ mod tests {
         RelaySyncState::default().save(&session_dir).unwrap();
 
         assert_eq!(crate::test_support::unix_mode(&session_dir), 0o700);
+    }
+
+    /// P150 (S14; live e2e lane M): `relay_sync.json` is a session file and is written 0600.
+    #[test]
+    #[cfg(unix)]
+    fn p150_relay_sync_state_file_is_owner_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let session_dir = temp_dir.path().join("session-abc");
+        RelaySyncState::default().save(&session_dir).unwrap();
+        assert_eq!(
+            crate::test_support::unix_mode(&session_dir.join("relay_sync.json")),
+            0o600
+        );
     }
 
     #[test]
@@ -1038,6 +1086,7 @@ mod tests {
             &msg,
             &mut initialized,
             AgentType::Tui,
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::WITHHELD,
             &update_state,
         );
 
@@ -1076,6 +1125,7 @@ mod tests {
             &msg,
             &mut initialized,
             AgentType::Tui,
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::WITHHELD,
             &update_state,
         );
 
@@ -1099,6 +1149,7 @@ mod tests {
             "not valid json",
             &mut initialized,
             AgentType::Tui,
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::WITHHELD,
             &update_state,
         );
 
@@ -1130,6 +1181,7 @@ mod tests {
             &msg,
             &mut initialized,
             AgentType::Agent,
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::WITHHELD,
             &update_state,
         );
 
@@ -1142,5 +1194,163 @@ mod tests {
             rx.try_recv().is_err(),
             "should not send response without request id"
         );
+    }
+
+    // ===== P77: the initialize response's host name follows the relay's operator =====
+
+    const P77_FLUXROUTER_RELAYS: [&str; 2] = ["wss://api.fluxrouter.ai/relay", "WSS://API.FLUXROUTER.AI./ws"];
+    const P77_OTHER_RELAYS: [&str; 7] = [
+        "wss://relay.example.test/ws",
+        "ws://api.fluxrouter.ai/relay",
+        "https://api.fluxrouter.ai/relay",
+        "wss://api.fluxrouter.ai.evil.example/relay",
+        "wss://evil.example/api.fluxrouter.ai",
+        "not a url",
+        "",
+    ];
+
+    fn p77_identity(relay_url: &str) -> fuigo_extra_ca::fluxrouter::IdentityDisclosure {
+        fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(relay_url)
+    }
+
+    /// P77: `_meta` for a FluxRouter-operated relay is what it was before P77, host name included; every other relay,
+    /// and every relay URL that cannot be classified, gets the same object without `hostname` and without the host
+    /// name anywhere in it.
+    #[test]
+    fn p77_relay_initialize_meta_carries_the_hostname_only_to_a_fluxrouter_relay() {
+        let (host, cwd) = ("My_Laptop.local", "/work/proj");
+        for url in P77_FLUXROUTER_RELAYS {
+            let meta = relay_initialize_meta(p77_identity(url), AgentType::Tui, "sess-1", host, cwd);
+            // The pre-P77 literal, verbatim.
+            let before = json!({
+                "agentType": AgentType::Tui,
+                "agentId": format!("{}-{}", AgentType::Tui, "sess-1"),
+                "sessionId": "sess-1",
+                "hostname": host,
+                "currentWorkingDirectory": cwd,
+            });
+            assert_eq!(meta, before, "{url}");
+            assert_eq!(meta.to_string(), before.to_string(), "{url}: byte for byte");
+        }
+        for url in P77_OTHER_RELAYS {
+            let meta = relay_initialize_meta(p77_identity(url), AgentType::Tui, "sess-1", host, cwd);
+            assert_eq!(
+                meta,
+                json!({
+                    "agentType": "tui",
+                    "agentId": "tui-sess-1",
+                    "sessionId": "sess-1",
+                    "currentWorkingDirectory": cwd,
+                }),
+                "{url}"
+            );
+            assert!(!meta.to_string().to_lowercase().contains("laptop"), "{url}: {meta}");
+        }
+        // Withholding is the fail-closed default; the agent type and session are the caller's.
+        let withheld = fuigo_extra_ca::fluxrouter::IdentityDisclosure::WITHHELD;
+        assert_eq!(
+            relay_initialize_meta(withheld, AgentType::Agent, "s", host, cwd).to_string(),
+            r#"{"agentType":"agent","agentId":"agent-s","sessionId":"s","currentWorkingDirectory":"/work/proj"}"#
+        );
+        assert_eq!(
+            relay_initialize_meta(p77_identity(P77_FLUXROUTER_RELAYS[0]), AgentType::Agent, "s", host, cwd).to_string(),
+            r#"{"agentType":"agent","agentId":"agent-s","sessionId":"s","hostname":"My_Laptop.local","currentWorkingDirectory":"/work/proj"}"#
+        );
+    }
+
+    /// P77, through the real handler: the response written to the relay channel carries this machine's host name for a
+    /// FluxRouter relay (the whole response is the pre-P77 one) and has no `hostname` field for any other relay.
+    #[test]
+    fn p77_relay_initialize_response_is_gated_by_the_relay_operator() {
+        let request = json!({ "jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {} }).to_string();
+        let respond = |url: &str| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let mut initialized = false;
+            handle_relay_message("sess-1", &tx, &request, &mut initialized, AgentType::Tui, p77_identity(url), &|_| {})
+                .expect("initialize is answered");
+            assert!(initialized, "{url}");
+            let sent = rx.try_recv().expect("a response was sent");
+            // The handler's only other frame is the session upsert (session id and working directory); nothing follows.
+            let upsert: serde_json::Value =
+                serde_json::from_str(&rx.try_recv().expect("the session upsert follows")).unwrap();
+            let cwd = upsert["params"]["cwd"].clone();
+            assert!(cwd.is_string(), "{url}: {upsert}");
+            assert_eq!(
+                upsert,
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "_fuigo/session/upsert",
+                    "params": { "sessionId": "sess-1", "cwd": cwd }
+                }),
+                "{url}"
+            );
+            assert!(rx.try_recv().is_err(), "{url}: exactly two frames answer initialize");
+            sent
+        };
+        let hostname = gethostname::gethostname().into_string().unwrap_or_else(|_| "unknown".to_string());
+        // The pre-P77 response, verbatim. The working directory is read back from the response under test: it is the
+        // process's current directory, which a neighbouring test may change between two reads.
+        let before = |cwd: &serde_json::Value| {
+            json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "result": {
+                    "protocolVersion": "1",
+                    "serverCapabilities": {},
+                    "_meta": {
+                        "agentType": AgentType::Tui,
+                        "agentId": format!("{}-{}", AgentType::Tui, "sess-1"),
+                        "sessionId": "sess-1",
+                        "hostname": hostname,
+                        "currentWorkingDirectory": cwd,
+                    }
+                }
+            })
+        };
+        for url in P77_FLUXROUTER_RELAYS {
+            let sent = respond(url);
+            let parsed: serde_json::Value = serde_json::from_str(&sent).unwrap();
+            let cwd = &parsed["result"]["_meta"]["currentWorkingDirectory"];
+            assert!(cwd.is_string(), "{url}: {sent}");
+            assert_eq!(sent, before(cwd).to_string(), "{url}: unchanged on the wire");
+        }
+        for url in P77_OTHER_RELAYS {
+            let sent: serde_json::Value = serde_json::from_str(&respond(url)).unwrap();
+            let mut without = before(&sent["result"]["_meta"]["currentWorkingDirectory"]);
+            without["result"]["_meta"].as_object_mut().unwrap().remove("hostname");
+            assert_eq!(sent, without, "{url}");
+            assert!(sent["result"]["_meta"].get("hostname").is_none(), "{url}: {sent}");
+        }
+    }
+
+    /// P77 source pin: the relay-sync task decides on the config it hands to the connection, the config decides on the
+    /// URL the socket is opened to, and the host name read here has exactly one use, the gated `_meta`.
+    #[test]
+    fn p77_relay_hostname_has_one_gated_source() {
+        let flat = |src: &str| {
+            let prod = src.split("\n#[cfg(test)]").next().unwrap();
+            prod.split_whitespace().collect::<Vec<_>>().join(" ")
+        };
+        let sync = flat(include_str!("sync.rs"));
+        assert_eq!(sync.matches("\"hostname\"").count(), 2, "the literal and its removal, both in relay_initialize_meta");
+        assert_eq!(sync.matches("gethostname::gethostname()").count(), 1);
+        assert_eq!(sync.matches("relay_initialize_meta(").count(), 2, "definition + the one use");
+        for pinned in [
+            "let identity = cfg.config.identity_disclosure(); // Spawn the relay connection (reconnection is \
+             handled internally by run_relay_loop) let (to_relay_tx, _relay_handle) = \
+             spawn_relay_connection(cfg.config, from_relay_tx, cancel.clone());",
+            "cfg.agent_type, identity, &update_state, )",
+            "\"_meta\": relay_initialize_meta(identity, agent_type, session_id, &hostname, &cwd),",
+            "if identity.body_identity(hostname).is_none() && let Some(fields) = meta.as_object_mut() { \
+             fields.shift_remove(\"hostname\"); }",
+        ] {
+            assert!(sync.contains(pinned), "{pinned}");
+        }
+        let relay = flat(include_str!("../agent/relay.rs"));
+        assert!(relay.contains(
+            "pub(crate) fn identity_disclosure(&self) -> fuigo_extra_ca::fluxrouter::IdentityDisclosure { \
+             fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination(&self.ws_url) }"
+        ));
+        assert!(relay.contains("let mut req = config.ws_url.clone().into_client_request()?;"));
     }
 }

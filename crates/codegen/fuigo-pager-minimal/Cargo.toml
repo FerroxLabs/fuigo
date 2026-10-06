@@ -53,3 +53,6 @@ fuigo-token-estimation = { workspace = true }
 fuigo-pager = { path = "../fuigo-pager", features = ["test-support"] }
 
 [features]
+
+[lints]
+workspace = true

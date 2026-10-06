@@ -16,8 +16,6 @@ pub(crate) use helpers::{
     compact_error, is_disk_full_error, parse_worktree_restore_payload,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
-#[cfg(feature = "local-workspace")]
-pub(crate) use helpers::reject_non_fs_only_advertised_tools;
 use helpers::*;
 use std::path::{Path, PathBuf};
 use agent_client_protocol as acp;
@@ -197,7 +195,7 @@ pub(crate) fn execute(
             let mut meta = session_flags.to_meta();
             apply_permission_mode_override(&mut meta, permission_mode_override);
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
+            finalize_chat_session_meta(&mut meta, is_chat_path);
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -297,11 +295,7 @@ pub(crate) fn execute(
             let cwd = cwd.to_path_buf();
             let mut meta = session_flags.to_meta();
             apply_permission_mode_override(&mut meta, permission_mode_override);
-            finalize_chat_session_meta(
-                &mut meta,
-                chat_kind || session_flags.chat_mode,
-                session_flags,
-            );
+            finalize_chat_session_meta(&mut meta, chat_kind || session_flags.chat_mode);
             if let Some(ref mid) = model_id {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("modelId".into(), serde_json::json!(mid.0));
@@ -419,7 +413,7 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
-            finalize_chat_session_meta(&mut meta, is_chat_path, session_flags);
+            finalize_chat_session_meta(&mut meta, is_chat_path);
             if let Some(rc) = session_flags.restore_code {
                 meta.get_or_insert_with(acp::Meta::new)
                     .insert("fuigo/restore_code".into(), serde_json::Value::Bool(rc));
@@ -1104,11 +1098,16 @@ pub(crate) fn execute(
                         .as_ref()
                         .err()
                         .and_then(http_status_from_error);
+                    let verdicts = result
+                        .as_ref()
+                        .err()
+                        .and_then(fuigo_shell::sampling::error_verdicts::error_verdicts_from_error);
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
                         http_status,
+                        verdicts,
                         prompt_id: Some(prompt_id),
                     }
                 });
@@ -1168,11 +1167,16 @@ pub(crate) fn execute(
                         .as_ref()
                         .err()
                         .and_then(http_status_from_error);
+                    let verdicts = result
+                        .as_ref()
+                        .err()
+                        .and_then(fuigo_shell::sampling::error_verdicts::error_verdicts_from_error);
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
                         http_status,
+                        verdicts,
                         prompt_id: Some(prompt_id),
                     }
                 });
@@ -1230,11 +1234,16 @@ pub(crate) fn execute(
                         .as_ref()
                         .err()
                         .and_then(http_status_from_error);
+                    let verdicts = result
+                        .as_ref()
+                        .err()
+                        .and_then(fuigo_shell::sampling::error_verdicts::error_verdicts_from_error);
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
                         http_status,
+                        verdicts,
                         prompt_id: Some(prompt_id),
                     }
                 });
@@ -1503,11 +1512,16 @@ pub(crate) fn execute(
                         .as_ref()
                         .err()
                         .and_then(http_status_from_error);
+                    let verdicts = result
+                        .as_ref()
+                        .err()
+                        .and_then(fuigo_shell::sampling::error_verdicts::error_verdicts_from_error);
                     TaskResult::PromptResponse {
                         agent_id,
                         result: result
                             .map_err(|e| format_acp_error(&e, is_api_key_auth)),
                         http_status,
+                        verdicts,
                         prompt_id: Some(prompt_id),
                     }
                 });
@@ -1927,11 +1941,17 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::PersistAnnouncementsHidden { hidden_ids } => {
+        Effect::PersistAnnouncementsHidden { hidden_ids, changed } => {
             tasks
                 .spawn(async move {
-                    fuigo_announcements::write_hidden_announcement_ids(&hidden_ids)
-                        .await;
+                    if let Err(e) = fuigo_announcements::update_hidden_announcement_ids(
+                            hidden_ids,
+                            changed,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to persist hidden announcements");
+                    }
                     TaskResult::AnnouncementsHiddenPersisted {
                         result: Ok(()),
                     }
@@ -2027,6 +2047,56 @@ pub(crate) fn execute(
                     }
                     TaskResult::CancelComplete
                 });
+        }
+        // The pager's config writes go to one worker, in order (see
+        // `config_write_queue`); enqueued here, on the event-loop thread.
+        Effect::PersistPluginCtaDismissal {
+            plugin_id,
+            config_path,
+        } => {
+            let done = crate::config_write_queue::run(move || {
+                fuigo_shell::config::add_dismissed_plugin_cta_to_file(&plugin_id, &config_path)
+                    .map_err(|e| e.to_string())
+            });
+            tasks.spawn(async move {
+                match done.await {
+                    Ok(Ok(())) => {}
+                    // Presented here (the dismissal's only report is the log).
+                    Ok(Err(e)) => {
+                        let e = e.acknowledge();
+                        tracing::warn!(error = %e, "couldn't persist plugin CTA dismissal");
+                    }
+                    Err(_) => tracing::warn!("couldn't persist plugin CTA dismissal: the write did not finish"),
+                }
+                TaskResult::CancelComplete
+            });
+        }
+        Effect::AgentsModalConfigWrite { agent_id, write } => {
+            let job = write.clone();
+            let done = crate::config_write_queue::run(move || job.run());
+            tasks.spawn(async move {
+                let result = done.await.unwrap_or_else(|_| {
+                    Err(crate::config_write_queue::WriteFailure::unqueued(
+                        "Failed to write config.toml: the write did not finish",
+                    ))
+                });
+                TaskResult::AgentsModalConfigWritten {
+                    agent_id,
+                    write,
+                    result,
+                }
+            });
+        }
+        Effect::WriteProviderConfig { request, report_to } => {
+            let done = crate::config_write_queue::run(move || request.run());
+            tasks.spawn(async move {
+                let result = done.await.unwrap_or_else(|_| {
+                    Err(crate::config_write_queue::WriteFailure::unqueued(
+                        "Could not write config.toml: the write did not finish",
+                    ))
+                });
+                TaskResult::ProviderConfigWritten { report_to, result }
+            });
         }
         Effect::PersistWorktreeMode { mode, config_key } => {
             debug_assert!(
@@ -3588,9 +3658,7 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::FeedbackFailed {
                                 agent_id,
-                                error: sanitize_user_error(
-                                    &format!("couldn't send feedback: {}", acp_error_text(&e)),
-                                ),
+                                error: sanitize_user_error(&feedback_send_error_text(&e)),
                             }
                         }
                     }
@@ -3703,27 +3771,25 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SaveMemoryNote { agent_id, text, cwd } => {
+        Effect::SaveMemoryNote { agent_id, session_id, text, cwd: _ } => {
+            let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                            let storage = fuigo_shell::session::memory::MemoryStorage::new(
-                                &cwd,
-                                None,
-                            );
-                            storage
-                                .append_to_memory(
-                                    fuigo_shell::session::memory::MemoryScope::Workspace,
-                                    &text,
-                                )
-                        })
+                    let request = acp::ExtRequest::new(
+                        "fuigo/memory/save_note",
+                        serde_json::value::to_raw_value(&serde_json::json!({
+                            "sessionId": session_id.0.to_string(),
+                            "text": text,
+                        }))
+                        .expect("serialize memory/save_note params")
+                        .into(),
+                    );
+                    // The shell decides, at write time, whether this session has memory on, and does the write.
+                    let result = acp_send(request, &tx)
                         .await
-                        .map_err(|e| format!("task join error: {e}"))
-                        .and_then(|r| r.map_err(|e| format!("{e}")));
-                    TaskResult::MemoryNoteSaved {
-                        agent_id,
-                        result,
-                    }
+                        .map(|_| ())
+                        .map_err(|e| sanitize_user_error(&acp_error_text(&e)));
+                    TaskResult::MemoryNoteSaved { agent_id, result }
                 });
         }
         Effect::SendBtw { agent_id, session_id, question, blocks, minimal_request_id } => {
@@ -4685,6 +4751,18 @@ async fn lookup_session_title_in(
 /// Neither has to re-parse the other.
 /// Auth is not a field here; it is prose the string appends on its own.
 /// `compact` marks the dense model/runtime group the modal renders as `Label: value` on one line.
+/// The reason a `fuigo/feedback` request failed, as the user reads it after "Couldn't send feedback: " (P152).
+/// The shell's own sentence (its error `data` message, e.g. "Feedback is disabled. To enable, ...") when it gave one,
+/// so the line carries no second "couldn't send feedback" and no JSON-RPC headline such as "Internal error"; else the
+/// generic rendering.
+pub(crate) fn feedback_send_error_text(err: &acp::Error) -> String {
+    err.data
+        .as_ref()
+        .and_then(fuigo_shell::sampling::error::error_detail_from_data)
+        .filter(|detail| !detail.trim().is_empty())
+        .unwrap_or_else(|| acp_error_text(err))
+}
+
 fn session_info_fields(
     info: &SessionInfoResponse,
     title: Option<&str>,

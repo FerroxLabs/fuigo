@@ -1,0 +1,23 @@
+Independent audit of Fuigo packet P111 (data-integrity fixes). Repository: the current directory (git worktree, branch strike/p111). Diff to audit: `git diff d1b6ba580eb587594d52b5a2550c1bd82a8bcd60..HEAD` (two commits: tests, then fix). Read-only: do not build, test or modify anything.
+
+Background: a Phase 7 audit found four defects in session rewind, compaction and fork (P88 made several reachable by letting sessions with a missing or damaged compaction checkpoint load):
+- DI-01: "rewind all" across a compaction whose checkpoint is missing restored/deleted project files, then the cross-compaction replay failed and the response said success:false, reverted_files:[].
+- DI-02: a project-file restore/delete failure was logged and skipped; the handler then truncated ALL rewind snapshots at/after the target (memory and rewind_points.jsonl), reported success, and listed failed deletions as reverted.
+- DI-03: the compaction checkpoint and activation marker become durable before the separate unacknowledged chat_history.jsonl rewrite; since P88 resume trusts chat_history.jsonl, so a crash between them resumed with pre-compaction history.
+- DI-04: a point-in-time fork after an earlier compaction whose checkpoint is missing fell back to truncating the parent's CURRENT chat, inheriting a later compaction summary.
+
+Claims of the fix (verify each against the code):
+1. crates/codegen/fuigo-shell/src/session/acp_session_impl/rewind.rs: handle_rewind builds the target conversation (plan_conversation_rewind, including cross-compaction replay) before any project file is touched; a replay failure returns with nothing changed.
+2. Same file: every file that cannot be restored/deleted is reported in `error`, never listed in reverted_files; on any failure the conversation is not rewound and no rewind snapshot is dropped (no tracker truncate_from, no TruncateRewindPoints), success=false; the same rewind can be retried.
+3. crates/codegen/fuigo-shell/src/session/storage/jsonl/compaction_witness.rs + persistence.rs: before the activation marker, CommitCompactionAndAck durably writes a witness (checkpoint id + length/SHA-256 of chat_history.jsonl after fsync). load_light (and copy_session_data_sync for the source) uses the checkpoint projection only when the latest marker is the witnessed checkpoint AND chat_history.jsonl is byte-identical to the fingerprint; otherwise chat_history.jsonl stays authoritative (P88's rule). Load repair (P96) is skipped when the projection replaces the history.
+4. crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs: when replay of the copied transcript fails, the fork falls back to truncation only if the copied transcript and the source end with the same compaction marker; otherwise it is refused with an error and the target directory this copy created is removed.
+Constraints that must still hold: P88's normal resume uses chat_history.jsonl; P96's rewrite gate (history_rewrite_refusal / rewrite_gate) for rewind and compaction.
+
+
+ROUND 3 (final). HEAD is now 0b7f8a99 (diff still d1b6ba580eb587594d52b5a2550c1bd82a8bcd60..HEAD).
+Round 1 (4 HIGH) was answered in 70bc5880: write-capable handle for the witness fsync (Windows); point-in-time copy stages the cut in a temp dir and decides before the target exists (no cleanup/deletion); FileStateTracker::try_get_rewind_points (fuigo-workspace) so an unreadable lazily loaded rewind_points.jsonl stops the rewind with nothing changed; a fork cut before the compaction the source history starts from is refused.
+Round 2 (2 HIGH, 1 MEDIUM) was answered in 0b7f8a99:
+1. The full-source replay (which lost a surviving compaction after a rewind between compactions) is gone. copy.rs chat_for_compacted_cut now compares the cut's latest compaction marker with latest_live_compaction_id(source): the latest marker on the source's live timeline, computed with the same filter_rewind_by the cut uses. Only markers are read, so an unreadable checkpoint on an abandoned branch no longer blocks a fork (round 2 MEDIUM).
+2. The staging directory is created owner-only (tempfile Builder permissions 0o700 on Unix; Windows temp is per user).
+3. Tests added: rewind between compactions then fork before the surviving one (refused); P88's rewound-away fixture with the abandoned checkpoint deleted (forks); staging mode 0700. The shared copy-test helper write_checkpoint_file now writes current-format checkpoints (resolved prefix) because a legacy cut before a later compaction is now refused; target_prompt_index_truncation_gates_checkpoint_copy keeps its assertions.
+Verify these, look for new defects, and re-check DI-01..DI-04 end to end. Same output format; end with exactly one verdict line: LAND, LAND-WITH-FOLLOWUPS, or DO-NOT-LAND.

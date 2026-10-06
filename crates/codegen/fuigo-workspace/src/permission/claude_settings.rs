@@ -14,7 +14,7 @@ use crate::permission::types::{PermissionConfig, RuleAction};
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Subset of `.claude/settings.json` we care about.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSettings {
     #[serde(default)]
@@ -33,6 +33,25 @@ pub struct ClaudeSettings {
     /// Keys and values are strings; non-string values are coerced or skipped.
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+}
+
+/// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them. Environment values print by name only: users put API keys there.
+/// The destructure is exhaustive, so a new field fails to compile here until its Debug output is decided.
+impl std::fmt::Debug for ClaudeSettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self {
+            permissions,
+            default_mode,
+            additional_directories,
+            env,
+        } = self;
+        f.debug_struct("ClaudeSettings")
+            .field("permissions", permissions)
+            .field("default_mode", default_mode)
+            .field("additional_directories", additional_directories)
+            .field("env", &env.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
+            .finish()
+    }
 }
 
 /// Parsed `permissions` object from Claude settings.

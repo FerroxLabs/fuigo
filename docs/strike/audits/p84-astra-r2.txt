@@ -1,0 +1,40 @@
+# P84 Astra round 2 — final report (range e0145e0f..9bdbe369; raw transcript sha256 25534da0487ef730384fe394e6e1d09d083903357a4fc904317b6f2ec2e281e3, copy at hetzner-dsm:/root/fuigo-builds/p84/audits/p84-astra-r2.raw)
+
+No P84-introduced blocker found. **One pre-existing HIGH internal soundness hole remains.**
+
+| Work item | Status | Progress / pending work |
+|---|---|---|
+| Overall execution goal | ✅ Done | Audited `e0145e0f..9bdbe369`, relevant callers, ACP dependency and tests. Read-only; no Cargo or runtime tests. |
+
+**HIGH — `LocalRef` can escape its bound future through safe crate code.**  
+Locations: [local_ref.rs:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:214), [handle.rs:38](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:38).
+
+`spawn_bound` passes an owned, clonable `LocalRef` to an unrestricted closure. The closure can save it outside the returned future. This source-level example fits inside the existing test’s `LocalSet`:
+
+```rust
+let mut escaped = None;
+agent.spawn_bound(|r| {
+    escaped = Some(r);
+    async {}
+}).await.unwrap();
+
+let saved = escaped.unwrap();
+drop(agent);
+saved.get().announcements_gen.get(); // freed agent
+```
+
+Similarly, after that empty task completes, `saved.get()` can hold `&MvpAgent` while a setter passes `has_pending()` and creates `&mut MvpAgent`. Consequently, “no pending future” implies “no other reference” only under the manually maintained no-escape rule.
+
+**Test coverage:** None catches this; the P84 tests retain their `LocalRef` inside the registered future. The revised setter test correctly covers a parked, registered borrower.
+
+**Disposition:** This escape route exists unchanged at the parent. I found no current production caller violating the rule, so it does not independently block the relocation fix. Follow up by enforcing the restriction or making it an explicit unsafe caller obligation. Pinning preserves location until destruction; it does not extend ownership lifetime. [Rust pinning contract](https://doc.rust-lang.org/std/pin/index.html#subtle-details-and-the-drop-guarantee)
+
+The remaining checks support landing:
+
+- The sole construction path pins the agent before exposure. The private handle state exposes no mutable dereference or extraction; handle relocation leaves the pointee stationary.
+- `BoundTasks` remains first, with its teardown implementation unchanged.
+- All **14 ACP overrides** match in signature and forwarding target. `logout` and `fork_session` retain identical defaults; the workspace enables the required unstable features.
+- Both round-1 corrections are present. The gateway replacement uses the guarded test setter; the refusal test acquires a shared borrow before parking.
+- The relocation tests exercise the real constructor and `spawn_bound`, check state identity and writes, and cover teardown. They use synthetic work; parent-failure and runtime results were **not independently rerun**.
+
+LAND-WITH-FOLLOWUPS

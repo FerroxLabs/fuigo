@@ -1,7 +1,7 @@
 //! Parent/subagent boundary: every parent-side lifecycle call site, in order.
 //!
 //! 1. `MvpAgent::start_subagent_coordinator` (parent thread, in `mvp_agent`) hands the event receiver and concurrency limit here.
-//!    `spawn_subagent_coordinator` drives the coordinator (living in `fuigo-tools`).
+//!    `subagent_coordinator_task` builds the coordinator future (living in `fuigo-tools`).
 //! 2. `ShellChildRunner::run` (parent thread) gathers what a child needs from the parent via `MvpAgent::try_build_subagent_spawn_context`.
 //!    That is the parent-to-child snapshot, built by the owner in `mvp_agent`.
 //!    It then runs the spawn work on the worker pool (`worker_runtime()`, built on first use).
@@ -12,6 +12,7 @@
 //! Stage timings are recorded in `subagent_spawn::SubagentSpawnPhase`.
 use super::ShellCompletionData;
 use crate::agent::mvp_agent::{LocalRef, MvpAgent};
+use futures::future::LocalBoxFuture;
 use crate::extensions::notification::{SessionNotification, SessionUpdate};
 use crate::session::SessionCommand;
 use agent_client_protocol as acp;
@@ -59,8 +60,8 @@ fn build_worker_runtime() -> std::io::Result<tokio::runtime::Runtime> {
         .thread_name("subagent-worker");
     fuigo_tty_utils::runtime::apply_blocking_pool(builder.enable_all()).build()
 }
-struct ShellChildRunner {
-    agent_ref: LocalRef<MvpAgent>,
+struct ShellChildRunner<'a> {
+    agent_ref: LocalRef<'a, MvpAgent>,
     /// Owned: panics are logged, coordinator teardown aborts stragglers.
     presentations: std::cell::RefCell<Vec<tokio_util::task::AbortOnDropHandle<()>>>,
 }
@@ -68,7 +69,7 @@ pub(crate) fn subagent_coordinator_channel() -> (
     fuigo_tools::implementations::fuigo_build::task::backend::SubagentCoordinatorSender,
     coordinator::SubagentCoordinatorReceiver,
 ) {
-    coordinator::SubagentCoordinator::<ShellChildRunner>::channel()
+    coordinator::SubagentCoordinator::<ShellChildRunner<'static>>::channel()
 }
 /// Resumes worker panics into the coordinator's `catch_unwind` (`finish_panicked_child`); the handle aborts on drop.
 pub(crate) async fn join_worker_task<T>(task: tokio::task::JoinHandle<T>) -> T {
@@ -79,14 +80,16 @@ pub(crate) async fn join_worker_task<T>(task: tokio::task::JoinHandle<T>) -> T {
         Err(_) => unreachable!("worker runtime is never shut down"),
     }
 }
-impl coordinator::ChildRunner for ShellChildRunner {
+impl<'a> coordinator::ChildRunner for ShellChildRunner<'a> {
     type Control = crate::agent::subagent::ShellChildRuntime;
     type CompletionData = crate::agent::subagent::ShellCompletionData;
-    type RunFuture = coordinator::LocalBoxFuture<coordinator::ChildRunOutput<Self::CompletionData>>;
-    type ValidateFuture = coordinator::LocalBoxFuture<
+    type RunFuture = LocalBoxFuture<'a, coordinator::ChildRunOutput<Self::CompletionData>>;
+    type ValidateFuture = LocalBoxFuture<
+        'a,
         fuigo_tools::implementations::fuigo_build::task::types::SubagentValidateTypeOutcome,
     >;
-    type DescribeFuture = coordinator::LocalBoxFuture<
+    type DescribeFuture = LocalBoxFuture<
+        'a,
         fuigo_tools::implementations::fuigo_build::task::types::SubagentDescribeOutcome,
     >;
     fn run(&self, run: coordinator::ChildRunRequest<Self::Control>) -> Self::RunFuture {
@@ -296,15 +299,15 @@ fn log_limit_notice(notice: coordinator::SubagentLimitNotice) {
         },
     ));
 }
-/// Wire the shared subagent coordinator actor onto the current `LocalSet`.
-/// Builds the `ShellChildRunner`, attaches the limit sink, and `spawn_local`s the `SubagentCoordinator` draining `rx`.
+/// The shared subagent coordinator actor, for the agent to spawn bound to itself (`MvpAgent::spawn_bound`).
+/// Builds the `ShellChildRunner`, attaches the limit sink, and returns the `SubagentCoordinator` draining `rx`.
 /// Coordinator/runner construction lives here in the boundary module.
 /// `MvpAgent::start_subagent_coordinator` owns the parent state (the event receiver and concurrency limits) it feeds in.
-pub(crate) fn spawn_subagent_coordinator(
-    agent_ref: LocalRef<MvpAgent>,
+pub(crate) fn subagent_coordinator_task<'a>(
+    agent_ref: LocalRef<'a, MvpAgent>,
     rx: coordinator::SubagentCoordinatorReceiver,
     limits: fuigo_tools::implementations::fuigo_build::task::admission::SubagentLimits,
-) {
+) -> impl std::future::Future<Output = ()> + 'a {
     let runner = ShellChildRunner {
         agent_ref,
         presentations: Default::default(),
@@ -330,9 +333,7 @@ pub(crate) fn spawn_subagent_coordinator(
         // recover the rest.
         buffered_completion_output_cap: None,
     };
-    tokio::task::spawn_local(
-        coordinator::SubagentCoordinator::from_channel(rx, runner, config).run(),
-    );
+    coordinator::SubagentCoordinator::from_channel(rx, runner, config).run()
 }
 /// Whether this completion will inject an auto-wake prompt; decided (and the reservation taken) on the coordinator thread in `on_completed`.
 pub(crate) fn will_wake_for(completion: &ChildCompletion<ShellCompletionData>) -> bool {
@@ -529,9 +530,12 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
 pub(crate) fn emit_subagent_notification(
     gateway: &GatewaySender,
     parent_session_id: &str,
-    update: SessionUpdate,
+    mut update: SessionUpdate,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
+    // P70b display sink: this rail goes to the client and to the parent's `updates.jsonl` without passing through
+    // the session's notification helpers. A child's failure text has credentials sent upstream replaced here.
+    update.scrub_sent_credentials();
     let mut meta = None;
     crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
     let notification = SessionNotification {
@@ -551,5 +555,40 @@ pub(crate) fn emit_subagent_notification(
         let ext_notification =
             acp::ExtNotification::new("fuigo/session_notification", params.into());
         gateway.forward_fire_and_forget(ext_notification);
+    }
+}
+
+#[cfg(test)]
+mod p70b_tests {
+    use super::*;
+
+    /// P70b: a child's failure text goes to the client on this rail without passing through the session's
+    /// notification helpers; credentials sent upstream are replaced before it is forwarded.
+    #[test]
+    fn a_forwarded_subagent_failure_has_sent_credentials_replaced() {
+        const CRED: &str = "p70b-subagent-cred-0123456789";
+        fuigo_telemetry::sent_credentials::record(CRED);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let gateway = GatewaySender::new(tx);
+        emit_subagent_notification(
+            &gateway,
+            "parent-session",
+            SessionUpdate::SubagentFinished {
+                subagent_id: "sa-1".into(),
+                child_session_id: "child-1".into(),
+                status: "failed".into(),
+                error: Some(format!("API error (status 400): bad key {CRED}")),
+                tool_calls: 0,
+                turns: 1,
+                duration_ms: 3,
+                tokens_used: 0,
+                output: None,
+                will_wake: false,
+            },
+            None,
+        );
+        let forwarded = format!("{:?}", rx.try_recv().expect("notification forwarded"));
+        assert!(!forwarded.contains(CRED), "{forwarded}");
+        assert!(forwarded.contains("bad key <redacted>"), "{forwarded}");
     }
 }

@@ -583,6 +583,8 @@ fn x11_primary_hint_routes_to_originating_agent() {
     );
 }
 
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn x11_primary_hint_routes_to_originating_dashboard() {
     let mut app = test_app_with_agent();
@@ -652,6 +654,8 @@ fn clipboard_failure_routes_to_originating_agent_without_duplicate() {
     );
 }
 
+// The `open_dashboard` helper reads `FUIGO_AGENT_DASHBOARD`, which a sibling test sets to `0`; serialize on that key like the other dashboard-opening tests (P78).
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
 #[test]
 fn clipboard_failure_routes_to_originating_dashboard() {
     let mut app = test_app_with_agent();
@@ -3149,4 +3153,109 @@ fn compact_complete_renders_one_failure_line_per_completion() {
         agent.session.state.is_idle(),
         "compact state must be exited after the first completion"
     );
+}
+
+// ---- P49: config writes leave the input thread ----
+
+fn agents_write() -> crate::views::agents_modal::AgentsConfigWrite {
+    crate::views::agents_modal::AgentsConfigWrite {
+        ticket: 4242,
+        op: crate::views::agents_modal::AgentsConfigOp::Toggle {
+            name: "explore".into(),
+            enabled: false,
+        },
+        config_path: std::path::PathBuf::from("/nonexistent/config.toml"),
+    }
+}
+
+/// Each deferred write action becomes exactly one effect; nothing is written
+/// during dispatch (which runs on the input thread).
+#[test]
+fn config_write_actions_dispatch_to_effects_only() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::PersistPluginCtaDismissal("figma".into()), &mut app);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::PersistPluginCtaDismissal { plugin_id, config_path }]
+                if plugin_id == "figma" && config_path.is_absolute()
+        ),
+        "{effects:?}"
+    );
+    let effects = dispatch(Action::AgentsModalConfigWrite(agents_write()), &mut app);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::AgentsModalConfigWrite { agent_id: Some(AgentId(0)), write }]
+                if *write == agents_write()
+        ),
+        "{effects:?}"
+    );
+    let provider = fuigo_shell::agent::key_discovery::PROVIDERS
+        .iter()
+        .find(|p| p.id == "anthropic")
+        .unwrap();
+    let request = crate::slash::commands::provider::ProviderWriteRequest {
+        provider,
+        model_id: "m".into(),
+        env_key: provider.env_vars[0],
+        config_path: std::path::PathBuf::from("/nonexistent/config.toml"),
+    };
+    let effects = dispatch(Action::WriteProviderConfig(request), &mut app);
+    assert!(
+        matches!(
+            &effects[..],
+            [Effect::WriteProviderConfig {
+                report_to: crate::app::actions::ConfigWriteReport::Agent(AgentId(0)),
+                ..
+            }]
+        ),
+        "{effects:?}"
+    );
+}
+
+/// The finished agents-modal write reaches the open modal.
+#[test]
+fn a_finished_agents_modal_write_updates_the_open_modal() {
+    let mut app = test_app_with_agent();
+    let cwd = tempfile::tempdir().unwrap();
+    let mut state = crate::views::agents_modal::AgentsModalState::new(
+        cwd.path(),
+        &std::collections::HashMap::new(),
+        &crate::app::bundle::BundleState::default(),
+        None,
+        None,
+        None,
+    );
+    state.write_pending = Some(agents_write().ticket);
+    app.agents.get_mut(&AgentId(0)).unwrap().agents_modal = Some(state);
+    dispatch_task_result(
+        TaskResult::AgentsModalConfigWritten {
+            agent_id: Some(AgentId(0)),
+            write: agents_write(),
+            result: Err(crate::config_write_queue::WriteFailure::unqueued(
+                "Could not lock config.toml: busy",
+            )),
+        },
+        &mut app,
+    );
+    let modal = app.agents[&AgentId(0)].agents_modal.as_ref().unwrap();
+    assert_eq!(modal.write_pending, None);
+    assert!(modal.message.as_ref().is_some_and(|m| m.text.contains("busy")));
+}
+
+/// A finished `/provider` write lands in the scrollback of the agent it was
+/// typed in, as the synchronous command's message did.
+#[test]
+fn a_finished_provider_write_is_reported_in_the_agents_scrollback() {
+    let mut app = test_app_with_agent();
+    let before = app.agents[&AgentId(0)].scrollback.len();
+    dispatch_task_result(
+        TaskResult::ProviderConfigWritten {
+            report_to: crate::app::actions::ConfigWriteReport::Agent(AgentId(0)),
+            result: Ok("Wrote [model_providers.anthropic]".into()),
+        },
+        &mut app,
+    );
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), before + 1);
 }

@@ -1,0 +1,27 @@
+Astra round 3 (codex 0.160.0, model gpt-6-astra, read-only) on 84569ea8..719dc634 (before the rebase onto fc3ccb94) -- final report only.
+Raw transcript (8622 lines) not committed (kept in the Hetzner lane, logs/astra-r3.raw.txt); sha256 34c00c1d070e2d97ed4cf675687d0f7f46cb27e24cf586997b534d0e439af4df
+
+Audited `84569ea8..719dc6343803ea70387ceb0d175d9f42eb8c4e4d` on `strike/p89`. Static inspection only; no builds, tests, or file modifications.
+
+1. **HIGH — Supersession can remove the reopen refusal without reporting usage. Pre-existing accounting defect, widened by P89.**  
+   [execution_state.rs:695](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:695) permits reopening once `pending` is empty and `unknown_usage` is false. But [supersede_attempt:595](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:595) removes an attempt with `usage: None` without recording unknown spend, including while Terminal.
+
+   Concrete sequence: a background child’s dispatched request fails before usage arrives and enters retry backoff. Meanwhile, the parent receives a refusal with its own usage settled and becomes Terminal. Initially, the child’s pending attempt correctly blocks reopening. When its backoff ends, [hand_off_attempt:530](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-sampler/src/actor/request_task.rs:530) supersedes the failed attempt; that operation propagates to the parent. The replacement admission is refused against the partial Terminal parent, but the original pending ID is already gone. `/goal resume` can now reopen despite never receiving that attempt’s usage.
+
+   At `84569ea8`, the same supersession loses the accounting, **but the parent remains Terminal and cannot admit resumed work**. P89 adds that continuation. The author is correct that successful Working turns already exposed the underlying defect; that does not establish “not widened” across this newly opened terminal boundary. The deliberate empty-response policy and its test do not establish that failed requests consumed zero tokens.
+
+2. **HIGH — No-output rewind still permits continuation with an unresolved dispatched attempt. Pre-existing; no additional widening found.**  
+   [cancel.rs:218](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_impl/cancel.rs:218) skips execution terminalization. Cancel after dispatch but before output, then continue the active goal: [execution_state.rs:1033](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:1033) adopts the registered Working execution, and admission does not reject its existing pending attempt.
+
+   The baseline has the same cancellation branch, goal-derived key, Working-instance reuse, and admission behavior. This finding belongs in the separate accounting packet; it is not an additional P89 regression.
+
+3. **LOW — Cancellation and reservation concurrency remain incompletely exercised. P89 coverage limitation.**  
+   [goal_latch_tests.rs:372](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/acp_session_tests/turn/goal_latch_tests.rs:372) invokes `emit_turn_completed` directly; it never aborts a running prompt. [execution_state.rs:2689](/Volumes/Mando/WaylandBots/Fuigo/wt-p89/crates/codegen/fuigo-shell/src/session/execution_state.rs:2689) tests sequential ownership handoff, not concurrent release/reservation.
+
+   Restoring the unlock-before-sampler-release race would survive that test. Nevertheless, the current ownership lock spans both operations, and I found no reverse lock-order path. These omissions leave regression risk, not evidence of an unfixed current deadlock or reservation race.
+
+**Round-2 finding 1 is fixed for attempts that remain pending.** The guard now includes optional attempts under either token limit. Terminal `Settle(Some(usage))` charges usage and can safely lift the refusal; `Settle(None)` sets `unknown_usage`. The added test covers required output-only attempts and optional total-budget attempts. Finding 1 above is the remaining escape through supersession.
+
+The remaining diff revealed no additional independently supported finding. Counters survive reopening, authoritative refusal remains typed, and the supplied P03 crash fixtures remain non-reopenable.
+
+**Verdict: One HIGH widened by P89 remains—the supersession escape from token-budgeted terminal refusal; no BLOCKER identified.**

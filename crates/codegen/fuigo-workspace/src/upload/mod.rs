@@ -129,6 +129,8 @@ struct HubAuthCredentialProvider {
     auth: Arc<dyn AuthProvider>,
     /// Resolved workspace owner so `snapshot` can attribute uploads (and 401s) to the real `user_id`/`team_id`.
     identity: WorkspaceIdentity,
+    /// P47: the configured auxiliary-service base (`FUIGO_CLI_CHAT_PROXY_BASE_URL`) uploads go to.
+    proxy_base_url: String,
 }
 impl fuigo_auth::visibility::HttpAuth for HubAuthCredentialProvider {
     fn apply(&self, builder: reqwest::RequestBuilder, _base_url: &str) -> reqwest::RequestBuilder {
@@ -170,6 +172,23 @@ impl AuthCredentialProvider for HubAuthCredentialProvider {
     async fn refresh_after_unauthorized(&self) -> bool {
         false
     }
+    /// P47: the hub credential is the session token (from the leader's `AuthManager` or auth.json), so every upload
+    /// destination must be admitted by the service-endpoint trust class with the configured proxy base.
+    fn bearer_may_reach(
+        &self,
+        url: &reqwest::Url,
+        _bearer: &str,
+    ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+        fuigo_extra_ca::service_trust::session_may_reach_service(
+            url.as_str(),
+            Some(&self.proxy_base_url),
+            |_| false,
+        )
+        .map_err(|refused| {
+            tracing::warn!(origin = %refused.origin, reason = refused.reason_label(), "workspace upload not sent: the session credential may not go to this destination");
+            fuigo_auth::BearerDestinationRefused(refused.to_string())
+        })
+    }
 }
 /// [`StorageConfig`] implementation that proxies uploads through the configured proxy endpoint using the connection's auth credentials.
 pub(crate) struct ProxyStorageConfig {
@@ -182,8 +201,11 @@ impl ProxyStorageConfig {
         api_base_url: String,
         identity: WorkspaceIdentity,
     ) -> Self {
-        let credentials: Arc<dyn AuthCredentialProvider> =
-            Arc::new(HubAuthCredentialProvider { auth, identity });
+        let credentials: Arc<dyn AuthCredentialProvider> = Arc::new(HubAuthCredentialProvider {
+            auth,
+            identity,
+            proxy_base_url: api_base_url.clone(),
+        });
         let method = UploadMethod::Proxy {
             proxy_base_url: api_base_url,
             user_token: "workspace-upload".to_string(),
@@ -376,11 +398,34 @@ mod tests {
         );
         let auth: Arc<dyn AuthProvider> =
             Arc::new(AuthCredential::headers([("x-api-key", "secret")]).expect("headers cred"));
-        let provider = HubAuthCredentialProvider { auth, identity };
+        let provider = HubAuthCredentialProvider {
+            auth,
+            identity,
+            proxy_base_url: "https://proxy.example/v1".into(),
+        };
         let snap = provider.snapshot();
         assert_eq!(snap.token, None, "Headers arm carries no bearer token");
         assert_eq!(snap.user_id.as_deref(), Some("user-headers"));
         assert_eq!(snap.team_id.as_deref(), Some("team-h"));
+    }
+    /// P47: the upload credential follows the service-endpoint trust class: the configured https proxy origin is
+    /// admitted; cleartext, loopback and any other origin are refused with the remedy.
+    #[test]
+    fn p47_upload_bearer_follows_the_service_trust_class() {
+        let provider = proxy_config()
+            .proxy_credentials()
+            .expect("proxy_credentials must be Some");
+        let reach = |u: &str| provider.bearer_may_reach(&reqwest::Url::parse(u).unwrap(), "test-token");
+        assert!(reach("https://proxy.example/v1/storage/upload").is_ok());
+        for refused in [
+            "http://proxy.example/v1/storage/upload",
+            "https://127.0.0.1/v1/storage/upload",
+            "https://proxy.example:8443/v1/storage/upload",
+            "https://evil.example/v1/storage/upload",
+        ] {
+            let err = reach(refused).expect_err(refused);
+            assert!(err.0.contains("The request was not made"), "{refused}: {}", err.0);
+        }
     }
     /// `WorkspaceTraceExportSource` must delegate all four `TraceExportSource` hooks to the wrapped `ProxyStorageConfig`.
     #[tokio::test]
@@ -613,7 +658,17 @@ mod tests {
             let subscriber = tracing_subscriber::registry().with(layer);
             let _guard = tracing::subscriber::set_default(subscriber);
             let handle = spawn_queue_stats_sampler(queue, std::time::Duration::from_millis(20));
-            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            // Wait for the first snapshot rather than a fixed 60 ms: a starved host may not run the sampler's task inside that window.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while std::time::Instant::now() < deadline
+                && !events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.message.contains("upload queue pending stats"))
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
             handle.abort();
         }
         let snaps: Vec<_> = events
@@ -639,5 +694,172 @@ mod tests {
             vec!["pending", "pending_bytes", "sample_period_secs"],
             "queue-aggregate snapshot carries only the queue counters (no session_id)"
         );
+    }
+}
+
+/// P149 (S14/K16, Astra r2 #1): the upload filter a standalone workspace server installs
+/// (`fuigo_file_utils::payload_filter`), since the shell's `/feedback` scrub is not in this process. It applies the same
+/// detectors from `fuigo_secrets`: credential shapes and private-key blocks, then the credentials this process sent. A
+/// JSON document is scrubbed string by string and re-serialised (so it stays valid JSON); other text as text; bytes
+/// that are not UTF-8 are returned as they are.
+pub fn workspace_upload_scrub(buf: Vec<u8>) -> Vec<u8> {
+    use std::borrow::Cow;
+    let text = match String::from_utf8(buf) {
+        Ok(text) => text,
+        Err(e) => return e.into_bytes(),
+    };
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&text) {
+        let mut scrub = JsonScrub { recorded: !fuigo_secrets::sent_credentials::is_empty(), pem: Default::default() };
+        if !scrub.value(&mut value, None) {
+            return text.into_bytes();
+        }
+        let pretty = text.trim().lines().count() > 1;
+        let out = if pretty { serde_json::to_vec_pretty(&value) } else { serde_json::to_vec(&value) };
+        return out.unwrap_or_else(|_| b"<redacted>".to_vec());
+    }
+    let exact = fuigo_secrets::sent_credentials::scrub_owned(text);
+    fuigo_secrets::redact_credential_shapes(&exact).into_owned().into_bytes()
+}
+
+/// The structural scrub `/feedback` applies (Astra r3 #2), for a process without the shell: string values and property
+/// names by credential shape, arrays of byte values decoded and scrubbed whole, and a PEM block whose markers and body
+/// sit in separate strings ([`fuigo_secrets::PrivateKeyJoin`]). Recorded credentials run first, then shapes.
+struct JsonScrub {
+    recorded: bool,
+    pem: fuigo_secrets::PrivateKeyJoin,
+}
+
+impl JsonScrub {
+    fn text(&self, s: &str) -> Option<String> {
+        use std::borrow::Cow;
+        let exact = self.recorded.then(|| fuigo_secrets::sent_credentials::scrub(s)).and_then(|c| match c {
+            Cow::Owned(o) => Some(o),
+            Cow::Borrowed(_) => None,
+        });
+        let base = exact.as_deref().unwrap_or(s);
+        match fuigo_secrets::redact_credential_shapes(base) {
+            Cow::Owned(o) => Some(o),
+            Cow::Borrowed(_) => exact,
+        }
+    }
+
+    fn value(&mut self, value: &mut serde_json::Value, property: Option<&str>) -> bool {
+        use serde_json::Value;
+        match value {
+            Value::String(s) => {
+                let mut changed = false;
+                if self.recorded {
+                    changed |= fuigo_secrets::sent_credentials::scrub_in_place(s);
+                }
+                changed |= self.pem.feed(property, s);
+                if let std::borrow::Cow::Owned(o) = fuigo_secrets::redact_credential_shapes(s) {
+                    *s = o;
+                    changed = true;
+                }
+                changed
+            }
+            Value::Array(items) => {
+                let bytes: Option<Vec<u8>> = (!items.is_empty())
+                    .then(|| items.iter().map(|v| v.as_u64().and_then(|n| u8::try_from(n).ok())).collect())
+                    .flatten();
+                if let Some(bytes) = bytes {
+                    // Decode the run, scrub each valid UTF-8 stretch, keep invalid bytes as they are.
+                    let exact = self.recorded.then(|| fuigo_secrets::sent_credentials::scrub_bytes(&bytes)).flatten();
+                    let current = exact.as_deref().unwrap_or(&bytes);
+                    let mut out = Vec::with_capacity(current.len());
+                    let mut changed = exact.is_some();
+                    for chunk in current.utf8_chunks() {
+                        match fuigo_secrets::redact_credential_shapes(chunk.valid()) {
+                            std::borrow::Cow::Owned(o) => {
+                                changed = true;
+                                out.extend_from_slice(o.as_bytes());
+                            }
+                            std::borrow::Cow::Borrowed(v) => out.extend_from_slice(v.as_bytes()),
+                        }
+                        out.extend_from_slice(chunk.invalid());
+                    }
+                    if changed {
+                        *items = out.into_iter().map(Value::from).collect();
+                    }
+                    return changed;
+                }
+                items.iter_mut().fold(false, |changed, item| self.value(item, property) | changed)
+            }
+            Value::Object(map) => {
+                let mut changed = false;
+                for (name, mut item) in std::mem::take(map) {
+                    changed |= self.value(&mut item, Some(&name));
+                    let mut name = match self.text(&name) {
+                        Some(scrubbed) => {
+                            changed = true;
+                            scrubbed
+                        }
+                        None => name,
+                    };
+                    // Two names redacted alike must not overwrite each other's data.
+                    let base = name.clone();
+                    let mut n = 2;
+                    while map.contains_key(&name) {
+                        name = format!("{base}#{n}");
+                        n += 1;
+                    }
+                    map.insert(name, item);
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod p149_upload_scrub_tests {
+    /// P149 (Astra r2 #1): a standalone workspace server's `tool_state.json` (scheduler prompts) leaves the machine
+    /// with credential shapes, private keys and sent credentials replaced, and stays valid JSON.
+    #[test]
+    fn workspace_upload_scrub_redacts_tool_state() {
+        // Not credential-shaped, so only the sent-credential registry can catch it.
+        const SENT: &str = "p149-SYNTH-workspace-sent-0001";
+        const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+        const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
+        fuigo_secrets::sent_credentials::record(SENT);
+        let state = serde_json::json!({"scheduler": [{"prompt": format!(
+            "run with {SENT} and {GHP}\n-----BEGIN PRIVATE KEY-----\n{PEM_BODY}\n-----END PRIVATE KEY-----\n")}]});
+        let out = super::workspace_upload_scrub(serde_json::to_vec(&state).unwrap());
+        let text = String::from_utf8(out).unwrap();
+        for secret in [SENT, GHP, PEM_BODY] {
+            assert!(!text.contains(secret), "{secret}: {text}");
+        }
+        serde_json::from_str::<serde_json::Value>(&text).expect("still JSON");
+        assert!(text.contains("run with <redacted>"), "control: {text}");
+        let log = format!("line {GHP}\n");
+        assert!(!String::from_utf8(super::workspace_upload_scrub(log.into_bytes())).unwrap().contains(GHP));
+        let binary = vec![0x89u8, b'P', b'N', b'G', 0xff];
+        assert_eq!(super::workspace_upload_scrub(binary.clone()), binary);
+    }
+
+    /// P149 (Astra r3 #2): the structural cases `/feedback` covers: a PEM block split over separate strings, a credential
+    /// in a property NAME, and a credential or key held as an array of byte values.
+    #[test]
+    fn workspace_upload_scrub_matches_feedback_structure() {
+        const SENT: &str = "p149-SYNTH-workspace-sent-0002";
+        const GHP: &str = "ghp_p149SYNTHp149SYNTHp149SYNTHp149SYNTH";
+        const PEM_BODY: &str = "MIIEp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHPEMBODYp149SYNTHAA";
+        fuigo_secrets::sent_credentials::record(SENT);
+        let bytes = |s: &str| s.bytes().map(serde_json::Value::from).collect::<Vec<_>>();
+        let state = serde_json::json!({
+            "pem": ["-----BEGIN PRIVATE KEY-----", PEM_BODY, "-----END PRIVATE KEY-----"],
+            (GHP): "named by a credential",
+            "raw": bytes(&format!("out {GHP} and {SENT}\n")),
+        });
+        let text = String::from_utf8(super::workspace_upload_scrub(serde_json::to_vec(&state).unwrap())).unwrap();
+        for secret in [SENT, GHP, PEM_BODY] {
+            assert!(!text.contains(secret), "{secret}: {text}");
+        }
+        let decoded: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let raw: Vec<u8> = decoded["raw"].as_array().unwrap().iter().filter_map(|v| v.as_u64().map(|n| n as u8)).collect();
+        let raw = String::from_utf8_lossy(&raw).into_owned();
+        assert!(!raw.contains(GHP) && !raw.contains(SENT), "byte array: {raw}");
+        assert!(raw.starts_with("out "), "control: {raw}");
     }
 }

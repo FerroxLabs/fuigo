@@ -1,0 +1,20 @@
+# P78 Astra round 8 (gpt-6-astra, codex exec, read-only) - audited 01115e18..6f9e8fa7 (strike/p78-s20)
+# Final report, verbatim (the full transcript is tool output).
+
+Audited `01115e18..6f9e8fa7` using git and file reads only. No Cargo, builds, tests, or file modifications.
+
+1. **LOW — NEW: temp-path guard has limited syntactic coverage.** `crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:818`. A fixture using `temp_dir().join(NAME_CONST)`, `.as_path().join("x")`, a separately bound directory, or an absolute `/tmp` path escapes detection. An expression spanning beyond the three-line window also escapes. Existing self-tests do not cover these bypasses. **No live colliding fixture using these forms found.** `temp_dir().join("a").join("b")` is caught through its first join. No false failure against the current tree identified; no pre-landing change required.
+
+2. **LOW — STILL OPEN: indirect dashboard readers escape serialization scanning.** `crates/codegen/fuigo-pager/src/app/agent_view/session.rs:1280`. Session creation/loading through `apply_app_scoped_gates` can observe a concurrent test’s `FUIGO_AGENT_DASHBOARD=0`. Existing caller tests do not assert the affected dashboard visibility, so they do not detect this interference. Unchanged from round 7; no newly demonstrated acceptance failure.
+
+3. **LOW — STILL OPEN: reader-pin scanner conservatively rejects unrelated bindings.** `crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:579`. A nested `fn helper(_theme: ()) {}` after acquiring `_theme` triggers rejection despite retaining the outer guard. Existing self-tests do not cover this scenario. Deliberately documented and absent from the four listed readers; no pre-landing change required.
+
+The new root-cause claim holds: `render.rs:990` calls the memoized repository check, whose initial evaluation at `state.rs:820` checks ancestor `.git` existence; another process could delete the fixture before that evaluation. `views/file_search/line_viewer.rs:728` returns `None` when reading the missing file fails.
+
+All three `TempDir` owners survive through their assertions. Removed cleanup statements contained no assertions; existing assertions remain unchanged.
+
+I found **no remaining shared fixed-path fixture collision or fixed-port listener** in the pager tests inspected. Absolute paths do remain as test data—for example, `inline_media_ffmpeg.rs:163` supplies `/tmp/x` as media metadata without creating it. `app/dispatch/tests/dashboard.rs:504` binds the shared temp directory but only canonicalizes it; it does not join or write a fixed filename. Traced shared-home fixtures use unique directories or PID-qualified session IDs.
+
+Earlier matcher, gutter, atomic-dump, embedded-mode and dashboard fixes remain supported. No additional silent matcher waits, weakened assertions, protected-test changes, or source-level compilation defects identified. Compilation, Clippy and runtime remain unverified.
+
+LAND

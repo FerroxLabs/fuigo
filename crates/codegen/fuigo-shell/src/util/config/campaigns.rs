@@ -5,7 +5,6 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use fuigo_config::campaigns::{
     CampaignEntry, filter_active_campaigns, ids_touching_paths, merge_campaign_entries,
@@ -22,7 +21,6 @@ use fuigo_config_types::{CampaignOverride, RemoteSettings};
 const MAX_DISMISSED_IDS: usize = 32;
 
 static DISMISS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static DISMISS_TMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 static REMOTE_CAMPAIGN_CACHE: RwLock<Vec<CampaignEntry>> = RwLock::new(Vec::new());
 
@@ -63,58 +61,73 @@ pub(crate) fn dismiss_campaign_ids(ids: impl IntoIterator<Item = String>) {
     }
 }
 
-/// Append `ids` to the dismissed set and write `campaigns_state.json` atomically (write to a temp file, then rename).
+/// Append `ids` to the dismissed set and write `campaigns_state.json` atomically.
 /// Corrupt prior state is renamed aside, not discarded.
+///
+/// The read-modify-write is `fuigo_config::fs_atomic::edit_under_lock` on
+/// `campaigns_state.json.lock` (the lock file this writer always used, so an
+/// older Fuigo sharing `$FUIGO_HOME` still contends on it): in leader mode
+/// several fuigo processes share `$FUIGO_HOME`, and the in-process mutex alone
+/// would let one overwrite another's update. The whole cycle runs under the lock
+/// (the corrupt-state rename is a side effect, so the edit must run once). The
+/// state goes through the shared temp (unique name, synced, removed on every
+/// failure), which also sweeps temps a crashed writer left. A lock that cannot
+/// be taken is now an error rather than an unlocked write.
 fn dismiss_campaign_ids_at(
     home: &Path,
     ids: impl IntoIterator<Item = String>,
 ) -> std::io::Result<()> {
-    use fs2::FileExt as _;
+    use fuigo_config::fs_atomic::{Edit, EditError};
     let _guard = DISMISS_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let path = campaigns_state_path(home);
-    // Cross-process advisory lock over the read-modify-write: in leader mode several fuigo processes share `$FUIGO_HOME`
-    // The in-process mutex alone would let one process overwrite another's update
-    // The lock is best-effort; a lock failure still proceeds
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path.with_extension("json.lock"));
-    if let Ok(ref f) = lock {
-        let _ = f.lock_exclusive();
-    }
-    let mut ordered = match std::fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<CampaignsState>(&contents) {
-            Ok(s) => s.dismissed_ids,
-            Err(e) => {
-                let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
-                tracing::warn!(error = %e, "campaigns: corrupt dismiss state; renamed aside");
-                Vec::new()
+    fuigo_config::fs_atomic::edit_under_lock(
+        &path,
+        &fuigo_config::fs_atomic::config_lock_path(&path),
+        |bytes| fuigo_config::fs_atomic::stage_atomically(&path, bytes, None),
+        |current| {
+            let mut ordered = match current {
+                Ok(Some(bytes)) => match serde_json::from_str::<CampaignsState>(
+                    // Not UTF-8 is a read error, as `read_to_string` made it.
+                    std::str::from_utf8(bytes).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "stream did not contain valid UTF-8",
+                        )
+                    })?,
+                ) {
+                    Ok(s) => s.dismissed_ids,
+                    Err(e) => {
+                        let _ = std::fs::rename(&path, path.with_extension("json.corrupt"));
+                        tracing::warn!(error = %e, "campaigns: corrupt dismiss state; renamed aside");
+                        Vec::new()
+                    }
+                },
+                Ok(None) => Vec::new(),
+                Err(e) => return Err(std::io::Error::new(e.kind(), e.to_string())),
+            };
+            let mut seen: HashSet<String> = ordered.iter().cloned().collect();
+            for id in ids {
+                if id.is_empty() || !seen.insert(id.clone()) {
+                    continue;
+                }
+                ordered.push(id);
             }
+            if ordered.len() > MAX_DISMISSED_IDS {
+                let drop_n = ordered.len() - MAX_DISMISSED_IDS;
+                ordered.drain(..drop_n);
+            }
+            let json = serde_json::to_string(&CampaignsState {
+                dismissed_ids: ordered,
+            })
+            .map_err(std::io::Error::other)?;
+            Ok(Edit::Replace {
+                contents: json.into_bytes(),
+                value: (),
+            })
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e),
-    };
-    let mut seen: HashSet<String> = ordered.iter().cloned().collect();
-    for id in ids {
-        if id.is_empty() || !seen.insert(id.clone()) {
-            continue;
-        }
-        ordered.push(id);
-    }
-    if ordered.len() > MAX_DISMISSED_IDS {
-        let drop_n = ordered.len() - MAX_DISMISSED_IDS;
-        ordered.drain(..drop_n);
-    }
-    let json = serde_json::to_string(&CampaignsState {
-        dismissed_ids: ordered,
-    })
-    .map_err(std::io::Error::other)?;
-    let nonce = DISMISS_TMP_NONCE.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}.{}.tmp", std::process::id(), nonce));
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
+    )
+    .map_err(|e| match e {
+        EditError::Lock(e) | EditError::Write(e) | EditError::Edit(e) => e,
     })
 }
 
@@ -208,19 +221,76 @@ fn resolve_dismissable_campaigns() -> Vec<CampaignEntry> {
     }
 }
 
+/// The disk layers of the last [`load_effective_config`] that succeeded in this process.
+///
+/// Kept so a later settings refresh whose config read FAILS can still re-resolve
+/// against the user's last-known-good files. It is the LAYERS, not the effective
+/// table, on purpose: the effective table already has that moment's REMOTE
+/// campaign patches merged in, and replaying it would resurrect a campaign the
+/// fresh remote settings have since withdrawn -- as TOML, which outranks remote
+/// settings. See [`effective_config_for_remote_settings`].
+static LAST_GOOD_CONFIG_LAYERS: RwLock<Option<std::sync::Arc<ConfigLayers>>> = RwLock::new(None);
+
 /// Effective config with the remote/override-aware campaign overlay, from one `ConfigLayers::load`.
+///
+/// On success the layers are also remembered as this process's last-known-good
+/// disk state ([`last_good_config_layers`]). Every binary loads its startup config
+/// through here, so the fallback exists from startup, not only after the first
+/// successful settings refresh.
 pub fn load_effective_config() -> std::io::Result<toml::Value> {
-    effective_config_from_layers(&ConfigLayers::load()?)
+    load_effective_config_with_campaign_free().map(|(effective, _)| effective)
+}
+
+/// [`load_effective_config`], plus the config files merged WITHOUT campaign patches from the
+/// SAME read. P90 F6 decides which helper models the user chose from the second table; taking
+/// it from any other read could pair one edit's effective config with another's choices.
+pub fn load_effective_config_with_campaign_free() -> std::io::Result<(toml::Value, toml::Value)> {
+    let layers = ConfigLayers::load()?;
+    let effective = effective_config_from_layers(&layers)?;
+    let campaign_free = layers.effective_config_base();
+    if let Ok(mut last_good) = LAST_GOOD_CONFIG_LAYERS.write() {
+        *last_good = Some(std::sync::Arc::new(layers));
+    }
+    Ok((effective, campaign_free))
+}
+
+/// The disk layers of the last successful [`load_effective_config`], if any.
+pub fn last_good_config_layers() -> Option<std::sync::Arc<ConfigLayers>> {
+    LAST_GOOD_CONFIG_LAYERS.read().ok().and_then(|g| g.clone())
 }
 
 /// Resolve a prospective user-config edit with the same layers and campaigns as runtime.
 pub fn effective_config_from_layers(layers: &ConfigLayers) -> std::io::Result<toml::Value> {
+    Ok(effective_config_with_remote(
+        layers,
+        &cached_remote_campaigns(),
+    ))
+}
+
+/// The effective config `layers` produce under the remote campaigns of `remote`
+/// -- the settings just fetched -- rather than whatever the process cache held
+/// when the layers were read.
+///
+/// `None` settings fall back to the process cache, mirroring
+/// [`set_remote_campaigns_from_settings`]: a failed fetch must not clobber a
+/// previously seeded set, while `Some` with no campaigns withdraws them all.
+pub fn effective_config_for_remote_settings(
+    layers: &ConfigLayers,
+    remote: Option<&RemoteSettings>,
+) -> toml::Value {
+    let remote_entries = match remote {
+        Some(_) => remote_campaigns_from_settings(remote),
+        None => cached_remote_campaigns(),
+    };
+    effective_config_with_remote(layers, &remote_entries)
+}
+
+fn effective_config_with_remote(layers: &ConfigLayers, remote: &[CampaignEntry]) -> toml::Value {
     let dismissed = load_dismissed_ids();
-    let remote = cached_remote_campaigns();
     let mut effective = layers.effective_config_base();
-    let active = resolve_active_campaigns_from_layers(layers, &effective, &remote, &dismissed);
+    let active = resolve_active_campaigns_from_layers(layers, &effective, remote, &dismissed);
     layers.apply_campaign_overrides(&mut effective, &active);
-    Ok(effective)
+    effective
 }
 
 /// Effective config with **disk campaigns only**: no remote cache, no `FUIGO_CAMPAIGNS_OVERRIDE`.
@@ -387,7 +457,7 @@ pub fn sync_campaign_fields(cfg: &mut crate::agent::config::Config) {
 /// If the dismiss lands but the write fails, the dismiss stands: failure leans toward not nudging.
 pub(super) async fn persist_user_choice(
     path: PatchPath,
-    write: impl FnOnce(&mut super::mcp::Config),
+    write: impl FnMut(&mut super::mcp::Config),
 ) -> anyhow::Result<()> {
     // Config-layer reads and the flock'd read-modify-write are blocking I/O; keep them off the async worker
     // The task is awaited before the config write so the dismiss-before-write ordering above holds
@@ -427,9 +497,9 @@ pub async fn persist_models_default(
         );
     }
     persist_user_choice(MODELS_DEFAULT_PATH, move |cfg| {
-        cfg.models.default = if s.is_empty() { None } else { Some(s) };
-        if let Some(effort) = reasoning_effort {
-            cfg.models.default_reasoning_effort = Some(effort);
+        cfg.models.default = if s.is_empty() { None } else { Some(s.clone()) };
+        if let Some(effort) = &reasoning_effort {
+            cfg.models.default_reasoning_effort = Some(*effort);
         }
     })
     .await

@@ -55,12 +55,12 @@ fn storage_breaker_config() -> BreakerConfig {
 /// a bridge implementation that wires into
 /// `crate::auth::attribution::record_consumer_401`.
 ///
-/// `sent_bearer_prefix` is the first-N characters of the bearer that was
-/// actually sent on the wire (extracted at the trait boundary so the full
-/// bearer never escapes `StorageClient`). `None` indicates no bearer was
+/// `sent_bearer` is the [`fuigo_auth::BearerFingerprint`] of the bearer that
+/// was sent, computed at the trait boundary so neither the bearer nor any
+/// fragment of it escapes `StorageClient`. `None` indicates no bearer was
 /// configured (the unauthenticated test/CI path).
 pub trait Auth401AttributionCallback: Send + Sync + std::fmt::Debug {
-    fn record_401(&self, operation: &str, sent_bearer_prefix: Option<&str>);
+    fn record_401(&self, operation: &str, sent_bearer: Option<&fuigo_auth::BearerFingerprint>);
 }
 
 // ============================================================================
@@ -388,6 +388,29 @@ impl StaticFuigoAuth {
             .clone()
             .or_else(|| self.user_token.clone())
     }
+
+    /// P47: the destination rule for [`Self::wire_bearer`]. A deployment key keeps its own rules; a user token is a
+    /// session token, so it goes only where the service-endpoint trust class admits it, with `proxy_base_url` as
+    /// the configured service base (`fuigo_extra_ca::service_trust`; no configured-API-origin tier in this crate).
+    pub fn bearer_destination(&self, proxy_base_url: &str) -> fuigo_auth::BearerDestination {
+        // No session token to protect: a deployment key keeps its own rules, and an absent or EMPTY `user_token` is no
+        // credential at all (callers use `""` for "no user token", e.g. a deployment-key-only or credential-less
+        // proxy config). Refusing such a request would drop it terminally for nothing.
+        if self.deployment_key.is_some() || self.user_token.as_deref().is_none_or(str::is_empty) {
+            return fuigo_auth::BearerDestination::Unrestricted;
+        }
+        service_session_destination(proxy_base_url)
+    }
+}
+
+/// P47: [`fuigo_auth::BearerDestination::Checked`] by the service-endpoint trust class, with `base` as the
+/// configured service base and no configured-API-origin tier.
+pub fn service_session_destination(base: &str) -> fuigo_auth::BearerDestination {
+    let base = base.to_owned();
+    fuigo_auth::BearerDestination::Checked(Arc::new(move |url: &reqwest::Url| {
+        fuigo_extra_ca::service_trust::session_may_reach_service(url.as_str(), Some(&base), |_| false)
+            .map_err(|refused| fuigo_auth::BearerDestinationRefused(refused.to_string()))
+    }))
 }
 
 impl fuigo_auth::HttpAuth for StaticFuigoAuth {
@@ -472,12 +495,35 @@ impl StorageClient {
     /// # Arguments
     /// * `proxy_base_url` - Base URL for the proxy (e.g., "https://cli-chat-proxy.grok.com/v1")
     /// * `user_token` - User's grok.com auth token
+    ///
+    /// P47: `user_token` is a session token, so it is attached only where the service-endpoint trust class
+    /// admits the destination ([`StaticFuigoAuth::bearer_destination`]); anywhere else the request is not sent.
     pub fn new(proxy_base_url: &str, user_token: &str) -> Self {
         let creds = StaticFuigoAuth::new(Some(user_token.to_owned()));
+        let destination = creds.bearer_destination(proxy_base_url);
+        Self::with_static(proxy_base_url, creds, destination)
+    }
+
+    /// A static credential that is NOT a session token (an API or test key): no destination rule applies to it.
+    pub fn with_static_key(proxy_base_url: &str, key: &str) -> Self {
+        let creds = StaticFuigoAuth::new(Some(key.to_owned()));
+        Self::with_static(
+            proxy_base_url,
+            creds,
+            fuigo_auth::BearerDestination::Unrestricted,
+        )
+    }
+
+    fn with_static(
+        proxy_base_url: &str,
+        creds: StaticFuigoAuth,
+        destination: fuigo_auth::BearerDestination,
+    ) -> Self {
         let bearer = creds.wire_bearer();
         let provider = Arc::new(fuigo_auth::StaticAuthCredentialProvider::new(
             Box::new(creds),
             bearer,
+            destination,
         ));
         Self::with_provider(proxy_base_url, default_upload_client(), provider)
     }
@@ -612,6 +658,15 @@ impl StorageClient {
     ///
     /// Reuses `add_common_headers` for the shared client headers. Returns UploadLimits
     /// struct; 0 = unlimited.
+    /// P71: the destination gate, at the sink. This client moves file content to its proxy only when
+    /// that proxy is FluxRouter-operated; for any other proxy nothing is sent, the user is told, and
+    /// the error is a `WithheldFromDestination`. It is the FIRST statement of every method that
+    /// PUBLIC method that moves content or names an object to the proxy for upload (`upload_gate_guard`
+    /// pins that), so no caller, however it obtained this client, can send content past it.
+    fn gate(&self, object_path: &str) -> Result<()> {
+        crate::destination_gate::gate_proxy_url(&self.base_url, object_path)
+    }
+
     pub async fn get_upload_limits(&self) -> Result<UploadLimits> {
         let url = format!("{}/storage/limits", self.base_url);
         let request = self.add_common_headers(self.http_client.get(&url));
@@ -649,8 +704,13 @@ impl StorageClient {
     /// send and 401 response, though in practice this is rare).
     fn fire_401_attribution(&self, operation: &str) {
         if let Some(ref cb) = self.attribution {
-            let bearer_prefix = self.credentials.snapshot().token;
-            cb.record_401(operation, bearer_prefix.as_deref());
+            let sent = self
+                .credentials
+                .snapshot()
+                .token
+                .as_deref()
+                .map(fuigo_auth::BearerFingerprint::of);
+            cb.record_401(operation, sent.as_ref());
         }
     }
 
@@ -787,6 +847,7 @@ impl StorageClient {
         &self,
         files: Vec<(String, Vec<u8>, String)>,
     ) -> Option<Vec<prod_mc_cli_chat_proxy_types::BatchUploadResult>> {
+        self.gate("batch upload").ok()?;
         let url = format!("{}/storage/batch_upload", self.base_url);
         let operation = "batch_upload";
 
@@ -872,6 +933,11 @@ impl StorageClient {
                     return None;
                 }
                 Err(e) => {
+                    // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry.
+                    if fuigo_auth::find_bearer_refusal(&e).is_some() {
+                        tracing::warn!("{operation} was not sent: {e}");
+                        return None;
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, operation, attempt, &e).await;
                         attempt += 1;
@@ -901,6 +967,7 @@ impl StorageClient {
         &self,
         files: Vec<(String, Vec<u8>, String)>,
     ) -> Option<Vec<prod_mc_cli_chat_proxy_types::BatchUploadResult>> {
+        self.gate("batch upload").ok()?;
         // Short-circuit on empty input: the server rejects empty payloads with
         // a 400, and there are no per-file results to return anyway.
         if files.is_empty() {
@@ -999,6 +1066,11 @@ impl StorageClient {
                     return None;
                 }
                 Err(e) => {
+                    // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry.
+                    if fuigo_auth::find_bearer_refusal(&e).is_some() {
+                        tracing::warn!("{operation} was not sent: {e}");
+                        return None;
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, operation, attempt, &e).await;
                         attempt += 1;
@@ -1118,11 +1190,16 @@ impl StorageClient {
             .client_version
             .as_deref()
             .unwrap_or(fuigo_version::VERSION);
-        let mut builder = builder.header("x-fuigo-client-version", version);
-
+        // P43: every request this goes on targets `{base_url}/storage/...`, so the base decides
+        // identity disclosure. The version and identifier are identity-class (P15).
+        let mut pairs = vec![("x-fuigo-client-version", version)];
         if let Some(id) = &self.client_identifier {
-            builder = builder.header("x-fuigo-client-identifier", id);
+            pairs.push(("x-fuigo-client-identifier", id.as_str()));
         }
+        let mut builder = builder.headers(
+            fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&self.base_url)
+                .header_map(pairs),
+        );
 
         if let Some(mode) = &self.client_mode {
             builder = builder.header("x-fuigo-client-mode", mode);
@@ -1154,6 +1231,7 @@ impl StorageClient {
         content: &[u8],
         content_type: &str,
     ) -> Result<UploadResponse> {
+        self.gate(path)?;
         let url = format!("{}/storage", self.base_url);
         let content = content.to_vec();
         let operation = format!("Upload to '{}'", path);
@@ -1237,6 +1315,12 @@ impl StorageClient {
                     .into());
                 }
                 Err(e) => {
+                    // P47: the auth middleware refused the destination and sent nothing. Not a network failure: no
+                    // retry, and the typed refusal survives so the upload queue classifies it as terminal.
+                    if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                        return Err(anyhow::Error::new(refused.clone())
+                            .context(format!("{operation} was not sent")));
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, &operation, attempt, &e).await;
                         attempt += 1;
@@ -1270,6 +1354,7 @@ impl StorageClient {
         file_path: &Path,
         content_type: &str,
     ) -> Result<UploadResponse> {
+        self.gate(dest_path)?;
         let url = format!("{}/storage", self.base_url);
         let operation = format!("Upload file '{}'", file_path.display());
 
@@ -1361,6 +1446,12 @@ impl StorageClient {
                     .into());
                 }
                 Err(e) => {
+                    // P47: the auth middleware refused the destination and sent nothing. Not a network failure: no
+                    // retry, and the typed refusal survives so the upload queue classifies it as terminal.
+                    if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                        return Err(anyhow::Error::new(refused.clone())
+                            .context(format!("{operation} was not sent")));
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, &operation, attempt, &e).await;
                         attempt += 1;
@@ -1397,6 +1488,7 @@ impl StorageClient {
     where
         R: AsyncRead + Send + Sync + 'static,
     {
+        self.gate(path)?;
         let url = format!("{}/storage", self.base_url);
 
         if let Err(BreakerOpen { retry_after }) = self.breaker.check() {
@@ -1489,6 +1581,7 @@ impl StorageClient {
         content_type: &str,
         options: Option<MultipartUploadOptions>,
     ) -> Result<MultipartCompleteResponse> {
+        self.gate(path)?;
         let options = options.unwrap_or_default();
 
         // Get file size to calculate parts
@@ -1729,6 +1822,14 @@ impl StorageClient {
             }
         }
 
+        // P47: a part the auth middleware refused was never sent; keep that refusal typed (it is terminal for the
+        // upload queue and carries the remedy) instead of folding it into the aggregate message.
+        if let Some(refused) = upload_errors
+            .iter()
+            .find_map(|(_, e)| fuigo_auth::find_bearer_refusal(e.as_ref()))
+        {
+            return Err(anyhow::Error::new(refused.clone()).context("Multipart upload part was not sent"));
+        }
         if !upload_errors.is_empty() {
             let error_msgs: Vec<String> = upload_errors
                 .iter()
@@ -1788,6 +1889,12 @@ impl StorageClient {
                     .into());
                 }
                 Err(e) => {
+                    // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry, and the
+                    // typed refusal survives for the upload queue's terminal classification.
+                    if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                        return Err(anyhow::Error::new(refused.clone())
+                            .context(format!("{operation} was not sent")));
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, operation, attempt, &e).await;
                         attempt += 1;
@@ -1842,6 +1949,12 @@ impl StorageClient {
                     .into());
                 }
                 Err(e) => {
+                    // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry, and the
+                    // typed refusal survives for the upload queue's terminal classification.
+                    if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                        return Err(anyhow::Error::new(refused.clone())
+                            .context(format!("{operation} was not sent")));
+                    }
                     if attempt < self.retry_config.max_retries {
                         wait_for_network_retry(&self.retry_config, operation, attempt, &e).await;
                         attempt += 1;
@@ -1863,7 +1976,9 @@ impl StorageClient {
     /// completely bypassing the proxy (and its nginx / Cloudflare body-size
     /// limits).  This is the recommended path for payloads that may exceed
     /// 4 MB.
-    pub async fn get_signed_upload_url(
+    ///
+    /// Private (P71): the only way to a signed-URL upload is [`Self::upload_bytes_signed`], which gates.
+    async fn get_signed_upload_url(
         &self,
         path: &str,
         content_type: &str,
@@ -1907,7 +2022,11 @@ impl StorageClient {
     ///
     /// The `content_type` **must** match the one baked into the signed URL,
     /// otherwise GCS will reject the request with 403.
-    pub async fn upload_via_signed_url(
+    ///
+    /// Private (P71): it PUTs to whatever URL it is handed, so it must only ever be handed the URL this
+    /// client's own (FluxRouter-operated, gated) proxy returned. [`Self::upload_bytes_signed`] is its
+    /// one caller.
+    async fn upload_via_signed_url(
         &self,
         signed_url: &str,
         data: &[u8],
@@ -1942,6 +2061,7 @@ impl StorageClient {
         data: &[u8],
         content_type: &str,
     ) -> Result<prod_mc_cli_chat_proxy_types::SignedUploadUrlResponse> {
+        self.gate(path)?;
         let signed = self.get_signed_upload_url(path, content_type).await?;
         if signed.signed_url.is_empty() {
             return Ok(signed);
@@ -1993,7 +2113,11 @@ async fn upload_part_streaming(
         let mut request = client
             .post(&url)
             .header("Content-Type", "application/octet-stream")
-            .header("x-fuigo-client-version", fuigo_version::VERSION)
+            // P43: identity-class header, FluxRouter-operated destinations only.
+            .headers(
+                fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_destination(&url)
+                    .header_map([("x-fuigo-client-version", fuigo_version::VERSION)]),
+            )
             .header("Content-Length", length.to_string());
         for (name, value) in crate::trace_context::trace_context_headers().iter() {
             request = request.header(name.clone(), value.clone());
@@ -2035,6 +2159,12 @@ async fn upload_part_streaming(
                 .into());
             }
             Err(e) => {
+                // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry, and the
+                // typed refusal survives for the upload queue's terminal classification.
+                if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                    return Err(anyhow::Error::new(refused.clone())
+                        .context(format!("{operation} was not sent")));
+                }
                 if attempt < retry_config.max_retries {
                     wait_for_network_retry(retry_config, &operation, attempt, &e).await;
                     attempt += 1;
@@ -2115,6 +2245,12 @@ async fn upload_part_direct(
                 .into());
             }
             Err(e) => {
+                // P47: refused by the auth middleware, nothing sent: not a network failure, so no retry, and the
+                // typed refusal survives for the upload queue's terminal classification.
+                if let Some(refused) = fuigo_auth::find_bearer_refusal(&e) {
+                    return Err(anyhow::Error::new(refused.clone())
+                        .context(format!("{operation} was not sent")));
+                }
                 if attempt < retry_config.max_retries {
                     wait_for_network_retry(retry_config, &operation, attempt, &e).await;
                     attempt += 1;
@@ -2355,7 +2491,126 @@ mod download_blob_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
+    }
+
+    /// P47 (audit R2): a part refused AFTER a successful multipart init (the credential's rule changed in between,
+    /// e.g. an exempt key was replaced by a session token) is never sent, and the refusal survives aggregation typed,
+    /// so the upload queue treats it as terminal.
+    #[tokio::test]
+    async fn p47_multipart_part_refusal_after_init_stays_typed() {
+        struct InitOnly;
+        impl fuigo_auth::HttpAuth for InitOnly {
+            fn apply(&self, b: reqwest::RequestBuilder, _: &str) -> reqwest::RequestBuilder {
+                b
+            }
+        }
+        #[async_trait::async_trait]
+        impl fuigo_auth::AuthCredentialProvider for InitOnly {
+            fn snapshot(&self) -> fuigo_auth::CredentialSnapshot {
+                fuigo_auth::CredentialSnapshot {
+                    token: Some("p47-session".into()),
+                    ..Default::default()
+                }
+            }
+            async fn refresh_after_unauthorized(&self) -> bool {
+                false
+            }
+            fn bearer_may_reach(
+                &self,
+                url: &reqwest::Url,
+                _bearer: &str,
+            ) -> Result<(), fuigo_auth::BearerDestinationRefused> {
+                if url.path().ends_with("/init") {
+                    Ok(())
+                } else {
+                    Err(fuigo_auth::BearerDestinationRefused("p47 refused part".into()))
+                }
+            }
+        }
+        let parts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = parts.clone();
+        let router = Router::new()
+            .route(
+                "/v1/storage/multipart/init",
+                axum::routing::post(|| async {
+                    axum::Json(serde_json::json!({
+                        "uploadId": "u1", "bucket": "b", "maxPartSizeBytes": 5
+                    }))
+                }),
+            )
+            .fallback(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { axum::http::StatusCode::OK.into_response() }
+            });
+        let (addr, _) = start_server(router).await;
+        let client = StorageClient::with_provider(
+            &format!("http://{addr}/v1"),
+            super::default_upload_client(),
+            std::sync::Arc::new(InitOnly),
+        );
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"twelve bytes").unwrap();
+        let err = client
+            .upload_multipart("p/large.bin", tmp.path(), "application/octet-stream", None)
+            .await
+            .unwrap_err();
+        assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_some(), "{err:#}");
+        assert_eq!(parts.load(std::sync::atomic::Ordering::SeqCst), 0, "a refused part was sent");
+    }
+
+    /// P47 (s12 regression): an EMPTY `user_token` is no credential, so the static path applies no destination rule and
+    /// the request is made (the upload queue's drain tests rely on a credential-less proxy config being retried, not
+    /// refused). Control: a non-empty token at the same loopback proxy is refused.
+    #[tokio::test]
+    async fn p47_empty_static_user_token_is_not_a_session_token() {
+        use super::StaticFuigoAuth;
+        let base = "http://127.0.0.1:1/v1";
+        assert!(matches!(
+            StaticFuigoAuth::new(Some(String::new())).bearer_destination(base),
+            fuigo_auth::BearerDestination::Unrestricted
+        ));
+        assert!(matches!(
+            StaticFuigoAuth::new(None).bearer_destination(base),
+            fuigo_auth::BearerDestination::Unrestricted
+        ));
+        let rule = StaticFuigoAuth::new(Some("p47-session".into())).bearer_destination(base);
+        assert!(rule.check(&reqwest::Url::parse(&format!("{base}/storage")).unwrap()).is_err());
+        // End to end: no refusal reaches the caller for the empty token (a transport error to the closed port instead).
+        let err = StorageClient::new(base, "").get_upload_limits().await.unwrap_err();
+        assert!(fuigo_auth::find_bearer_refusal(err.as_ref()).is_none(), "{err:#}");
+    }
+
+    /// P47: the static session-token constructor never contacts a cleartext loopback proxy (the request is not
+    /// sent, with or without the token) and says why; the non-session constructor reaches the same server
+    /// (positive control: the harness records requests).
+    #[tokio::test]
+    async fn p47_static_session_token_is_never_sent_to_a_loopback_proxy() {
+        let hits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = hits.clone();
+        let router = Router::new().route(
+            "/v1/storage/limits",
+            get(move || {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async { axum::http::StatusCode::UNAUTHORIZED.into_response() }
+            }),
+        );
+        let (addr, _) = start_server(router).await;
+        let base = format!("http://{addr}/v1");
+
+        let refused = StorageClient::new(&base, "p47-session-token")
+            .get_upload_limits()
+            .await
+            .unwrap_err();
+        let text = format!("{refused:#}");
+        assert!(text.contains("The request was not made"), "{text}");
+        assert!(!text.contains("p47-session-token"), "{text}");
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        let _ = StorageClient::with_static_key(&base, "static-key")
+            .get_upload_limits()
+            .await;
+        assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// Happy path: proxy returns a signed URL; content server streams back bytes.
@@ -2459,7 +2714,7 @@ mod batch_check_exists_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
     }
 
     #[tokio::test]
@@ -2592,7 +2847,7 @@ mod batch_check_exists_tests {
     async fn batch_returns_probe_failed_on_network_error() {
         // Privileged port 1 on loopback isn't listening -> deterministic ECONNREFUSED
         // (no port-reuse race like bind-then-drop would have).
-        let client = StorageClient::new("http://127.0.0.1:1/v1", "test-token");
+        let client = StorageClient::with_static_key("http://127.0.0.1:1/v1", "test-token");
         let paths = vec!["blobs/a".to_string()];
         let result = client.batch_check_exists(&paths).await;
         assert!(
@@ -2671,7 +2926,7 @@ mod check_exists_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
     }
 
     #[tokio::test]
@@ -2766,7 +3021,7 @@ mod check_exists_tests {
 
     #[tokio::test]
     async fn check_exists_returns_probe_failed_on_network_error() {
-        let client = StorageClient::new("http://127.0.0.1:1/v1", "test-token");
+        let client = StorageClient::with_static_key("http://127.0.0.1:1/v1", "test-token");
         let result = client.check_exists("p").await;
         assert!(
             matches!(result, ExistsResult::ProbeFailed),
@@ -2794,7 +3049,7 @@ mod batch_upload_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
     }
 
     fn test_files() -> Vec<(String, Vec<u8>, String)> {
@@ -3111,7 +3366,7 @@ mod batch_upload_json_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
     }
 
     fn test_files() -> Vec<(String, Vec<u8>, String)> {
@@ -3328,7 +3583,7 @@ mod forbidden_tests {
     }
 
     fn client_for(addr: SocketAddr) -> StorageClient {
-        StorageClient::new(&format!("http://{addr}/v1"), "test-token")
+        StorageClient::with_static_key(&format!("http://{addr}/v1"), "test-token")
     }
 
     fn forbidden_handler() -> impl IntoResponse {
@@ -3476,3 +3731,73 @@ mod forbidden_tests {
 #[cfg(test)]
 #[path = "storage_client_breaker_tests.rs"]
 mod breaker_tests;
+
+#[cfg(test)]
+mod p43_identity_tests {
+    use super::*;
+    /// P43. Every storage request goes to `{base_url}/storage/...`; the identity-class client
+    /// labels go only to a FluxRouter-operated base.
+    #[tokio::test(flavor = "current_thread")]
+    async fn storage_common_headers_carry_identity_only_to_fluxrouter() {
+        let build = |base: &str| {
+            let client =
+                StorageClient::new(base, "tok").with_client_identity("1.0.21", "fuigo-shell");
+            let url = format!("{base}/storage/limits");
+            client
+                .add_common_headers(client.http_client.get(&url))
+                .build()
+                .unwrap()
+        };
+        let request = build("https://api.fluxrouter.ai/v1");
+        assert_eq!(request.headers()["x-fuigo-client-version"], "1.0.21");
+        assert_eq!(request.headers()["x-fuigo-client-identifier"], "fuigo-shell");
+        for base in ["https://storage-proxy.example/v1", "http://127.0.0.1:9/v1", "http://api.fluxrouter.ai/v1"] {
+            let request = build(base);
+            for name in fuigo_extra_ca::fluxrouter::IDENTITY_HEADER_NAMES {
+                assert!(!request.headers().contains_key(name), "{base} got {name}");
+            }
+        }
+    }
+
+    /// P43 hostile: the multipart part upload (its own gate, not `add_common_headers`) sends no
+    /// client version to a storage proxy that is not FluxRouter-operated.
+    #[tokio::test(flavor = "current_thread")]
+    async fn multipart_part_upload_sends_no_identity_to_a_non_fluxrouter_proxy() {
+        use std::io::Write as _;
+        let seen: Arc<std::sync::Mutex<Vec<axum::http::HeaderMap>>> = Arc::default();
+        let recorder = seen.clone();
+        let app = axum::Router::new().fallback(move |headers: axum::http::HeaderMap| {
+            let recorder = recorder.clone();
+            async move {
+                recorder.lock().unwrap().push(headers);
+                axum::http::StatusCode::BAD_REQUEST
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"part-bytes").unwrap();
+        let client = reqwest_middleware::ClientBuilder::new(
+            fuigo_extra_ca::build_reqwest_client(|builder| builder).unwrap(),
+        )
+        .build();
+        let _ = upload_part_streaming(
+            &client,
+            &base,
+            "upload-1",
+            1,
+            Arc::new(file),
+            0,
+            10,
+            &RetryConfig::default(),
+        )
+        .await;
+        server.abort();
+        let seen = seen.lock().unwrap();
+        assert!(!seen.is_empty(), "the part upload made no request");
+        for headers in seen.iter() {
+            assert!(!headers.contains_key("x-fuigo-client-version"));
+        }
+    }
+}

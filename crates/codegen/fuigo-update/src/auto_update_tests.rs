@@ -1378,9 +1378,25 @@ fn test_installer_allows_downgrade_internal() {
     assert!(installer_allows_downgrade("internal"));
 }
 
+/// R110 (U2): gh-release has no authoritative pointer ("latest" comes from the release list), so an automatic
+/// update never goes down; only an explicit `--force` (or `--version`) may.
 #[test]
-fn test_installer_allows_downgrade_gh_release() {
-    assert!(installer_allows_downgrade("gh-release"));
+fn test_installer_allows_downgrade_gh_release_only_when_forced() {
+    assert!(!installer_allows_downgrade("gh-release"));
+    assert!(installer_allows_forced_downgrade("gh-release"));
+    assert!(installer_allows_forced_downgrade("internal"));
+    assert!(!installer_allows_forced_downgrade("npm"));
+    assert!(!installer_allows_forced_downgrade("unknown"));
+}
+
+/// R110 (U1): the `SHA256SUMS` entry is matched on the exact asset name, in text or binary mode.
+#[test]
+fn gh_sums_entry_matches_the_exact_asset_name() {
+    let sums = "AAAA  fuigo-1.0.21-linux-x86_64.tar.gz\nbbbb  fuigo-1.0.21-linux-x86_64\ncccc *fuigo-1.0.21-macos-aarch64\n";
+    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64").as_deref(), Some("bbbb"));
+    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-macos-aarch64").as_deref(), Some("cccc"));
+    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux-x86_64.tar.gz").as_deref(), Some("aaaa"));
+    assert_eq!(gh_sums_entry(sums, "fuigo-1.0.21-linux"), None);
 }
 
 #[test]
@@ -1798,6 +1814,19 @@ fn test_env_installer_explicit_internal_wins_over_npm_managed() {
 // ──────────────────────────────────────────────────────────────────────
 // create_temp_npmrc — also env-var based (NPM_TOKEN), must run serially.
 // ──────────────────────────────────────────────────────────────────────
+
+/// P145 (Astra r1 #4): the token file is removed when its guard drops, so a cancelled npm call cannot leave it behind.
+#[test]
+#[serial_test::serial]
+fn p145_temp_npmrc_is_removed_when_its_guard_drops() {
+    let _g = InstallerEnvGuard::isolate();
+    unsafe { std::env::set_var("NPM_TOKEN", "secret123") };
+    let guard = create_temp_npmrc(None).unwrap().expect("file written");
+    let path = guard.0.clone();
+    assert!(path.exists());
+    drop(guard);
+    assert!(!path.exists(), "token file left behind: {}", path.display());
+}
 
 #[test]
 #[serial_test::serial]
@@ -2431,4 +2460,42 @@ fn npm_entry_is_recognized_by_the_binary_location() {
     let resolved = std::fs::canonicalize(&path_entry).unwrap();
     assert!(super::is_under_node_modules(&resolved));
     assert!(!super::is_under_node_modules(&root.join("home/bin/fuigo")));
+}
+
+/// P109: the GitHub Release must carry an asset under the exact name the gh-release installer asks
+/// for, on every platform `detect_platform` can report. The release workflow lays the assets out with
+/// scripts/release/github-release-assets.sh; this pins the installer's names to that script's table.
+#[test]
+fn gh_release_asset_names_match_release_layout_script() {
+    const SCRIPT: &str = include_str!("../../../../scripts/release/github-release-assets.sh");
+    // (npm platform the release workflow builds, os and arch `detect_platform` returns there)
+    let table = [
+        ("darwin-arm64", "macos", "aarch64"),
+        ("darwin-x64", "macos", "x86_64"),
+        ("linux-arm64", "linux", "aarch64"),
+        ("linux-x64", "linux", "x86_64"),
+        ("win32-arm64", "windows", "aarch64"),
+        ("win32-x64", "windows", "x86_64"),
+    ];
+    for (npm_platform, os, arch) in table {
+        let line = format!("{npm_platform}) asset_platform={os}-{arch} ;;");
+        assert!(
+            SCRIPT.contains(&line),
+            "github-release-assets.sh must map {npm_platform} to {os}-{arch} (missing `{line}`)"
+        );
+        assert_eq!(
+            super::gh_release_asset_name("1.0.21", os, arch),
+            format!("fuigo-1.0.21-{os}-{arch}"),
+        );
+        // The script writes `fuigo-$VERSION-$asset_platform`.
+        assert!(SCRIPT.contains(r#"cp "$raw" "$OUT/fuigo-$VERSION-$asset_platform""#));
+    }
+    assert_eq!(
+        SCRIPT.matches(") asset_platform=").count(),
+        table.len(),
+        "the script maps a platform this test does not know"
+    );
+    // The platform this test runs on resolves to one of the six names.
+    let (os, arch) = super::detect_platform().unwrap();
+    assert!(table.iter().any(|(_, o, a)| *o == os && *a == arch));
 }

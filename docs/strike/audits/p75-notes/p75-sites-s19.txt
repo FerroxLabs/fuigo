@@ -1,0 +1,63 @@
+crates/codegen/fuigo-update/src/auto_update.rs:179: fuigo_tty_utils::cli_println!("{payload}");
+crates/codegen/fuigo-update/src/auto_update.rs:184: fuigo_tty_utils::cli_println!("Fuigo - v{} [{}]", status.current_version, status.channel);
+crates/codegen/fuigo-update/src/auto_update.rs:185: fuigo_tty_utils::cli_println!("Update check failed: {error}");
+crates/codegen/fuigo-update/src/auto_update.rs:193: fuigo_tty_utils::cli_println!(
+crates/codegen/fuigo-update/src/auto_update.rs:200: fuigo_tty_utils::cli_println!("A new version of Fuigo is available.");
+crates/codegen/fuigo-update/src/auto_update.rs:206: fuigo_tty_utils::cli_println!(
+crates/codegen/fuigo-update/src/auto_update.rs:215: fuigo_tty_utils::cli_println!("Fuigo - v{}{}", status.current_version, channel_label);
+crates/codegen/fuigo-update/src/auto_update.rs:718: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:726: fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:730: fuigo_tty_utils::cli_eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
+crates/codegen/fuigo-update/src/auto_update.rs:734: fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:748: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:755: fuigo_tty_utils::cli_eprintln!("{}", PROMPT_UPDATE_NOW);
+crates/codegen/fuigo-update/src/auto_update.rs:764: fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+crates/codegen/fuigo-update/src/auto_update.rs:768: fuigo_tty_utils::cli_eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
+crates/codegen/fuigo-update/src/auto_update.rs:783: fuigo_tty_utils::cli_eprintln!("{}", MSG_RUN_UPDATE_MANUAL);
+crates/codegen/fuigo-update/src/auto_update.rs:868: fuigo_tty_utils::cli_eprintln!("Restarting Fuigo...");
+crates/codegen/fuigo-update/src/auto_update.rs:1594: fuigo_tty_utils::cli_eprintln!("  Downloading fuigo v{} ({})...", version, platform);
+crates/codegen/fuigo-update/src/auto_update.rs:1626: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2265: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2311: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2381: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2385: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2388: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2391: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2394: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2471: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2484: fuigo_tty_utils::cli_eprintln!("Switched to {} channel.", ch);
+crates/codegen/fuigo-update/src/auto_update.rs:2505: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2530: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2535: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2545: fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", version);
+crates/codegen/fuigo-update/src/auto_update.rs:2546: fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
+crates/codegen/fuigo-update/src/auto_update.rs:2565: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2581: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2612: fuigo_tty_utils::cli_eprintln!("Already up to date ({}).", effective_current);
+crates/codegen/fuigo-update/src/auto_update.rs:2654: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2660: fuigo_tty_utils::cli_eprintln!("Updating Fuigo {} → {}", effective_current, install_target);
+crates/codegen/fuigo-update/src/auto_update.rs:2664: fuigo_tty_utils::cli_eprintln!();
+crates/codegen/fuigo-update/src/auto_update.rs:2671: fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", target_version);
+crates/codegen/fuigo-update/src/auto_update.rs:2674: fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
+crates/codegen/fuigo-update/src/auto_update.rs:2695: Ok(true) => fuigo_tty_utils::cli_eprintln!("  Applied managed configuration."),
+crates/codegen/fuigo-update/src/auto_update.rs:2701: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-update/src/auto_update.rs:2705: Err(e) => fuigo_tty_utils::cli_eprintln!("  Couldn't apply managed configuration. {e}"),
+crates/codegen/fuigo-update/src/version_policy.rs:103: fuigo_tty_utils::cli_eprintln!("{message}");
+crates/codegen/fuigo-sandbox/src/lib.rs:314: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:332: fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan materialization failed: {e}");
+crates/codegen/fuigo-sandbox/src/lib.rs:338: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:350: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:363: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:537: fuigo_tty_utils::cli_eprintln!("error: sandbox profile resolve failed: {e}");
+crates/codegen/fuigo-sandbox/src/lib.rs:558: fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
+crates/codegen/fuigo-sandbox/src/lib.rs:566: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:584: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-sandbox/src/lib.rs:612: fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:132: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:340: fuigo_tty_utils::cli_eprintln!("taking over from predecessor workspace-server (pid {pid})");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:342: fuigo_tty_utils::cli_eprintln!("failed to signal predecessor (pid {pid}): {e}");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:348: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:352: fuigo_tty_utils::cli_eprintln!("failed to kill predecessor (pid {pid}): {e}");
+crates/codegen/fuigo-workspace-daemon/src/daemonize.rs:360: fuigo_tty_utils::cli_eprintln!(
+crates/codegen/fuigo-workspace/src/bin/workspace_server.rs:258: fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&CAPABILITIES)?);
+crates/codegen/fuigo-workspace/src/bin/workspace_server.rs:265: fuigo_tty_utils::cli_eprintln!("{msg}");

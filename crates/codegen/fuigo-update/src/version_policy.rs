@@ -100,7 +100,7 @@ pub fn enforce_version_policy_or_exit() {
     let decision = evaluate_required_range(&current, &policy);
     if let Some(message) = required_range_message(&decision) {
         warn!(?decision, "required version range: refusing to start");
-        eprintln!("{message}");
+        fuigo_tty_utils::cli_eprintln!("{message}");
         std::process::exit(1);
     }
 }

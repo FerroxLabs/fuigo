@@ -140,6 +140,9 @@ fn worktree_failure_message_hint_follows_threaded_provenance() {
 #[serial_test::serial(FUIGO_HOME)]
 #[test]
 fn pin_title_resume_finds_saved_profile_and_conflicts() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let id = "abcdabcd-1111-2222-3333-444444444444";
@@ -178,6 +181,9 @@ fn pin_title_resume_finds_saved_profile_and_conflicts() {
 #[serial_test::serial(FUIGO_HOME)]
 #[test]
 fn headless_title_pin_is_caller_aware() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let id = "abababab-1111-2222-3333-444444444444";
@@ -211,6 +217,9 @@ fn headless_title_pin_is_caller_aware() {
 #[serial_test::serial(FUIGO_HOME)]
 #[test]
 fn pin_prefers_restored_child_over_same_id_in_other_cwd() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let child = "cafecafe-1111-2222-3333-444444444444";
@@ -246,6 +255,9 @@ fn pin_prefers_restored_child_over_same_id_in_other_cwd() {
 #[serial_test::serial(FUIGO_HOME)]
 #[tokio::test]
 async fn materialization_consumes_pinned_id_after_concurrent_rename() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let pinned = "dadadada-1111-2222-3333-444444444444";
@@ -300,6 +312,9 @@ fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
 #[serial_test::serial(FUIGO_HOME)]
 #[test]
 fn pin_ambiguous_title_errors_before_sandbox() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(
@@ -329,6 +344,9 @@ fn pin_ambiguous_title_errors_before_sandbox() {
 #[serial_test::serial(FUIGO_HOME)]
 #[tokio::test]
 async fn pinned_no_match_does_not_retry_title_after_sandbox() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
 
@@ -378,6 +396,9 @@ async fn pinned_no_match_does_not_retry_title_after_sandbox() {
 #[serial_test::serial(FUIGO_HOME)]
 #[tokio::test]
 async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(&cwd_str, "legacy-remote-7", serde_json::json!({}));
@@ -417,6 +438,9 @@ async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
 #[serial_test::serial(FUIGO_HOME)]
 #[tokio::test]
 async fn duplicate_legacy_id_is_not_title_addressable() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
     let mut fx = FuigoHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(

@@ -757,8 +757,13 @@ impl BindMcpConfig {
     /// local-agent-endpoint transport posture (no OAuth probe, no proxy, no
     /// redirects). Defaults OFF for every server — a user-configured
     /// third-party MCP server must never receive the session id or lose its
-    /// OAuth/proxy path. Read when a server STARTS; marking changes alone do
-    /// not restart a running server.
+    /// OAuth/proxy path. A name is necessary but not sufficient: the server's
+    /// URL must also be a loopback address (`127.0.0.0/8`, `::1`,
+    /// `localhost`), enforced where the header is added
+    /// (`fuigo_mcp::servers::start_mcp_server`), so a remote server that is
+    /// given a first-party name gets neither the header nor the posture.
+    /// Read when a server STARTS; marking changes alone do not restart a
+    /// running server.
     pub fn with_first_party_servers(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.first_party = std::sync::Arc::new(names.into_iter().collect());
         self
@@ -930,6 +935,7 @@ impl AgentSessionConfig {
     }
 }
 /// WARNING: `tool_config` is redacted from `Debug` output because `ToolServerConfig.tools[*].params` may contain credentials.
+/// `extra_env` prints by name only (P70a, Astra r4): users put API keys there.
 impl std::fmt::Debug for AgentSessionConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentSessionConfig")
@@ -946,7 +952,7 @@ impl std::fmt::Debug for AgentSessionConfig {
             )
             .field("max_depth", &self.max_depth)
             .field("cwd_override", &self.cwd_override)
-            .field("extra_env", &self.extra_env)
+            .field("extra_env", &self.extra_env.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>())
             .field("parent_session_id", &self.parent_session_id)
             .finish()
     }
@@ -1238,5 +1244,19 @@ mod tests {
             WorkspaceServerMetadata::from_metadata(&serde_json::json!("opaque")),
             WorkspaceServerMetadata::default()
         );
+    }
+}
+
+#[cfg(test)]
+mod p70a_redacted_debug {
+    /// P70a (Astra r4): a child session's `extra_env` values never reach a `{:?}`; the names still print.
+    #[test]
+    fn agent_session_config_debug_prints_extra_env_names_only() {
+        let mut config = super::AgentSessionConfig::new("p70a-child");
+        config.extra_env.insert("P70A_API_KEY".to_owned(), "p70ae-FAKE-0a1b2c3d".to_owned());
+        for out in [format!("{config:?}"), format!("{config:#?}")] {
+            assert!(out.contains("P70A_API_KEY") && out.contains("<redacted>"), "control: {out}");
+            assert!(!out.contains("p70ae-FAKE"), "Debug holds an env value: {out}");
+        }
     }
 }

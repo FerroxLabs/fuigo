@@ -609,6 +609,17 @@ impl ChatStateActor {
         items: Vec<ConversationItem>,
         is_compaction: bool,
     ) {
+        self.persistence.replace_history(&items);
+        self.apply_replaced_conversation(items, is_compaction);
+    }
+
+    /// The in-memory half of [`Self::replace_conversation`], for a history whose persistence the caller has already
+    /// handled ([`ChatStateCommand::ReplaceConversationPersisted`](crate::commands::ChatStateCommand)).
+    pub(super) fn apply_replaced_conversation(
+        &mut self,
+        items: Vec<ConversationItem>,
+        is_compaction: bool,
+    ) {
         self.snapshot_turn_slice();
         if is_compaction && let Some(cap) = &mut self.state.turn_capture {
             cap.compaction_occurred = true;
@@ -616,7 +627,6 @@ impl ChatStateActor {
         // `harness_trace_buffer` / `harness_trace_turns` intentionally untouched:
         // the planner/verifier subagents ran, so their sealed trace turns survive
         // a conversation replace (same intent as the `TruncateToPromptIndex` arm).
-        self.persistence.replace_history(&items);
         let base_estimate = super::state::estimate_conversation_tokens(&items);
         let estimated_tokens = self.reseed_total_tokens(base_estimate);
         self.state.conversation = items;

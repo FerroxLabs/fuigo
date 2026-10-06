@@ -100,14 +100,18 @@ Memory is stored as Markdown files under `~/.fuigo/memory/`:
 | Location | Scope | Description |
 |----------|-------|-------------|
 | `~/.fuigo/memory/MEMORY.md` | Global | Facts that apply across all your projects |
-| `~/.fuigo/memory/<project-slug>-<hash8>/MEMORY.md` | Workspace | Project-specific conventions and context |
-| `~/.fuigo/memory/<project-slug>-<hash8>/sessions/` | Sessions | Per-session summaries and logs |
+| `~/.fuigo/memory/<project-slug>-<hash>/MEMORY.md` | Workspace | Project-specific conventions and context |
+| `~/.fuigo/memory/<project-slug>-<hash>/sessions/` | Sessions | Per-session summaries and logs |
 
-Fuigo suffixes each workspace directory with a short hash of the repository's identity. The identity is the `origin` remote in `org/repo` form when the directory is a Git repository with an `origin` remote, or the directory path otherwise. Because clones and worktrees of the same repository share an `origin` remote, they also share one memory directory.
+Fuigo suffixes each workspace directory with a hash of the repository's identity (16 hex digits for a remote identity, 8 for a path). The identity is the `origin` remote as `host/org/repo` when the directory is a Git repository with an `origin` remote, or the directory path otherwise. The scheme, user name, port and a trailing `.git` are ignored, so `git@github.com:acme/app.git` and `https://github.com/acme/app` are the same identity, and every clone and worktree of that repository on this machine shares one memory directory. The same `org/repo` on a different host (for example `https://other.example/acme/app`) is a different identity and gets its own directory.
 
-An SQLite index supports search within the current workspace and, when explicitly
-enabled, the shared global `MEMORY.md`. Other workspace directories and recovery
-snapshots are excluded from reads and retrieval, including through symlinks.
+The identity comes from the repository's own `.git/config`. Fuigo cannot tell a genuine clone from a directory whose `.git/config` was copied or edited to name the same `origin` (for example, an archive that ships its `.git` folder). Such a directory shares the memory of that repository. Turn memory off (`FUIGO_MEMORY=0`) when you work in a repository you do not trust.
+
+Earlier versions used `org/repo` without the host as the identity. A directory created that way is moved to the new name the first time it is opened, but only when Fuigo can prove it belongs to this host: everything recorded in it must be readable, at least one project path recorded in it (the `# Project Memory — <path>` header of its `MEMORY.md`, or the workspace recorded with a captured session note) must still exist on this machine with an `origin` of exactly the same `host/org/repo`, and no recorded path may point at a different host. Otherwise the old directory is left untouched, nothing is deleted, and Fuigo prints a one-time notice that names the old directory and the new one (the same notice appears if a proven directory cannot be moved). A `MEMORY_MIGRATE` warning is also written to the log. If the old memory is yours, move its contents into the new directory by hand. The notice is shown once for each old directory and new directory pair, so later starts stay quiet; in the full-screen interface it is printed again when you leave it. A moved directory's old search index is kept aside in a `.pre-p91-index-…` folder inside it, and a new index is built from its Markdown files. Close sessions started by an older Fuigo before you upgrade: a session that is still running keeps writing to the old directory.
+
+An SQLite index supports search within the current workspace directory and, when explicitly
+enabled, the shared global `MEMORY.md`. Memory directories of other identities, and recovery
+snapshots, are excluded from reads and retrieval, including through symlinks.
 
 Fuigo serializes its memory writes and replaces files atomically, so concurrent appends preserve entries and interrupted replacements leave complete files. On Unix, Fuigo writes memory files with owner-only permissions. Nonempty workspace directories are retained even when they contain curated notes but no session logs.
 
@@ -263,11 +267,11 @@ Only one Dream run owns a workspace at a time, with ownership acquired before th
 
 ### Auto-Dream
 
-Dream also runs automatically. Fuigo defers the startup check until the session loop is running, then checks periodically. Consolidation runs once enough time has passed and enough sessions have accumulated:
+Dream is **off by default**. Turn it on with `enabled = true`, and Fuigo then defers the startup check until the session loop is running and checks periodically. Once enabled, consolidation runs when enough time has passed and enough sessions have accumulated:
 
 ```toml
 [memory.dream]
-enabled = true     # Run automatic consolidation (default: true)
+enabled = true     # Run automatic consolidation (default: false -- off unless you set this)
 min_hours = 24     # Minimum hours between consolidations
 min_sessions = 5   # Minimum sessions since the last consolidation
 check_interval_secs = 3600 # Also check the gates hourly
@@ -371,6 +375,8 @@ fuigo memory clear --all
 fuigo memory clear --yes
 ```
 
+`fuigo memory clear` only clears the current memory folder. If an older version of Fuigo wrote notes into the repository's old memory folder after the move to the host-qualified name, `clear` lists that folder as not cleared, with its path and how to remove it. Fuigo never reads or deletes it.
+
 To edit memory from the shell, open the files in your editor directly -- for example, `$EDITOR ~/.fuigo/memory/MEMORY.md`.
 
 ---
@@ -381,7 +387,7 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `false` | Enable memory |
+| `enabled` | `true` | Enable memory. Resolved across layers, highest first: `FUIGO_MEMORY`, the `--no-memory` CLI flag, this config key, a remote feature flag, then the built-in default of `true` |
 | `session.save_on_end` | `true` | Write metadata summary on session end |
 | `watcher.enabled` | `true` | Watch `~/.fuigo/memory/` for external edits and reindex |
 
@@ -420,7 +426,7 @@ To edit memory from the shell, open the files in your editor directly -- for exa
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Enable automatic Dream consolidation |
+| `enabled` | `false` | Enable automatic Dream consolidation |
 | `min_hours` | `24` | Minimum hours between consolidations |
 | `min_sessions` | `5` | Minimum sessions since the last consolidation |
 | `stale_lock_secs` | `3600` | Seconds before a stale consolidation lock is reclaimed |
@@ -432,11 +438,11 @@ You configure flush under `[compaction]`, not `[memory]`, because it is a compac
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `enabled` | `true` | Enable the pre-compaction memory flush |
+| `enabled` | `false` | Enable the pre-compaction memory flush |
 | `soft_threshold_tokens` | `4000` | Token headroom before the compact threshold that triggers a flush |
 | `max_flush_write_chars` | `8000` | Maximum characters the flush may write to memory |
 | `flush_model` | unset | Model for the flush turn. When unset or `""`, Fuigo uses the session's primary model. |
-| `idle_timeout_secs` | `300` | Idle seconds before a background flush. Set `0` to disable idle flushes. |
+| `idle_timeout_secs` | unset | Idle seconds before a background flush. Unset by default, so idle flushes do not run; set a value to enable them, or `0` to disable explicitly. |
 | `semantic_dedup_threshold` | unset | Cosine-similarity threshold for de-duplicating flushed content. When unset, defaults to `0.92`. |
 
 ### Pruning Settings (`[compaction.pruning]`)

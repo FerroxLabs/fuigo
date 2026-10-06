@@ -14,6 +14,10 @@ pub use validator::SyntaxValidator;
 
 use source::{ParentPlan, SourceState};
 
+// The loader's blank re-check asks the same question: is this still that file?
+#[cfg(windows)]
+pub(crate) use source::FileIdentity;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedItem {
     pub name: String,

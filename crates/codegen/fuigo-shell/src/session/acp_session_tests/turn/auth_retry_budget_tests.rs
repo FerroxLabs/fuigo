@@ -12,6 +12,48 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
+/// P42: since session-token delivery has one predicate, an `http://` loopback mock never receives the session
+/// token. Each test therefore runs in a fresh process (the proxy and CA variables latch at the first HTTP
+/// client) and reaches its mock through [`crate::test_support::session_wire::SessionFront`] as the configured
+/// origin `https://api.fluxrouter.ai/v1`. The trust set is the production predicate; nothing is overridden.
+static P42_FRONT: std::sync::OnceLock<crate::test_support::session_wire::SessionFront> =
+    std::sync::OnceLock::new();
+
+/// The configured-origin spelling of `server`'s URL (the front was started by [`p42_child`]).
+async fn p42_front_url(server: &MockInferenceServer) -> String {
+    crate::agent::config::Config::install_test_trusted_origins();
+    P42_FRONT
+        .get()
+        .expect("p42_child starts the front before the test body")
+        .front(&server.url())
+}
+
+/// `true` in the fresh child process that runs `test`'s body; the parent only checks the child passed.
+/// In the child, the front starts here, before anything can build an HTTP client or load the TLS roots.
+fn p42_child(test: &str) -> bool {
+    let child = fuigo_test_support::env::fresh_process_home(&format!(
+        "session::acp_session::auth_retry_budget_tests::{test}"
+    ))
+    .is_some();
+    if child {
+        P42_FRONT.get_or_init(crate::test_support::session_wire::SessionFront::start);
+        // Real clock (P42): the front is real network I/O, which a paused clock cannot coexist with. The
+        // production ladders run unchanged but every paced sleep is divided by this factor; the test-side waits
+        // below use the same `paced`, so every ratio the assertions rely on is preserved.
+        crate::session::acp_session::auth_retry::TEST_PACE_DIVISOR
+            .store(P42_PACE_DIVISOR, std::sync::atomic::Ordering::Relaxed);
+    }
+    child
+}
+
+/// See [`p42_child`].
+const P42_PACE_DIVISOR: u32 = 100;
+
+/// A test-side wait or hang cap, on the same scale as the production paced sleeps.
+fn paced(d: Duration) -> Duration {
+    crate::session::acp_session::auth_retry::paced(d)
+}
+
 /// The token the mock server accepts and the refresher mints on success.
 const FRESH_TOKEN: &str = "refreshed-test-token";
 
@@ -173,8 +215,9 @@ async fn session_token_actor(
     auth_manager: Arc<AuthManager>,
     shape: ActorShape,
 ) -> (Arc<SessionActor>, FuigoUpdates) {
+    let front_url = p42_front_url(server).await;
     let sampling_cfg = fuigo_sampler::SamplerConfig {
-        base_url: server.url(),
+        base_url: front_url.clone(),
         model: "test".to_string(),
         api_backend: fuigo_sampler::ApiBackend::Responses,
         context_window: 256_000,
@@ -220,7 +263,7 @@ async fn session_token_actor(
         .get_sampling_config()
         .await
         .expect("test actor has sampling config");
-    cfg.base_url = server.url();
+    cfg.base_url = front_url.clone();
     cfg.api_backend = fuigo_sampling_types::ApiBackend::Responses;
     cfg.model = "test".to_string();
     actor.chat_state_handle.update_sampling_config(cfg);
@@ -229,7 +272,7 @@ async fn session_token_actor(
     creds.auth_type = fuigo_chat_state::AuthType::SessionToken;
     actor.chat_state_handle.update_credentials(creds);
 
-    // Definite NotByok: the session-token gate must stay active against the loopback mock URL (an `Unknown` would demand a first-party host)
+    // Definite NotByok: the session-token gate must stay active against the loopback mock URL (an `Unknown` would demand a configured API origin)
     actor
         .model_auth_memo
         .replace(Some(crate::session::acp_session::ModelAuthMemo {
@@ -272,8 +315,8 @@ async fn run_prompt(
     run_prompt_with_cap(actor, prompt_id, 3600).await
 }
 
-/// [`run_prompt`] with an explicit virtual-time cap: under a paused clock virtual spend scales
-/// with the pacing ladders, so caps are anti-hang bounds only and never assert timing.
+/// [`run_prompt`] with an explicit hang cap, scaled like the paced sleeps; caps are anti-hang bounds only
+/// and never assert timing.
 async fn run_prompt_with_cap(
     actor: &Arc<SessionActor>,
     prompt_id: &str,
@@ -283,10 +326,9 @@ async fn run_prompt_with_cap(
         "hello".to_string(),
     ))];
     // Hang guard, not a latency assertion: only a wedged turn reaches it
-    // The exhaustion test runs on a paused clock, and the 401 ladder plus refresh waits burn far past any real-time budget in virtual time
-    // Auto-advance makes that virtual time free
+    // P42: real clock, paced sleeps scaled by `P42_PACE_DIVISOR`; the cap is scaled the same way (floor 120 s)
     tokio::time::timeout(
-        Duration::from_secs(cap_secs),
+        paced(Duration::from_secs(cap_secs)).max(Duration::from_secs(120)),
         actor.handle_prompt(
             prompt_id,
             prompt_blocks,
@@ -344,6 +386,9 @@ fn inference_requests(
 /// Recovery lands a fresh token; the turn must survive and resubmit with the fresh bearer.
 #[test]
 fn fail_closed_401_is_uncharged_and_turn_survives() {
+    if !p42_child("fail_closed_401_is_uncharged_and_turn_survives") {
+        return;
+    }
     on_session_stack(|| {
         run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
@@ -458,6 +503,9 @@ fn recovered_fail_closed_401_refresh_calls(park_disabled: bool) -> u32 {
 /// resubmit skips its refresh-driving prepares, so the kill switch is observable as extra refreshes.
 #[test]
 fn park_disabled_recovered_401_still_resubmits() {
+    if !p42_child("park_disabled_recovered_401_still_resubmits") {
+        return;
+    }
     let parked = recovered_fail_closed_401_refresh_calls(false);
     let unparked = recovered_fail_closed_401_refresh_calls(true);
     assert!(
@@ -468,11 +516,14 @@ fn park_disabled_recovered_401_still_resubmits() {
 
 /// Real credential rejections must still terminate: the escalating budget exhausts after `MAX_RETRIES` when every request carries a rejected bearer.
 /// The failure names authenticated rejections, not a generic budget message.
-/// `start_paused` auto-advances the backoff ladder.
+/// The backoff ladder runs on a real clock, scaled by `P42_PACE_DIVISOR`.
 #[test]
 fn authenticated_401s_still_exhaust_after_three_retries() {
+    if !p42_child("authenticated_401s_still_exhaust_after_three_retries") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             // The server only accepts a token the refresher never mints, so every authenticated send is rejected
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
@@ -559,11 +610,30 @@ impl crate::auth::refresh::TokenRefresher for DeferredRefreshNeverLands {
     }
 }
 
-/// Out-of-band recovery: `after` in, a wire-valid token lands and the refresh notify fires.
-fn land_fresh_token_after(actor: &Arc<SessionActor>, after: Duration) {
+/// Re-authentication park announcements so far (Retrying updates for a 401, not transient 5xx retries).
+fn reauth_parks(updates: &FuigoUpdates) -> usize {
+    retrying_updates(updates)
+        .iter()
+        .filter(|(_, _, reason)| reason.contains("Re-authenticating"))
+        .count()
+}
+
+/// Out-of-band recovery: a wire-valid token lands (and the refresh notify fires) once the turn has
+/// announced `parks_for(after)` park cycles (`retryState` Retrying updates).
+///
+/// P42: these tests run on a real clock, where the first recovery dispatch costs real time, so a purely
+/// time-based landing could beat the first parked resubmit. Landing on observed park cycles keeps the
+/// sequence the assertions describe (credential-less send, parked resubmits, authenticated resubmit), with the
+/// longer outage (`after` = 300 s) still producing proportionally more parked cycles than the short one (30 s).
+fn land_fresh_token_after(actor: &Arc<SessionActor>, updates: &FuigoUpdates, after: Duration) {
+    let parks = (after.as_secs() / 15).max(2) as usize;
+    let updates = updates.clone();
     let waker = actor.auth_manager.clone().expect("actor has auth manager");
     tokio::task::spawn_local(async move {
-        tokio::time::sleep(after).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+        while reauth_parks(&updates) < parks && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         waker.hot_swap(FuigoAuth {
             key: FRESH_TOKEN.to_string(),
             auth_mode: AuthMode::Oidc,
@@ -580,8 +650,11 @@ fn land_fresh_token_after(actor: &Arc<SessionActor>, after: Duration) {
 /// Parked cycles are paced by the escalating schedule and drive neither recovery dispatches nor preflight refreshes.
 #[test]
 fn deferred_recovery_credential_less_401_parks_and_survives() {
+    if !p42_child("deferred_recovery_credential_less_401_parks_and_survives") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -594,7 +667,7 @@ fn deferred_recovery_credential_less_401_parks_and_survives() {
             let pre_request_calls = refresher.pre_request_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            land_fresh_token_after(&actor, Duration::from_secs(30));
+            land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
 
             let outcome = run_prompt_with_cap(&actor, "deferred-recovery-parks", 86_400).await;
             assert!(
@@ -659,9 +732,9 @@ fn deferred_recovery_credential_less_401_parks_and_survives() {
             let server_rejected_calls2 = refresher2.server_rejected_calls.clone();
             let pre_request_calls2 = refresher2.pre_request_calls.clone();
             let (_dir2, am2) = expired_auth_manager(refresher2);
-            let (actor2, _updates2) =
+            let (actor2, updates2) =
                 session_token_actor(&server2, am2, ActorShape::default()).await;
-            land_fresh_token_after(&actor2, Duration::from_secs(300));
+            land_fresh_token_after(&actor2, &updates2, Duration::from_secs(300));
             let outcome2 =
                 run_prompt_with_cap(&actor2, "deferred-recovery-parks-long", 86_400).await;
             assert!(
@@ -670,7 +743,11 @@ fn deferred_recovery_credential_less_401_parks_and_survives() {
             );
             assert!(
                 inference_requests(&server2).len() > inference.len(),
-                "the longer outage must take more parked cycles"
+                "the longer outage must take more parked cycles: short={} sends / {} parks, long={} sends / {} parks",
+                inference.len(),
+                reauth_parks(&updates),
+                inference_requests(&server2).len(),
+                reauth_parks(&updates2),
             );
             assert_eq!(
                 server_rejected_calls2.load(Ordering::SeqCst),
@@ -690,8 +767,11 @@ fn deferred_recovery_credential_less_401_parks_and_survives() {
 /// credential-less 401 re-parks without a fresh recovery dispatch.
 #[test]
 fn api_5xx_during_park_does_not_unpark_or_redispatch() {
+    if !p42_child("api_5xx_during_park_does_not_unpark_or_redispatch") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -713,7 +793,7 @@ fn api_5xx_during_park_does_not_unpark_or_redispatch() {
             let server_rejected_calls = refresher.server_rejected_calls.clone();
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
-            land_fresh_token_after(&actor, Duration::from_secs(30));
+            land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
 
             let outcome = run_prompt_with_cap(&actor, "park-survives-5xx", 86_400).await;
             assert!(
@@ -735,9 +815,9 @@ fn api_5xx_during_park_does_not_unpark_or_redispatch() {
                 let refresher = Arc::new(DeferredRefreshNeverLands::default());
                 let calls = refresher.server_rejected_calls.clone();
                 let (_dir, am) = expired_auth_manager(refresher);
-                let (actor, _updates) =
+                let (actor, updates) =
                     session_token_actor(&server, am, ActorShape::default()).await;
-                land_fresh_token_after(&actor, Duration::from_secs(30));
+                land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
                 run_prompt_with_cap(&actor, "park-no-5xx", 86_400)
                     .await
                     .expect("control park must survive");
@@ -761,8 +841,11 @@ fn api_5xx_during_park_does_not_unpark_or_redispatch() {
 /// shared budget. Subagent-shaped: only subagent turns get a wait budget.
 #[test]
 fn parked_429_wait_does_not_drive_refreshes() {
+    if !p42_child("parked_429_wait_does_not_drive_refreshes") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
                 .await
                 .expect("mock inference server");
@@ -825,8 +908,11 @@ fn parked_429_wait_does_not_drive_refreshes() {
 /// spawn costs an extra credential-less send the runaway guard never counts.
 #[test]
 fn parked_turn_does_not_respawn_two_pass_prefire() {
+    if !p42_child("parked_turn_does_not_respawn_two_pass_prefire") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -836,7 +922,7 @@ fn parked_turn_does_not_respawn_two_pass_prefire() {
 
             let refresher = Arc::new(DeferredRefreshNeverLands::default());
             let (_dir, am) = expired_auth_manager(refresher);
-            let (actor, _updates) = session_token_actor(&server, am, ActorShape::default()).await;
+            let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
 
             // Two-pass on, usage in the prefire band: 77% of 100k vs the 85%
             // threshold (the band opens at threshold − 10).
@@ -874,7 +960,7 @@ fn parked_turn_does_not_respawn_two_pass_prefire() {
                 ConversationItem::assistant("a2"),
             ]);
             actor.chat_state_handle.record_token_usage(77_000);
-            land_fresh_token_after(&actor, Duration::from_secs(30));
+            land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
 
             let outcome = run_prompt_with_cap(&actor, "parked-prefire", 86_400).await;
             assert!(outcome.is_ok(), "parked turn must survive: {outcome:?}");
@@ -897,8 +983,11 @@ fn parked_turn_does_not_respawn_two_pass_prefire() {
 /// the very turn the park is keeping alive.
 #[test]
 fn parked_turn_past_compact_threshold_does_not_auto_compact() {
+    if !p42_child("parked_turn_past_compact_threshold_does_not_auto_compact") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 FRESH_TOKEN,
@@ -930,14 +1019,19 @@ fn parked_turn_past_compact_threshold_does_not_auto_compact() {
                 ConversationItem::assistant("a2"),
             ]);
 
-            // Usage crosses the threshold only after the first iteration's compact check (which runs un-parked at t=0):
-            // the first parked resubmit is paced ≥1s out, so a 500ms seed lands between the park and every parked iteration.
+            // Usage crosses the threshold only after the first iteration's compact check (which runs un-parked):
+            // P42 (real clock) seeds it once the first park is announced, so it lands between the park and the parked
+            // iterations, which are what this test is about.
             let usage_seeder = actor.chat_state_handle.clone();
+            let park_watch = updates.clone();
             tokio::task::spawn_local(async move {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+                while reauth_parks(&park_watch) < 1 && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
                 usage_seeder.record_token_usage(90_000);
             });
-            land_fresh_token_after(&actor, Duration::from_secs(30));
+            land_fresh_token_after(&actor, &updates, Duration::from_secs(30));
 
             let outcome = run_prompt_with_cap(&actor, "parked-no-auto-compact", 86_400).await;
             assert!(
@@ -999,8 +1093,11 @@ impl crate::auth::refresh::TokenRefresher for DeferredThenRecovers {
 /// after `MAX_RETRIES`) — pins the `is_missing()` conjunct of the re-park arm.
 #[test]
 fn parked_turn_authenticated_rejection_dispatches_and_exhausts_charged() {
+    if !p42_child("parked_turn_authenticated_rejection_dispatches_and_exhausts_charged") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             // The server accepts a token nobody mints: 401s before and after the landing.
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
@@ -1014,10 +1111,16 @@ fn parked_turn_authenticated_rejection_dispatches_and_exhausts_charged() {
             let (_dir, am) = expired_auth_manager(refresher);
             let (actor, updates) = session_token_actor(&server, am, ActorShape::default()).await;
 
-            // 30 virtual seconds in, a wire-valid token lands — the server keeps rejecting.
+            // After observed park cycles (as `land_fresh_token_after`: a purely time-based landing on the real
+            // clock can beat the first parked resubmit on a loaded host), a wire-valid token lands — the
+            // server keeps rejecting.
             let waker = actor.auth_manager.clone().expect("actor has auth manager");
+            let parked_updates = updates.clone();
             tokio::task::spawn_local(async move {
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+                while reauth_parks(&parked_updates) < 2 && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 recovers.store(true, Ordering::SeqCst);
                 waker.hot_swap(FuigoAuth {
                     key: FRESH_TOKEN.to_string(),
@@ -1079,8 +1182,11 @@ fn parked_turn_authenticated_rejection_dispatches_and_exhausts_charged() {
 /// client-visible terminal retryState — not an infinite loop.
 #[test]
 fn never_recovering_credential_less_401_hits_runaway_guard() {
+    if !p42_child("never_recovering_credential_less_401_hits_runaway_guard") {
+        return;
+    }
     on_session_stack(|| {
-        run_current_thread(true, || async {
+        run_current_thread(false, || async {
             let server = MockInferenceServer::start_with_required_auth(
                 vec![MockModelEntry::new("test")],
                 "never-issued-token",

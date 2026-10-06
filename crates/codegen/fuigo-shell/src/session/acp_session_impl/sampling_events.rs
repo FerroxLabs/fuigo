@@ -384,7 +384,7 @@ impl SessionActor {
                         "attempt": attempt,
                         "max_retries": max_retries,
                         "kind": kind.as_str(),
-                        "reason": crate::util::truncate(&reason, 300),
+                        "reason": fuigo_telemetry::sent_credentials::truncate_chars(&reason, 300).0,
                     })),
                 );
                 self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
@@ -393,6 +393,7 @@ impl SessionActor {
                         max_retries,
                         reason,
                         error_type: Some(kind.as_str().to_string()),
+                        verdicts: None,
                     },
                 ))
                 .await;
@@ -416,7 +417,7 @@ impl SessionActor {
                         "kind": error.kind.as_str(),
                         "status_code": error.status_code,
                         "is_retryable": error.is_retryable,
-                        "message": crate::util::truncate(&error.message, 300),
+                        "message": fuigo_telemetry::sent_credentials::truncate_chars(&error.message, 300).0,
                     })),
                 );
                 self.signals_handle()

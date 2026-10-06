@@ -26,6 +26,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const {repositoryFor} = require('./release-metadata');
 
 const NPM_ROOT = path.resolve(__dirname, '..', '..');
 const META_PKG = path.join(NPM_ROOT, 'fuigo', 'package.json');
@@ -79,6 +80,22 @@ function readJson(p) {
     return JSON.parse(fs.readFileSync(p, 'utf8'));
 }
 
+/**
+ * `repository` is required on every package (npm provenance, see release-metadata.js).
+ * Returns a copy with the field set, placed right after `license` when it is new.
+ */
+function withRepository(obj, dirName) {
+    const repo = repositoryFor(dirName);
+    if ('repository' in obj) return {...obj, repository: repo};
+    const out = {};
+    for (const [k, v] of Object.entries(obj)) {
+        out[k] = v;
+        if (k === 'license') out.repository = repo;
+    }
+    if (!('repository' in out)) out.repository = repo;
+    return out;
+}
+
 function writeJson(p, obj) {
     fs.writeFileSync(p, JSON.stringify(obj, null, 4) + '\n');
 }
@@ -99,9 +116,11 @@ function main() {
     // optionalDependency by exact version, so a stale pin means the platform
     // package is silently skipped and postinstall reports "unsupported
     // platform" on a platform that is in fact supported.
-    const meta = readJson(META_PKG);
+    let meta = readJson(META_PKG);
     note('meta version', meta.version, version);
     meta.version = version;
+    note('meta repository', JSON.stringify(meta.repository), JSON.stringify(repositoryFor('fuigo')));
+    meta = withRepository(meta, 'fuigo');
 
     // Rebuilt from scratch, not merged: a renamed package must not leave its
     // old pin behind, or npm resolves a name that will never exist again.
@@ -123,9 +142,12 @@ function main() {
             console.error(`[sync-version] missing package: ${pkgPath}`);
             process.exit(1);
         }
-        const pkg = readJson(pkgPath);
+        let pkg = readJson(pkgPath);
         note(`  fuigo-${p}`, pkg.version, version);
         pkg.version = version;
+        note(`  fuigo-${p} repository`, JSON.stringify(pkg.repository),
+            JSON.stringify(repositoryFor(`fuigo-${p}`)));
+        pkg = withRepository(pkg, `fuigo-${p}`);
         if (!check) writeJson(pkgPath, pkg);
     }
 
