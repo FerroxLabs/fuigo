@@ -25,7 +25,8 @@ use state::{
 };
 use wire::{
     AssistantFrame, AssistantMessage, CompactBoundaryLine, CompactMetadata, ContentBlock,
-    MessageUsage, MessagesLine, PartialDelta, PermissionDenial, ResultLine, SystemInitLine,
+    MessageUsage, MessagesLine, PartialDelta, PermissionDenial, ResponseDiscardedLine, ResultLine,
+    SystemInitLine,
     SystemLine, ToolResultBlock, ToolResultLine, ToolResultMessage, messages_permission_mode,
     new_uuid,
 };
@@ -34,6 +35,8 @@ use wire::{
 pub(crate) struct MessagesReducer {
     /// Session facts, populated by `begin`; `None` until then.
     session: Option<SessionState>,
+    /// P188: tool calls a discarded attempt reported (a hosted x_search card); their late updates are ignored.
+    discarded_tool_ids: std::collections::HashSet<String>,
     tools: Vec<String>,
     slash_commands: Vec<String>,
     /// Skill names for the Messages `init` `skills` field.
@@ -105,6 +108,7 @@ impl MessagesReducer {
             partial_msg_seq: 0,
             tool_uses: std::collections::HashMap::new(),
             permission_denials: None,
+            discarded_tool_ids: std::collections::HashSet::new(),
         }
     }
 
@@ -317,6 +321,38 @@ impl MessagesReducer {
         self.assistant_frames += 1;
         self.completed_responses += 1;
         Some(to_line(&MessagesLine::Assistant(frame)))
+    }
+
+    /// P188: the response being streamed failed after output and is resent. Its blocks never become an `assistant`
+    /// frame; with partials on, its open partial message is closed (`stop_reason` null) and marked void. A completed
+    /// response is never discarded: its blocks belong to history, and the discard is about output that never got here.
+    fn discard_response(&mut self, out: &mut Vec<Value>, message_id: Option<String>) {
+        if self.response.is_completed() {
+            return;
+        }
+        if self.include_partials() && self.framing.message_open() {
+            self.partial_close_message(out, None);
+            out.push(to_line(&MessagesLine::System(SystemLine::ResponseDiscarded(
+                ResponseDiscardedLine {
+                    message_id,
+                    session_id: self.session_id().to_string(),
+                    uuid: new_uuid(),
+                },
+            ))));
+        }
+        // A tool call the dead attempt reported (a hosted x_search card) goes with it, and nothing may answer it
+        // later: no `tool_use` is left without its result, and no `tool_result` without its `tool_use`
+        for block in std::mem::take(&mut self.blocks) {
+            if let ContentBlock::ToolUse { id, .. } = block {
+                self.pending_client_tool_uses.remove(&id);
+                self.tool_uses.remove(&id);
+                self.discarded_tool_ids.insert(id);
+            }
+        }
+        self.open_kind = None;
+        self.open_text.clear();
+        self.framing = PartialFraming::Idle;
+        self.clear_pending();
     }
 
     /// Drop all per-response state so none leaks onto a later response.
@@ -584,6 +620,7 @@ impl Reducer for MessagesReducer {
                 self.flush_tool_results(&mut out);
                 self.emit_client_tool_call(&mut out, tc);
             }
+            StreamEvent::ToolCallUpdate(u) if self.discarded_tool_ids.contains(&u.tool_call_id) => {}
             StreamEvent::ToolCallUpdate(u) => {
                 let terminal = matches!(
                     u.status,
@@ -689,6 +726,9 @@ impl Reducer for MessagesReducer {
                         stop_sequence,
                     });
                 }
+            }
+            StreamEvent::ResponseDiscarded { message_id, .. } => {
+                self.discard_response(&mut out, message_id)
             }
             StreamEvent::Lifecycle(_) | StreamEvent::Plan(_) => {}
         }

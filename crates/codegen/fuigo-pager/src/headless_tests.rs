@@ -750,8 +750,8 @@ fn structured_output_from_meta_wins_over_text_buffer() {
 #[test]
 fn streaming_json_structured_output_emits_from_meta() {
     let mut emitter = HeadlessEmitter::new(OutputFormat::StreamingJson, true);
-    emitter.on_text_chunk(r#"{"name":"#);
-    emitter.on_text_chunk(r#""bob"}"#);
+    emitter.on_text_chunk(r#"{"name":"#, None);
+    emitter.on_text_chunk(r#""bob"}"#, None);
     assert!(emitter.text_buffer.is_empty());
 
     emitter.set_structured_output_from_meta(
@@ -1332,7 +1332,7 @@ fn a_typed_prompt_error_reports_its_message_not_raw_json() {
 fn capped_run_output(format: super::OutputFormat) -> String {
     let captured = CapturedOut::default();
     let mut emitter = super::HeadlessEmitter::with_writer(format, true, Box::new(captured.clone()));
-    emitter.on_text_chunk("the answer");
+    emitter.on_text_chunk("the answer", None);
     let err = super::finish_turn(
         &mut emitter,
         Some(Ok(completed_prompt_response())),
@@ -3362,6 +3362,103 @@ mod denial_docs_pin {
                 section.contains(&format!("`{key}`")),
                 "the budget-denial field table must describe `{key}`"
             );
+        }
+    }
+}
+
+/// P188: a resent model request voids what its dead attempts streamed. `plain` and `json` never print that text;
+/// the streaming formats never put it in a frame or the result, and say what is void where deltas already went out.
+#[test]
+fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
+    use super::StreamEvent;
+    for format in [
+        super::OutputFormat::Plain,
+        super::OutputFormat::Json,
+        super::OutputFormat::StreamingJson,
+        super::OutputFormat::StreamingMessagesJson,
+    ] {
+        let captured = CapturedOut::default();
+        let mut emitter =
+            super::HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+        // A committed response first: its text is final and must survive the later discards
+        emitter.on_text_chunk("Looking. ", Some(1));
+        emitter.reduce_and_emit(StreamEvent::ResponseCompleted {
+            message_id: None,
+            stop_reason: Some("tool_use".into()),
+            usage: None,
+            signature: None,
+            stop_sequence: None,
+        });
+        for (stream, dead) in [(2, "A1"), (3, "A2")] {
+            emitter.on_thought_chunk(&format!("thinking {dead}"), Some(stream));
+            emitter.on_text_chunk(dead, Some(stream));
+            if stream == 3 {
+                // Astra r1: a hosted tool (x_search) reports mid-attempt; it is not a response boundary
+                emitter.reduce_and_emit(StreamEvent::ToolCall(super::reducer::ToolCallEvent::hosted_for_test(
+                    "xs-1", "x_search",
+                )));
+            }
+            emitter.reduce_and_emit(StreamEvent::ResponseDiscarded {
+                message_id: None,
+                stream_start_ms: Some(stream),
+            });
+        }
+        emitter.on_text_chunk("A3", Some(4));
+        emitter.reduce_and_emit(StreamEvent::ResponseCompleted {
+            message_id: None,
+            stop_reason: Some("end_turn".into()),
+            usage: None,
+            signature: None,
+            stop_sequence: None,
+        });
+        emitter.on_end("end_turn", "sess-p188", "req-p188", None);
+        let out = captured.text();
+        match format {
+            super::OutputFormat::Plain => assert_eq!(out, "Looking. A3\n"),
+            super::OutputFormat::Json => {
+                let doc: serde_json::Value = serde_json::from_str(&out).expect("one JSON document");
+                assert_eq!(doc["text"], "Looking. A3", "{out}");
+                assert!(doc.get("thought").is_none(), "the dead attempts' thinking is void too: {out}");
+            }
+            super::OutputFormat::StreamingJson => {
+                // Text lines went out live; a consumer applying `response_discarded` gets the accepted reply
+                let (mut visible, mut committed, mut voids) = (String::new(), 0, 0);
+                for line in out.lines() {
+                    let line: serde_json::Value = serde_json::from_str(line).expect("NDJSON");
+                    match line["type"].as_str() {
+                        Some("text") => visible.push_str(line["data"].as_str().unwrap()),
+                        Some("usage") => committed = visible.len(),
+                        Some("response_discarded") => {
+                            voids += 1;
+                            visible.truncate(committed);
+                        }
+                        _ => {}
+                    }
+                }
+                assert_eq!(voids, 2, "{out}");
+                assert_eq!(visible, "Looking. A3", "{out}");
+            }
+            super::OutputFormat::StreamingMessagesJson => {
+                assert!(!out.contains("A1") && !out.contains("A2"), "no frame or result carries dead text: {out}");
+                let lines: Vec<serde_json::Value> = out
+                    .lines()
+                    .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("NDJSON"))
+                    .collect();
+                let result = lines.iter().find(|l| l["type"] == "result").expect("result line");
+                // `result` is the last assistant frame's text, as for any multi-response turn
+                assert_eq!(result["result"], "A3", "{out}");
+                // Astra r1 HIGH: the hosted call reported by a dead attempt keeps its tool_use, so its error
+                // tool_result is never an orphan
+                let ids = |kind: &str, key: &str| -> Vec<String> {
+                    lines
+                        .iter()
+                        .flat_map(|l| l["message"]["content"].as_array().cloned().unwrap_or_default())
+                        .filter(|b| b["type"] == kind)
+                        .map(|b| b[key].as_str().unwrap_or_default().to_string())
+                        .collect()
+                };
+                assert_eq!(ids("tool_use", "id"), ids("tool_result", "tool_use_id"), "{out}");
+            }
         }
     }
 }

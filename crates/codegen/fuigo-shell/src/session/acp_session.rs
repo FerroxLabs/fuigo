@@ -791,6 +791,9 @@ pub(crate) struct SessionActor {
     /// Cleared at each turn start, and again after a mirror (which ends with its own
     /// blank line, so the next one must not add a second).
     pub(crate) turn_thought_text_emitted: std::sync::atomic::AtomicBool,
+    /// P188: visible output of the current model response that history has not accepted, so a resend after it tells
+    /// clients to discard it (see [`crate::session::unaccepted_output`]).
+    pub(crate) unaccepted_output: crate::session::unaccepted_output::UnacceptedOutput,
     /// Open blocking reverse-requests (permission / question / plan-approval), keyed by `tool_call_id`.
     /// Shared with `SessionHandle` so the roster can read it synchronously to report `NeedsInput`.
     /// Mutated by `PendingInteractionGuard` at each reverse-request site. Never persisted.
@@ -2060,6 +2063,12 @@ mod goal_latch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
 mod empty_response_retry_status_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/stream_retry_discard_tests.rs"]
+mod stream_retry_discard_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/stream_retry_r3_pin_tests.rs"]
+mod stream_retry_r3_pin_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;

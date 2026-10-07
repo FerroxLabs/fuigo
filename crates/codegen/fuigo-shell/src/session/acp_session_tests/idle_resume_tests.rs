@@ -185,6 +185,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+                unaccepted_output: Default::default(),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),

@@ -62,6 +62,16 @@ the egress guard off for every connection the Fuigo process makes, including the
 blocked telemetry hosts (`mixpanel.com`). It is only for pointing an API-key
 provider at xAI.
 
+A `[model.*]` table in your own config that sets both `model` and a `base_url` that is
+exactly one of these two endpoints, and has no `api_key`, `env_key`, `auth_provider`,
+headers, query parameters or other `api_base_url`, also uses that subscription (the
+selected account). So a model entry that leaves out
+`auth_provider` still goes through the subscription and is never sent through the
+ordinary API-key path. Models from the remote catalog are never bound this way, remote catalog entries on
+these two endpoints are ignored, and remote configuration cannot point a model at them. Name an
+`auth_provider` when you want to bind a specific account. A model with its own key for
+these endpoints stays a bring-your-own-key model.
+
 Replace the model placeholders, then select `-m chatgpt-subscription` or
 `-m grok-subscription`, or select that configured model in the TUI/ACP client.
 Keep each subscription's wire model/endpoint mapping unambiguous. Do not combine

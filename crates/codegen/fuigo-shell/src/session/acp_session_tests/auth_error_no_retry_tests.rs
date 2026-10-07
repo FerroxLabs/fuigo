@@ -2004,21 +2004,118 @@ async fn sampler_401_on_fresh_provider_token_surfaces_error() {
         .await;
 }
 
+/// A subscription model reconstructs onto the native subscription resolver and never carries the session
+/// key. P192: the subscription must come from the (wire model, endpoint) lookup of the user's config; the
+/// memo's wire-id-only provider alone no longer confers it (it may belong to a same-wire-id twin), so the
+/// fixture config binds the session's (model, endpoint) to the ChatGPT subscription.
 #[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
 async fn subscription_acp_reconstruction_uses_native_resolver_without_session_key() {
-    let local=tokio::task::LocalSet::new();
-    local.run_until(async {
-        let (actor,_rx)=make_actor_with_method_and_credentials(None,"api_key",fuigo_chat_state::AuthType::ApiKey,"fake-unrelated-key".into()).await;
-        let mut config=actor.chat_state_handle.get_sampling_config().await.unwrap();
-        config.base_url="https://chatgpt.com/backend-api/codex".into();
-        let model=config.model.clone();
-        actor.chat_state_handle.update_sampling_config(config);
-        let provider=crate::auth::AuthProviderRef::new("native-test".into(),crate::auth::AuthProviderConfig{subscription:Some(crate::auth::subscription::SubscriptionProvider::Chatgpt),account:Some("account-a".into()),..Default::default()});
-        actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo{model_id:model,facts:crate::agent::config::ModelAuthFacts{byok:crate::agent::auth_method::ModelByok::Byok,auth_scheme:Default::default()},provider:Some(provider)}));
-        let sampling=actor.reconstruct_full_config().await;
-        assert_eq!(sampling.subscription,Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt));
-        assert!(sampling.subscription_resolver.is_some());assert!(sampling.api_key.is_none());assert!(sampling.bearer_resolver.is_none());assert!(sampling.attribution_callback.is_none());
-    }).await;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    const SLUG: &str = "p192-native-slug";
+    const SUBSCRIPTION_URL: &str = "https://chatgpt.com/backend-api/codex";
+    let home = tempfile::tempdir().expect("fuigo home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[auth_provider.native-test]\nsubscription = \"chatgpt\"\naccount = \"account-a\"\n\
+             [model.native]\nmodel = \"{SLUG}\"\nbase_url = \"{SUBSCRIPTION_URL}\"\nauth_provider = \"native-test\"\n"
+        ),
+    )
+    .expect("write config.toml");
+    let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "api_key",
+                fuigo_chat_state::AuthType::ApiKey,
+                "fake-unrelated-key".into(),
+            )
+            .await;
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = SUBSCRIPTION_URL.into();
+            config.model = SLUG.into();
+            actor.chat_state_handle.update_sampling_config(config);
+            let provider = crate::auth::AuthProviderRef::new(
+                "native-test".into(),
+                crate::auth::AuthProviderConfig {
+                    subscription: Some(crate::auth::subscription::SubscriptionProvider::Chatgpt),
+                    account: Some("account-a".into()),
+                    ..Default::default()
+                },
+            );
+            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
+                model_id: SLUG.into(),
+                facts: crate::agent::config::ModelAuthFacts {
+                    byok: crate::agent::auth_method::ModelByok::Byok,
+                    auth_scheme: Default::default(),
+                },
+                provider: Some(provider),
+            }));
+            let sampling = actor.reconstruct_full_config().await;
+            assert_eq!(
+                sampling.subscription,
+                Some(fuigo_sampler::subscription::SubscriptionKind::Chatgpt)
+            );
+            assert!(sampling.subscription_resolver.is_some());
+            assert!(sampling.api_key.is_none());
+            assert!(sampling.bearer_resolver.is_none());
+            assert!(sampling.attribution_callback.is_none());
+        })
+        .await;
+}
+
+/// P192 (R1): a subscription known only from the wire-id memo, with no (model, endpoint) entry in the
+/// user's config, is not attached to the turn: it may belong to another entry with the same wire id.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn p192_memo_only_subscription_is_not_attached_to_the_turn() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = tempfile::tempdir().expect("fuigo home");
+    let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            crate::agent::config::Config::install_test_trusted_origins();
+            let (actor, _rx) = make_actor_with_method_and_credentials(
+                None,
+                "api_key",
+                fuigo_chat_state::AuthType::ApiKey,
+                "fake-unrelated-key".into(),
+            )
+            .await;
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = "https://chatgpt.com/backend-api/codex".into();
+            config.model = "p192-memo-only-slug".into();
+            actor.chat_state_handle.update_sampling_config(config);
+            let provider = crate::auth::AuthProviderRef::new(
+                "native-test".into(),
+                crate::auth::AuthProviderConfig {
+                    subscription: Some(crate::auth::subscription::SubscriptionProvider::Chatgpt),
+                    account: Some("account-a".into()),
+                    ..Default::default()
+                },
+            );
+            actor.model_auth_memo.replace(Some(crate::session::acp_session::ModelAuthMemo {
+                model_id: "p192-memo-only-slug".into(),
+                facts: crate::agent::config::ModelAuthFacts {
+                    byok: crate::agent::auth_method::ModelByok::Byok,
+                    auth_scheme: Default::default(),
+                },
+                provider: Some(provider),
+            }));
+            let sampling = actor.reconstruct_full_config().await;
+            assert_eq!(sampling.subscription, None);
+            assert!(sampling.subscription_resolver.is_none());
+        })
+        .await;
 }
 
 /// P42: a 401 on a request the session token was withheld from (its destination may not receive it) is

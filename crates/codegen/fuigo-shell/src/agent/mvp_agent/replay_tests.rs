@@ -233,3 +233,56 @@ fn next_ext_notification_params(
     }
     params
 }
+
+/// P188 (MurageMobile): a `session/load` replay of a discarding `retry_state` carries `_meta.isReplay: true` like
+/// every other replayed update, keeps `discardEmitted` / `streamStartMs`, and travels on the replay carrier
+/// `fuigo/session/update` (on the wire `_fuigo/session/update`), sessionUpdate `retry_state`.
+#[tokio::test]
+async fn a_replayed_discard_is_marked_as_replay() {
+    use crate::extensions::notification::{RetryState, SessionNotification, SessionUpdate};
+    let (agent, mut rx) = build_agent_with_gateway();
+    let record = serde_json::to_value(SessionNotification {
+        session_id: acp::SessionId::new("s"),
+        update: SessionUpdate::RetryState(RetryState::Retrying {
+            attempt: 1,
+            max_retries: 15,
+            reason: "stream ended early".into(),
+            error_type: Some("api".into()),
+            verdicts: None,
+            discard_emitted: true,
+            message_id: None,
+            stream_start_ms: Some(1_700_000_000_123),
+        }),
+        meta: Some(serde_json::json!({ "eventId": "e-1", "agentTimestampMs": 1 })),
+    })
+    .expect("serialize");
+
+    agent.forward_raw_replay_line(
+        &replay_line(&record),
+        /*persist_data*/ None,
+        /*target_client_id*/ None,
+        /*mark_replay*/ true,
+        &mut crate::session::storage::ReplayToolCollapser::new(),
+    );
+
+    let mut seen = None;
+    while let Ok(msg) = rx.try_recv() {
+        if let AcpClientMessage::ExtNotification(args) = msg {
+            seen.get_or_insert_with(|| {
+                (
+                    args.request.method.to_string(),
+                    serde_json::from_str::<Value>(args.request.params.get()).expect("json"),
+                )
+            });
+            let _ = args.response_tx.send(Ok(()));
+        }
+    }
+    let (method, params) = seen.expect("the replayed retry_state is sent");
+    assert_eq!(method, "fuigo/session/update");
+    assert_eq!(params["update"]["sessionUpdate"], "retry_state");
+    assert_eq!(params["update"]["type"], "retrying");
+    assert_eq!(params["update"]["discardEmitted"], true);
+    assert_eq!(params["update"]["streamStartMs"], 1_700_000_000_123_i64);
+    assert_eq!(params["_meta"]["isReplay"], true, "{params}");
+    assert_eq!(params["_meta"]["eventId"], "e-1", "{params}");
+}

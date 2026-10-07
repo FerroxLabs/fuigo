@@ -67,6 +67,15 @@ enum AcpLine {
         commands: Vec<String>,
     },
     MaxTurnsReached,
+    /// P188: the `text`/`thought` lines since the current response began (the later of the prompt, the last `usage`
+    /// line and the last `response_discarded`) came from a model request that failed and is being resent; drop them,
+    /// the resend streams the reply again. A `tool_call` line is not a boundary: a hosted search reports mid-response.
+    ResponseDiscarded {
+        #[serde(rename = "messageId", skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(rename = "streamStartMs", skip_serializing_if = "Option::is_none")]
+        stream_start_ms: Option<i64>,
+    },
     Error {
         message: String,
     },
@@ -158,6 +167,13 @@ impl Reducer for AcpReducer {
                 skills: _,
             } => AcpLine::AvailableCommands { tools, commands },
             StreamEvent::Lifecycle(l) => return vec![to_line(&acp_lifecycle_line(l))],
+            StreamEvent::ResponseDiscarded {
+                message_id,
+                stream_start_ms,
+            } => AcpLine::ResponseDiscarded {
+                message_id,
+                stream_start_ms,
+            },
             // Only the Messages reducer consumes these, for its `--include-partial-messages` framing
             StreamEvent::ResponseStarted { .. } | StreamEvent::ReasoningCompleted { .. } => {
                 return vec![];
@@ -241,5 +257,31 @@ fn acp_lifecycle_line(l: Lifecycle) -> AcpLine {
         Lifecycle::MemoryFlushCompleted { result, path } => {
             AcpLine::MemoryFlushCompleted { result, path }
         }
+    }
+}
+
+#[cfg(test)]
+mod p188_tests {
+    use super::*;
+
+    /// P188: the native stream mirrors the ACP contract: a `response_discarded` line voids the `text`/`thought`
+    /// lines since the current response began.
+    #[test]
+    fn a_discard_becomes_a_response_discarded_line() {
+        let mut r = AcpReducer::default();
+        assert_eq!(
+            r.reduce(StreamEvent::ResponseDiscarded {
+                message_id: Some("msg_1".into()),
+                stream_start_ms: Some(7),
+            }),
+            vec![serde_json::json!({"type": "response_discarded", "messageId": "msg_1", "streamStartMs": 7})]
+        );
+        assert_eq!(
+            r.reduce(StreamEvent::ResponseDiscarded {
+                message_id: None,
+                stream_start_ms: None
+            }),
+            vec![serde_json::json!({"type": "response_discarded"})]
+        );
     }
 }

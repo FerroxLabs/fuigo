@@ -1530,10 +1530,20 @@ impl SessionActor {
         {
             // Bump the stream start so the summary chunk carries a fresh `streamStartMs`
             // Without it the client appends this closing message to the model's last turn message instead of a new block
-            self.chat_state_handle
-                .record_stream_start(chrono::Utc::now().timestamp_millis());
+            self.claim_out_of_band_stream_start();
             self.send_slash_command_output(&summary).await;
         }
+    }
+
+    /// P188: open a stream block for output the sampler did not produce (the goal summary). Its `streamStartMs` goes
+    /// through the same claim as a sampler attempt's, so it is unique in the session: the next attempt can never share
+    /// it, and a discard keyed on that attempt can never void this output too.
+    pub(crate) fn claim_out_of_band_stream_start(&self) -> i64 {
+        let id = self
+            .unaccepted_output
+            .claim_stream_start(chrono::Utc::now().timestamp_millis());
+        self.chat_state_handle.record_stream_start(id);
+        id
     }
 
     /// Build a [`GoalNotifySender`] for the goal orchestrator.

@@ -442,3 +442,97 @@ fn messages_partial_consecutive_signature_blocks_keep_own_signature() {
     assert_eq!(blocks[0]["signature"], "sig-1");
     assert_eq!(blocks[1]["signature"], "sig-2");
 }
+
+/// P188: a resent model request voids what its dead attempts streamed. No `assistant` frame carries that text, with
+/// or without partials; with partials the dead partial message is closed (`stop_reason` null) and marked void.
+#[test]
+fn p188_discarded_attempts_never_reach_a_frame() {
+    for partials in [false, true] {
+        let mut r = messages(partials);
+        let mut out = Vec::new();
+        for dead in ["A1", "A2"] {
+            out.extend(r.reduce(StreamEvent::AgentThought(format!("thinking {dead}"))));
+            out.extend(r.reduce(StreamEvent::AgentMessage(dead.into())));
+            out.extend(r.reduce(StreamEvent::ResponseDiscarded {
+                message_id: Some(format!("msg_{dead}")),
+                stream_start_ms: None,
+            }));
+        }
+        out.extend(r.reduce(StreamEvent::AgentMessage("A3".into())));
+        out.extend(r.reduce(StreamEvent::ResponseCompleted {
+            message_id: None,
+            stop_reason: Some("end_turn".into()),
+            usage: None,
+            signature: None,
+            stop_sequence: None,
+        }));
+        out.extend(r.finish(&end_turn()));
+        let frames: Vec<&serde_json::Value> = out.iter().filter(|l| l["type"] == "assistant").collect();
+        assert_eq!(frames.len(), 1, "partials={partials}: one assistant frame: {out:#?}");
+        assert_eq!(
+            frames[0]["message"]["content"],
+            serde_json::json!([{"type": "text", "text": "A3"}]),
+            "partials={partials}: the frame holds the accepted attempt only"
+        );
+        let discarded: Vec<&serde_json::Value> = out
+            .iter()
+            .filter(|l| l["type"] == "system" && l["subtype"] == "response_discarded")
+            .collect();
+        if partials {
+            assert_eq!(discarded.len(), 2, "{out:#?}");
+            assert_eq!(discarded[0]["message_id"], "msg_A1");
+            let stops: Vec<&serde_json::Value> = out
+                .iter()
+                .filter(|l| l["event"]["type"] == "message_delta")
+                .collect();
+            assert_eq!(stops.len(), 3, "each dead partial message is closed, then the live one: {out:#?}");
+            assert!(stops[0]["event"]["delta"]["stop_reason"].is_null(), "a void message has no stop reason");
+        } else {
+            assert!(discarded.is_empty(), "nothing streamed, nothing to void: {out:#?}");
+            let all = serde_json::to_string(&out).unwrap();
+            assert!(!all.contains("A1") && !all.contains("A2"), "{all}");
+        }
+    }
+}
+
+/// P188 (Astra r2): a hosted call reported by a dead attempt goes with it. Its late completion is ignored, so the
+/// stream has neither an orphan `tool_use` nor an orphan `tool_result`, and the resend's partial message starts
+/// its blocks at index 0 again.
+#[test]
+fn p188_a_dead_attempts_hosted_call_goes_with_it() {
+    let mut r = messages(true);
+    let mut out = Vec::new();
+    out.extend(r.reduce(StreamEvent::AgentMessage("A1".into())));
+    let mut xs = tool_call_ev();
+    xs.tool_call_id = "xs-1".into();
+    out.extend(r.reduce(StreamEvent::ToolCall(xs)));
+    out.extend(r.reduce(StreamEvent::ResponseDiscarded {
+        message_id: None,
+        stream_start_ms: Some(5),
+    }));
+    let mut done = web_search_done("xs-1");
+    done.status = Some(acp::ToolCallStatus::Completed);
+    out.extend(r.reduce(StreamEvent::ToolCallUpdate(done)));
+    let tail_from = out.len();
+    out.extend(r.reduce(StreamEvent::AgentMessage("A2".into())));
+    out.extend(r.reduce(StreamEvent::ResponseCompleted {
+        message_id: None,
+        stop_reason: Some("end_turn".into()),
+        usage: None,
+        signature: None,
+        stop_sequence: None,
+    }));
+    out.extend(r.finish(&end_turn()));
+    let frames: Vec<&serde_json::Value> = out.iter().filter(|l| l["type"] == "assistant").collect();
+    assert_eq!(frames.len(), 1, "{out:#?}");
+    assert_eq!(frames[0]["message"]["content"], serde_json::json!([{"type": "text", "text": "A2"}]));
+    assert!(
+        !out.iter().any(|l| l["type"] == "user"),
+        "no tool_result for the dead call: {out:#?}"
+    );
+    let block_start = out[tail_from..]
+        .iter()
+        .find(|m| m["event"]["type"] == "content_block_start")
+        .expect("the resend opens a block");
+    assert_eq!(block_start["event"]["index"], 0, "{out:#?}");
+}

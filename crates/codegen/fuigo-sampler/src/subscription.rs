@@ -21,6 +21,31 @@ impl SubscriptionKind {
             Self::Xai => "https://api.x.ai/v1",
         }
     }
+    /// The subscription whose own inference endpoint `base_url` names (P192), or `None`.
+    ///
+    /// Only spellings of exactly [`Self::base_url`] qualify: `https`, that host (ASCII case
+    /// is normalized by the URL parser), the default port, that path with any trailing
+    /// slashes, and no credentials, query or fragment. Any other URL, including a lookalike
+    /// host or another path on the same host, is not a subscription endpoint.
+    pub fn for_endpoint(base_url: &str) -> Option<Self> {
+        let url = reqwest::Url::parse(base_url.trim()).ok()?;
+        if url.scheme() != "https"
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.port().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return None;
+        }
+        let path = url.path();
+        // Every trailing slash, as the request URL join does (`EndpointTemplate::new`).
+        let path = path.trim_end_matches('/');
+        [Self::Chatgpt, Self::Xai].into_iter().find(|kind| {
+            reqwest::Url::parse(kind.base_url())
+                .is_ok_and(|own| own.host_str() == url.host_str() && own.path() == path)
+        })
+    }
     fn recipient(self) -> Recipient {
         match self {
             Self::Chatgpt => Recipient::ChatGptInference,

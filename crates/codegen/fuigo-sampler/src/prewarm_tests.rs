@@ -121,6 +121,7 @@ fn status_strings_are_stable() {
         (PrewarmOutcome::Truncated, "truncated"),
         (PrewarmOutcome::Failed, "failed"),
         (PrewarmOutcome::TimedOut, "timed_out"),
+        (PrewarmOutcome::SubscriptionEndpoint, "subscription_endpoint"),
     ] {
         assert_eq!(<&'static str>::from(outcome), status);
     }
@@ -232,4 +233,27 @@ fn first_use_span_records_freshness_once_per_origin() {
         fields.ints.contains_key("age_at_first_use_ms"),
         "age_at_first_use_ms must land as an i64 the exporter keeps"
     );
+}
+
+/// P192: a subscription's inference endpoint is never prewarmed. The prewarm dials the bare
+/// origin through the ordinary shared client, which the egress guard refuses for `api.x.ai`
+/// (a refused dial on every xAI-subscription session/new) and which, for `chatgpt.com`, is an
+/// unauthenticated request the subscription never needs. Inference itself goes through the
+/// exact-URL subscription client, which this pool cannot warm anyway.
+#[tokio::test(flavor = "current_thread")]
+async fn subscription_endpoints_are_never_prewarmed() {
+    for base_url in [
+        "https://api.x.ai/v1",
+        "https://api.x.ai/v1/",
+        "https://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com/backend-api/codex//",
+    ] {
+        let report = super::prewarm_transport(base_url).await;
+        assert_eq!(
+            <&'static str>::from(report.outcome),
+            "subscription_endpoint",
+            "{base_url} must be skipped before any dial"
+        );
+        assert!(report.origin.is_none(), "{base_url}: no origin is claimed");
+    }
 }
