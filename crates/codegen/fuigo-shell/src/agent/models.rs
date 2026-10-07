@@ -590,6 +590,11 @@ impl ModelsManager {
         *self.inner.current_reasoning_effort.write() = effort;
     }
 
+    /// The [`ModelEntry`] for `model_id` (catalog key or wire name), as `model_in_catalog` resolves it.
+    pub(crate) fn catalog_entry(&self, model_id: &str) -> Option<ModelEntry> {
+        self.with_catalog_entry(model_id, ModelEntry::clone)
+    }
+
     /// Run `f` on the [`ModelEntry`] for `model_id` (catalog key or wire name); `None` if absent.
     fn with_catalog_entry<T>(&self, model_id: &str, f: impl FnOnce(&ModelEntry) -> T) -> Option<T> {
         let cat = self.inner.catalog.read();

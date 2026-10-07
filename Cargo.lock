@@ -3942,6 +3942,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-normalization",
+ "url",
  "urlencoding",
  "which",
  "windows 0.61.3",
@@ -5513,7 +5514,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.21"
+version = "1.0.22"
 dependencies = [
  "semver",
 ]

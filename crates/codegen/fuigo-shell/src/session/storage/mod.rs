@@ -462,6 +462,12 @@ pub(crate) mod chat_rebuild {
         user_parts: Vec<ContentPart>,
         user_is_interjection: bool,
         agent_text: String,
+        /// P188: length of `agent_text` that earlier responses committed (a tool call closes a response). A
+        /// `retry_state` with `discardEmitted` voids everything after it: that text came from a discarded attempt.
+        accepted_text_len: usize,
+        /// P188: where each model attempt's text begins in `agent_text`, by the `_meta.streamStartMs` its chunks
+        /// carried. A discard naming a stream cuts exactly that attempt's text.
+        text_streams: Vec<(i64, usize)>,
         agent_tool_calls: Vec<ToolCall>,
 
         in_user_turn: bool,
@@ -488,6 +494,8 @@ pub(crate) mod chat_rebuild {
                 user_parts: Vec::new(),
                 user_is_interjection: false,
                 agent_text: String::new(),
+                accepted_text_len: 0,
+                text_streams: Vec::new(),
                 agent_tool_calls: Vec::new(),
                 in_user_turn: false,
                 has_agent_content: false,
@@ -505,7 +513,19 @@ pub(crate) mod chat_rebuild {
 
         fn process(&mut self, update: &SessionUpdate) -> Vec<ConversationItem> {
             match update {
-                SessionUpdate::Acp(n) => self.handle_acp(&n.update),
+                SessionUpdate::Acp(n) => {
+                    let stream = n
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("streamStartMs"))
+                        .and_then(serde_json::Value::as_i64);
+                    if let (acp::SessionUpdate::AgentMessageChunk(_), Some(stream)) = (&n.update, stream)
+                        && self.text_streams.last().is_none_or(|(last, _)| *last != stream)
+                    {
+                        self.text_streams.push((stream, self.agent_text.len()));
+                    }
+                    self.handle_acp(&n.update)
+                }
                 SessionUpdate::Fuigo(n) => self.handle_fuigo(&n.update),
             }
         }
@@ -538,6 +558,33 @@ pub(crate) mod chat_rebuild {
                 FuigoUpdate::RewindMarker { .. } => {
                     // This reducer does not apply rewinds; see `rebuild_chat_history`.
                     self.rewound_after_checkpoint |= self.checkpoint_seen;
+                    Vec::new()
+                }
+                // P188: the attempt whose text streamed since the last committed response was resent; the live
+                // history never kept that text, so the rebuilt one must not either
+                FuigoUpdate::RetryState(crate::extensions::notification::RetryState::Retrying {
+                    discard_emitted: true,
+                    stream_start_ms,
+                    ..
+                }) => {
+                    let cut = match stream_start_ms {
+                        // The attempt's own text, wherever it began; an attempt that wrote none voids nothing
+                        Some(stream) => self
+                            .text_streams
+                            .iter()
+                            .position(|(s, _)| s == stream)
+                            .map(|i| {
+                                let off = self.text_streams[i].1;
+                                self.text_streams.truncate(i);
+                                off
+                            })
+                            .unwrap_or(self.agent_text.len()),
+                        None => self.accepted_text_len,
+                    };
+                    self.agent_text.truncate(cut);
+                    if self.agent_text.is_empty() && self.agent_tool_calls.is_empty() {
+                        self.has_agent_content = false;
+                    }
                     Vec::new()
                 }
                 _ => Vec::new(), // DiffReview, MemoryFlush, etc. not needed
@@ -634,6 +681,8 @@ pub(crate) mod chat_rebuild {
                 out.extend(self.flush_user());
                 self.in_user_turn = false;
             }
+            // P188: tool calls are dispatched only for a committed response, so its text is accepted
+            self.accepted_text_len = self.agent_text.len();
             let id = tc.tool_call_id.0.to_string();
             let args = tc
                 .raw_input
@@ -725,6 +774,8 @@ pub(crate) mod chat_rebuild {
             if !self.has_agent_content && self.agent_tool_calls.is_empty() {
                 return None;
             }
+            self.accepted_text_len = 0;
+            self.text_streams.clear();
             let item = ConversationItem::Assistant(AssistantItem {
                 content: std::sync::Arc::<str>::from(std::mem::take(&mut self.agent_text)),
                 tool_calls: std::mem::take(&mut self.agent_tool_calls),
@@ -750,6 +801,8 @@ pub(crate) mod chat_rebuild {
             self.user_prompt_index = None;
             self.user_is_interjection = false;
             self.agent_text.clear();
+            self.accepted_text_len = 0;
+            self.text_streams.clear();
             self.agent_tool_calls.clear();
             self.tool_args.clear();
             self.emitted_tool_results.clear();
@@ -3147,6 +3200,174 @@ mod tests {
                     (framed("second"), true),
                     ("next prompt".to_string(), false),
                 ]
+            );
+        }
+    }
+
+    /// P188: a resend after streamed text persists the dead attempt's chunks and then the discarding `retry_state`.
+    /// A history rebuilt from `updates.jsonl` must hold what the live history held: the accepted attempt only.
+    mod rebuild_discarded_attempts {
+        use super::*;
+        use crate::extensions::notification::{RetryState, SessionNotification as FuigoNotification};
+        use crate::sampling::ConversationItem;
+        use std::sync::Arc;
+
+        fn chunk(text: &str) -> acp::ContentChunk {
+            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))
+        }
+
+        fn acp_update(update: acp::SessionUpdate) -> SessionUpdate {
+            SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                acp::SessionId::new(Arc::from("s")),
+                update,
+            )))
+        }
+
+        fn agent(text: &str) -> SessionUpdate {
+            acp_update(acp::SessionUpdate::AgentMessageChunk(chunk(text)))
+        }
+
+        fn user(text: &str) -> SessionUpdate {
+            acp_update(acp::SessionUpdate::UserMessageChunk(chunk(text)))
+        }
+
+        /// A chunk as the shell persists it mid-turn: the attempt's stream start in `_meta`.
+        fn agent_in(text: &str, stream: i64) -> SessionUpdate {
+            let mut meta = serde_json::Map::new();
+            meta.insert("streamStartMs".into(), serde_json::json!(stream));
+            SessionUpdate::Acp(Box::new(
+                acp::SessionNotification::new(
+                    acp::SessionId::new(Arc::from("s")),
+                    acp::SessionUpdate::AgentMessageChunk(chunk(text)),
+                )
+                .meta(Some(meta)),
+            ))
+        }
+
+        fn retry_of(stream: i64) -> SessionUpdate {
+            let SessionUpdate::Fuigo(mut n) = retry(true) else { unreachable!() };
+            if let crate::extensions::notification::SessionUpdate::RetryState(RetryState::Retrying {
+                stream_start_ms,
+                ..
+            }) = &mut n.update
+            {
+                *stream_start_ms = Some(stream);
+            }
+            SessionUpdate::Fuigo(n)
+        }
+
+        /// Astra r1 HIGH: an accepted text-only response, then a continuation that fails and is resent. Only the
+        /// continuation's attempt is void; the accepted text stays (no tool call marks the boundary in the file).
+        #[test]
+        fn a_discard_names_its_attempt_and_spares_accepted_text_before_it() {
+            assert_eq!(
+                assistant_texts(vec![
+                    user("hi"),
+                    agent_in("P. ", 1),
+                    agent_in("dead", 2),
+                    retry_of(2),
+                    agent_in("live", 3),
+                ]),
+                ["P. live"]
+            );
+            // An attempt that streamed no text (tool-call deltas only) voids nothing
+            assert_eq!(
+                assistant_texts(vec![user("hi"), agent_in("P. ", 1), retry_of(2), agent_in("live", 3)]),
+                ["P. live"]
+            );
+        }
+
+        fn retry(discard_emitted: bool) -> SessionUpdate {
+            SessionUpdate::Fuigo(Box::new(FuigoNotification {
+                session_id: acp::SessionId::new(Arc::from("s")),
+                update: crate::extensions::notification::SessionUpdate::RetryState(
+                    RetryState::Retrying {
+                        attempt: 1,
+                        max_retries: 15,
+                        reason: "stream ended early".into(),
+                        error_type: Some("api".into()),
+                        verdicts: None,
+                        discard_emitted,
+                        message_id: None,
+                        stream_start_ms: None,
+                    },
+                ),
+                meta: None,
+            }))
+        }
+
+        fn tool_call(id: &str) -> SessionUpdate {
+            acp_update(acp::SessionUpdate::ToolCall(acp::ToolCall::new(
+                acp::ToolCallId::new(id),
+                "run",
+            )))
+        }
+
+        fn tool_done(id: &str) -> SessionUpdate {
+            acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(id),
+                acp::ToolCallUpdateFields::new().status(Some(acp::ToolCallStatus::Completed)),
+            )))
+        }
+
+        fn assistant_texts(updates: Vec<SessionUpdate>) -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let envelopes: Vec<SessionUpdateEnvelope> = updates
+                .iter()
+                .map(|u| SessionUpdateEnvelope::from_update(u).unwrap())
+                .collect();
+            write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
+            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
+                    ConversationItem::Assistant(a) => Some(a.content.to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn discarded_attempts_never_enter_rebuilt_history() {
+            assert_eq!(
+                assistant_texts(vec![
+                    user("hi"),
+                    agent("A1"),
+                    retry(true),
+                    agent("A2"),
+                    retry(true),
+                    agent("A3"),
+                ]),
+                ["A3"]
+            );
+        }
+
+        /// Only the response being resent is voided: text a committed response streamed before its tool call stays.
+        #[test]
+        fn a_discard_spares_text_of_the_committed_response_before_it() {
+            assert_eq!(
+                assistant_texts(vec![
+                    user("hi"),
+                    agent("Let me look. "),
+                    tool_call("c1"),
+                    agent("dead"),
+                    retry(true),
+                    agent("live"),
+                    tool_done("c1"),
+                    agent("Done."),
+                ]),
+                ["Let me look. live", "Done."]
+            );
+        }
+
+        /// A retry that followed no output (no flag) voids nothing.
+        #[test]
+        fn a_plain_retry_voids_nothing() {
+            assert_eq!(
+                assistant_texts(vec![user("hi"), agent("A1"), retry(false), agent("A2")]),
+                ["A1A2"]
             );
         }
     }

@@ -5366,3 +5366,63 @@ fn hooks_follow_a_removed_background_placeholder_to_its_replacement_row() {
     tracker.note_tool_row("bg1", replacement, &mut sb);
     assert_eq!(hook_count(&sb, 0), 2, "both batches on the replacement row");
 }
+/// Every agent-message row's text, in scrollback order.
+fn p188_agent_rows(sb: &ScrollbackState) -> Vec<String> {
+    (0..sb.len())
+        .filter_map(|i| match &sb.get(i).unwrap().block {
+            RenderBlock::AgentMessage(m) => Some(m.text()),
+            _ => None,
+        })
+        .collect()
+}
+/// P188: each attempt opens its own stream (`streamStartMs`); a resend after output (`discardEmitted`) removes the
+/// dead attempt's text and thinking rows, so the pager shows the accepted attempt once, live and on replay alike.
+#[test]
+fn p188_discard_removes_the_dead_attempts_rows() {
+    crate::appearance::cache::set_show_thinking_blocks(true);
+    for is_replay in [false, true] {
+        let mut sb = ScrollbackState::new();
+        let mut tracker = AcpUpdateTracker::new();
+        let attempt = |start: i64| NotificationMeta {
+            stream_start_ms: Some(start),
+            is_replay,
+            ..Default::default()
+        };
+        assert!(tracker.handle_update(agent_chunk("earlier answer"), &attempt(1), &mut sb));
+        assert!(tracker.handle_update(tool_call("read-1", acp::ToolKind::Read, "read_file"), &attempt(1), &mut sb));
+        assert!(tracker.handle_update(tool_update_completed("read-1"), &attempt(1), &mut sb));
+        for (start, text) in [(2, "A1"), (3, "A2")] {
+            tracker.handle_update(thought_chunk("thinking"), &attempt(start), &mut sb);
+            assert!(tracker.handle_update(agent_chunk(text), &attempt(start), &mut sb));
+            assert!(tracker.discard_current_response(&mut sb, Some(start)), "{text} rows are removed");
+        }
+        assert!(tracker.handle_update(agent_chunk("A3"), &attempt(4), &mut sb));
+        tracker.finish_turn(&mut sb);
+        assert_eq!(
+            p188_agent_rows(&sb),
+            ["earlier answer", "A3"],
+            "replay={is_replay}: the committed answer before the tool call stays, the dead attempts are gone"
+        );
+        assert!(
+            !(0..sb.len()).any(|i| matches!(&sb.get(i).unwrap().block, RenderBlock::Thinking(t) if t.text() == "thinking")),
+            "replay={is_replay}: the dead attempts' thinking is gone too"
+        );
+        assert!(!tracker.discard_current_response(&mut sb, None), "nothing left to discard");
+    }
+}
+/// Astra r1 HIGH: an accepted text-only response, then an attempt that streams only tool-call deltas (no rows) and is
+/// resent. Its discard names a stream that drew nothing here, so the accepted response stays.
+#[test]
+fn p188_discard_of_a_rowless_attempt_spares_the_accepted_response() {
+    let mut sb = ScrollbackState::new();
+    let mut tracker = AcpUpdateTracker::new();
+    let at = |start: i64| NotificationMeta {
+        stream_start_ms: Some(start),
+        ..Default::default()
+    };
+    assert!(tracker.handle_update(agent_chunk("accepted"), &at(1), &mut sb));
+    assert!(!tracker.discard_current_response(&mut sb, Some(2)));
+    assert!(tracker.handle_update(agent_chunk("retry"), &at(3), &mut sb));
+    tracker.finish_turn(&mut sb);
+    assert_eq!(p188_agent_rows(&sb), ["accepted", "retry"]);
+}

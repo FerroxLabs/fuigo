@@ -76,6 +76,8 @@ impl SessionActor {
                 request_id,
                 timestamp_ms,
             } => {
+                // P188: the attempt's id on the wire is its stream start, unique within the session
+                let timestamp_ms = self.unaccepted_output.claim_stream_start(timestamp_ms);
                 // Begin a fresh per-generation segment
                 // A new turn (the prompt id changed) resets the whole accumulator, so a capture from an earlier turn cannot leak into this trace
                 // A same-turn restart, a doomloop's next reasoning-only generation, keeps the collected segments and just opens a new one
@@ -130,6 +132,8 @@ impl SessionActor {
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingText,
                     });
+                    // P188: a resend from here on owes clients a discard of this text
+                    self.unaccepted_output.note_emitted();
                     self.send_update(
                         acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
                             acp::ContentBlock::Text(acp::TextContent::new(text)),
@@ -160,6 +164,7 @@ impl SessionActor {
                     self.emit_event(crate::session::events::Event::PhaseChanged {
                         phase: crate::session::events::Phase::StreamingReasoning,
                     });
+                    self.unaccepted_output.note_emitted();
                     self.send_thought_chunk(text, chunk_index).await;
                 }
             },
@@ -180,6 +185,7 @@ impl SessionActor {
                     }
                 }
 
+                self.unaccepted_output.note_emitted();
                 // Forward to clients as a `tool_call_delta_chunk` Ferrox Labs session update through the buffered path
                 // This mirrors how AgentMessageChunk and AgentThoughtChunk are routed: no per-chunk hook dispatch, no persistence
                 // The canonical acp::SessionUpdate::ToolCall is the source of truth for replay
@@ -199,6 +205,7 @@ impl SessionActor {
                 cache_creation_input_tokens,
                 ..
             } => {
+                self.unaccepted_output.note_message_id(message_id.clone());
                 // Ride the buffered chunk rail (the same FIFO `event_tx` as `send_update`) so this lands ahead of the response's first agent chunk
                 // That lets partial framing in headless mode emit the real `message_start` id and input usage in order
                 self.send_buffered_fuigo_update(FuigoSessionUpdate::ResponseStarted {
@@ -394,6 +401,9 @@ impl SessionActor {
                         reason,
                         error_type: Some(kind.as_str().to_string()),
                         verdicts: None,
+                        discard_emitted: false,
+                        message_id: None,
+                        stream_start_ms: None,
                     },
                 ))
                 .await;

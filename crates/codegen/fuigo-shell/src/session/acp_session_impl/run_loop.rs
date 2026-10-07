@@ -267,7 +267,7 @@ async fn deliver_queued_retry_status_mirrors(
     replay_buffer: &mut ReplayBuffer,
 ) {
     while let Ok(event) = event_rx.try_recv() {
-        if matches!(event, SessionEvent::RetryStatusMirror(_)) {
+        if matches!(event, SessionEvent::RetryStatusMirror(_) | SessionEvent::OrderedFuigo(_)) {
             session.handle_session_event(event, replay_buffer).await;
         }
     }

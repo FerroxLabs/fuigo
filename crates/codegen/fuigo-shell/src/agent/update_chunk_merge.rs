@@ -129,7 +129,16 @@ impl ReplayBuffer {
             .map(|prev| incoming.is_in_timestamp_window(prev, max_duration_ms))
             .unwrap_or(true);
 
-        if !session_id_matches {
+        // P188: chunks of two model attempts never merge. A `retry_state` with `discardEmitted` voids one attempt's
+        // updates by their `_meta.streamStartMs`; a merged chunk carries only the later attempt's.
+        let stream_matches = self.pending.as_ref().is_none_or(|prev| {
+            match (stream_start_ms_of(prev), stream_start_ms_of(&incoming)) {
+                (Some(a), Some(b)) => a == b,
+                _ => true,
+            }
+        });
+
+        if !session_id_matches || !stream_matches {
             // Can't merge; send both chunks immediately to preserve current chunk order
             match self.pending.take() {
                 Some(pending) => {
@@ -347,6 +356,18 @@ fn append_chunk_id_range(range_arr: &mut Vec<serde_json::Value>, new_chunk_id: u
     }
 
     range_arr.push(serde_json::json!(new_chunk_id));
+}
+
+/// `_meta.streamStartMs` of an ACP notification (the model attempt it came from), if stamped.
+fn stream_start_ms_of(notification: &SessionNotification) -> Option<i64> {
+    match notification {
+        SessionNotification::Acp(n) => n
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("streamStartMs"))
+            .and_then(serde_json::Value::as_i64),
+        SessionNotification::Fuigo(_) => None,
+    }
 }
 
 fn merge_meta(prev: Option<acp::Meta>, new: Option<acp::Meta>) -> Option<acp::Meta> {
@@ -599,6 +620,37 @@ mod tests {
             },
             SessionNotification::Fuigo(_) => None,
         }
+    }
+
+    /// P188: a chunk stamped with one attempt's `streamStartMs` never merges with the next attempt's.
+    #[test]
+    fn p188_chunks_of_two_attempts_never_merge() {
+        let in_stream = |text: &str, stream: i64| {
+            let SessionNotification::Acp(mut n) = SessionNotification::from(msg_chunk("s", 1, text)) else {
+                unreachable!()
+            };
+            n.meta
+                .get_or_insert_with(Default::default)
+                .insert("streamStartMs".into(), json!(stream));
+            SessionNotification::Acp(n)
+        };
+        let mut buf = ReplayBuffer::new(Some(settings(100, 1_000_000)));
+        assert!(buf.consume_chunk(in_stream("A", 10)).is_none());
+        assert!(buf.consume_chunk(in_stream("1", 10)).is_none(), "one attempt still merges");
+        let Some((first, Some(second))) = buf.consume_chunk(in_stream("A3", 20)) else {
+            panic!("the two attempts' chunks go out separately, in order");
+        };
+        let text = |n: &SessionNotification| match n {
+            SessionNotification::Acp(n) => match &n.update {
+                acp::SessionUpdate::AgentMessageChunk(c) => match &c.content {
+                    acp::ContentBlock::Text(t) => t.text.clone(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            },
+            SessionNotification::Fuigo(_) => String::new(),
+        };
+        assert_eq!((text(&first), text(&second)), ("A1".to_string(), "A3".to_string()));
     }
 
     #[test]

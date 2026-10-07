@@ -108,6 +108,25 @@ pub(crate) enum SessionEvent {
     /// `current_prompt_id`) that a `Send` actor on another task cannot read, and the session actor
     /// is `!Send`. Handled exactly like [`Self::Transient`] once built.
     RetryStatusMirror(Box<crate::extensions::notification::RetryState>),
+    /// P188: a persisted `_fuigo/session_notification` that must reach the client and `updates.jsonl` in queue order:
+    /// every `retry_state` `retrying` (a discarding one voids chunks still in the merge window). The loop flushes the replay buffer, then delivers
+    /// it through `SessionActor::deliver_fuigo_notification` (meta, persistence, forward, mirror, hooks).
+    OrderedFuigo(Box<OrderedFuigoUpdate>),
+}
+
+/// The arguments of `SessionActor::deliver_fuigo_notification`, queued.
+pub(crate) struct OrderedFuigoUpdate {
+    pub(crate) update: crate::extensions::notification::SessionUpdate,
+    pub(crate) extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
+    pub(crate) durability: crate::session::storage::jsonl::AppendDurability,
+}
+
+impl std::fmt::Debug for OrderedFuigoUpdate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrderedFuigoUpdate")
+            .field("update", &self.update)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SessionEvent {

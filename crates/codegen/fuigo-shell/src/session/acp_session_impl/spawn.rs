@@ -1882,6 +1882,7 @@ pub(crate) async fn spawn_session_actor(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+        unaccepted_output: Default::default(),
         current_prompt_id: current_prompt_id.clone(),
         pending_interactions: pending_interactions.clone(),
         telemetry_enabled,

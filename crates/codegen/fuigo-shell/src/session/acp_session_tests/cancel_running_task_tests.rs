@@ -161,6 +161,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+                unaccepted_output: Default::default(),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),
@@ -762,6 +763,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 chat_state_handle,
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+                unaccepted_output: Default::default(),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
                 pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
                     std::collections::HashMap::new(),
@@ -1067,6 +1069,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 chat_state_handle: fuigo_chat_state::ChatStateHandle::noop(),
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+                unaccepted_output: Default::default(),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(Some(
                     "running".to_string(),
                 ))),
@@ -2619,6 +2622,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 chat_state_handle: fuigo_chat_state::ChatStateHandle::noop(),
                 unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
                 turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+                unaccepted_output: Default::default(),
                 current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(Some(
                     "running".to_string(),
                 ))),
