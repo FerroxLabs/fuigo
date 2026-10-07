@@ -1612,6 +1612,43 @@ struct SessionPersistence {
     turn_start_guard: Option<crate::session::storage::snapshot_lock::SnapshotHold>,
 }
 
+/// P188: whether two notifications come from different model attempts (both stamped, with different
+/// `_meta.streamStartMs`). Such chunks are never merged into one persisted line.
+fn crosses_attempts(a: &acp::SessionNotification, b: &acp::SessionNotification) -> bool {
+    let stream_of = |n: &acp::SessionNotification| {
+        n.meta
+            .as_ref()
+            .and_then(|m| m.get("streamStartMs"))
+            .and_then(serde_json::Value::as_i64)
+    };
+    matches!((stream_of(a), stream_of(b)), (Some(x), Some(y)) if x != y)
+}
+
+#[cfg(test)]
+mod p188_crosses_attempts_tests {
+    use super::*;
+
+    #[test]
+    fn only_two_stamped_different_attempts_cross() {
+        let chunk = |stream: Option<i64>| {
+            let n = acp::SessionNotification::new(
+                acp::SessionId::new("s"),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                    acp::TextContent::new("t"),
+                ))),
+            );
+            match stream {
+                Some(stream) => n.meta(serde_json::json!({ "streamStartMs": stream }).as_object().cloned()),
+                None => n,
+            }
+        };
+        assert!(crosses_attempts(&chunk(Some(1)), &chunk(Some(2))));
+        assert!(!crosses_attempts(&chunk(Some(1)), &chunk(Some(1))));
+        assert!(!crosses_attempts(&chunk(None), &chunk(Some(2))));
+        assert!(!crosses_attempts(&chunk(Some(1)), &chunk(None)));
+    }
+}
+
 impl SessionPersistence {
     fn try_merge_text(prev: &mut acp::ContentBlock, new: &acp::ContentBlock) -> bool {
         match (prev, new) {
@@ -1657,6 +1694,11 @@ impl SessionPersistence {
             return None;
         };
 
+        // P188: never merge chunks of two model attempts; a discard voids one by its `_meta.streamStartMs`
+        if crosses_attempts(&pending, incoming) {
+            self.pending_notification = Some(incoming.clone());
+            return Some(pending);
+        }
         let pending_update = pending.update.clone();
         match (&incoming.update, pending_update) {
             (
@@ -2204,7 +2246,16 @@ impl SessionPersistence {
                                 }
                             }
                         }
-                        SessionUpdate::Fuigo(_) => {
+                        SessionUpdate::Fuigo(ref fuigo) => {
+                            // P188: a `retry_state` voids the chunks before it, so they must be on disk before it.
+                            // The merge buffer may still hold the last of them; write it first.
+                            if matches!(
+                                fuigo.update,
+                                crate::extensions::notification::SessionUpdate::RetryState(_)
+                            ) && let Err(error) = self.drain_pending().await
+                            {
+                                tracing::warn!(%error, "failed to write pending update before a retry_state");
+                            }
                             // Ferrox Labs notifications are written directly without merging
                             if let Err(error) = self.write_update(&update).await {
                                 tracing::warn!(%error, "failed to write update");

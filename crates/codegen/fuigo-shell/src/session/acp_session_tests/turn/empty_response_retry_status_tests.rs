@@ -183,7 +183,24 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 ..Default::default()
             };
 
-            let (outcome, frames, elapsed, submissions) = run_turn(&server, policy).await;
+            let (outcome, mut frames, elapsed, submissions) = run_turn(&server, policy).await;
+            // P188: each discard names its attempt's wall-clock stream start; pin that it is there, then compare the rest
+            for frame in &mut frames {
+                match frame {
+                    Frame::Fuigo(RetryState::Retrying { stream_start_ms, .. }) => {
+                        assert!(stream_start_ms.take().is_some(), "a discard names its attempt");
+                    }
+                    Frame::Standard {
+                        retry_status: Some(status),
+                        ..
+                    } => {
+                        if let Some(obj) = status.as_object_mut() {
+                            obj.remove("streamStartMs");
+                        }
+                    }
+                    _ => {}
+                }
+            }
 
             let reason = "empty response from model (reasoning_only)";
             let retrying = |attempt| {
@@ -193,6 +210,10 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                     reason: reason.to_string(),
                     error_type: Some("empty_response".to_string()),
                     verdicts: None,
+                    // P188: each resent attempt had streamed its reasoning, which the resend voids
+                    discard_emitted: true,
+                    message_id: None,
+                    stream_start_ms: None,
                 };
                 state.stamp_verdicts();
                 state
@@ -212,12 +233,12 @@ fn reasoning_only_storm_is_capped_and_mirrored_on_session_update() {
                 vec![
                     Frame::Fuigo(retrying(1)),
                     mirror(
-                        "\n\nRetrying the model (1/3): empty response from model (reasoning_only)\n\n",
+                        "\n\nRetrying the model (1/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n",
                         &retrying(1),
                     ),
                     Frame::Fuigo(retrying(2)),
                     mirror(
-                        "\n\nRetrying the model (2/3): empty response from model (reasoning_only)\n\n",
+                        "\n\nRetrying the model (2/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n",
                         &retrying(2),
                     ),
                     Frame::Fuigo(exhausted.clone()),
@@ -274,6 +295,9 @@ fn shell_transient_retries_are_mirrored_once_each() {
                     reason: "Server error; retrying request".to_string(),
                     error_type: Some("api".to_string()),
                     verdicts: None,
+                    discard_emitted: false,
+                    message_id: None,
+                    stream_start_ms: None,
                 };
                 state.stamp_verdicts();
                 state
@@ -499,6 +523,9 @@ async fn a_retry_mirror_never_overtakes_answer_text_already_generated() {
                 reason: "Server error; retrying request".to_string(),
                 error_type: Some("api".to_string()),
                 verdicts: None,
+                discard_emitted: false,
+                message_id: None,
+                stream_start_ms: None,
             };
             retrying.stamp_verdicts();
             actor
@@ -1025,7 +1052,7 @@ fn a_mirror_after_reasoning_starts_its_own_paragraph() {
             let reasoning = format!("{REASONING} ");
             let retry = |n| {
                 format!(
-                    "\n\nRetrying the model ({n}/3): empty response from model (reasoning_only)\n\n"
+                    "\n\nRetrying the model ({n}/3), discarding the partial reply above: empty response from model (reasoning_only)\n\n"
                 )
             };
             assert_eq!(

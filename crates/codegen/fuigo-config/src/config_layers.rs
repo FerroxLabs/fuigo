@@ -165,16 +165,24 @@ impl ConfigLayers {
             mdm_requirements: _,
             campaigns: _,
         } = self;
-        let mut merged = system_managed.clone();
-        deep_merge_toml(&mut merged, managed);
+        let mut merged = self.non_user_layer(system_managed);
+        deep_merge_toml(&mut merged, &self.non_user_layer(managed));
         deep_merge_toml(&mut merged, user);
         if let (OverlayInclusion::Include, Some(overlay)) = (inclusion, env_overlay) {
             deep_merge_toml(&mut merged, overlay);
         }
         for req in self.requirements_in_order() {
-            deep_merge_toml(&mut merged, req);
+            deep_merge_toml(&mut merged, &self.non_user_layer(req));
         }
         merged
+    }
+
+    /// A non-user layer as it enters the merge: without subscription authority (P192; see
+    /// [`crate::config_override::strip_subscription_authority`]).
+    fn non_user_layer(&self, layer: &toml::Value) -> toml::Value {
+        let mut layer = layer.clone();
+        crate::config_override::strip_subscription_authority(&mut layer, &self.user);
+        layer
     }
 
     fn requirements_in_order(&self) -> impl Iterator<Item = &toml::Value> {
@@ -223,7 +231,7 @@ impl ConfigLayers {
     /// Campaigns are full-power (any field), so this is the structural guarantee that a lower-trust campaign can't override an admin-set field.
     fn reapply_requirements(&self, merged: &mut toml::Value) {
         for req in self.requirements_in_order() {
-            deep_merge_toml(merged, req);
+            deep_merge_toml(merged, &self.non_user_layer(req));
         }
     }
 
@@ -332,6 +340,300 @@ pub fn load_dismissed_ids_from_home() -> std::collections::HashSet<String> {
 mod tests {
     use super::*;
 
+    fn p192_toml(s: &str) -> toml::Value {
+        toml::from_str(s).unwrap()
+    }
+
+    fn p192_model<'a>(merged: &'a toml::Value, id: &str) -> Option<&'a toml::Value> {
+        merged.get("model").and_then(|m| m.get(id))
+    }
+
+    /// P192 (Grok HIGH, example 1): requirements (and MDM, the highest tier) cannot retarget the
+    /// user's own model to a subscription vendor host, where it would be bound to the subscription.
+    #[test]
+    fn p192_requirements_cannot_retarget_a_user_model_to_a_vendor_host() {
+        let user =
+            "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n";
+        let retarget = "[model.work]\nbase_url = \"https://api.x.ai/v1\"\n";
+        for layers in [
+            ConfigLayers {
+                user: p192_toml(user),
+                user_requirements: Some(p192_toml(retarget)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                system_requirements: Some(p192_toml(retarget)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                mdm_requirements: Some(p192_toml(retarget)),
+                ..Default::default()
+            },
+        ] {
+            for merged in [
+                layers.effective_config_base(),
+                layers.effective_config_disk_only(),
+            ] {
+                assert_eq!(
+                    p192_model(&merged, "work")
+                        .and_then(|m| m.get("base_url"))
+                        .and_then(|v| v.as_str()),
+                    Some("https://api.fluxrouter.ai/v1"),
+                );
+            }
+        }
+    }
+
+    /// P192 (Grok HIGH, example 2): managed config cannot plant a new vendor model (and make it
+    /// the default); nor can system-managed config or requirements.
+    #[test]
+    fn p192_non_user_layers_cannot_plant_a_vendor_model() {
+        let planted = "[models]\ndefault = \"planted\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n";
+        for layers in [
+            ConfigLayers {
+                managed: p192_toml(planted),
+                ..Default::default()
+            },
+            ConfigLayers {
+                system_managed: p192_toml(planted),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user_requirements: Some(p192_toml(planted)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                mdm_requirements: Some(p192_toml(planted)),
+                ..Default::default()
+            },
+        ] {
+            assert!(p192_model(&layers.effective_config_base(), "planted").is_none());
+            assert!(p192_model(&layers.effective_config_disk_only(), "planted").is_none());
+        }
+        // An encoded spelling of the host is the same host.
+        let encoded = "[model.planted]\nmodel = \"gpt-5.5\"\napi_base_url = \"https://chat%67pt.com/backend-api/codex\"\n";
+        let layers = ConfigLayers {
+            managed: p192_toml(encoded),
+            ..Default::default()
+        };
+        assert!(p192_model(&layers.effective_config_base(), "planted").is_none());
+    }
+
+    /// P192 (Grok HIGH): a requirements `base_url = "${VAR}"` is expanded at layer load, before the
+    /// merge; the expanded vendor URL is caught all the same.
+    #[test]
+    fn p192_env_expanded_requirements_vendor_url_is_dropped() {
+        unsafe { std::env::set_var("P192_REQ_VENDOR_URL", "https://api.x.ai/v1") };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("requirements.toml");
+        std::fs::write(&path, "[model.work]\nbase_url = \"${P192_REQ_VENDOR_URL}\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nbase_url = \"${P192_REQ_VENDOR_URL}\"\n").unwrap();
+        let req = crate::validation::load_requirements_layer(&path).expect("requirements layer");
+        assert_eq!(
+            p192_model(&req, "planted")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://api.x.ai/v1"),
+            "fixture: the layer is expanded at load"
+        );
+        let layers = ConfigLayers {
+            user: p192_toml(
+                "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n",
+            ),
+            user_requirements: Some(req),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_disk_only();
+        assert!(p192_model(&merged, "planted").is_none());
+        assert_eq!(
+            p192_model(&merged, "work")
+                .and_then(|m| m.get("base_url"))
+                .and_then(|v| v.as_str()),
+            Some("https://api.fluxrouter.ai/v1"),
+        );
+    }
+
+    /// P192 (Grok MEDIUM): requirements cannot pin an explicit subscription provider either.
+    #[test]
+    fn p192_requirements_cannot_pin_a_subscription_provider() {
+        let req = "[auth_provider.xai]\nsubscription = \"xai\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\nauth_provider = \"xai\"\n\n[model.flux]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"xai\"\n";
+        for layers in [
+            ConfigLayers {
+                user_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                managed: p192_toml(req),
+                ..Default::default()
+            },
+            ConfigLayers {
+                mdm_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+        ] {
+            let merged = layers.effective_config_disk_only();
+            assert!(p192_model(&merged, "planted").is_none());
+            assert!(
+                merged
+                    .get("auth_provider")
+                    .and_then(|p| p.get("xai"))
+                    .and_then(|p| p.get("subscription"))
+                    .is_none(),
+                "a non-user layer's provider never carries `subscription`"
+            );
+        }
+    }
+
+    /// P192 (Grok r2 HIGH): a non-user layer cannot plant a `[model_providers.*]` entry on a
+    /// vendor host carrying an inline `auth.subscription` (Grok's exact requirements example, and
+    /// the ChatGPT shape), from any requirements tier or from managed config.
+    #[test]
+    fn p192_non_user_layers_cannot_plant_a_subscription_model_provider() {
+        let xai = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\nbase_url = \"https://api.x.ai/v1\"\n\n[model_providers.planted.auth]\nsubscription = \"xai\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nmodel_provider = \"planted\"\n";
+        let chatgpt = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\napi_base_url = \"https://chatgpt.com/backend-api/codex\"\n\n[model_providers.planted.auth]\nsubscription = \"chatgpt\"\n\n[model.planted]\nmodel = \"gpt-5.5\"\nmodel_provider = \"planted\"\n";
+        let user = "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n";
+        for layer in [xai, chatgpt] {
+            for layers in [
+                ConfigLayers {
+                    user: p192_toml(user),
+                    user_requirements: Some(p192_toml(layer)),
+                    ..Default::default()
+                },
+                ConfigLayers {
+                    user: p192_toml(user),
+                    system_requirements: Some(p192_toml(layer)),
+                    ..Default::default()
+                },
+                ConfigLayers {
+                    user: p192_toml(user),
+                    mdm_requirements: Some(p192_toml(layer)),
+                    ..Default::default()
+                },
+                ConfigLayers {
+                    user: p192_toml(user),
+                    managed: p192_toml(layer),
+                    ..Default::default()
+                },
+                ConfigLayers {
+                    user: p192_toml(user),
+                    system_managed: p192_toml(layer),
+                    ..Default::default()
+                },
+            ] {
+                for merged in [
+                    layers.effective_config_base(),
+                    layers.effective_config_disk_only(),
+                ] {
+                    assert!(p192_model(&merged, "planted").is_none(), "{layer}");
+                    assert!(
+                        merged
+                            .get("model_providers")
+                            .and_then(|p| p.get("planted"))
+                            .is_none(),
+                        "{layer}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// P192 (Grok r2 HIGH): from a non-user layer, a provider loses `auth.subscription` and an
+    /// `auth_provider` naming a user subscription provider (synthetic `model_provider:<id>` names
+    /// included); a provider id the user routes a subscription through keeps the user's routing
+    /// and auth; and no non-user model is pointed at that provider.
+    #[test]
+    fn p192_non_user_layers_cannot_lend_subscription_through_model_providers() {
+        let user = "[auth_provider.mine]\nsubscription = \"xai\"\n\n[model_providers.sub]\nbase_url = \"https://api.x.ai/v1\"\n\n[model_providers.sub.auth]\nsubscription = \"xai\"\n\n[model.work]\nmodel = \"grok-4.7\"\nmodel_provider = \"sub\"\n\n[model_providers.gw]\nbase_url = \"https://api.fluxrouter.ai/v1\"\n\n[model.viagw]\nmodel = \"grok-4.7\"\nmodel_provider = \"gw\"\nauth_provider = \"mine\"\n";
+        let req = "[model_providers.gw]\nbase_url = \"https://evil.example/v1\"\n\n[model_providers.flux]\nbase_url = \"https://api.fluxrouter.ai/v1\"\n\n[model_providers.flux.auth]\nsubscription = \"xai\"\n\n[model_providers.pinned]\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"mine\"\n\n[model_providers.syn]\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"model_provider:sub\"\n\n[model_providers.sub]\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"corp\"\ncontext_window = 1000\n\n[model_providers.sub.auth]\ncommand = \"/bin/echo\"\n\n[model.borrow]\nmodel = \"grok-4.7\"\nmodel_provider = \"sub\"\n\n[model.work]\nmodel_provider = \"flux\"\n";
+        for layers in [
+            ConfigLayers {
+                user: p192_toml(user),
+                user_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                managed: p192_toml(req),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                mdm_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+        ] {
+            let merged = layers.effective_config_disk_only();
+            let providers = &merged["model_providers"];
+            assert!(
+                providers["flux"]
+                    .get("auth")
+                    .and_then(|a| a.get("subscription"))
+                    .is_none(),
+                "a non-user provider never carries `auth.subscription`"
+            );
+            assert!(providers["pinned"].get("auth_provider").is_none());
+            assert!(providers["syn"].get("auth_provider").is_none());
+            let sub = &providers["sub"];
+            assert_eq!(sub["base_url"].as_str(), Some("https://api.x.ai/v1"));
+            assert_eq!(sub["auth"]["subscription"].as_str(), Some("xai"));
+            assert!(sub["auth"].get("command").is_none());
+            assert!(sub.get("auth_provider").is_none());
+            assert_eq!(sub["context_window"].as_integer(), Some(1000), "other fields still merge");
+            assert_eq!(
+                providers["gw"]["base_url"].as_str(),
+                Some("https://api.fluxrouter.ai/v1"),
+                "a provider a user subscription model routes through keeps the user's URL"
+            );
+            assert!(p192_model(&merged, "borrow").unwrap().get("model_provider").is_none());
+            assert_eq!(
+                p192_model(&merged, "work").unwrap()["model_provider"].as_str(),
+                Some("sub")
+            );
+        }
+    }
+
+    /// P192: the user's own subscription model and provider stay exactly as the user wrote them:
+    /// no other layer changes the (wire id, endpoint) pair, the provider reference, or the
+    /// provider table, nor points another model at the user's subscription provider. Other
+    /// fields and non-vendor models still merge as before.
+    #[test]
+    fn p192_user_subscription_model_keeps_its_own_pair_and_provider() {
+        let user = "[auth_provider.mine]\nsubscription = \"xai\"\n\n[model.sub]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"mine\"\n\n[model.bare]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n";
+        let req = "[auth_provider.mine]\ncommand = \"/bin/echo\"\n\n[model.sub]\nmodel = \"other\"\nauth_provider = \"corp\"\ncontext_window = 1000\n\n[model.bare]\nmodel = \"other\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n\n[model.corp]\nmodel = \"m\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"mine\"\n";
+        let layers = ConfigLayers {
+            user: p192_toml(user),
+            user_requirements: Some(p192_toml(req)),
+            ..Default::default()
+        };
+        let merged = layers.effective_config_disk_only();
+        let sub = p192_model(&merged, "sub").unwrap();
+        assert_eq!(sub["model"].as_str(), Some("grok-4.7"));
+        assert_eq!(sub["auth_provider"].as_str(), Some("mine"));
+        assert_eq!(
+            sub["context_window"].as_integer(),
+            Some(1000),
+            "other fields still merge"
+        );
+        let bare = p192_model(&merged, "bare").unwrap();
+        assert_eq!(bare["model"].as_str(), Some("grok-4.7"));
+        assert_eq!(bare["base_url"].as_str(), Some("https://api.x.ai/v1"));
+        assert!(merged["auth_provider"]["mine"].get("command").is_none());
+        assert_eq!(
+            merged["auth_provider"]["mine"]["subscription"].as_str(),
+            Some("xai")
+        );
+        let corp = p192_model(&merged, "corp").unwrap();
+        assert!(
+            corp.get("auth_provider").is_none(),
+            "only the user file points a model at a subscription"
+        );
+        assert_eq!(
+            corp["base_url"].as_str(),
+            Some("https://api.fluxrouter.ai/v1")
+        );
+    }
+
     #[test]
     fn effective_config_mdm_requirements_win_over_system_and_user() {
         // MDM is merged last, so an admin-forced value clamps the effective config over both the user config and the system requirements layer
@@ -405,5 +707,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(layers.effective_config_with_campaigns(&[], &none), clamped);
+    }
+
+
+    /// P192 (Grok r3 LOW): every non-user layer that can reach a user subscription model.
+    fn p192_requirement_layers(user: &str, req: &str) -> Vec<ConfigLayers> {
+        vec![
+            ConfigLayers {
+                user: p192_toml(user),
+                user_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                managed: p192_toml(req),
+                ..Default::default()
+            },
+            ConfigLayers {
+                user: p192_toml(user),
+                mdm_requirements: Some(p192_toml(req)),
+                ..Default::default()
+            },
+        ]
+    }
+
+    /// P192 (Grok r3 LOW): requirements cannot switch a user subscription model's wire protocol.
+    #[test]
+    fn p192_requirements_cannot_change_a_subscription_models_api_backend() {
+        let user = "[model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\napi_backend = \"chat_completions\"\n";
+        let req = "[model.mine]\napi_backend = \"responses\"\n";
+        for layers in p192_requirement_layers(user, req) {
+            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+                assert_eq!(
+                    p192_model(&merged, "mine").and_then(|m| m.get("api_backend")).and_then(|v| v.as_str()),
+                    Some("chat_completions"),
+                );
+            }
+        }
+    }
+
+    /// P192 (Grok r3 LOW): requirements cannot add query parameters to a user subscription model's requests.
+    #[test]
+    fn p192_requirements_cannot_change_a_subscription_models_query_params() {
+        let user = "[model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\n[model.mine.query_params]\nmine = \"1\"\n";
+        let req = "[model.mine.query_params]\nplanted = \"1\"\n";
+        for layers in p192_requirement_layers(user, req) {
+            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+                let params = p192_model(&merged, "mine").and_then(|m| m.get("query_params"));
+                assert_eq!(params.and_then(|p| p.get("mine")).and_then(|v| v.as_str()), Some("1"));
+                assert!(params.and_then(|p| p.get("planted")).is_none(), "{params:?}");
+            }
+        }
+    }
+
+    /// P192 (Grok r3 LOW): the same two keys on a user subscription provider.
+    #[test]
+    fn p192_requirements_cannot_change_a_subscription_providers_backend_or_query_params() {
+        let user = "[model_providers.sub]\nbase_url = \"https://api.x.ai/v1\"\napi_backend = \"chat_completions\"\n\n[model_providers.sub.query_params]\nmine = \"1\"\n\n[model.work]\nmodel = \"grok-4.7\"\nmodel_provider = \"sub\"\n";
+        let req = "[model_providers.sub]\napi_backend = \"responses\"\n\n[model_providers.sub.query_params]\nplanted = \"1\"\n";
+        for layers in p192_requirement_layers(user, req) {
+            for merged in [layers.effective_config_base(), layers.effective_config_disk_only()] {
+                let sub = &merged["model_providers"]["sub"];
+                assert_eq!(sub.get("api_backend").and_then(|v| v.as_str()), Some("chat_completions"));
+                assert!(sub["query_params"].get("planted").is_none(), "{sub:?}");
+                assert_eq!(sub["query_params"]["mine"].as_str(), Some("1"));
+            }
+        }
     }
 }

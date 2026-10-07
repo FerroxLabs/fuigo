@@ -195,12 +195,24 @@ pub(super) enum MessagesLine {
     Result(Box<ResultLine>),
 }
 
-/// The two `system` line subtypes, discriminated by `subtype`.
+/// The `system` line subtypes, discriminated by `subtype`.
 #[derive(Serialize)]
 #[serde(tag = "subtype", rename_all = "snake_case")]
 pub(super) enum SystemLine {
     Init(SystemInitLine),
     CompactBoundary(CompactBoundaryLine),
+    ResponseDiscarded(ResponseDiscardedLine),
+}
+
+/// P188: `system`/`response_discarded`, written only with `--include-partial-messages`. The partial message just
+/// closed (`stop_reason` null) came from a model request that failed and is being resent: its `stream_event` deltas
+/// are void. No `assistant` frame and no `result` ever carries that text.
+#[derive(Serialize)]
+pub(super) struct ResponseDiscardedLine {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) message_id: Option<String>,
+    pub(super) session_id: String,
+    pub(super) uuid: String,
 }
 
 #[derive(Serialize)]

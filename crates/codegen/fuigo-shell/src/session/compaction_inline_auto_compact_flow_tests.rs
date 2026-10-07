@@ -223,6 +223,7 @@ async fn create_test_actor(
         status_wake: Default::default(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         turn_thought_text_emitted: std::sync::atomic::AtomicBool::new(false),
+        unaccepted_output: Default::default(),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-auto-compact"),
             cwd: cwd.as_str().to_string(),

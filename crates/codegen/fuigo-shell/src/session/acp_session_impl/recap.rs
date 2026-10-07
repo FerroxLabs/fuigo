@@ -710,7 +710,21 @@ impl SessionActor {
 
         self.refresh_token_if_expired().await;
         let mut sampling_config = self.reconstruct_full_config().await;
-        sampling_config.model = model.clone();
+        let suggest_entry = self.models_manager.catalog_entry(&model);
+        if !suggest_route_allowed(&sampling_config, suggest_entry.as_ref()) {
+            // P192: the override below swaps only the wire model and keeps the session's
+            // route. In a subscription session that would send the transcript, under the
+            // user's subscription credential, to the subscription vendor for a model that is
+            // not the one the user chose, instead of to that model's own endpoint.
+            tracing::debug!(
+                model = %model,
+                "prompt suggest: model differs from the subscription session's model; skipping request"
+            );
+            return None;
+        }
+        if sampling_config.subscription.is_none() {
+            sampling_config.model = model.clone();
+        }
         sampling_config.reasoning_effort = None;
         let suggest_reasoning = prompt_suggest::resolve_suggest_reasoning(
             configured_reasoning_effort,
@@ -832,6 +846,19 @@ impl SessionActor {
     }
 }
 
+/// P192: a prompt-suggestion request may override the model only off a subscription route.
+/// On one, the suggestion model's catalog entry must BE the session's model (same wire id and
+/// endpoint); a key that merely spells the session's wire id can name another model entirely.
+fn suggest_route_allowed(
+    session: &fuigo_sampler::SamplerConfig,
+    entry: Option<&crate::agent::config::ModelEntry>,
+) -> bool {
+    session.subscription.is_none()
+        || entry.is_some_and(|entry| {
+            entry.info.model == session.model && entry.info.base_url == session.base_url
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -935,5 +962,53 @@ mod tests {
         assert_ne!(a_id, b_id, "each attempt must get a fresh req_id");
         // Everything except the request id is byte-identical to the base.
         assert_eq!(a.x_fuigo_conv_id, base.x_fuigo_conv_id);
+    }
+
+    /// P192: on a subscription route only the session's own model entry may be suggested with.
+    #[test]
+    fn p192_suggest_override_stays_off_the_subscription_route() {
+        let raw: toml::Value = toml::from_str(
+            "[model.sub]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+             [model.\"grok-4.7\"]\nmodel = \"local-helper\"\nbase_url = \"http://127.0.0.1:1234/v1\"\napi_key = \"fixture\"\n",
+        )
+        .unwrap();
+        let cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+        let models = crate::agent::config::resolve_model_list(&cfg, None);
+        let mut session = fuigo_sampler::SamplerConfig {
+            model: "grok-4.7".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            ..Default::default()
+        };
+        assert!(super::suggest_route_allowed(&session, models.get("grok-4.7")), "no subscription: unchanged");
+        session.subscription = Some(fuigo_sampler::subscription::SubscriptionKind::Xai);
+        assert!(super::suggest_route_allowed(&session, models.get("sub")));
+        assert!(!super::suggest_route_allowed(&session, models.get("grok-4.7")), "a key spelling the wire id is another model");
+        assert!(!super::suggest_route_allowed(&session, None));
+    }
+
+    /// P192: the same wire id on another endpoint is another model; it must not be suggested
+    /// with on a subscription route (the subscription credential would follow it there).
+    #[test]
+    fn p192_suggest_same_wire_id_on_another_endpoint_is_refused() {
+        let raw: toml::Value = toml::from_str(
+            "[model.sub]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+             [model.mirror]\nmodel = \"grok-4.7\"\nbase_url = \"http://127.0.0.1:1234/v1\"\napi_key = \"fixture\"\n",
+        )
+        .unwrap();
+        let cfg = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+        let models = crate::agent::config::resolve_model_list(&cfg, None);
+        let mirror = models.get("mirror").expect("mirror entry resolved");
+        assert_eq!(mirror.info.model, "grok-4.7", "fixture: same wire id as the session");
+        let session = fuigo_sampler::SamplerConfig {
+            model: "grok-4.7".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            subscription: Some(fuigo_sampler::subscription::SubscriptionKind::Xai),
+            ..Default::default()
+        };
+        assert!(super::suggest_route_allowed(&session, models.get("sub")));
+        assert!(
+            !super::suggest_route_allowed(&session, Some(mirror)),
+            "same wire id on another endpoint must be refused"
+        );
     }
 }

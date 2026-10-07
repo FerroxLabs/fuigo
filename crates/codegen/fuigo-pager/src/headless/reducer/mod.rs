@@ -63,6 +63,14 @@ pub(crate) enum StreamEvent {
     ReasoningCompleted {
         signature: Option<String>,
     },
+    /// P188: the model request streaming the current response failed after output and is being resent
+    /// (`retry_state` with `discardEmitted`). Everything the current response streamed is void; the resend streams
+    /// the reply again. `message_id` is the discarded response's id when the backend gave one.
+    ResponseDiscarded {
+        message_id: Option<String>,
+        /// The dead attempt's `_meta.streamStartMs`, when the shell named it.
+        stream_start_ms: Option<i64>,
+    },
     /// One model response finished; it carries its stop reason, id, usage, signature, and stop sequence.
     ResponseCompleted {
         message_id: Option<String>,
@@ -85,6 +93,24 @@ pub(crate) struct ToolCallEvent {
     locations: Value,
     /// True for Fuigo's backend `web_search`; it is folded inline instead of taking the split path client tools take.
     backend_web_search: bool,
+}
+
+#[cfg(test)]
+impl ToolCallEvent {
+    /// A pending client-path tool call, as a hosted x_search reports one mid-response.
+    pub(crate) fn hosted_for_test(id: &str, name: &str) -> Self {
+        Self {
+            tool_call_id: id.to_string(),
+            title: name.to_string(),
+            tool_kind: None,
+            status: Some(proto::ToolCallStatus::Pending),
+            tool_name: name.to_string(),
+            raw_input: serde_json::json!({}),
+            content: Value::Null,
+            locations: Value::Null,
+            backend_web_search: false,
+        }
+    }
 }
 
 pub(crate) struct ToolCallUpdateEvent {

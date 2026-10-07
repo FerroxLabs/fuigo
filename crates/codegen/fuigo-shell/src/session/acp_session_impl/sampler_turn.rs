@@ -736,12 +736,11 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let (mut model_facts, mut selected_provider) = self.model_auth_state(cfg.model.as_str());
-        if let Some(provider) = crate::auth::subscription::inference::selected_for_endpoint(&cfg.model,&cfg.base_url) {
+        let by_endpoint = crate::auth::subscription::inference::selected_for_endpoint(&cfg.model,&cfg.base_url);
+        if by_endpoint.is_some() {
             model_facts.byok = crate::agent::auth_method::ModelByok::Byok;
-            selected_provider = Some(provider);
-        } else if selected_provider.as_ref().and_then(|p| p.subscription_provider()).is_some_and(|p| p.sampling_kind().base_url() != cfg.base_url) {
-            selected_provider = None;
         }
+        selected_provider = crate::auth::subscription::inference::turn_provider(by_endpoint, selected_provider);
         // Gate on the stable session classifier, not `creds.auth_type`; see `crate::agent::auth_method::session_token_auth_gate`
         // P42: `cfg.base_url` is checked with the one session-delivery predicate for every BYOK status
         let auth_method = self.auth_method_id.load();
@@ -2306,6 +2305,9 @@ impl SessionActor {
                 ),
                 error_type: None,
                 verdicts: None,
+                discard_emitted: false,
+                message_id: None,
+                stream_start_ms: None,
             },
         ))
         .await;

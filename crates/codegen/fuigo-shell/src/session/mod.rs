@@ -493,6 +493,7 @@ pub(crate) mod repo_status_prefix;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod summary;
+pub(crate) mod unaccepted_output;
 pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod testkit;

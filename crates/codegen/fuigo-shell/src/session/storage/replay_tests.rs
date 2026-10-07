@@ -1038,6 +1038,9 @@ fn fuigo_only_transcript_forwards_but_stays_empty() {
             reason: "overloaded".into(),
             error_type: None,
             verdicts: None,
+            discard_emitted: false,
+            message_id: None,
+            stream_start_ms: None,
         },
     ));
     std::fs::write(dir.join(UPDATES_FILE), format!("{retry}\n")).unwrap();

@@ -446,6 +446,19 @@ impl SessionActor {
                 }
                 self.emit_transient_notification(self.retry_status_mirror_notification(&state));
             }
+            SessionEvent::OrderedFuigo(ordered) => {
+                if let Some(pending) = replay_buffer.flush() {
+                    self.emit_buffered(pending).await;
+                }
+                let ordered = *ordered;
+                self.deliver_fuigo_notification(
+                    ordered.update,
+                    ordered.extra_meta,
+                    ordered.durability,
+                    true,
+                )
+                .await;
+            }
         }
     }
     /// Tracing log for buffered Ferrox Labs notifications emerging from emit_buffered.
@@ -1106,6 +1119,76 @@ impl SessionActor {
         if closes_cancel_rewind_window(&update) {
             self.close_rewind_window().await;
         }
+        // P188: a resend after visible output owes every client a discard of that output. Every resend path (the
+        // sampler's retry loop, the turn loop's transient/auth/media-gen/auto-recovery resends) announces itself here,
+        // so the discard is stamped here once.
+        if let FuigoSessionUpdate::RetryState(
+            crate::extensions::notification::RetryState::Retrying {
+                discard_emitted,
+                message_id,
+                stream_start_ms,
+                ..
+            },
+        ) = &mut update
+            && let Some(discard) = self.unaccepted_output.take_discard()
+        {
+            *discard_emitted = true;
+            *message_id = discard.message_id;
+            *stream_start_ms = discard.stream_start_ms;
+        }
+        // P188: every `retrying` state rides the session's event queue. A discard voids chunks that may still sit in
+        // the replay buffer's merge window, so the loop emits those first, then this; and resend announcements never
+        // overtake one another, so a stock client's mirror lines stay in order behind the dead text they announce.
+        // Terminal states (`exhausted`/`failed`) stay direct: their notification hooks must not run on the loop.
+        if matches!(
+            update,
+            FuigoSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::Retrying { .. }
+            )
+        ) {
+            let ordered = crate::session::replay_events::OrderedFuigoUpdate {
+                update,
+                extra_meta,
+                durability,
+            };
+            match self
+                .event_tx
+                .send(SessionEvent::OrderedFuigo(Box::new(ordered)))
+            {
+                Ok(()) => return,
+                // The session loop is gone, so nothing queued can precede it: deliver it directly
+                Err(unsent) => {
+                    if let SessionEvent::OrderedFuigo(ordered) = unsent.0 {
+                        let ordered = *ordered;
+                        self.deliver_fuigo_notification(
+                            ordered.update,
+                            ordered.extra_meta,
+                            ordered.durability,
+                            false,
+                        )
+                        .await;
+                    }
+                    return;
+                }
+            }
+        }
+        self.deliver_fuigo_notification(update, extra_meta, durability, false)
+            .await;
+    }
+
+    /// The fan-out half of [`Self::send_fuigo_notification_with_extra_meta`]: stamp meta, persist, forward, mirror a
+    /// `retry_state`, fire notification hooks. `in_loop`: called by the session loop (`SessionEvent::OrderedFuigo`),
+    /// which is already at this notification's place in the queue, so its mirror is emitted right here rather than
+    /// queued behind output that came later.
+    pub(crate) async fn deliver_fuigo_notification(
+        &self,
+        update: FuigoSessionUpdate,
+        extra_meta: Option<serde_json::Map<String, serde_json::Value>>,
+        durability: crate::session::storage::jsonl::AppendDurability,
+        in_loop: bool,
+    ) {
+        // The `eventId` is minted at delivery, so the `_fuigo` rail's ids rise in the order clients receive them
+        // (their per-rail high-water drops anything lower). Chunks carry ids on their own rail.
         let meta = {
             let mut meta = self.build_notification_meta();
             if let (Some(obj), Some(extra)) = (meta.as_object_mut(), extra_meta) {
@@ -1148,7 +1231,11 @@ impl SessionActor {
                 .forward_fire_and_forget(ext_notification);
         }
         if let FuigoSessionUpdate::RetryState(state) = &notification.update {
-            self.emit_retry_status_mirror(state);
+            if in_loop {
+                self.emit_transient_notification(self.retry_status_mirror_notification(state));
+            } else {
+                self.emit_retry_status_mirror(state);
+            }
         }
         if let Some((notification_type, message, title, level)) =
             notification_hook_for_update(&notification.update)

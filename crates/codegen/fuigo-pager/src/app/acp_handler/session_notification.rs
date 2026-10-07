@@ -1671,8 +1671,16 @@ pub(super) fn apply_retry_state(
             max_retries,
             reason,
             error_type,
+            discard_emitted,
+            stream_start_ms,
             ..
         } => {
+            // P188: the resend replaces what the failed attempt streamed; live and on replay alike
+            if *discard_emitted {
+                session
+                    .tracker
+                    .discard_current_response(scrollback, *stream_start_ms);
+            }
             session.set_retry_activity(Some(TurnActivity::Retrying {
                 attempt: *attempt,
                 max_retries: *max_retries,

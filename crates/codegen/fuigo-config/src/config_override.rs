@@ -191,7 +191,7 @@ pub fn apply_patches(
         }
         let config_models = config.get("model").and_then(toml::Value::as_table);
         if let Some(patch_models) = patch.get_mut("model").and_then(toml::Value::as_table_mut) {
-            for (id, patch_model) in patch_models {
+            for (id, patch_model) in patch_models.iter_mut() {
                 let has_mtls_identity = config_models
                     .and_then(|models| models.get(id))
                     .and_then(toml::Value::as_table)
@@ -206,6 +206,33 @@ pub fn apply_patches(
                     }
                 }
             }
+            // P192: a model on a subscription vendor's host can carry the user's subscription
+            // credential, so remote configuration neither routes a model there nor changes any
+            // field of one that is (its credential and routing fields included): the whole
+            // patch entry for such a model is dropped.
+            // The same holds for a model routed through a subscription provider (Grok r2 HIGH):
+            // the merged config's subscription providers are the user file's alone (every other
+            // layer is stripped by `strip_subscription_authority`), and no patch model may
+            // reference one.
+            let routes = UserSubscriptionRoutes::of(config);
+            let vendor_ids: Vec<String> = patch_models
+                .iter()
+                .filter(|(id, patch_model)| {
+                    config_models
+                        .and_then(|models| models.get(id.as_str()))
+                        .is_some_and(|own| names_subscription_vendor(own) || routes.is_routed(own))
+                        || names_subscription_vendor(patch_model)
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in vendor_ids {
+                patch_models.remove(&id);
+            }
+            for (_, patch_model) in patch_models.iter_mut() {
+                if let Some(patch_model) = patch_model.as_table_mut() {
+                    routes.strip_refs(patch_model);
+                }
+            }
         }
         for path in PATCH_STRIP_PATHS {
             strip_path(&mut patch, path);
@@ -214,6 +241,243 @@ pub fn apply_patches(
         crate::loader::normalize_config_layer(&mut patch);
         deep_merge_toml(config, &patch);
     }
+}
+
+/// P192: only the user's own file (`$FUIGO_HOME/config.toml`) confers subscription authority.
+/// `layer` is a non-user layer (system managed, managed, or a requirements tier, MDM included),
+/// already `${VAR}`-expanded; `user` is the user file. From `layer`, this removes:
+/// - every `[model_providers.<id>]` entry on a vendor host, and every `[model.<id>]` entry on a
+///   vendor host or naming such a provider (`model_provider`), so no other layer adds a vendor
+///   model or retargets one there;
+/// - `subscription` from every provider's inline `auth`, and a provider's `auth_provider` naming
+///   a user subscription provider; on a provider id the user file routes a subscription through,
+///   its `base_url`, `api_base_url`, `auth` and `auth_provider`;
+/// - on a key whose user entry is a subscription model (vendor host, or a reference to a user
+///   subscription provider), the routing fields `model`, `base_url`, `api_base_url`,
+///   `auth_provider` and `model_provider`, plus the wire protocol `api_backend` and the request
+///   `query_params` (Grok r3 LOW), so the merged (wire id, endpoint) pair stays exactly the user's;
+/// - a model's `auth_provider` or `model_provider` reference to a provider the user file makes a
+///   subscription (synthetic `model_provider:<id>` auth names included);
+/// - `subscription` on every `[auth_provider.<name>]`, and the whole table for a name the user
+///   file makes a subscription provider.
+///
+/// Campaign and version-override patches get the same rule in [`apply_patches`]; the
+/// `FUIGO_CONFIG` overlay cannot carry these tables at all. A trusted project's
+/// `.fuigo/config.toml` is not a model layer.
+pub fn strip_subscription_authority(layer: &mut toml::Value, user: &toml::Value) {
+    let user_sub = UserSubscriptionRoutes::of(user);
+    let user_models = user.get("model").and_then(toml::Value::as_table);
+    // `[model_providers.<id>]` (Grok r2 HIGH): a model inherits its provider's URL and inline
+    // `auth`, so a provider is held to the same rule as a model.
+    let mut vendor_provider_ids = std::collections::HashSet::new();
+    if let Some(providers) = layer.get_mut("model_providers").and_then(toml::Value::as_table_mut) {
+        providers.retain(|id, provider| {
+            let vendor = names_subscription_vendor(provider);
+            if vendor {
+                vendor_provider_ids.insert(id.to_owned());
+            }
+            !vendor
+        });
+        for (id, provider) in providers.iter_mut() {
+            let Some(provider) = provider.as_table_mut() else {
+                continue;
+            };
+            if user_sub.providers.contains(id) {
+                for key in [
+                    "base_url",
+                    "api_base_url",
+                    "auth",
+                    "auth_provider",
+                    "api_backend",
+                    "query_params",
+                ] {
+                    provider.remove(key);
+                }
+            }
+            if let Some(auth) = provider.get_mut("auth").and_then(toml::Value::as_table_mut) {
+                auth.remove("subscription");
+                if auth.is_empty() {
+                    provider.remove("auth");
+                }
+            }
+            if user_sub.names_auth(provider.get("auth_provider")) {
+                provider.remove("auth_provider");
+            }
+        }
+    }
+    if let Some(models) = layer.get_mut("model").and_then(toml::Value::as_table_mut) {
+        models.retain(|_, model| {
+            !names_subscription_vendor(model)
+                && !model
+                    .get("model_provider")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|id| vendor_provider_ids.contains(id))
+        });
+        for (id, model) in models.iter_mut() {
+            let Some(model) = model.as_table_mut() else {
+                continue;
+            };
+            let user_subscription_model = user_models
+                .and_then(|models| models.get(id))
+                .is_some_and(|own| names_subscription_vendor(own) || user_sub.is_routed(own));
+            if user_subscription_model {
+                for key in [
+                    "model",
+                    "base_url",
+                    "api_base_url",
+                    "auth_provider",
+                    "model_provider",
+                    "api_backend",
+                    "query_params",
+                ] {
+                    model.remove(key);
+                }
+            }
+            user_sub.strip_refs(model);
+        }
+    }
+    if let Some(providers) = layer.get_mut("auth_provider").and_then(toml::Value::as_table_mut) {
+        providers.retain(|name, _| !user_sub.auth.contains(name));
+        for (_, provider) in providers.iter_mut() {
+            if let Some(provider) = provider.as_table_mut() {
+                provider.remove("subscription");
+            }
+        }
+    }
+}
+
+/// P192: the subscription routes the user's own file defines, which no other layer or remote
+/// patch may point a model at.
+struct UserSubscriptionRoutes {
+    /// `[auth_provider.<name>]` names carrying `subscription`, plus the synthetic
+    /// `model_provider:<id>` name of every provider whose inline `auth` carries it.
+    auth: std::collections::HashSet<String>,
+    /// `[model_providers.<id>]` ids routed to a vendor host or carrying a subscription credential
+    /// (inline `auth.subscription`, or an `auth_provider` in [`Self::auth`]), and every id a user
+    /// subscription model names as its `model_provider`.
+    providers: std::collections::HashSet<String>,
+}
+
+impl UserSubscriptionRoutes {
+    fn of(config: &toml::Value) -> Self {
+        let mut auth: std::collections::HashSet<String> = config
+            .get("auth_provider")
+            .and_then(toml::Value::as_table)
+            .map(|providers| {
+                providers
+                    .iter()
+                    .filter(|(_, p)| p.get("subscription").is_some())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let model_providers = config.get("model_providers").and_then(toml::Value::as_table);
+        for (id, provider) in model_providers.into_iter().flatten() {
+            if provider
+                .get("auth")
+                .and_then(|a| a.get("subscription"))
+                .is_some()
+            {
+                // `fuigo-shell` `model_provider_auth_name`.
+                auth.insert(format!("model_provider:{id}"));
+            }
+        }
+        let mut routes = Self {
+            auth,
+            providers: std::collections::HashSet::new(),
+        };
+        for (id, provider) in model_providers.into_iter().flatten() {
+            let credential = provider
+                .get("auth")
+                .and_then(|a| a.get("subscription"))
+                .is_some()
+                || routes.names_auth(provider.get("auth_provider"));
+            if credential || names_subscription_vendor(provider) {
+                routes.providers.insert(id.clone());
+            }
+        }
+        // A provider a user subscription model routes through (its own `auth_provider` names a
+        // user subscription) supplies that model's URL, so it is a subscription route too.
+        let models = config.get("model").and_then(toml::Value::as_table);
+        for model in models.into_iter().flatten().map(|(_, m)| m) {
+            if (names_subscription_vendor(model) || routes.names_auth(model.get("auth_provider")))
+                && let Some(id) = model.get("model_provider").and_then(toml::Value::as_str)
+            {
+                routes.providers.insert(id.to_owned());
+            }
+        }
+        routes
+    }
+
+    /// `auth_provider` (a model's or a provider's) names a user subscription provider.
+    fn names_auth(&self, auth_provider: Option<&toml::Value>) -> bool {
+        auth_provider
+            .and_then(toml::Value::as_str)
+            .is_some_and(|name| self.auth.contains(name))
+    }
+
+    /// `model_provider` names a user subscription route.
+    fn names_provider(&self, model_provider: Option<&toml::Value>) -> bool {
+        model_provider
+            .and_then(toml::Value::as_str)
+            .is_some_and(|id| self.providers.contains(id))
+    }
+
+    /// A model routed through a user subscription provider (either reference).
+    fn is_routed(&self, model: &toml::Value) -> bool {
+        self.names_auth(model.get("auth_provider"))
+            || self.names_provider(model.get("model_provider"))
+    }
+
+    /// Remove a non-user model's references to a user subscription provider.
+    fn strip_refs(&self, model: &mut toml::Table) {
+        if self.names_auth(model.get("auth_provider")) {
+            model.remove("auth_provider");
+        }
+        if self.names_provider(model.get("model_provider")) {
+            model.remove("model_provider");
+        }
+    }
+}
+
+/// Hosts of the subscription vendors' own inference endpoints (`fuigo_sampler::subscription::
+/// SubscriptionKind::base_url`; fuigo-shell's `p192_patch_vendor_hosts_match_the_subscriptions`
+/// keeps the two in step). Any scheme, port, path, case or trailing dot of these hosts counts.
+const SUBSCRIPTION_VENDOR_HOSTS: [&str; 2] = ["api.x.ai", "chatgpt.com"];
+
+/// Whether a `[model.<id>]` value routes to a [`SUBSCRIPTION_VENDOR_HOSTS`] host through its
+/// `base_url` or `api_base_url`. A non-table value routes nowhere.
+fn names_subscription_vendor(model: &toml::Value) -> bool {
+    ["base_url", "api_base_url"].into_iter().any(|key| {
+        model
+            .get(key)
+            .and_then(toml::Value::as_str)
+            .is_some_and(names_subscription_vendor_host)
+    })
+}
+
+/// Whether `url` names a [`SUBSCRIPTION_VENDOR_HOSTS`] host: as the URL parser the request
+/// path uses reads it (percent-decoding, case, IDNA), or, for text it cannot parse, as its
+/// literal authority, so neither an encoded nor a malformed spelling slips through.
+pub fn names_subscription_vendor_host(url: &str) -> bool {
+    let parsed = url::Url::parse(url.trim()).ok().and_then(|url| {
+        url.host_str()
+            .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+    });
+    if parsed.is_some_and(|host| SUBSCRIPTION_VENDOR_HOSTS.contains(&host.as_str())) {
+        return true;
+    }
+    let rest = url.trim();
+    let rest = rest.split_once("://").map_or(rest, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = if host_port.starts_with('[') {
+        host_port
+    } else {
+        host_port.split(':').next().unwrap_or_default()
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    SUBSCRIPTION_VENDOR_HOSTS.contains(&host.as_str())
 }
 
 fn strip_path(patch: &mut toml::Table, path: PatchPath) {
@@ -237,6 +501,89 @@ fn strip_path(patch: &mut toml::Table, path: PatchPath) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P192: remote configuration can neither route a model to a subscription vendor's host
+    /// nor re-target a user's model that is on one; other models stay tunable.
+    #[test]
+    fn p192_patches_cannot_route_to_or_retarget_subscription_vendor_models() {
+        let mut cfg: toml::Value = toml::from_str(
+            "[model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+             [model.flux]\nmodel = \"f\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n",
+        )
+        .unwrap();
+        let patch: toml::Table = toml::from_str(
+            "[model.mine]\nmodel = \"other\"\nbase_url = \"https://evil.example/v1\"\ntemperature = 0.2\n\
+             [model.remote]\nmodel = \"grok-4.7\"\nbase_url = \"HTTPS://API.X.AI./v1\"\n\
+             [model.chat]\nmodel = \"g\"\napi_base_url = \"https://u@chatgpt.com:443/backend-api/codex\"\n\
+             [model.flux]\nmodel = \"f2\"\nbase_url = \"https://api.fluxrouter.ai/v2\"\n",
+        )
+        .unwrap();
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        let m = &cfg["model"];
+        assert_eq!(m["mine"]["model"].as_str(), Some("grok-4.7"));
+        assert_eq!(m["mine"]["base_url"].as_str(), Some("https://api.x.ai/v1"));
+        assert!(m["mine"].get("temperature").is_none(), "no field of a vendor-host model is patched");
+        for id in ["remote", "chat"] {
+            assert!(m.get(id).is_none(), "{id}: a patch never creates a vendor-host model");
+        }
+        // Nor can a patch invalidate a vendor-host model's credential or provider fields.
+        let mut cfg: toml::Value = toml::from_str(
+            "[model.sub]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\nauth_provider = \"native\"\n",
+        )
+        .unwrap();
+        let patch: toml::Table = toml::from_str(
+            "[model.sub]\nauth_provider = false\nenv_key = false\n[model.enc]\nbase_url = \"https://%61pi.x.ai/v1\"\n",
+        )
+        .unwrap();
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        assert_eq!(cfg["model"]["sub"]["auth_provider"].as_str(), Some("native"));
+        assert!(cfg["model"]["sub"].get("env_key").is_none());
+        assert!(cfg["model"].get("enc").is_none());
+        assert_eq!(m["flux"]["model"].as_str(), Some("f2"));
+        assert_eq!(m["flux"]["base_url"].as_str(), Some("https://api.fluxrouter.ai/v2"));
+        for (url, named) in [
+            ("https://api.x.ai/v1", true),
+            ("http://api.x.ai:8443", true),
+            ("api.x.ai/v1", true),
+            ("https://chatgpt.com/backend-api/codex", true),
+            ("https://%61pi.x.ai/v1", true),
+            ("https://API.X.AI./v1", true),
+            ("https://chatgpt%2Ecom/backend-api/codex", true),
+            ("https://api.x.ai.evil.example/v1", false),
+            ("https://x.ai/v1", false),
+            ("https://api.fluxrouter.ai/v1", false),
+        ] {
+            assert_eq!(names_subscription_vendor_host(url), named, "{url}");
+        }
+    }
+
+    /// P192 (Grok r2 HIGH, patch side): a campaign / version-override patch cannot point a model
+    /// at the user's subscription provider (`auth_provider`, `model_provider`, or the synthetic
+    /// `model_provider:<id>` name), nor patch a model the user routes through one.
+    #[test]
+    fn p192_patches_cannot_borrow_a_user_subscription_provider() {
+        let mut cfg: toml::Value = toml::from_str(
+            "[auth_provider.mine]\nsubscription = \"xai\"\n\
+             [model_providers.sub]\nbase_url = \"https://api.x.ai/v1\"\n\
+             [model_providers.sub.auth]\nsubscription = \"xai\"\n\
+             [model.work]\nmodel = \"grok-4.7\"\nmodel_provider = \"sub\"\n",
+        )
+        .unwrap();
+        let patch: toml::Table = toml::from_str(
+            "[model.a]\nmodel = \"m\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"mine\"\n\
+             [model.b]\nmodel = \"m\"\nmodel_provider = \"sub\"\n\
+             [model.c]\nmodel = \"m\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"model_provider:sub\"\n\
+             [model.work]\nmodel = \"other\"\ntemperature = 0.2\n",
+        )
+        .unwrap();
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+        let m = &cfg["model"];
+        assert!(m["a"].get("auth_provider").is_none());
+        assert!(m["b"].get("model_provider").is_none());
+        assert!(m["c"].get("auth_provider").is_none());
+        assert_eq!(m["work"]["model"].as_str(), Some("grok-4.7"));
+        assert!(m["work"].get("temperature").is_none());
+    }
 
     fn table(s: &str) -> toml::Table {
         toml::from_str(s).unwrap()

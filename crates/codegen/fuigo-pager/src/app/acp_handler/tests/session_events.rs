@@ -195,12 +195,51 @@
             reason: "rate limited".into(),
             error_type: None,
             verdicts: None,
+            discard_emitted: false,
+            message_id: None,
+            stream_start_ms: None,
         };
         apply_retry_state(&retry, &mut session, &mut scrollback, false);
         assert!(
             session.in_flight_prompt.is_none(),
             "RetryState bypasses session/update in_flight hook"
         );
+    }
+
+    /// P188: `retry_state` with `discardEmitted` drops the dead attempt's streamed row; without it nothing is dropped.
+    #[test]
+    fn p188_apply_retry_state_discard_drops_the_streamed_attempt() {
+        for discard_emitted in [true, false] {
+            let mut session = make_session(Some("s1"));
+            let mut scrollback = ScrollbackState::new();
+            let chunk = agent_client_protocol::SessionUpdate::AgentMessageChunk(
+                agent_client_protocol::ContentChunk::new(agent_client_protocol::ContentBlock::Text(
+                    agent_client_protocol::TextContent::new("A1".to_string()),
+                )),
+            );
+            session.tracker.handle_update(
+                chunk,
+                &crate::acp::meta::NotificationMeta::default(),
+                &mut scrollback,
+            );
+            assert_eq!(scrollback.len(), 1);
+            let retry = RetryState::Retrying {
+                attempt: 1,
+                max_retries: 15,
+                reason: "stream ended early".into(),
+                error_type: Some("api".into()),
+                verdicts: None,
+                discard_emitted,
+                message_id: None,
+                stream_start_ms: None,
+            };
+            apply_retry_state(&retry, &mut session, &mut scrollback, false);
+            assert_eq!(
+                scrollback.len(),
+                usize::from(!discard_emitted),
+                "discardEmitted={discard_emitted}"
+            );
+        }
     }
 
     #[test]

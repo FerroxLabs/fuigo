@@ -8242,6 +8242,389 @@ fn subscription_model_selection_is_provider_scoped_and_keeps_flux_key() {
     assert!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://api.fluxrouter.ai/v1").is_none());
     assert_eq!(crate::auth::subscription::inference::from_models(&models,"shared-model","https://chatgpt.com/backend-api/codex").unwrap().subscription_provider(),Some(crate::auth::subscription::SubscriptionProvider::Chatgpt));
 }
+/// P192: Sean signed in with `fuigo login --provider xai` and picked a Grok model whose entry
+/// points at xAI's own inference endpoint but names no auth provider. The entry fell through
+/// to the ordinary API-key transport, the egress guard refused `api.x.ai`, and every ACP turn
+/// failed with "invalid client configuration: fuigo refuses to contact upstream vendor host".
+/// A model whose endpoint IS a subscription's inference endpoint, with no credential of its
+/// own, is that subscription's model: it is bound to the subscription transport (exempt, exact
+/// URL, no redirects), never the ordinary one. Anything else stays unbound.
+#[test]
+fn p192_subscription_endpoint_model_without_auth_provider_uses_the_subscription() {
+    use fuigo_sampler::subscription::SubscriptionKind;
+    let bound = |entry: &str| -> Option<SubscriptionKind> {
+        let raw: toml::Value = toml::from_str(&format!("[model.pick]\n{entry}\n")).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        let model = &models["pick"];
+        let credentials = resolve_credentials(model, Some("unrelated-session-secret"));
+        let sampling = sampling_config_for_model(model, credentials, None, None, None, None);
+        if sampling.subscription.is_some() {
+            assert!(sampling.subscription_resolver.is_some());
+            assert!(sampling.api_key.is_none(), "no other credential rides a subscription request");
+            assert!(sampling.bearer_resolver.is_none());
+            let provider = crate::auth::subscription::inference::from_models(
+                &models,
+                &model.info.model,
+                &model.info.base_url,
+            )
+            .expect("the ACP turn path re-selects the same subscription by (model, endpoint)");
+            assert_eq!(
+                provider.subscription_provider().map(|p| p.sampling_kind()),
+                sampling.subscription
+            );
+        }
+        sampling.subscription
+    };
+    for (entry, kind) in [
+        (r#"model = "grok-4.7"
+            base_url = "https://api.x.ai/v1""#, SubscriptionKind::Xai),
+        (r#"model = "grok-4.7"
+            base_url = "https://api.x.ai/v1/""#, SubscriptionKind::Xai),
+        (r#"model = "grok-4.7"
+            base_url = "HTTPS://API.X.AI:443/v1""#, SubscriptionKind::Xai),
+        (r#"model = "gpt-fixture"
+            base_url = "https://chatgpt.com/backend-api/codex"
+            api_backend = "responses""#, SubscriptionKind::Chatgpt),
+        (r#"model = "gpt-fixture"
+            base_url = "https://chatgpt.com/backend-api/codex//"
+            api_backend = "responses""#, SubscriptionKind::Chatgpt),
+    ] {
+        assert_eq!(bound(entry), Some(kind), "{entry}");
+    }
+    for entry in [
+        // The user's own credential: their BYOK choice, never silently a subscription.
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           env_key = "XAI_API_KEY""#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           api_key = "fake-paid-key""#,
+        // The user's own header credential or request shaping.
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           env_http_headers = { Authorization = "XAI_BYOK_AUTH" }"#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           extra_headers = { Authorization = "Bearer fake" }"#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           query_params = { route = "x" }"#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1"
+           api_base_url = "https://api.fluxrouter.ai/v1""#,
+        // Not the subscription's exact endpoint.
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v2""#,
+        r#"model = "grok-4.7"
+           base_url = "http://api.x.ai/v1""#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai:8443/v1""#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai/v1?route=x""#,
+        r#"model = "grok-4.7"
+           base_url = "https://user@api.x.ai/v1""#,
+        r#"model = "grok-4.7"
+           base_url = "https://api.x.ai.evil.example/v1""#,
+        r#"model = "gpt-fixture"
+           base_url = "https://chatgpt.com/backend-api""#,
+        r#"model = "flux-model"
+           base_url = "https://api.fluxrouter.ai/v1""#,
+    ] {
+        assert_eq!(bound(entry), None, "{entry}");
+    }
+    // `/provider xai <model>`: a model_provider table with its own env key stays BYOK.
+    let raw: toml::Value = toml::from_str(
+        r#"
+        [model_providers.xai]
+        base_url = "https://api.x.ai/v1"
+        env_key = "XAI_API_KEY"
+        [model.grok-byok]
+        model = "grok-4.7"
+        model_provider = "xai"
+    "#,
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    let models = resolve_model_list(&cfg, None);
+    let model = &models["grok-byok"];
+    let sampling =
+        sampling_config_for_model(model, resolve_credentials(model, None), None, None, None, None);
+    assert_eq!(sampling.subscription, None);
+}
+/// P192: the endpoint binding is the user's: a remote-catalog entry on a subscription endpoint
+/// never binds the user's subscription credential, and a binding revived from bytes (no table
+/// to re-attach) is re-derived from the user's entry rather than failing closed.
+#[test]
+fn p192_endpoint_binding_is_for_user_models_and_survives_revival() {
+    use fuigo_sampler::subscription::SubscriptionKind;
+    let kind = |entry: &ModelEntry| {
+        sampling_config_for_model(entry, resolve_credentials(entry, None), None, None, None, None)
+            .subscription
+    };
+    let user: toml::Value = toml::from_str(
+        "[model.pick]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n",
+    )
+    .unwrap();
+    let user = Config::new_from_toml_cfg(&user).unwrap();
+    let bound = resolve_model_list(&user, None)["pick"].clone();
+    assert_eq!(kind(&bound), Some(SubscriptionKind::Xai));
+    let revived: ModelEntry =
+        serde_json::from_value(serde_json::to_value(&bound).unwrap()).unwrap();
+    assert_eq!(kind(&revived), None, "a revived ref is untrusted until re-resolved");
+    let again = resolve_model_list(&user, Some([("pick".to_owned(), revived.clone())].into()));
+    assert_eq!(kind(&again["pick"]), Some(SubscriptionKind::Xai));
+    let empty = Config::new_from_toml_cfg(&toml::Value::Table(Default::default())).unwrap();
+    let mut catalog = bound.clone();
+    catalog.auth_provider = None;
+    for mut entry in [catalog, revived] {
+        let models =
+            resolve_model_list(&empty, Some([("remote".to_owned(), entry.clone())].into()));
+        assert!(!models.contains_key("remote"), "a catalog row on a subscription endpoint is dropped");
+        // The same through `api_base_url` only.
+        entry.info.base_url = "https://api.fluxrouter.ai/v1".into();
+        entry.api_base_url = Some("https://chatgpt.com/backend-api/codex/".into());
+        let models = resolve_model_list(&empty, Some([("remote".to_owned(), entry)].into()));
+        assert!(!models.contains_key("remote"));
+    }
+    // An ordinary catalog row stays.
+    let mut flux = bound.clone();
+    flux.auth_provider = None;
+    flux.info.base_url = "https://api.fluxrouter.ai/v1".into();
+    let models = resolve_model_list(&empty, Some([("flux".to_owned(), flux)].into()));
+    assert_eq!(kind(&models["flux"]), None);
+}
+/// P192 Astra r1: the binding needs the user to have written BOTH the wire id and the
+/// endpoint (a catalog row never supplies either); aliases bound alike are not ambiguous; and
+/// an ACP turn never takes a subscription found only by wire id.
+#[test]
+fn p192_binding_provenance_aliases_and_turn_selection() {
+    use crate::auth::subscription::inference::{from_models, turn_provider};
+    let row = |model: &str| {
+        let raw: toml::Value = toml::from_str(&format!(
+            "[model.seed]\nmodel = \"{model}\"\nbase_url = \"https://api.x.ai/v1\"\n"
+        ))
+        .unwrap();
+        let mut entry = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None)["seed"]
+            .clone();
+        entry.auth_provider = None;
+        entry
+    };
+    let bound = |text: &str, key: &str, catalog: Option<(&str, ModelEntry)>| {
+        let raw: toml::Value = toml::from_str(text).unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models =
+            resolve_model_list(&cfg, catalog.map(|(k, e)| [(k.to_owned(), e)].into()));
+        let m = &models[key];
+        sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None)
+            .subscription
+    };
+    // A local tweak of a catalog row on the vendor endpoint: the user wrote neither field.
+    assert_eq!(bound("[model.remote]\ntemperature = 0.2\n", "remote", Some(("remote", row("grok-4.7")))), None);
+    // Endpoint written, wire id from the catalog: ACP's disk-only lookup could not find it.
+    assert_eq!(bound("[model.pick]\nbase_url = \"https://api.x.ai/v1\"\n", "pick", Some(("pick", row("grok-4.7")))), None);
+    // Two aliases bound alike: not ambiguous.
+    let raw: toml::Value = toml::from_str(
+        "[model.a]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+         [model.b]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+         [model.byok]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1/\"\nenv_key = \"XAI_API_KEY\"\n",
+    )
+    .unwrap();
+    let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
+    let alias = from_models(&models, "grok-4.7", "https://api.x.ai/v1").unwrap();
+    assert!(alias.config.is_usable(), "identical bindings must not poison the provider");
+    // The BYOK twin's own endpoint matches no subscription, so ACP keeps its key.
+    let by_endpoint = from_models(&models, "grok-4.7", "https://api.x.ai/v1/");
+    assert!(by_endpoint.is_none());
+    assert!(turn_provider(by_endpoint, Some(alias.clone())).is_none());
+    assert!(turn_provider(Some(alias.clone()), None).is_some());
+    let helper = crate::auth::AuthProviderRef::new(
+        "helper".into(),
+        crate::auth::AuthProviderConfig { command: "mint".into(), ..Default::default() },
+    );
+    assert_eq!(turn_provider(None, Some(helper.clone())).map(|p| p.name), Some(helper.name));
+    // An unbound twin on the exact same (model, endpoint) is still ambiguous: fail closed.
+    let raw: toml::Value = toml::from_str(
+        "[model.a]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n\
+         [model.byok]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\nenv_key = \"XAI_API_KEY\"\n",
+    )
+    .unwrap();
+    let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
+    assert!(!from_models(&models, "grok-4.7", "https://api.x.ai/v1").unwrap().config.is_usable());
+}
+/// P192: fuigo-config's remote-patch guard names exactly the hosts the subscriptions bind.
+#[test]
+fn p192_patch_vendor_hosts_match_the_subscriptions() {
+    use fuigo_sampler::subscription::SubscriptionKind;
+    for kind in [SubscriptionKind::Xai, SubscriptionKind::Chatgpt] {
+        assert!(fuigo_config::config_override::names_subscription_vendor_host(kind.base_url()));
+        assert_eq!(SubscriptionKind::for_endpoint(kind.base_url()), Some(kind));
+    }
+}
+/// P192 Astra r3: global `[models].extra_headers` are the user's header credential (no
+/// binding), and a catalog row the user's own table fully defines stays as that entry's base,
+/// so an explicit ChatGPT binding keeps the catalog's Responses protocol.
+#[test]
+fn p192_global_headers_and_user_owned_catalog_base() {
+    use fuigo_sampler::subscription::SubscriptionKind;
+    let sampling = |models: &indexmap::IndexMap<String, ModelEntry>, key: &str| {
+        let m = &models[key];
+        sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None)
+    };
+    let raw: toml::Value = toml::from_str(
+        "[models]\nextra_headers = { Authorization = \"Bearer fake-byok\" }\n\
+         [model.byok]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n",
+    )
+    .unwrap();
+    let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
+    assert_eq!(sampling(&models, "byok").subscription, None);
+    let raw: toml::Value = toml::from_str(
+        "[auth_provider.chatgpt-subscription]\nsubscription = \"chatgpt\"\n\
+         [model.chatgpt-subscription]\nmodel = \"gpt-fixture\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\nauth_provider = \"chatgpt-subscription\"\n",
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    let mut row = resolve_model_list(&cfg, None)["chatgpt-subscription"].clone();
+    row.auth_provider = None;
+    row.info.api_backend = ApiBackend::Responses;
+    let models =
+        resolve_model_list(&cfg, Some([("chatgpt-subscription".to_owned(), row)].into()));
+    let s = sampling(&models, "chatgpt-subscription");
+    assert_eq!(s.subscription, Some(SubscriptionKind::Chatgpt));
+    assert_eq!(s.api_backend, ApiBackend::Responses, "the user-owned row still donates its protocol");
+}
+/// P192: the ChatGPT subscription endpoint speaks only the Responses protocol (its transport
+/// accepts nothing but `POST …/codex/responses`). A ChatGPT-subscription model configured as the
+/// user guide shows it (no `api_backend`) must use Responses, not fail closed with "subscription
+/// endpoint or protocol mismatch" on every turn; xAI keeps the configured protocol.
+#[test]
+fn p192_chatgpt_subscription_uses_the_responses_protocol() {
+    use fuigo_sampler::subscription::SubscriptionKind;
+    let raw: toml::Value = toml::from_str(
+        "[auth_provider.chatgpt-subscription]\nsubscription = \"chatgpt\"\n\
+         [model.chatgpt-subscription]\nmodel = \"gpt-fixture\"\n\
+         base_url = \"https://chatgpt.com/backend-api/codex\"\nauth_provider = \"chatgpt-subscription\"\n\
+         [model.bare]\nmodel = \"gpt-fixture\"\nbase_url = \"https://chatgpt.com/backend-api/codex/\"\n\
+         [model.grok]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n",
+    )
+    .unwrap();
+    let models = resolve_model_list(&Config::new_from_toml_cfg(&raw).unwrap(), None);
+    let sampling = |key: &str| {
+        let m = &models[key];
+        sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None)
+    };
+    for key in ["chatgpt-subscription", "bare"] {
+        let s = sampling(key);
+        assert_eq!(s.subscription, Some(SubscriptionKind::Chatgpt), "{key}");
+        assert_eq!(s.api_backend, ApiBackend::Responses, "{key}");
+    }
+    let grok = sampling("grok");
+    assert_eq!(grok.subscription, Some(SubscriptionKind::Xai));
+    assert_eq!(grok.api_backend, models["grok"].info.api_backend, "xAI keeps its protocol");
+}
+/// P192 (Grok HIGH): a catalog row on a subscription endpoint is kept as a base only when the
+/// merged table re-pins that key to a subscription endpoint (only the user file can); a table
+/// that points the key elsewhere does not keep the vendor row (nor its vendor `api_base_url`).
+#[test]
+fn p192_catalog_vendor_row_kept_only_for_a_subscription_pair() {
+    let raw: toml::Value = toml::from_str(
+        "[model.k]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n",
+    )
+    .unwrap();
+    let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    let mut row = resolve_model_list(&cfg, None)["k"].clone();
+    row.info.base_url = "https://api.x.ai/v1".into();
+    row.api_base_url = Some("https://api.x.ai/v1".into());
+    row.info.context_window = std::num::NonZeroU64::new(123_456).unwrap();
+    let models = resolve_model_list(&cfg, Some([("k".to_owned(), row)].into()));
+    assert_eq!(models["k"].info.base_url, "https://api.fluxrouter.ai/v1");
+    assert_eq!(models["k"].api_base_url, None);
+    assert_ne!(
+        models["k"].info.context_window.get(),
+        123_456,
+        "the vendor row was not kept as a base (it donated nothing)"
+    );
+}
+/// P192 (Grok HIGH/MEDIUM), end to end through the real loader: a requirements file that
+/// retargets the user's model to `${VAR}` = the xAI endpoint, plants a vendor model, and pins a
+/// subscription provider confers no subscription; the user's own subscription model still binds.
+#[test]
+#[serial_test::serial]
+fn p192_requirements_layer_confers_no_subscription_authority() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_sampler::subscription::SubscriptionKind;
+    let home = tempfile::tempdir().expect("fuigo home");
+    std::fs::write(
+        home.path().join("config.toml"),
+        "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n\
+         [model.mine]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("requirements.toml"),
+        "[auth_provider.xai]\nsubscription = \"xai\"\n\
+         [model.work]\nbase_url = \"${P192_SHELL_REQ_URL}\"\n\
+         [model.planted]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.x.ai/v1\"\nauth_provider = \"xai\"\n\
+         [model.pinned]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\nauth_provider = \"xai\"\n",
+    )
+    .unwrap();
+    let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+    let _url = fuigo_test_support::EnvGuard::set("P192_SHELL_REQ_URL", "https://api.x.ai/v1");
+    let raw = crate::config::load_effective_config().expect("effective config");
+    let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+    let models = resolve_model_list(&cfg, None);
+    let sub = |key: &str| {
+        let m = &models[key];
+        sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None)
+            .subscription
+    };
+    assert_eq!(models["work"].info.base_url, "https://api.fluxrouter.ai/v1");
+    assert_eq!(sub("work"), None);
+    assert!(!models.contains_key("planted"));
+    assert_eq!(sub("pinned"), None, "a requirements provider never carries `subscription`");
+    assert_eq!(sub("mine"), Some(SubscriptionKind::Xai), "the user's own model still binds");
+}
+
+/// P192 (Grok r2 HIGH): Grok's exact `requirements.toml` example plants a `[model_providers.*]`
+/// entry on `api.x.ai` with inline `auth.subscription` and makes it the default; the ChatGPT
+/// shape does the same from `managed_config.toml`. Neither yields a `planted` model, and no
+/// resolved model carries a subscription.
+#[test]
+#[serial_test::serial]
+fn p192_non_user_model_providers_confer_no_subscription() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let xai = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\nbase_url = \"https://api.x.ai/v1\"\n\n[model_providers.planted.auth]\nsubscription = \"xai\"\n\n[model.planted]\nmodel = \"grok-4.7\"\nmodel_provider = \"planted\"\n";
+    let chatgpt = "[models]\ndefault = \"planted\"\n\n[model_providers.planted]\nbase_url = \"https://chatgpt.com/backend-api/codex\"\n\n[model_providers.planted.auth]\nsubscription = \"chatgpt\"\n\n[model.planted]\nmodel = \"gpt-5.5\"\nmodel_provider = \"planted\"\n";
+    for (file, body) in [
+        ("requirements.toml", xai),
+        ("requirements.toml", chatgpt),
+        ("managed_config.toml", xai),
+        ("managed_config.toml", chatgpt),
+    ] {
+        let home = tempfile::tempdir().expect("fuigo home");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[model.work]\nmodel = \"grok-4.7\"\nbase_url = \"https://api.fluxrouter.ai/v1\"\n",
+        )
+        .unwrap();
+        std::fs::write(home.path().join(file), body).unwrap();
+        let _home = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        let raw = crate::config::load_effective_config().expect("effective config");
+        let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        let models = resolve_model_list(&cfg, None);
+        assert!(!models.contains_key("planted"), "{file}: {body}");
+        for (key, m) in &models {
+            let sampling =
+                sampling_config_for_model(m, resolve_credentials(m, None), None, None, None, None);
+            assert_eq!(sampling.subscription, None, "{file}: {key} carries a subscription");
+        }
+    }
+}
 #[tokio::test]
 async fn subscription_conflicting_static_key_and_command_fail_closed() {
     for extra in [r#"api_key = "fake-paid-key""#, ""] {

@@ -27,12 +27,16 @@ fn tool_overrides_capability() -> serde_json::Value {
         .expect("ToolOverridesCapability is always serializable")
 }
 /// `agentCapabilities._meta["fuigo/capabilities"]`. One entry per capability so later packets (Q5b) add a line.
+/// `retryDiscard` (P188) announces the `retry_state` discard signal (`discardEmitted`, `streamStartMs`).
 /// `authenticateApiKey` (P08) tells a client, before it authenticates, that `authenticate` accepts a key in
 /// `_meta["fuigo/apiKey"]` even when `authMethods` is empty (Contract E.3 keeps the empty list for a credential-less start).
 fn fuigo_capabilities() -> serde_json::Value {
     serde_json::json!({
         "toolOverrides": tool_overrides_capability(),
         "authenticateApiKey": auth_method::runtime_api_key_capability(),
+        // P188: `retry_state` `retrying` carries `discardEmitted` (and `streamStartMs`) when a resend voids output
+        // the client already received. A client resets on `discardEmitted` only when this key is present.
+        "retryDiscard": { "version": 1 },
     })
 }
 /// The `authenticate` reply for a login that failed or that the user cancelled.
