@@ -511,6 +511,9 @@ mod notification_hook_filter_tests {
             reason: "timeout".into(),
             error_type: None,
             verdicts: None,
+            discard_emitted: false,
+            message_id: None,
+            stream_start_ms: None,
         });
         assert!(notification_hook_for_update(&update).is_none());
     }

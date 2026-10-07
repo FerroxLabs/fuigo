@@ -2121,6 +2121,8 @@ impl SessionActor {
         // A new turn's first retry-status mirror has no reasoning in front of it.
         self.turn_thought_text_emitted
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        // P188: output a previous turn left behind is not this turn's to discard
+        self.unaccepted_output.accept();
         let _ = self.compaction.auto_compact_suppressed.compare_exchange(
             crate::session::compaction_config::SUPPRESS_TURN,
             crate::session::compaction_config::SUPPRESS_NONE,
@@ -2218,6 +2220,23 @@ impl SessionActor {
                 self.session_info.id.0,
                 delay.as_millis(),
             );
+            // P188: the restart resends the turn's request; whatever the failed one streamed is void. Announce it as the
+            // resend it is, so the stamp in `send_fuigo_notification` voids that output on every client.
+            if self.unaccepted_output.is_owed() {
+                self.send_fuigo_notification(FuigoSessionUpdate::RetryState(
+                    crate::extensions::notification::RetryState::Retrying {
+                        attempt,
+                        max_retries: recovery.max_retries,
+                        reason: format!("Auto-recovery: {error_desc}"),
+                        error_type: None,
+                        verdicts: None,
+                        discard_emitted: false,
+                        message_id: None,
+                        stream_start_ms: None,
+                    },
+                ))
+                .await;
+            }
             self.send_fuigo_notification(FuigoSessionUpdate::AutoRecoveryStarted {
                 attempt,
                 max_retries: recovery.max_retries,
@@ -3254,6 +3273,9 @@ impl SessionActor {
                             reason: format!("{cause}; retrying request"),
                             error_type: Some(kind.as_str().to_string()),
                             verdicts: None,
+                            discard_emitted: false,
+                            message_id: None,
+                            stream_start_ms: None,
                         },
                     ))
                     .await;
@@ -3300,6 +3322,9 @@ impl SessionActor {
                                         .to_string(),
                                     error_type: None,
                                     verdicts: None,
+                                    discard_emitted: false,
+                                    message_id: None,
+                                    stream_start_ms: None,
                                 },
                             ))
                             .await;
@@ -3332,6 +3357,9 @@ impl SessionActor {
                                         .to_string(),
                                     error_type: None,
                                     verdicts: None,
+                                    discard_emitted: false,
+                                    message_id: None,
+                                    stream_start_ms: None,
                                 },
                             ))
                             .await;
@@ -3584,6 +3612,9 @@ impl SessionActor {
                         reason: "Too many parallel media-gen calls; retrying".to_string(),
                         error_type: None,
                         verdicts: None,
+                        discard_emitted: false,
+                        message_id: None,
+                        stream_start_ms: None,
                     },
                 ))
                 .await;
@@ -3626,6 +3657,8 @@ impl SessionActor {
             let usage_reported = response.usage.is_some();
             self.record_response_items(response.items, usage_reported)
                 .await;
+            // P188: the response is history now; its streamed output is accepted, never discarded
+            self.unaccepted_output.accept();
             if let Some(text) = fallback_text {
                 tracing::warn!(
                     text_len = text.len(),

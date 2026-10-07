@@ -1168,6 +1168,29 @@ pub enum RetryState {
         /// decides on these and only displays `reason`; absent on older shells, whose text is unscrubbed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         verdicts: Option<crate::sampling::error_verdicts::ErrorVerdicts>,
+        /// P188: the request being resent had already streamed visible output for the current model response
+        /// (`agent_message_chunk`, `agent_thought_chunk`, `tool_call_delta_chunk`) that the resend replaces. A client
+        /// must drop that attempt's output: every update whose `_meta.streamStartMs` equals `streamStartMs` below
+        /// (exact, also on replay); without `streamStartMs`, everything of those kinds since the current response
+        /// began (the later of the prompt start, the last `response_completed`, and the last retry that carried this
+        /// flag). The standard-rail mirror of this state (`_meta["fuigo/retryStatus"]`) is never output to void. The shell delivers this notification after every chunk of the discarded attempt and
+        /// before any chunk of the resend, live and in `updates.jsonl` (so a `session/load` replay carries it too).
+        /// Absent (false) on older shells and on a resend that follows no visible output.
+        #[serde(
+            rename = "discardEmitted",
+            default,
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        discard_emitted: bool,
+        /// P188: the provider message id of the discarded response, when the backend gave one (Messages API
+        /// `response_started`); absent otherwise. Only meaningful with `discardEmitted`.
+        #[serde(rename = "messageId", default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// P188: the `_meta.streamStartMs` every update of the discarded attempt carried. A client that keys on it
+        /// drops exactly that attempt's output (live and on replay) instead of inferring where the response began.
+        /// Only meaningful with `discardEmitted`; absent when the attempt's stream start is unknown.
+        #[serde(rename = "streamStartMs", default, skip_serializing_if = "Option::is_none")]
+        stream_start_ms: Option<i64>,
     },
     /// All retries have been exhausted
     Exhausted {
@@ -1334,8 +1357,19 @@ pub fn retry_status_text(state: &RetryState, after_thought_text: bool) -> String
             attempt,
             max_retries,
             reason,
+            discard_emitted,
             ..
-        } => format!("{separator}Retrying the model ({attempt}/{max_retries}): {reason}\n\n"),
+        } => {
+            // P188: a stock client cannot drop the partial reply it already shows, so at least say it is void
+            let discarded = if *discard_emitted {
+                ", discarding the partial reply above"
+            } else {
+                ""
+            };
+            format!(
+                "{separator}Retrying the model ({attempt}/{max_retries}){discarded}: {reason}\n\n"
+            )
+        }
         RetryState::Exhausted {
             attempts, reason, ..
         } => {
@@ -1792,6 +1826,9 @@ mod tests {
                 reason: with("retrying"),
                 error_type: None,
                 verdicts: None,
+                discard_emitted: false,
+                message_id: None,
+                stream_start_ms: None,
             }),
             SessionUpdate::RetryState(RetryState::Exhausted {
                 attempts: 3,
@@ -1873,6 +1910,9 @@ mod tests {
                     reason: "empty response from model (reasoning_only)".into(),
                     error_type: Some("empty_response".into()),
                     verdicts: None,
+                    discard_emitted: false,
+                    message_id: None,
+                    stream_start_ms: None,
                 },
                 "Retrying the model (1/2): empty response from model (reasoning_only)\n\n",
             ),
@@ -1990,6 +2030,9 @@ mod tests {
             reason: "Server error; retrying request".into(),
             error_type: Some("api".into()),
             verdicts: None,
+            discard_emitted: false,
+            message_id: None,
+            stream_start_ms: None,
         };
         assert_eq!(
             format!(

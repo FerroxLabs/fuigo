@@ -4039,6 +4039,30 @@ pub(crate) fn resolve_model_list(
     }
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
+        // P192: a remote catalog row never routes to a subscription's own inference endpoint.
+        // Unbound it could only be refused by the egress guard (xAI) or sent unauthenticated
+        // (ChatGPT); and the ACP turn path, which re-resolves the config without the catalog,
+        // could not tell it apart from a user's subscription model with the same wire id.
+        // A row whose key the user's own `[model.<key>]` table fully defines (wire id and
+        // endpoint) is kept as that entry's base: it may donate metadata such as `api_backend`.
+        prefetched.retain(|key, entry| {
+            let on_endpoint = |url: &str| {
+                fuigo_sampler::subscription::SubscriptionKind::for_endpoint(url).is_some()
+            };
+            // Only the user's file can pin a [model.*] pair on a subscription endpoint: every other
+            // layer is stripped of such pairs before the merge (fuigo-config
+            // `strip_subscription_authority`), so the merged table here is the user's own.
+            let user_owned = cfg.config_models.get(key).is_some_and(|own| {
+                own.model.is_some() && own.base_url.as_deref().is_some_and(on_endpoint)
+            });
+            let vendor = !user_owned
+                && (on_endpoint(&entry.info.base_url)
+                    || entry.api_base_url.as_deref().is_some_and(on_endpoint));
+            if vendor {
+                tracing::debug!(model_key = %key, "catalog row on a subscription endpoint dropped");
+            }
+            !vendor
+        });
         let default_cw = DEFAULT_CONTEXT_WINDOW;
         for (key, entry) in prefetched.iter_mut() {
             let donor = resolved.get(key);
@@ -4140,6 +4164,33 @@ pub(crate) fn resolve_model_list(
         resolved.insert(key.clone(), entry);
     }
     for (key, entry) in resolved.iter_mut() {
+        // P192: an endpoint binding revived from bytes has no table to re-attach; drop it
+        // and let `bind_endpoint_subscription` below re-derive it from the entry as it is now.
+        if entry.auth_provider.as_ref().is_some_and(|p| {
+            !p.is_fail_closed()
+                && crate::auth::subscription::inference::is_endpoint_binding_name(&p.name)
+                && !cfg.auth_providers.contains_key(&p.name)
+        }) {
+            entry.auth_provider = None;
+        }
+        if entry.auth_provider.is_none() {
+            // Only a model whose wire id AND endpoint the user wrote in their own config: a
+            // remote catalog row never supplies the endpoint a subscription credential is bound
+            // to, and the ACP turn path, which re-resolves the config without the catalog,
+            // finds the same (model, endpoint) again. The binding is built trusted; there is no
+            // table to attach.
+            // Global `[models].extra_headers` land on every entry after this loop; they are
+            // the user's own header credential and keep the ordinary transport too.
+            if cfg.models.extra_headers.is_empty()
+                && cfg
+                    .config_models
+                    .get(key)
+                    .is_some_and(|own| own.model.is_some() && own.base_url.is_some())
+            {
+                crate::auth::subscription::inference::bind_endpoint_subscription(entry);
+            }
+            continue;
+        }
         if let Some(ref mut provider) = entry.auth_provider {
             if provider.is_fail_closed() {
                 continue;

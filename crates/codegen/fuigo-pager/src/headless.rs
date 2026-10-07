@@ -402,6 +402,19 @@ struct HeadlessEmitter {
     parse_structured_output: bool,
     text_buffer: String,
     thought_buffer: String,
+    /// P188: the lengths of `text_buffer` / `thought_buffer` that completed responses own. A discarded attempt's
+    /// text (everything after them) is cut off when `retry_state` says the request is being resent.
+    text_mark: usize,
+    thought_mark: usize,
+    /// P188: where each model attempt's text / thinking begins in `text_buffer` / `thought_buffer`, by the
+    /// `_meta.streamStartMs` its chunks carried. A discard naming a stream cuts exactly that attempt.
+    text_streams: Vec<(i64, usize)>,
+    thought_streams: Vec<(i64, usize)>,
+    /// P188: the attempt whose text `plain_pending` holds.
+    plain_stream: Option<i64>,
+    /// P188: `plain` holds the current response's text until the response completes (or a tool call or the end of
+    /// the run closes it): stdout cannot take text back, and a resent request streams the reply again.
+    plain_pending: String,
     /// Schema-validated output read from the prompt-response `_meta`.
     structured_output: Option<Result<serde_json::Value, String>>,
     usage: Option<serde_json::Value>,
@@ -450,6 +463,12 @@ impl HeadlessEmitter {
             parse_structured_output,
             text_buffer: String::new(),
             thought_buffer: String::new(),
+            text_mark: 0,
+            thought_mark: 0,
+            text_streams: Vec::new(),
+            thought_streams: Vec::new(),
+            plain_stream: None,
+            plain_pending: String::new(),
             structured_output: None,
             usage: None,
             reducer: reducer_for(format),
@@ -579,9 +598,54 @@ impl HeadlessEmitter {
         }
     }
 
+    /// P188: response boundaries for the formats that hold text themselves (`plain` writes, `json`/`stream-json`
+    /// buffer). A completed response, or a tool call (dispatched only for a committed response), makes the text so
+    /// far final; a discard drops what came after the last boundary.
+    fn observe_response_boundary(&mut self, event: &StreamEvent) {
+        match event {
+            // A completed response is final. Tool events are not boundaries: a hosted tool (web/x search) reports
+            // while its response is still streaming and can still fail.
+            StreamEvent::ResponseCompleted { .. } => {
+                self.text_mark = self.text_buffer.len();
+                self.thought_mark = self.thought_buffer.len();
+                self.flush_plain_pending();
+            }
+            StreamEvent::ResponseDiscarded {
+                stream_start_ms: Some(stream),
+                ..
+            } => {
+                cut_stream(&mut self.text_buffer, &mut self.text_streams, *stream);
+                cut_stream(&mut self.thought_buffer, &mut self.thought_streams, *stream);
+                if self.plain_stream == Some(*stream) {
+                    self.plain_pending.clear();
+                }
+            }
+            // An older notice without the stream: everything since the last completed response
+            StreamEvent::ResponseDiscarded {
+                stream_start_ms: None,
+                ..
+            } => {
+                self.text_buffer.truncate(self.text_mark);
+                self.thought_buffer.truncate(self.thought_mark);
+                self.plain_pending.clear();
+            }
+            _ => {}
+        }
+    }
+
+    /// Write the `plain` text held for the current response.
+    fn flush_plain_pending(&mut self) {
+        if self.plain_pending.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.plain_pending);
+        let _ = self.write_out(pending.as_bytes(), true);
+    }
+
     /// Fold one event through the reducer and emit its lines; a no-op for `plain`/`json`.
     fn reduce_and_emit(&mut self, event: StreamEvent) {
         self.observe_response_usage(&event);
+        self.observe_response_boundary(&event);
         let Some(reducer) = self.reducer.as_mut() else {
             return;
         };
@@ -659,10 +723,16 @@ impl HeadlessEmitter {
         self.usage = meta.get("usage").cloned();
     }
 
-    fn on_text_chunk(&mut self, text: &str) {
+    fn on_text_chunk(&mut self, text: &str, stream: Option<i64>) {
+        note_stream(&mut self.text_streams, stream, self.text_buffer.len());
         match self.format {
             OutputFormat::Plain => {
-                let _ = self.write_out(text.as_bytes(), true);
+                // A new attempt began with no discard of the one held: that one was accepted
+                if stream.is_some() && stream != self.plain_stream {
+                    self.flush_plain_pending();
+                    self.plain_stream = stream;
+                }
+                self.plain_pending.push_str(text);
             }
             OutputFormat::Json => {
                 self.text_buffer.push_str(text);
@@ -677,7 +747,8 @@ impl HeadlessEmitter {
         }
     }
 
-    fn on_thought_chunk(&mut self, text: &str) {
+    fn on_thought_chunk(&mut self, text: &str, stream: Option<i64>) {
+        note_stream(&mut self.thought_streams, stream, self.thought_buffer.len());
         match self.format {
             OutputFormat::Plain => { /* no-op */ }
             OutputFormat::Json => {
@@ -746,6 +817,7 @@ impl HeadlessEmitter {
         let scrubbed = error.map(fuigo_telemetry::sent_credentials::scrub);
         let error = scrubbed.as_deref();
         self.terminal_emitted = true;
+        self.flush_plain_pending();
         match self.format {
             OutputFormat::Plain => {
                 let _ = self.write_out(b"\n", false);
@@ -803,6 +875,7 @@ impl HeadlessEmitter {
 
     /// Emit the max turns marker for the active format.
     fn on_max_turns(&mut self) {
+        self.flush_plain_pending();
         match self.format {
             // Plain's stderr line is `main`'s `Error: max turns reached` (the run returns `Err`);
             // a second "Max turns reached" here would be the same condition printed twice.
@@ -825,6 +898,8 @@ impl HeadlessEmitter {
         let message = fuigo_telemetry::sent_credentials::scrub(message);
         let message = message.as_ref();
         self.terminal_emitted = true;
+        // The text a failed run already produced is still printed, as it was when `plain` streamed it
+        self.flush_plain_pending();
         match self.format {
             // Plain writes nothing: every `on_error` caller but one returns the same message as
             // `Err`, and `main` is the single authoritative stderr print (`Error: ...`) for it.
@@ -861,6 +936,29 @@ impl HeadlessEmitter {
             }
         }
     }
+}
+
+/// P188: remember where a model attempt's text begins (`stream` is its `_meta.streamStartMs`).
+fn note_stream(streams: &mut Vec<(i64, usize)>, stream: Option<i64>, at: usize) {
+    if let Some(stream) = stream
+        && streams.last().is_none_or(|(last, _)| *last != stream)
+    {
+        streams.push((stream, at));
+    }
+}
+
+/// P188: cut an attempt's text out of `buffer` (it is always the tail: the attempt being resent is the latest).
+fn cut_stream(buffer: &mut String, streams: &mut Vec<(i64, usize)>, stream: i64) {
+    if let Some(i) = streams.iter().position(|(s, _)| *s == stream) {
+        buffer.truncate(streams[i].1);
+        streams.truncate(i);
+    }
+}
+
+/// `_meta.streamStartMs` of a session update: the model attempt it came from.
+fn update_stream_start_ms(meta: Option<&acp::Meta>) -> Option<i64> {
+    meta.and_then(|m| m.get("streamStartMs"))
+        .and_then(serde_json::Value::as_i64)
 }
 
 pub(crate) fn attach_result_usage(result: &mut serde_json::Value, usage: &serde_json::Value) {
@@ -2414,6 +2512,8 @@ fn finish_turn(
     session_id: &acp::SessionId,
     is_api_key_auth: bool,
 ) -> Result<TurnStop> {
+    // P188: the turn is over, nothing can be resent: the text held for the last response is final
+    emitter.flush_plain_pending();
     // The hard run cap fired: background work is already reaped, so report it and exit non-zero.
     if timed_out {
         let msg = match total_timeout {
@@ -2477,6 +2577,9 @@ fn finish_turn(
                 // rule and its remedy — rides on that same line (`HeadlessDenial::agent_message`).
                 if emitter.format != OutputFormat::Plain {
                     emitter.on_error(&fuigo_shell::sampling::error::acp_error_text(&err), None);
+                } else {
+                    // P188 (Astra r1): the reply text held for the response still reaches stdout
+                    emitter.flush_plain_pending();
                 }
                 return Ok(TurnStop::BudgetDenied(rule));
             }
@@ -3116,7 +3219,10 @@ fn handle_headless_acp_message(
                                 "headless: time-to-first-chunk"
                             );
                         }
-                        emitter.on_text_chunk(&text.text);
+                        emitter.on_text_chunk(
+                            &text.text,
+                            update_stream_start_ms(boxed.request.meta.as_ref()),
+                        );
                     }
                 }
                 acp::SessionUpdate::AgentThoughtChunk(chunk) => {
@@ -3130,7 +3236,10 @@ fn handle_headless_acp_message(
                                 "headless: time-to-first-thought"
                             );
                         }
-                        emitter.on_thought_chunk(&text.text);
+                        emitter.on_thought_chunk(
+                            &text.text,
+                            update_stream_start_ms(boxed.request.meta.as_ref()),
+                        );
                     }
                 }
                 acp::SessionUpdate::ToolCall(_)

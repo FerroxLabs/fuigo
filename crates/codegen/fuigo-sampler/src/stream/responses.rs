@@ -263,6 +263,9 @@ pub(crate) fn stream_responses_tracked<'a>(
         // Later `ResponseFunctionCallArgumentsDelta` events look up `output_index` here to find the matching `tool_index`
         let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
         let mut next_tool_index: u32 = 0;
+        // P188: every finished output item, by `output_index`. The ChatGPT subscription backend can close with
+        // `response.completed` carrying `output: []`; the items then exist only here (see the fill below).
+        let mut done_items: BTreeMap<u32, rs::OutputItem> = BTreeMap::new();
 
         let mut stream = raw_stream;
         loop {
@@ -565,6 +568,7 @@ pub(crate) fn stream_responses_tracked<'a>(
                 // For WebSearchCall this includes the query and source URLs.
                 // For CustomToolCall this includes x_search results.
                 ResponseStreamEvent::ResponseOutputItemDone(done_event) => {
+                    done_items.insert(done_event.output_index, done_event.item.clone());
                     match &done_event.item {
                         rs::OutputItem::WebSearchCall(ws) => {
                             let result = serde_json::to_value(ws).ok();
@@ -645,7 +649,20 @@ pub(crate) fn stream_responses_tracked<'a>(
 
         // ── Build the final response ─────────────────────────────────
         let mut response = match final_response {
-            Some(r) => r,
+            Some(mut r) => {
+                // P188: a terminal response with an empty `output` is rebuilt from the `output_item.done` items the
+                // stream delivered, in `output_index` order, exactly as reasoning text is patched in below. Without
+                // it the reply the user watched stream is classified as `NoVisibleContent` and resent.
+                if r.output.is_empty() && !done_items.is_empty() {
+                    tracing::debug!(
+                        request_id = %request_id,
+                        items = done_items.len(),
+                        "terminal response carried no output; using the streamed output_item.done items"
+                    );
+                    r.output = std::mem::take(&mut done_items).into_values().collect();
+                }
+                r
+            }
             None => {
                 let err = SamplingError::Api {
                     status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
@@ -1137,6 +1154,79 @@ mod tests {
             stop_reasons_for_incomplete("some_future_reason").await,
             (Some(StopReason::Length), None)
         );
+    }
+
+    #[tokio::test]
+    async fn p188_empty_completed_output_is_rebuilt_from_output_item_done() {
+        // The ChatGPT subscription backend streams the reply and its `output_item.done`, then closes with
+        // `response.completed` whose `output` is `[]`. The reply must survive, not be classed empty and resent.
+        let message = |id: &str, text: &str| -> rs_types::OutputItem {
+            serde_json::from_value(serde_json::json!({
+                "type": "message",
+                "id": id,
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }))
+            .expect("message output item")
+        };
+        let done = |output_index: u32, item: rs_types::OutputItem| {
+            rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+                sequence_number: 0,
+                output_index,
+                item,
+            })
+        };
+        let raw = stream::iter(vec![
+            Ok(text_delta_event("first second")),
+            Ok(done(0, message("msg_1", "first second"))),
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            Default::default(),
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "first second");
+                assert_eq!(response.empty_reason(), None, "a filled reply is not empty");
+                assert_eq!(response.stop_reason, Some(StopReason::Stop));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        // A non-empty terminal `output` stays authoritative: the done items never replace or extend it
+        let mut terminal = empty_completed_response();
+        terminal.output = vec![message("msg_t", "terminal")];
+        let raw = stream::iter(vec![
+            Ok(done(0, message("msg_1", "streamed"))),
+            Ok(rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
+                response: terminal,
+                sequence_number: 0,
+            })),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+            Default::default(),
+        ))
+        .await;
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.assistant_text(), "terminal");
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
     }
 
     #[tokio::test]

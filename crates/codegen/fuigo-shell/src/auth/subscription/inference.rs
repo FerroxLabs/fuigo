@@ -12,6 +12,71 @@ impl SubscriptionProvider {
         }
     }
 }
+/// Prefix of the auth-provider name [`bind_endpoint_subscription`] gives a model. The
+/// space keeps it apart from any `[auth_provider.<name>]` TOML table name a user can write
+/// bare; a quoted table of the same name wins (it is then the user's own provider).
+const ENDPOINT_BINDING_SUFFIX: &str = " subscription (model endpoint)";
+
+fn endpoint_binding_name(provider: SubscriptionProvider) -> String {
+    format!("{}{ENDPOINT_BINDING_SUFFIX}", provider.name())
+}
+
+/// Whether `name` is a binding [`bind_endpoint_subscription`] made, rather than a
+/// configured `[auth_provider.<name>]` table.
+pub(crate) fn is_endpoint_binding_name(name: &str) -> bool {
+    [SubscriptionProvider::Chatgpt, SubscriptionProvider::Xai]
+        .into_iter()
+        .any(|provider| name == endpoint_binding_name(provider))
+}
+
+/// P192: a model whose endpoint IS a subscription's own inference endpoint
+/// ([`SubscriptionKind::for_endpoint`]) and that carries no credential and no auth
+/// provider of its own belongs to that subscription. Bind it, so its requests take the
+/// exempt, exact-URL, no-redirect subscription transport. Without this the entry fell
+/// through to the ordinary transport: no credential could be attached to a vendor host,
+/// and the egress guard refused the request ("fuigo refuses to contact upstream vendor
+/// host") on every turn.
+///
+/// `resolve_model_list` applies this to models from the user's own config only; a remote
+/// catalog entry never binds a subscription credential.
+/// A model with its own `api_key`/`env_key` (bring-your-own-key, including `/provider
+/// xai`), its own auth provider, headers or query parameters, or a different
+/// `api_base_url`, is left exactly as configured. No credential store is
+/// read here: if the user never signed in, the turn says to run `fuigo login`.
+pub(crate) fn bind_endpoint_subscription(entry: &mut crate::agent::config::ModelEntry) {
+    // Any credential-bearing or request-shaping input of the user's own is a different
+    // transport the user chose (BYOK, a header token, a proxy query): never replaced.
+    if entry.auth_provider.is_some()
+        || entry.api_key.is_some()
+        || entry.env_key.is_some()
+        || !entry.info.extra_headers.is_empty()
+        || !entry.info.env_http_headers.is_empty()
+        || !entry.info.query_params.is_empty()
+    {
+        return;
+    }
+    let Some(kind) = SubscriptionKind::for_endpoint(&entry.info.base_url) else {
+        return;
+    };
+    if entry
+        .api_base_url
+        .as_deref()
+        .is_some_and(|url| SubscriptionKind::for_endpoint(url) != Some(kind))
+    {
+        return;
+    }
+    let provider = match kind {
+        SubscriptionKind::Chatgpt => SubscriptionProvider::Chatgpt,
+        SubscriptionKind::Xai => SubscriptionProvider::Xai,
+    };
+    let mut binding = crate::auth::AuthProviderRef::unresolved(endpoint_binding_name(provider));
+    binding.attach_trusted_config(Some(&crate::auth::AuthProviderConfig {
+        subscription: Some(provider),
+        ..Default::default()
+    }));
+    entry.auth_provider = Some(binding);
+}
+
 #[derive(Debug)]
 struct Resolver {
     provider: SubscriptionProvider,
@@ -69,6 +134,11 @@ pub(crate) fn configure(
         return;
     };
     sampler.subscription = Some(kind.sampling_kind());
+    // P192: ChatGPT's subscription endpoint speaks only Responses (its transport accepts nothing
+    // but `POST …/codex/responses`); any other protocol could only fail closed on every turn.
+    if kind == SubscriptionProvider::Chatgpt {
+        sampler.api_backend = fuigo_sampling_types::ApiBackend::Responses;
+    }
     sampler.subscription_resolver = Some(std::sync::Arc::new(Resolver {
         provider: kind,
         account: provider.config.account.clone(),
@@ -185,6 +255,30 @@ pub(crate) fn selected_for_endpoint(
     let models = crate::agent::config::resolve_model_list(&config, None);
     from_models(&models, model, endpoint)
 }
+/// The auth provider an ACP turn uses, from the (wire model, endpoint) lookup
+/// [`selected_for_endpoint`] and the wire-id-only lookup of the session's model facts.
+///
+/// The endpoint lookup is authoritative for subscriptions (P192): a subscription found only
+/// by wire id belongs to ANOTHER entry with the same model id (for example a
+/// bring-your-own-key twin on the same host), and attaching it would replace this model's
+/// own credential with the subscription. A non-subscription provider is kept.
+pub(crate) fn turn_provider(
+    by_endpoint: Option<crate::auth::AuthProviderRef>,
+    by_wire_id: Option<crate::auth::AuthProviderRef>,
+) -> Option<crate::auth::AuthProviderRef> {
+    if by_endpoint.is_some() {
+        return by_endpoint;
+    }
+    by_wire_id.filter(|p| p.subscription_provider().is_none())
+}
+fn subscription_ref(
+    entry: &crate::agent::config::ModelEntry,
+) -> Option<&crate::auth::AuthProviderRef> {
+    entry
+        .auth_provider
+        .as_ref()
+        .filter(|p| p.subscription_provider().is_some())
+}
 pub(crate) fn from_models(
     models: &indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
     model: &str,
@@ -194,16 +288,14 @@ pub(crate) fn from_models(
         .values()
         .filter(|entry| entry.info.model == model && entry.info.base_url == endpoint)
         .collect();
-    let mut provider = matches
-        .iter()
-        .find_map(|entry| {
-            entry
-                .auth_provider
-                .as_ref()
-                .filter(|p| p.subscription_provider().is_some())
-        })?
-        .clone();
-    if matches.len() != 1 {
+    let mut provider = matches.iter().find_map(|entry| subscription_ref(entry))?.clone();
+    // Ambiguous only when the matching entries would send this request differently: an
+    // unbound twin, or a different provider table (subscription, account or anything else).
+    // Aliases bound by identical tables (P192 endpoint bindings among them) agree.
+    let same_binding = |entry: &&crate::agent::config::ModelEntry| {
+        subscription_ref(entry).is_some_and(|p| p.config == provider.config)
+    };
+    if !matches.iter().all(same_binding) {
         provider.config.command = "ambiguous subscription model/account mapping".into();
     }
     Some(provider)

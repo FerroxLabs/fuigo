@@ -701,3 +701,35 @@ fn headless_config_notice_decodes_and_is_worded_as_a_warning() {
         _ => panic!("expected ConfigNotice"),
     }
 }
+
+/// P188: the shell's own `retry_state` serialization decodes to a discard only when `discardEmitted` is set.
+#[test]
+fn p188_retry_state_with_discard_decodes_to_response_discarded() {
+    use fuigo_shell::extensions::notification::{RetryState, SessionUpdate};
+    let wire = |discard_emitted: bool| {
+        serde_json::to_value(SessionUpdate::RetryState(RetryState::Retrying {
+            attempt: 1,
+            max_retries: 15,
+            reason: "stream ended early".into(),
+            error_type: Some("api".into()),
+            verdicts: None,
+            discard_emitted,
+            message_id: discard_emitted.then(|| "msg_1".to_string()),
+            stream_start_ms: discard_emitted.then_some(9),
+        }))
+        .unwrap()
+    };
+    let on = wire(true);
+    assert_eq!(on["discardEmitted"], true, "the wire name Murage reads: {on}");
+    assert_eq!(on["messageId"], "msg_1", "{on}");
+    assert!(matches!(
+        handle_ext_notification(&make_ext_notif("fuigo/session_notification", on)),
+        ExtEvent::Stream(event) if matches!(*event, StreamEvent::ResponseDiscarded { ref message_id, stream_start_ms: Some(9) } if message_id.as_deref() == Some("msg_1"))
+    ));
+    let off = wire(false);
+    assert!(off.get("discardEmitted").is_none(), "absent when false, as on older shells: {off}");
+    assert!(matches!(
+        handle_ext_notification(&make_ext_notif("fuigo/session_notification", off)),
+        ExtEvent::None
+    ));
+}

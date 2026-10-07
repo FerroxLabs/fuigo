@@ -14,12 +14,9 @@ also apply.
 - If a project's config, a plugin, a project `.mcp.json`, your editor's MCP settings or a server you added with
   `/mcps Add` names `FUIGO_API_KEY`, move that entry to `~/.fuigo/config.toml`, or export the key before starting
   Fuigo (B32).
-- Install with `npm i -g fuigo`, or update with `fuigo update`. npm 12 reports that Fuigo's install script was blocked;
-  Fuigo still works, because it finishes its setup the first time it runs. To let the script run during the install,
-  use `npm i -g fuigo --allow-scripts=fuigo`. If you install by hand with npm while Fuigo is
+- Install with `npm i -g fuigo`, or update with `fuigo update`. If npm stops the install with a message that install
+  scripts are blocked, run `npm i -g fuigo --allow-scripts=fuigo`. If you install by hand with npm while Fuigo is
   running, run `fuigo leader kill` afterwards so the shared session restarts on the new version.
-- **On Windows, update from 1.0.20 or older with npm once:** `npm i -g fuigo`. `fuigo update` in those versions cannot
-  start npm ("program not found"); from 1.0.21 on, `fuigo update` works on Windows (F22).
 
 ---
 
@@ -174,9 +171,8 @@ Each item says what changed and what to do.
 - **B4. Headless runs report denials with their own exit codes.** `fuigo -p` exits **3** when the run ended at a
   permission or token-budget denial, prints one line with the remedy on stderr, and adds a `permissionDenied`
   record to every output format; a denial the model recovered from exits 0 with a notice. It exits **4** when Fuigo
-  could not start at all ("Fuigo never started, nothing was run"). Budget limits now arrive as typed denials and exit 3 (over ACP: `error_kind: execution_incomplete`,
-  `data.code: execution_budget_denied`, `data.rule`; the headless `permissionDenied` record names the rule, for example
-  `execution_model_call_limit` or `execution_runtime_limit`): the budget refusing the next model request, the
+  could not start at all ("Fuigo never started, nothing was run"). Budget limits now arrive as typed denials (`error_kind: execution_incomplete`,
+  `data.code: execution_budget_denied`, `data.rule`) and exit 3: the budget refusing the next model request, the
   model-call limit (`FUIGO_MAX_MODEL_CALLS`) reserving the last call for the final answer (whether the model answers
   in it, calls a tool in it, or a Stop hook or goal continues after it), and the runtime limit
   (`FUIGO_MAX_RUNTIME_SECS`, or an execution's or parent's deadline) passing while a request is in flight or before it
@@ -246,11 +242,9 @@ Each item says what changed and what to do.
 - **B18. An API key passed by an editor or app is no longer saved automatically.** `authenticate` with
   `fuigo.api_key` keeps the key in memory only. *What to do:* to keep the old behaviour send
   `_meta: {"fuigo/apiKey": {"persist": true}}`; `fuigo/setApiKey` still saves as before.
-- **B19. Apps that embed Fuigo non-interactively are no longer left waiting on `ask_user_question`.** A client that
-  declares itself non-interactive (initialize `startupHints.nonInteractive`, or `fuigo -p`) is not offered the tool. If
-  such a client attaches to a session an interactive client started, a question gets the standard "no operator"
-  reply within 30 seconds (it was 30 minutes). A client that does not declare it is treated as interactive and waits
-  for its answer. *What to do:* an embedder that cannot answer questions should set `startupHints.nonInteractive`.
+- **B19. For apps that embed Fuigo non-interactively, `ask_user_question` waits at most 30 seconds** (it was 30
+  minutes); a missing or silent embedder gets the standard "no operator" reply. A non-interactive ACP client that stays silent gets that reply instead of blocking. *What to do:* answer within 30
+  seconds.
 - **B20. Config and state writes are stricter.** Every config and state file is replaced atomically under a shared
   cross-process lock, so two Fuigo processes no longer lose each other's edits. Newly created config files are mode
   0600. A writer now refuses a file it cannot read instead of treating it as empty and overwriting it, and a config
@@ -390,8 +384,8 @@ Each item says what changed and what to do.
   write is now saved as `<name>.user-<time>.bak` (with a warning) before it is replaced or removed. *What to do:* put
   your own settings in `~/.fuigo/config.toml`, or system-wide in `/etc/fuigo`.
 - **B37. `fuigo update` fails fast when the registry is down.** With the registry down or silent, `fuigo update`
-  fails in seconds (about 32 s at worst) with a short error naming the cause (for example `ECONNREFUSED`) and a
-  non-zero exit; `fuigo update --check` exits 1 instead of reporting a cached "latest" as current. The installed Fuigo is never touched. *What to do:* retry
+  fails in seconds (about 32 s at worst) with a one-line error and a non-zero exit; `fuigo update --check` exits 1
+  instead of printing raw npm output or a cached "latest". The installed Fuigo is never touched. *What to do:* retry
   later.
 - **B38. Permission prompts are harder to answer by accident.** Prompts preselect *allow once*, and text you type
   into an open prompt can no longer answer it: an Enter, digit or Backspace inside typing is held, and a digit never
@@ -567,7 +561,3 @@ Each item says what changed and what to do.
   limit's final answer, exits 1. A `/btw` side question refused by the process counter or clock fails as `api`. A
   failure the provider answered itself (a status, an auth refusal, a rate limit, a stream error) keeps its cause and
   exits 1, even if the runtime limit passed while it was being reported.
-- **K26.** Exit 4 (B4) covers a start that fails cleanly, for example when the open-file limit is too low for Fuigo's
-  runtime. With a limit only slightly too low (`ulimit -n` around 7 to 24 on Linux), a later component can abort instead
-  (exit 134, a panic message on stderr) before anything runs. *What to do:* raise the open-file limit (the default on
-  every supported system is far above this).

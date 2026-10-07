@@ -253,6 +253,18 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             #[serde(default)]
             signature: Option<String>,
         },
+        /// P188: only `retrying` with `discardEmitted` matters here; every other retry state is progress the
+        /// headless formats do not print.
+        RetryState {
+            #[serde(rename = "type")]
+            kind: String,
+            #[serde(default, rename = "discardEmitted")]
+            discard_emitted: bool,
+            #[serde(default, rename = "messageId")]
+            message_id: Option<String>,
+            #[serde(default, rename = "streamStartMs")]
+            stream_start_ms: Option<i64>,
+        },
         ResponseCompleted {
             #[serde(default)]
             message_id: Option<String>,
@@ -344,6 +356,17 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             signature,
             stop_sequence,
         })),
+        // P188: the resend replaces what the failed attempt streamed, so the formats drop it (`StreamEvent::ResponseDiscarded`)
+        FuigoUpdate::RetryState {
+            kind,
+            discard_emitted: true,
+            message_id,
+            stream_start_ms,
+        } if kind == "retrying" => ExtEvent::Stream(Box::new(StreamEvent::ResponseDiscarded {
+            message_id,
+            stream_start_ms,
+        })),
+        FuigoUpdate::RetryState { .. } => ExtEvent::None,
         // A task_backgrounded or task_completed tag arriving here belongs on its dedicated method; log loudly
         // Any other unknown tag stays a clean ignore
         FuigoUpdate::Other => {

@@ -335,6 +335,9 @@ pub struct AcpUpdateTracker {
     /// Entry currently receiving AgentThoughtChunk deltas.
     /// None when agent isn't thinking.
     current_thinking: Option<EntryId>,
+    /// P188: the text and thinking rows the current model stream (one `streamStartMs`) created, finished or not.
+    /// A `retry_state` with `discardEmitted` removes them; a new stream, a tool call or the turn's end forgets them.
+    stream_rows: Vec<EntryId>,
     /// Tool calls in flight, keyed by ACP tool call ID string.
     /// Stores the base ToolCall for field merging with ToolCallUpdate.
     pending_tools: HashMap<String, PendingTool>,
@@ -1013,6 +1016,11 @@ impl AcpUpdateTracker {
                     self.pre_create_thinking(scrollback);
                 }
             }
+            if self.last_stream_start_ms != Some(new_start) {
+                self.stream_rows.clear();
+                // The thinking row pre-created above belongs to the new stream
+                self.stream_rows.extend(self.current_thinking);
+            }
             self.last_stream_start_ms = Some(new_start);
         }
         let is_agent_output = is_agent_output_update(&update);
@@ -1085,6 +1093,7 @@ impl AcpUpdateTracker {
         }
         self.last_thinking_elapsed_ms = None;
         self.last_stream_start_ms = None;
+        self.stream_rows.clear();
         self.compaction_activity = None;
         self.retry_activity = None;
         self.writing_tool_call = None;
@@ -1095,6 +1104,31 @@ impl AcpUpdateTracker {
         self.tool_entry_ids.clear();
         self.orphan_tool_hooks.clear();
         self.skip_next_skill_body = false;
+    }
+    /// P188: the model request that streamed the current response failed after output and is being resent
+    /// (`retry_state` with `discardEmitted`). Its text and thinking were never kept by the agent, and the resend
+    /// streams its own, so drop both rows instead of leaving a dead attempt above the real answer.
+    /// Only this stream's rows go: every attempt opens a new `streamStartMs`, which forgets the previous stream's rows.
+    /// `stream_start_ms` names the dead attempt (`retry_state.streamStartMs`); when it is not the stream these rows
+    /// came from, that attempt drew nothing here (it streamed only tool-call deltas) and nothing is removed.
+    pub fn discard_current_response(
+        &mut self,
+        scrollback: &mut ScrollbackState,
+        stream_start_ms: Option<i64>,
+    ) -> bool {
+        if stream_start_ms.is_some() && stream_start_ms != self.last_stream_start_ms {
+            return false;
+        }
+        let mut changed = false;
+        self.current_agent_msg = None;
+        self.current_thinking = None;
+        self.last_thinking_elapsed_ms = None;
+        for id in std::mem::take(&mut self.stream_rows) {
+            changed |= scrollback.remove_entry(id);
+        }
+        self.writing_tool_call = None;
+        self.writing_tool_names.clear();
+        changed
     }
     /// Finish the current thinking block, passing elapsed time to the entry.
     ///
@@ -1126,6 +1160,7 @@ impl AcpUpdateTracker {
             let entry_id = scrollback.push_block(block);
             scrollback.set_last_running(true);
             self.current_thinking = Some(entry_id);
+            self.stream_rows.push(entry_id);
         }
     }
     /// Mark that the next UserMessageChunk should be silently dropped.
@@ -1170,6 +1205,9 @@ impl AcpUpdateTracker {
             scrollback.set_last_running(true);
             entry_id
         });
+        if is_new {
+            self.stream_rows.push(id);
+        }
         if is_new
             && let Some(ts_ms) = meta.agent_timestamp_ms
             && let Some(entry) = scrollback.get_by_id_mut(id)
@@ -1200,6 +1238,7 @@ impl AcpUpdateTracker {
             return false;
         }
         let is_replay = meta.is_replay;
+        let created = self.current_thinking.is_none();
         let id = *self.current_thinking.get_or_insert_with(|| {
             let block = if is_replay {
                 RenderBlock::thinking_streaming_replay()
@@ -1210,6 +1249,9 @@ impl AcpUpdateTracker {
             scrollback.set_last_running(true);
             entry_id
         });
+        if created {
+            self.stream_rows.push(id);
+        }
         if let (Some(agent_ts), Some(stream_start)) =
             (meta.agent_timestamp_ms, meta.stream_start_ms)
         {
@@ -1230,6 +1272,12 @@ impl AcpUpdateTracker {
     ) -> bool {
         self.finish_thinking(scrollback);
         self.current_agent_msg = None;
+        // P188: without stream starts (an older shell) a tool call is the only sign the response before it was
+        // committed. With them a hosted tool card (web/x search) can sit inside a still-streaming attempt, and the
+        // next attempt's new stream start is what forgets these rows.
+        if self.last_stream_start_ms.is_none() {
+            self.stream_rows.clear();
+        }
         if is_todo_tool(&tc)
             || is_bg_plumbing_tool(&tc)
             || is_task_tool(&tc)

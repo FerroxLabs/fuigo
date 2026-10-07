@@ -46,6 +46,8 @@ pub enum PrewarmOutcome {
     Truncated,
     Failed,
     TimedOut,
+    /// P192: a subscription's inference endpoint; never dialled by the ordinary client.
+    SubscriptionEndpoint,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,6 +69,13 @@ pub async fn prewarm_transport(base_url: &str) -> PrewarmReport {
         duration_ms: elapsed_ms_since(started),
         origin,
     };
+    // P192: subscription inference uses its own exact-URL client, which this shared pool
+    // cannot warm. Dialling the origin here would be a guard-refused request to `api.x.ai`
+    // or an unauthenticated one to `chatgpt.com`, both for nothing.
+    if crate::subscription::SubscriptionKind::for_endpoint(base_url).is_some() {
+        tracing::debug!("sampler transport prewarm skipped: subscription endpoint");
+        return report(PrewarmOutcome::SubscriptionEndpoint, None);
+    }
     let Some(origin) = endpoint_origin(base_url) else {
         tracing::debug!(base_url = %fuigo_auth::redact_url(base_url), "sampler transport prewarm skipped: no dialable origin");
         return report(PrewarmOutcome::NoOrigin, None);
