@@ -26,6 +26,10 @@ on:
         description: "Build and assemble, but do not publish"
         type: boolean
         default: true
+      mac_sign:
+        description: "Developer ID sign and notarize the macOS binaries (tag pushes always do). Off = ad-hoc/unsigned macOS, NOT for release."
+        type: boolean
+        default: true
       replace_release_assets:
         description: "GitHub Release re-run: replace existing assets whose content differs"
         type: boolean
@@ -198,7 +202,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Linux builds run in the glibc-2.28 container (P199); their cache must not mix
+          # with the old ubuntu-24.04 build-script binaries, which need glibc 2.39 and
+          # would fail to execute inside the container.
+          key: ${{ matrix.target }}${{ runner.os == 'Linux' && '-glibc228' || '' }}
           # Cache the release profile; the default only covers debug.
           cache-targets: true
           cache-on-failure: true
@@ -210,12 +217,35 @@ jobs:
       # skills load ungated. 1.0.11 and 1.0.12 shipped unstamped. The value is
       # the same one the smoke test below expects in `--version`.
       - name: Build
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           FUIGO_VERSION=$(grep -m1 '^version' crates/codegen/fuigo-version/Cargo.toml | cut -d'"' -f2)
           export FUIGO_VERSION
           cargo build --release --target ${{ matrix.target }} -p fuigo-pager-bin
+
+      # Linux: the runner is native, but the build runs in a manylinux_2_28 container
+      # (AlmaLinux 8, glibc 2.28, image pinned by digest inside the script) so the binary
+      # needs at most GLIBC_2.28 instead of the runner's 2.39 (P199). Still no cross
+      # toolchain: the container matches the runner's architecture. The script installs
+      # the pinned rustc and protoc 29.3 itself; the host steps above only serve the cache.
+      - name: Build (glibc 2.28 container)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/release/build-linux-glibc228.sh ${{ matrix.target }}
+
+      # Release floor (P199 + P202): fails the job if the binary needs glibc > 2.28,
+      # GLIBCXX > 3.4.25 or CXXABI > 1.3.11, or (aarch64) contains an SVE/SVE2
+      # instruction, which would SIGILL on Neoverse N1 / Graviton2 / Ampere A1. Runs
+      # before the smoke test so a floor violation is the reported failure.
+      - name: Linux floor check
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/release/check-linux-floor.sh --self-test
+          scripts/release/check-linux-floor.sh "target/${{ matrix.target }}/release/${{ matrix.bin }}"
 
       # A binary that cannot start is worth catching here rather than after
       # publish. Only meaningful where the runner can execute what it built,
@@ -296,12 +326,166 @@ jobs:
           retention-days: 3
           if-no-files-found: ignore
 
+      # Windows and macOS binaries leave `build` UNSIGNED under a name that no consumer's
+      # `fuigo-*` download pattern matches; the `sign` job re-uploads them as `fuigo-<platform>`.
+      # Linux binaries are not signed and keep their final name.
       - uses: actions/upload-artifact@v4
         with:
-          name: fuigo-${{ matrix.npm_platform }}
+          name: ${{ runner.os == 'Linux' && format('fuigo-{0}', matrix.npm_platform) || format('unsigned-fuigo-{0}', matrix.npm_platform) }}
           path: target/${{ matrix.target }}/release/${{ matrix.bin }}
           retention-days: 3
           # Already ~166 MB; the assemble step brotli-compresses it properly.
+          compression-level: 0
+          if-no-files-found: error
+
+  # CODE SIGNING. Separate job (not steps inside `build`) so that (a) `environment: release` and
+  # the OIDC token are required only here, never by the Linux entries, and (b) cargo build
+  # scripts and dependencies never run in a job that holds signing credentials.
+  # Order: build -> unsigned-fuigo-<p> -> sign -> fuigo-<p> -> publish/github-release. The
+  # unsigned name matches no `fuigo-*` download pattern, so nothing can package it.
+  # Windows signing is unconditional. macOS signing follows `mac_sign` (absent on tag push =
+  # true). Fork PRs never reach this: the workflow has no pull_request trigger.
+  sign:
+    name: sign ${{ matrix.npm_platform }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MAC_SIGN: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_sign == false && 'false' || 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: windows-latest, os: windows, npm_platform: win32-x64, bin: fuigo-pager.exe}
+          # Signed from the x64 runner: Authenticode only appends a certificate table. The
+          # arm64 exe cannot execute here, so there is no post-signing smoke for it; the
+          # verify-published job executes it natively on windows-11-arm after publish.
+          - {runner: windows-latest, os: windows, npm_platform: win32-arm64, bin: fuigo-pager.exe}
+          - {runner: macos-14, os: macos, npm_platform: darwin-arm64, bin: fuigo-pager, arch: arm64}
+          - {runner: macos-14, os: macos, npm_platform: darwin-x64, bin: fuigo-pager, arch: x86_64}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-fuigo-${{ matrix.npm_platform }}
+          path: bin
+
+      - name: Record unsigned digest
+        shell: bash
+        run: sha256sum "bin/${{ matrix.bin }}" 2>/dev/null || shasum -a 256 "bin/${{ matrix.bin }}"
+
+      # ---------------- Windows (mandatory, no switch)
+      - name: Azure login (OIDC, no client secret)
+        if: matrix.os == 'windows'
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1 (the version the proven Ferrox Labs signing workflow uses)
+        with:
+          client-id: cc90fcf0-bdc5-45bb-a84b-399a3c0740dc
+          tenant-id: 11fd2488-ed71-47ba-aad3-6c19d6e911ab
+          allow-no-subscriptions: true
+
+      - name: Sign with Azure Artifact Signing
+        if: matrix.os == 'windows'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: https://eus.codesigning.azure.net
+          signing-account-name: ferrox-labs-signing
+          certificate-profile-name: ferroxlabs
+          files-folder: ${{ github.workspace }}\bin
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          # This job has no actions: write, so the dependency cache could only warn; skip it.
+          cache-dependencies: false
+
+      - name: Gate - Authenticode Valid and Ferrox Labs signer
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: ./scripts/release/windows-verify-signature.ps1 -Path "bin/${{ matrix.bin }}"
+
+      - name: Smoke test signed binary
+        if: matrix.npm_platform == 'win32-x64'
+        shell: bash
+        run: scripts/release/smoke-version.sh "bin/${{ matrix.bin }}"
+
+      # ---------------- macOS (behind mac_sign)
+      - name: macOS signing is OFF
+        if: matrix.os == 'macos' && env.MAC_SIGN == 'false'
+        shell: bash
+        run: |
+          echo "::warning::mac_sign=false: ${{ matrix.npm_platform }} is NOT Developer ID signed or notarized. Do not release this run."
+          echo "WARNING: ${{ matrix.npm_platform }} is NOT Developer ID signed (mac_sign=false)" >> "$GITHUB_STEP_SUMMARY"
+          archs=$(lipo -archs "bin/${{ matrix.bin }}"); echo "architectures: $archs"
+          [ "$archs" = "${{ matrix.arch }}" ] || { echo "::error::expected ${{ matrix.arch }}, built $archs"; exit 1; }
+          if [ "${{ matrix.arch }}" = arm64 ]; then codesign --verify --verbose=1 "bin/${{ matrix.bin }}"; fi
+
+      - name: Import Developer ID certificate (throwaway keychain)
+        if: matrix.os == 'macos' && env.MAC_SIGN == 'true'
+        shell: bash
+        env:
+          MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: scripts/release/macos-import-cert.sh
+
+      - name: Sign, verify and notarize
+        if: matrix.os == 'macos' && env.MAC_SIGN == 'true'
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: scripts/release/macos-sign-notarize.sh "bin/${{ matrix.bin }}" "${{ matrix.arch }}"
+
+      - name: Remove keychain and key material
+        if: always() && matrix.os == 'macos' && env.MAC_SIGN == 'true'
+        shell: bash
+        run: scripts/release/macos-cleanup.sh
+
+      # The x64 binary runs under Rosetta on the arm64 runner, as in the build job's smoke test.
+      - name: Smoke test signed binary
+        if: matrix.os == 'macos'
+        shell: bash
+        run: |
+          chmod +x "bin/${{ matrix.bin }}"
+          scripts/release/smoke-version.sh "bin/${{ matrix.bin }}"
+
+      # Fail closed: the same identity check `publish` repeats, run on the exact file to upload.
+      - name: Guard - artifact to upload is signed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.os }}" = windows ] || [ "$MAC_SIGN" = true ]; then
+            # windows-latest has `python`, not always `python3`, on the bash PATH.
+            PY=$(command -v python3 || command -v python) || { echo "::error::no python on PATH for the signature guard"; exit 1; }
+            "$PY" scripts/release/check-signed-binary.py "bin/${{ matrix.bin }}"
+          else
+            echo "mac_sign=false: macOS signature check skipped"
+          fi
+
+      - name: Record signed digest
+        shell: bash
+        run: sha256sum "bin/${{ matrix.bin }}" 2>/dev/null || shasum -a 256 "bin/${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuigo-${{ matrix.npm_platform }}
+          path: bin/${{ matrix.bin }}
+          retention-days: 3
           compression-level: 0
           if-no-files-found: error
 
@@ -363,7 +547,7 @@ jobs:
 
   publish:
     name: assemble and publish
-    needs: [build, security]
+    needs: [build, sign, security]
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: npm-publish
@@ -394,6 +578,25 @@ jobs:
           find artifacts -type f -exec ls -lh {} \;
           test "$(find artifacts -type f | wc -l)" -eq 6 || {
             echo "::error::expected 6 binaries, refusing to publish a partial set"; exit 1; }
+
+      # Tripwire, not cryptographic validation (that happened in `sign`): asserts the Windows
+      # exes carry an Authenticode table naming Ferrox Labs, and (mac_sign) that the Mach-O files
+      # carry a non-ad-hoc, hardened-runtime signature with team PX6SP9GPWJ. Windows is always
+      # required; macOS follows the same switch as `sign`.
+      - name: Verify binaries are signed (presence and identity)
+        env:
+          MAC_SIGN: ${{ github.event_name == 'workflow_dispatch' && inputs.mac_sign == false && 'false' || 'true' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/test-check-signed-binary.py
+          python3 scripts/release/check-signed-binary.py \
+            artifacts/fuigo-win32-x64/fuigo-pager.exe artifacts/fuigo-win32-arm64/fuigo-pager.exe
+          if [ "$MAC_SIGN" = true ]; then
+            python3 scripts/release/check-signed-binary.py \
+              artifacts/fuigo-darwin-arm64/fuigo-pager artifacts/fuigo-darwin-x64/fuigo-pager
+          else
+            echo "::warning::mac_sign=false: macOS binaries are NOT Developer ID signed"
+          fi
 
       # Deliberately NO `npm install` here.
       #
