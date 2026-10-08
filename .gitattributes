@@ -15,3 +15,7 @@
 # behaviour off, so no core.autocrlf / core.eol setting on any platform can
 # rewrite a 0x0A inside these bytes.
 *.pbbin binary
+
+# The release workflow runs these with bash on windows-latest, where git checks text files out
+# with CRLF by default: a CRLF shebang or `set -euo pipefail\r` breaks the script (P203).
+scripts/release/*.sh text eol=lf
