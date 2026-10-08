@@ -2,3 +2,4 @@ target/
 .ijfw/
 AGENTS.md
 CLAUDE.md
+__pycache__/

@@ -428,12 +428,29 @@ test('every npm publish asks for provenance', () => {
     assert.equal(lines.length, 2, lines.join('\n'));
     for (const l of lines) assert(l.includes('--provenance'), l);
 });
-test('only the publish job holds id-token: write, and the workflow default does not', () => {
+// P203: the `sign` job also needs an OIDC token (Azure login for Authenticode signing). It is the only other
+// holder, it is bound to the `release` environment, and it can never publish to npm.
+test('only the publish and sign jobs hold id-token: write, and the workflow default does not', () => {
     const top = wf.slice(0, wf.indexOf('\njobs:\n'));
     assert(!/id-token/.test(top), 'workflow-level id-token');
     assert(/^ {4}permissions:\n(?: {6}.*\n)*? {6}id-token: write$/m.test(jobs.publish), 'publish job lacks id-token: write');
+    assert(/^ {4}permissions:\n(?: {6}.*\n)*? {6}id-token: write$/m.test(jobs.sign), 'sign job lacks id-token: write');
     for (const [n, body] of Object.entries(jobs)) {
-        if (n !== 'publish') assert(!/^\s*id-token:\s*write/m.test(body), `${n} has id-token: write`);
+        if (n !== 'publish' && n !== 'sign') assert(!/^\s*id-token:\s*write/m.test(body), `${n} has id-token: write`);
+    }
+});
+test('the sign job is bound to the release environment, cannot publish, and signs before publish', () => {
+    assert(/^ {4}environment: release$/m.test(jobs.sign), 'sign job is not bound to the release environment');
+    assert(!/npm publish\b/.test(jobs.sign), 'sign job runs npm publish');
+    assert(!/NODE_AUTH_TOKEN|NPM_TOKEN/.test(jobs.sign), 'sign job references an npm token');
+    assert(/^ {4}needs: \[build, sign, security\]$/m.test(jobs.publish), 'publish does not wait for sign');
+    assert(/name: unsigned-fuigo-\$\{\{ matrix\.npm_platform \}\}/.test(jobs.sign), 'sign does not consume the unsigned artifact');
+    assert(/^ {10}name: fuigo-\$\{\{ matrix\.npm_platform \}\}$/m.test(jobs.sign), 'sign does not upload under the name publish consumes');
+    assert(/azure\/login@[0-9a-f]{40}\b/.test(jobs.sign), 'azure/login is not pinned to a commit');
+    assert(/artifact-signing-action@[0-9a-f]{40}\b/.test(jobs.sign), 'the signing action is not pinned to a commit');
+    // Windows signing has no switch: its steps depend on the platform only.
+    for (const m of jobs.sign.matchAll(/^ {8}if: (.*)$/gm)) {
+        if (/windows|win32/.test(m[1])) assert(!/MAC_SIGN|mac_sign|dry_run/.test(m[1]), `Windows step is conditional: ${m[1]}`);
     }
 });
 test('verify-published records digests and github-release compares them with the assets', () => {
