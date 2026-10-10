@@ -3308,3 +3308,80 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
         })
         .await;
 }
+/// P169 (Grok 4.7 #2): a fleet `[models] allowed_models` pin binds subagents. Catalog: `parent-model` (selectable),
+/// `allowed-model` (selectable) and `blocked-key` whose model id is `blocked-model-id` (the pin left it unselectable).
+fn fleet_pinned_ctx(pinned: bool) -> SubagentSpawnContext {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    ctx.sampling_config.model = "parent-model".to_string();
+    ctx.model_id = acp::ModelId::new("parent-model");
+    ctx.available_models
+        .insert("parent-model".to_string(), test_model_entry("parent-model"));
+    ctx.available_models
+        .insert("allowed-model".to_string(), test_model_entry("allowed-model"));
+    let mut blocked = test_model_entry("blocked-model-id");
+    blocked.info.user_selectable = false;
+    ctx.available_models.insert("blocked-key".to_string(), blocked);
+    ctx.fleet_model_pin = pinned;
+    ctx
+}
+/// `[subagents.models]` naming a fleet-disallowed model inherits the parent model instead.
+#[tokio::test]
+async fn fleet_pin_refuses_subagents_models_override() {
+    use fuigo_agent::config::ModelOverride;
+    let mut ctx = fleet_pinned_ctx(true);
+    ctx.subagent_model_overrides
+        .insert("explore".to_string(), "blocked-key".to_string());
+    let (config, model_id) = resolve_subagent_sampling_config("explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "parent-model");
+    assert_eq!(model_id.0.as_ref(), "parent-model");
+    let mut open = fleet_pinned_ctx(false);
+    open.subagent_model_overrides
+        .insert("explore".to_string(), "blocked-key".to_string());
+    let (config, _) = resolve_subagent_sampling_config("explore", &ModelOverride::Inherit, &open).await;
+    assert_eq!(config.model, "blocked-model-id", "fixture: without a fleet pin the override applies");
+}
+/// `AgentDefinition.model` naming a fleet-disallowed model inherits the parent model instead.
+#[tokio::test]
+async fn fleet_pin_refuses_agent_definition_model() {
+    use fuigo_agent::config::ModelOverride;
+    let ctx = fleet_pinned_ctx(true);
+    let agent_model = ModelOverride::Override("blocked-key".to_string());
+    let (config, _) = resolve_subagent_sampling_config("explore", &agent_model, &ctx).await;
+    assert_eq!(config.model, "parent-model");
+    let allowed = ModelOverride::Override("allowed-model".to_string());
+    let (config, _) = resolve_subagent_sampling_config("explore", &allowed, &ctx).await;
+    assert_eq!(config.model, "allowed-model", "a selectable model still applies under the pin");
+}
+/// A goal role / persona runtime override naming a fleet-disallowed model falls through (here: to the parent).
+#[tokio::test]
+async fn fleet_pin_refuses_runtime_goal_or_persona_override() {
+    use fuigo_agent::config::ModelOverride;
+    let ctx = fleet_pinned_ctx(true);
+    let (config, model_id) =
+        resolve_effective_model_config(Some("blocked-key"), "explore", &ModelOverride::Inherit, &ctx).await;
+    assert_eq!(config.model, "parent-model");
+    assert_eq!(model_id.0.as_ref(), "parent-model");
+}
+/// An alias (the catalog entry's model id rather than its key) is refused like the key.
+#[test]
+fn fleet_pin_refuses_an_alias_of_a_disallowed_entry() {
+    let ctx = fleet_pinned_ctx(true);
+    assert!(resolve_model_override_to_config("blocked-model-id", &ctx).is_none());
+    assert!(resolve_model_override_to_config("blocked-key", &ctx).is_none());
+    assert!(resolve_model_override_to_config("allowed-model", &ctx).is_some());
+    assert!(
+        resolve_model_override_to_config("blocked-model-id", &fleet_pinned_ctx(false)).is_some(),
+        "fixture: unpinned, the alias resolves"
+    );
+}
+/// Resume pins the child to its source model; a source model the fleet pin disallows refuses the resume with the
+/// policy reason (not "no longer available"), and an allowed one still pins.
+#[test]
+fn fleet_pin_refuses_resume_pin_to_a_disallowed_source_model() {
+    let ctx = fleet_pinned_ctx(true);
+    let refusal = subagent_model_policy_refusal("blocked-model-id", &ctx).expect("refused");
+    assert!(refusal.contains("allowed_models"), "{refusal}");
+    assert!(resolve_model_override_to_config("blocked-model-id", &ctx).is_none());
+    assert_eq!(subagent_model_policy_refusal("allowed-model", &ctx), None);
+    assert_eq!(subagent_model_policy_refusal("blocked-model-id", &fleet_pinned_ctx(false)), None);
+}

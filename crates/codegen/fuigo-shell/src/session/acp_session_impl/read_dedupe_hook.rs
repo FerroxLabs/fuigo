@@ -17,6 +17,74 @@ fn is_read_file_tool(name: &str) -> bool {
     matches!(name, "read_file" | "Read" | "read")
 }
 
+/// The entries of a `read_file` call, each with the file the reader opens for it, or `None` when the call may not
+/// be deduped (P174). The raw parser also accepts keys the tool ignores (`target_file` or `path` on the codex form),
+/// so dedupe runs only when every parsed entry is a file the permission check judged: the rewrite then reads only
+/// judged files, and dedupe hashes the file the reader opens (not its own `cwd.join`, which can name another file).
+fn judged_read_entries(prepared: &PreparedToolCall) -> Option<Vec<(ReadRequestEntry, PathBuf)>> {
+    let judged = prepared.judged_read_paths.as_ref()?;
+    parse_read_entries(&prepared.parsed_args)
+        .into_iter()
+        .map(|entry| {
+            let opened = judged
+                .iter()
+                .find(|(spelled, _)| *spelled == entry.path)
+                .map(|(_, opened)| opened.clone())?;
+            Some((entry, opened))
+        })
+        .collect()
+}
+
+impl SessionActor {
+    /// Every file a `read_file` call opens (P174), as spelled and as the reader resolves it: the Fuigo reader's own
+    /// resolution, or the codex reader's literal path.
+    /// `None` (no dedupe for the call) when a file does not exist or the files cannot be resolved within a bound.
+    pub(super) async fn judged_read_files(
+        &self,
+        tool_input: &ToolInput,
+    ) -> Option<Vec<(String, PathBuf)>> {
+        use fuigo_workspace::permission::ReadResolution;
+        let Some(targets) = fuigo_workspace::permission::read_targets_for(tool_input) else {
+            return Some(Vec::new());
+        };
+        let cwd = self.tool_context.cwd.as_path().to_path_buf();
+        let display_cwd = self
+            .display_cwd
+            .get()
+            .map(|cwd| PathBuf::from(cwd.as_str()));
+        let resolve_all = async move {
+            let mut out = Vec::with_capacity(targets.paths.len());
+            for path in targets.paths {
+                let opened = match targets.resolution {
+                    ReadResolution::ModelPath => {
+                        // Not `resolve_read_target`: its Unicode-confusable fallback lists the file's whole
+                        // directory, and a file that does not exist has nothing to dedupe (the call is then not
+                        // deduped). The permission check still judges that fallback file.
+                        fuigo_tools::implementations::fuigo_build::read_file::resolve_existing_read_target(
+                            &cwd,
+                            display_cwd.as_deref(),
+                            &path,
+                        )
+                        .await?
+                    }
+                    ReadResolution::Literal => {
+                        let (cwd, spelled) = (cwd.clone(), path.clone());
+                        tokio::task::spawn_blocking(move || canonical_path(&cwd, &spelled))
+                            .await
+                            .ok()?
+                    }
+                };
+                out.push((path, opened));
+            }
+            Some(out)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), resolve_all)
+            .await
+            .ok()
+            .flatten()
+    }
+}
+
 /// What to do with one `read_file` call: which requested entries are served from the cache.
 #[derive(Debug, Default)]
 pub(crate) struct DedupePlan {
@@ -121,11 +189,13 @@ impl SessionActor {
                 plans.push(Arc::new(None));
                 continue;
             }
-            let entries = parse_read_entries(&prepared.parsed_args);
+            let Some(entries) = judged_read_entries(prepared) else {
+                plans.push(Arc::new(None));
+                continue;
+            };
             let mode = read_mode(&prepared.parsed_args);
             let mut plan = DedupePlan::default();
-            for entry in entries {
-                let path = canonical_path(self.tool_context.cwd.as_path(), &entry.path);
+            for (entry, path) in entries {
                 let key = ReadKey {
                     path: path.clone(),
                     offset: entry.offset,
@@ -203,12 +273,13 @@ impl SessionActor {
         if fc.content.is_empty() || result.output.is_error() {
             return;
         }
-        let entries = parse_read_entries(&prepared.parsed_args);
+        let Some(entries) = judged_read_entries(prepared) else {
+            return;
+        };
         let mode = read_mode(&prepared.parsed_args);
         let prompt_index = self.chat_state_handle.get_prompt_index().await;
         let content_chars = result.prompt_text.chars().count();
-        for entry in entries {
-            let path = canonical_path(self.tool_context.cwd.as_path(), &entry.path);
+        for (entry, path) in entries {
             if plan.is_some_and(|p| p.deduped_paths.contains(&path)) {
                 continue;
             }
@@ -238,5 +309,97 @@ impl SessionActor {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod p174_tests {
+    use super::*;
+
+    fn prepared(args: serde_json::Value, judged: Option<Vec<&str>>) -> PreparedToolCall {
+        PreparedToolCall {
+            call_id: "call_1".to_string(),
+            tool_call_id: acp::ToolCallId::new("call_1"),
+            tool_name: "read_file".to_string(),
+            raw_arguments: args.to_string(),
+            parsed_args: args,
+            model_id: "test-model".to_string(),
+            concatenated_json_count: 0,
+            dispatch_target_name: None,
+            is_read_only: true,
+            rewriting_hook: None,
+            additional_context: Vec::new(),
+            judged_read_paths: judged.map(|paths| {
+                paths
+                    .into_iter()
+                    .map(|p| (p.to_owned(), PathBuf::from(format!("/opened{p}"))))
+                    .collect()
+            }),
+        }
+    }
+
+    /// Astra r1 HIGH: the codex form ignores `target_file`, so only `files` was judged; dedupe must not turn the
+    /// ignored key into a `files` entry (which the rewritten call would read unjudged).
+    #[test]
+    fn dedupe_never_adds_a_path_the_permission_check_did_not_judge() {
+        let args = serde_json::json!({ "target_file": "/w/secrets/key", "files": [{ "path": "/w/ok.txt" }] });
+        assert!(judged_read_entries(&prepared(args.clone(), Some(vec!["/w/ok.txt"]))).is_none());
+        assert!(judged_read_entries(&prepared(args.clone(), None)).is_none());
+        let entries = judged_read_entries(&prepared(args, Some(vec!["/w/secrets/key", "/w/ok.txt"])))
+            .expect("every entry was judged");
+        assert_eq!(
+            entries.iter().map(|(e, _)| e.path.as_str()).collect::<Vec<_>>(),
+            vec!["/w/secrets/key", "/w/ok.txt"]
+        );
+        // Astra r2 HIGH: dedupe hashes the file the reader opens, never its own `cwd.join` of the spelling.
+        assert_eq!(
+            entries.iter().map(|(_, opened)| opened.clone()).collect::<Vec<_>>(),
+            vec![PathBuf::from("/opened/w/secrets/key"), PathBuf::from("/opened/w/ok.txt")]
+        );
+    }
+
+    async fn judged(input: serde_json::Value) -> Option<Vec<(String, PathBuf)>> {
+        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let actor = crate::session::acp_session::support::create_test_actor(
+                    0, 256_000, 85, gateway_tx, persistence_tx,
+                )
+                .await;
+                let input =
+                    ToolInput::ReadFile(serde_json::from_value(input).expect("read_file input"));
+                actor.judged_read_files(&input).await
+            })
+            .await
+    }
+
+    /// The prepare path must not scan a directory (P174 perf): a path that does not exist is not deduped, so the
+    /// Unicode-confusable sibling scan (`try_resolve_unicode_filename`, which lists the whole parent directory, 1.3 s for
+    /// a 500k-entry `/tmp`) never runs on the actor. Deterministic: a confusable sibling exists, and the scan would
+    /// find it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn judged_read_files_does_not_scan_the_directory_for_a_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("shot\u{202F}1.png"), b"x").expect("write sibling");
+        let asked = dir.path().join("shot 1.png").to_string_lossy().into_owned();
+        let got = judged(serde_json::json!({ "target_file": asked })).await;
+        assert!(got.is_none(), "a missing file is not deduped and its directory is not scanned; got {got:?}");
+    }
+
+    /// The fix keeps the judged file the one the reader opens: symlinks are followed.
+    /// Unix only: it creates the link with `std::os::unix::fs::symlink`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn judged_read_files_follows_symlinks_for_an_existing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real.txt");
+        std::fs::write(&real, b"x").expect("write");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+        let asked = link.to_string_lossy().into_owned();
+        let got = judged(serde_json::json!({ "target_file": asked.clone() })).await.expect("resolved");
+        assert_eq!(got, vec![(asked, dunce::canonicalize(&real).expect("canonical"))]);
     }
 }

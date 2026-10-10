@@ -104,9 +104,16 @@ pub fn discover_plugins(
     trust_store: &PluginTrustStore,
     project_trusted: bool,
 ) -> Vec<Value> {
+    // P169: the hub listing honors strictKnownMarketplaces like session discovery does.
+    let mut config = config.clone();
+    if config.source_restriction.is_none() {
+        config.source_restriction = crate::permission::resolution::managed_settings()
+            .marketplace_allowlist
+            .plugin_load_restriction(&fuigo_agent::plugins::InstallRegistry::load());
+    }
     let discovered = fuigo_agent::plugins::discover_plugins(
         Some(root_cwd),
-        config,
+        &config,
         trust_store,
         project_trusted,
     );

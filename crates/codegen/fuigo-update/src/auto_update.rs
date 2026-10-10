@@ -181,8 +181,8 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     }
 
     if let Some(error) = status.error.as_deref() {
-        fuigo_tty_utils::cli_println!("Fuigo - v{} [{}]", status.current_version, status.channel);
-        fuigo_tty_utils::cli_println!("Update check failed: {error}");
+        fuigo_tty_utils::cli_println!("Fuigo - v{} [{}]", fuigo_tty_utils::untrusted(&status.current_version), fuigo_tty_utils::untrusted(&status.channel));
+        fuigo_tty_utils::cli_println!("Update check failed: {}", fuigo_tty_utils::untrusted(&error));
         return Ok(());
     }
 
@@ -192,9 +192,9 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
         if let Some(latest_version) = status.latest_version.as_deref() {
             fuigo_tty_utils::cli_println!(
                 "A new version of Fuigo is available: {} -> {}{}",
-                status.current_version,
-                latest_version,
-                channel_label
+                fuigo_tty_utils::untrusted(&status.current_version),
+                fuigo_tty_utils::untrusted(&latest_version),
+                fuigo_tty_utils::untrusted(&channel_label)
             );
         } else {
             fuigo_tty_utils::cli_println!("A new version of Fuigo is available.");
@@ -205,14 +205,14 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     if let Some(latest_version) = status.latest_version.as_deref() {
         fuigo_tty_utils::cli_println!(
             "Fuigo - v{} (latest: {}){}",
-            status.current_version,
-            latest_version,
-            channel_label
+            fuigo_tty_utils::untrusted(&status.current_version),
+            fuigo_tty_utils::untrusted(&latest_version),
+            fuigo_tty_utils::untrusted(&channel_label)
         );
         return Ok(());
     }
 
-    fuigo_tty_utils::cli_println!("Fuigo - v{}{}", status.current_version, channel_label);
+    fuigo_tty_utils::cli_println!("Fuigo - v{}{}", fuigo_tty_utils::untrusted(&status.current_version), fuigo_tty_utils::untrusted(&channel_label));
     Ok(())
 }
 
@@ -728,13 +728,13 @@ pub async fn run_update_if_available(
     if auto_update {
         fuigo_tty_utils::cli_eprintln!(
             "A new version of Fuigo is available: {} -> {}{}",
-            current_version,
-            latest_version,
-            channel_label
+            fuigo_tty_utils::untrusted(&current_version),
+            fuigo_tty_utils::untrusted(&latest_version),
+            fuigo_tty_utils::untrusted(&channel_label)
         );
         if interactive {
             if let Err(e) = run_update_subcommand(run_mode, trigger).await {
-                fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+                fuigo_tty_utils::cli_eprintln!("Update failed: {}", fuigo_tty_utils::untrusted(&e));
             } else if matches!(run_mode, UpdateRunMode::Blocking) {
                 return Ok(true);
             } else {
@@ -742,7 +742,7 @@ pub async fn run_update_if_available(
                 return Ok(false);
             }
         } else if let Err(e) = run_update_subcommand(run_mode, trigger).await {
-            fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+            fuigo_tty_utils::cli_eprintln!("Update failed: {}", fuigo_tty_utils::untrusted(&e));
         } else if matches!(run_mode, UpdateRunMode::Blocking) {
             return Ok(true);
         }
@@ -758,9 +758,9 @@ pub async fn run_update_if_available(
         }
         fuigo_tty_utils::cli_eprintln!(
             "A new version of Fuigo is available: {} -> {}{}",
-            current_version,
-            latest_version,
-            channel_label
+            fuigo_tty_utils::untrusted(&current_version),
+            fuigo_tty_utils::untrusted(&latest_version),
+            fuigo_tty_utils::untrusted(&channel_label)
         );
         if interactive {
             fuigo_tty_utils::cli_eprintln!("{}", PROMPT_UPDATE_NOW);
@@ -772,7 +772,7 @@ pub async fn run_update_if_available(
                     if let Err(e) =
                         run_update_subcommand(run_mode, CliUpdateTrigger::UserCommand).await
                     {
-                        fuigo_tty_utils::cli_eprintln!("Update failed: {}", e);
+                        fuigo_tty_utils::cli_eprintln!("Update failed: {}", fuigo_tty_utils::untrusted(&e));
                     } else if matches!(run_mode, UpdateRunMode::Blocking) {
                         return Ok(true);
                     } else {
@@ -1605,7 +1605,7 @@ async fn download_verified_from_base(
     let binary_name = format!("fuigo-{}-{}", version, platform);
     let binary_path = download_dir.join(&binary_name);
 
-    fuigo_tty_utils::cli_eprintln!("  Downloading fuigo v{} ({})...", version, platform);
+    fuigo_tty_utils::cli_eprintln!("  Downloading fuigo v{} ({})...", fuigo_tty_utils::untrusted(&version), fuigo_tty_utils::untrusted(&platform));
 
     // The downloaded binary is already +x (see `publish_downloaded_artifact`)
     download_cli_artifact_from_gcs(gcs_base_url, &binary_name, &binary_path, true).await?;
@@ -2373,8 +2373,8 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
     fuigo_tty_utils::cli_eprintln!(
         "  Downloading fuigo v{} ({}) from GitHub Releases...",
-        version,
-        platform
+        fuigo_tty_utils::untrusted(&version),
+        fuigo_tty_utils::untrusted(&platform)
     );
 
     download_verified_gh_asset(&tag, &binary_name, &binary_path).await?;
@@ -2689,7 +2689,7 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
         })
         .await;
         update_config.channel = ch.to_string();
-        fuigo_tty_utils::cli_eprintln!("Switched to {} channel.", ch);
+        fuigo_tty_utils::cli_eprintln!("Switched to {} channel.", fuigo_tty_utils::untrusted(&ch));
     }
 }
 
@@ -2737,8 +2737,8 @@ pub async fn run_update(
         }
         fuigo_tty_utils::cli_eprintln!(
             "Installing Fuigo {} (current: {})...",
-            version,
-            current_version
+            fuigo_tty_utils::untrusted(&version),
+            fuigo_tty_utils::untrusted(&current_version)
         );
         fuigo_tty_utils::cli_eprintln!();
         run_install_script(installer, Some(version), update_config, trigger).await?;
@@ -2750,7 +2750,7 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", version);
+        fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", fuigo_tty_utils::untrusted(&version));
         fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
         return Ok(Some(version.to_string()));
     }
@@ -2771,9 +2771,8 @@ pub async fn run_update(
             let stable_ptr = try_fetch_stable_pointer().await;
             write_version_cache(&latest, stable_ptr.as_deref()).await;
             fuigo_tty_utils::cli_eprintln!(
-                "The latest release ({latest}) is not an allowed update; \
-                 keeping the current version ({current_version})."
-            );
+                "The latest release ({}) is not an allowed update; \
+                 keeping the current version ({}).", fuigo_tty_utils::untrusted(&latest), fuigo_tty_utils::untrusted(&current_version));
             refresh_deployment_config().await;
             return Ok(None);
         }
@@ -2787,9 +2786,8 @@ pub async fn run_update(
     };
     if install_target != latest_version {
         fuigo_tty_utils::cli_eprintln!(
-            "Latest available is {latest_version}, but your configured version range \
-             allows {install_target}; installing that instead."
-        );
+            "Latest available is {}, but your configured version range \
+             allows {}; installing that instead.", fuigo_tty_utils::untrusted(&latest_version), fuigo_tty_utils::untrusted(&install_target));
     }
 
     // What's on disk wins over this process's compiled-in version
@@ -2817,7 +2815,7 @@ pub async fn run_update(
                 } else {
                     let stable_ptr = try_fetch_stable_pointer().await;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
-                    fuigo_tty_utils::cli_eprintln!("Already up to date ({}).", effective_current);
+                    fuigo_tty_utils::cli_eprintln!("Already up to date ({}).", fuigo_tty_utils::untrusted(&effective_current));
                     // Retry if a prior sync failed.
                     refresh_deployment_config().await;
                     // The target is on disk even though this call installed nothing
@@ -2867,11 +2865,11 @@ pub async fn run_update(
     {
         fuigo_tty_utils::cli_eprintln!(
             "Forcing reinstall of Fuigo {} (already up to date)",
-            effective_current
+            fuigo_tty_utils::untrusted(&effective_current)
         );
         &effective_current
     } else {
-        fuigo_tty_utils::cli_eprintln!("Updating Fuigo {} → {}", effective_current, install_target);
+        fuigo_tty_utils::cli_eprintln!("Updating Fuigo {} → {}", fuigo_tty_utils::untrusted(&effective_current), fuigo_tty_utils::untrusted(&install_target));
         &install_target
     };
 
@@ -2882,7 +2880,7 @@ pub async fn run_update(
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", target_version);
+    fuigo_tty_utils::cli_eprintln!("  ✓ fuigo v{} installed successfully!", fuigo_tty_utils::untrusted(&target_version));
 
     if !force && std::env::var_os("FUIGO_AUTO_UPDATE").is_none() {
         fuigo_tty_utils::cli_eprintln!("  Please restart Fuigo.");
@@ -2916,7 +2914,7 @@ async fn refresh_deployment_config() {
                 "  Couldn't apply managed configuration. Run `fuigo setup` to retry."
             );
         }
-        Err(e) => fuigo_tty_utils::cli_eprintln!("  Couldn't apply managed configuration. {e}"),
+        Err(e) => fuigo_tty_utils::cli_eprintln!("  Couldn't apply managed configuration. {}", fuigo_tty_utils::untrusted(&e)),
     }
 }
 

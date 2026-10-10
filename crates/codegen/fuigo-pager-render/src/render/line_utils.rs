@@ -28,20 +28,8 @@ pub fn push_owned_lines(src: &[Line<'_>], out: &mut Vec<Line<'static>>) {
     }
 }
 
-/// True for a character unsafe to render from untrusted or server-supplied text.
-/// C0/C1 controls can inject terminal escapes; the bidi-control and zero-width format characters enable Trojan-Source spoofing.
-/// Every place that scrubs untrusted text (chip labels, toast error scrub, the settings editor input) calls this so the set never drifts.
-pub fn is_unsafe_display_char(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{061C}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2060}'..='\u{206F}'
-            | '\u{FEFF}'
-        )
-}
+/// The shared unsafe-display-character set; it lives in `fuigo-tty-utils` so every crate scrubs untrusted text with one definition.
+pub use fuigo_tty_utils::is_unsafe_display_char;
 
 /// Polyfill for nightly-only [`str::floor_char_boundary`].
 /// Snaps a byte index down to the nearest char boundary.
@@ -238,22 +226,11 @@ pub fn cascade_truncate(
 mod tests {
     use super::*;
 
+    /// The re-export is the shared set, widened beyond the bidi and zero-width characters
     #[test]
-    fn is_unsafe_display_char_covers_controls_and_bidi_format() {
-        // Safe: ordinary printable text (incl. legitimate RTL letters).
-        for c in ['a', ' ', '/', '\u{00e9}', '\u{05d0}'] {
-            assert!(!is_unsafe_display_char(c), "{c:?} must be safe");
-        }
-        // Unsafe: C0/C1 controls plus the full bidi-control and zero-width set
-        for c in [
-            '\u{1b}', '\n', '\t', '\u{061C}', '\u{200B}', '\u{200F}', '\u{202E}', '\u{2066}',
-            '\u{2069}', '\u{206F}', '\u{FEFF}',
-        ] {
-            assert!(
-                is_unsafe_display_char(c),
-                "{:#06x} must be unsafe",
-                c as u32
-            );
+    fn is_unsafe_display_char_is_the_widened_shared_set() {
+        for c in ['\u{00AD}', '\u{2028}', '\u{180E}', '\u{FFF9}', '\u{13430}', '\u{1BCA0}', '\u{E0041}'] {
+            assert!(is_unsafe_display_char(c), "U+{:04X}", c as u32);
         }
     }
 

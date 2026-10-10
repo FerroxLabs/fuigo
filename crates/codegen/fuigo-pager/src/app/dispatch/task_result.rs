@@ -430,6 +430,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_degree,
             running_prompt_id,
             scheduler_background_loops,
+            attempt,
         } => handle_session_loaded(
             app,
             agent_id,
@@ -440,6 +441,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             restore_degree,
             running_prompt_id,
             scheduler_background_loops,
+            attempt,
         ),
         TaskResult::SessionMetaFromDisk {
             agent_id,
@@ -470,7 +472,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             session_id,
             error,
-        } => handle_session_load_failed(app, agent_id, session_id, error),
+            attempt,
+        } => handle_session_load_failed(app, agent_id, session_id, error, attempt),
         TaskResult::SessionListLoaded {
             host,
             generation,
@@ -1604,6 +1607,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         chip_elements: Vec::new(),
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
+                        side_question_minimal: false,
                     });
                 agent.show_toast(&format!("Interjection failed. Requeued: {error}"));
             }

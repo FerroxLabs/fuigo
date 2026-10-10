@@ -676,22 +676,43 @@ pub(crate) enum GoalRoleModelChoice {
     /// Use this explicit pair (subject to auth/fail-open at spawn time).
     Explicit(crate::util::config::GoalRoleModel),
 }
+/// Fleet `[models] allowed_models` pin from `requirements.toml` (P169). A list REPLACES the user/project allowlist (a
+/// user list can never widen it); an empty pinned list means unrestricted. [`Self::FailClosed`] is a present-but-
+/// unreadable value or an unreadable requirements file: nothing is selectable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowlistPin {
+    List(Vec<String>),
+    FailClosed,
+}
 /// A requirement pin from `requirements.toml`. Wins over all other sources.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Constrained<T> {
     pin: Option<T>,
     source: Option<crate::config::RequirementSource>,
 }
-impl<T: Clone> Constrained<T> {
+impl<T> Default for Constrained<T> {
+    fn default() -> Self {
+        Self {
+            pin: None,
+            source: None,
+        }
+    }
+}
+impl<T> Constrained<T> {
     pub fn pin(&mut self, value: T, source: crate::config::RequirementSource) {
         self.pin = Some(value);
         self.source = Some(source);
     }
-    pub fn pinned(&self) -> Option<T> {
-        self.pin.clone()
+    pub fn pin_ref(&self) -> Option<&T> {
+        self.pin.as_ref()
     }
     pub fn source(&self) -> Option<&crate::config::RequirementSource> {
         self.source.as_ref()
+    }
+}
+impl<T: Clone> Constrained<T> {
+    pub fn pinned(&self) -> Option<T> {
+        self.pin.clone()
     }
 }
 /// Enforced requirements from `requirements.toml`. Pinned values win over all other sources.
@@ -707,6 +728,8 @@ pub struct Requirements {
     pub respect_gitignore: Constrained<bool>,
     pub remote_fetch: Constrained<bool>,
     pub title_refresh: Constrained<bool>,
+    /// Fleet-pinned `[models] allowed_models` (P169): replaces the user/project list; see [`AllowlistPin`].
+    pub allowed_models: Constrained<AllowlistPin>,
     /// Pins from a requirements layer or an MDM policy, keyed by [`Feature`].
     features: BTreeMap<Feature, Constrained<bool>>,
 }
@@ -1052,6 +1075,70 @@ pub struct PluginsConfig {
     pub cli_plugin_dirs: Vec<std::path::PathBuf>,
 }
 impl PluginsConfig {
+    /// Reads the `[plugins]` table of a whole config, field by field.
+    ///
+    /// A malformed `paths`, `disabled`, `enabled` or `auto_discover` is skipped and named in the returned
+    /// warnings; it never discards the other fields. Dropping the whole table would lose `disabled`
+    /// and silently re-enable the plugins the user turned off (fail-open).
+    pub(crate) fn from_config_lenient(config: &toml::Value) -> (Self, Vec<String>) {
+        let mut out = Self::default();
+        let mut warnings = Vec::new();
+        let Some(plugins) = config.get("plugins") else {
+            return (out, warnings);
+        };
+        let Some(table) = plugins.as_table() else {
+            warnings.push(format!(
+                "[plugins] must be a table, found {}; ignoring it",
+                plugins.type_str()
+            ));
+            return (out, warnings);
+        };
+        let mut list = |key: &str| -> Vec<String> {
+            let Some(value) = table.get(key) else {
+                return Vec::new();
+            };
+            let Some(entries) = value.as_array() else {
+                warnings.push(format!(
+                    "[plugins] {key} must be a list of strings, found {}; ignoring it",
+                    value.type_str()
+                ));
+                return Vec::new();
+            };
+            let mut kept = Vec::new();
+            for entry in entries {
+                match entry.as_str() {
+                    Some(s) => kept.push(s.to_owned()),
+                    None => warnings.push(format!(
+                        "[plugins] {key} has a non-string entry ({}); skipping that entry",
+                        entry.type_str()
+                    )),
+                }
+            }
+            kept
+        };
+        out.paths = list("paths");
+        out.disabled = list("disabled");
+        out.enabled = list("enabled");
+        match table.get("auto_discover") {
+            None => {}
+            Some(toml::Value::Boolean(b)) => out.auto_discover = Some(*b),
+            Some(other) => warnings.push(format!(
+                "[plugins] auto_discover must be true or false, found {}; ignoring it",
+                other.type_str()
+            )),
+        }
+        (out, warnings)
+    }
+
+    /// [`Self::from_config_lenient`], logging each warning so the user sees which field was bad.
+    pub(crate) fn from_config_warn(config: &toml::Value, source: &str) -> Self {
+        let (cfg, warnings) = Self::from_config_lenient(config);
+        for w in &warnings {
+            tracing::warn!("{source}: {w}");
+        }
+        cfg
+    }
+
     /// Merge `enabledPlugins` from Claude settings files into this config.
     ///
     /// Reads `enabledPlugins` from `~/.claude/settings.json` only (user scope).
@@ -1085,14 +1172,35 @@ impl PluginsConfig {
             }
         }
     }
+    /// The discovery config, carrying managed `strictKnownMarketplaces` as a load restriction (P169, Grok 4.7 #1).
     pub(crate) fn to_discovery_config(&self) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
-        fuigo_agent::plugins::discovery::DiscoveryConfig {
+        let restriction = fuigo_workspace::permission::resolution::managed_settings()
+            .marketplace_allowlist
+            .plugin_load_restriction(&fuigo_agent::plugins::InstallRegistry::load());
+        self.to_discovery_config_with(restriction)
+    }
+
+    /// [`Self::to_discovery_config`] with an explicit restriction. Under one, `[plugins].paths` and `--plugin-dir` are
+    /// local sources and are not carried, and `enabled` keeps only allowed full ids (no bare names).
+    pub(crate) fn to_discovery_config_with(
+        &self,
+        restriction: Option<fuigo_agent::plugins::PluginSourceRestriction>,
+    ) -> fuigo_agent::plugins::discovery::DiscoveryConfig {
+        let mut config = fuigo_agent::plugins::discovery::DiscoveryConfig {
             auto_discover: self.auto_discover,
             cli_plugin_dirs: self.cli_plugin_dirs.clone(),
             config_paths: self.paths.iter().map(std::path::PathBuf::from).collect(),
             disabled: self.disabled.clone(),
             enabled: self.enabled.clone(),
+            source_restriction: None,
+        };
+        if let Some(restriction) = restriction {
+            config.cli_plugin_dirs.clear();
+            config.config_paths.clear();
+            restriction.retain_enabled(&mut config.enabled);
+            config.source_restriction = Some(restriction);
         }
+        config
     }
 }
 /// Feedback submission configuration (`[feedback]` in config.toml).
@@ -1426,7 +1534,8 @@ pub struct MarketplaceSourceEntry {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct StorageConfig {
-    /// Number of days to keep stale sessions before cleanup. Default: 30.
+    /// Days a session may stay unused before its whole folder is deleted; older images, videos, downloads and
+    /// terminal logs are also pruned from sessions still in use (their checkpoints and history never are). Default: 30.
     pub cleanup_ttl_days: Option<u32>,
 }
 /// `[paths]` configuration: extra directories to scan for skills, rules, etc.
@@ -3822,13 +3931,12 @@ fn error_reporting_enabled_from_toml(root: &toml::Value) -> Option<bool> {
 fn fuigo_telemetry_env_enabled() -> Option<bool> {
     env_telemetry_mode("FUIGO_TELEMETRY_ENABLED").map(|m| !m.is_disabled())
 }
-/// Load `~/.fuigo/requirements.toml` standalone so the admin pin can beat
-/// env vars.
-/// The merged config layer can't express that: last-merge-wins loses provenance.
+/// The requirements layers merged (user, system, MDM; [`fuigo_config::load_merged_requirements`]), read standalone so the
+/// admin pin can beat env vars. The merged config layer can't express that: last-merge-wins loses provenance.
+/// P183 round 7 (sweep): this read only the user-home file, raw, so a system or MDM pin (`[diagnostics] error_reporting`,
+/// the `features.mcp_*` pins) lost to an env var here, and a broken system file was not kept at its last good copy.
 pub(crate) fn read_requirements_toml() -> Option<toml::Value> {
-    let path = crate::util::fuigo_home::fuigo_home().join("requirements.toml");
-    let content = std::fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok()
+    fuigo_config::load_merged_requirements()
 }
 /// Resolve the external-OTEL master switch exactly the way the external stream's activation does.
 /// **Requirement pin > `FUIGO_EXTERNAL_OTEL` env > `[telemetry].otel_enabled` config layer (managed config included) > off**.
@@ -4011,10 +4119,16 @@ pub fn apply_remote_settings_side_effects(settings: Option<&crate::util::config:
 /// Read `env.<key>` from Claude-compat `managed_settings.json`.
 /// `Some(true)` indicates a force-off signal from a Mac-MDM-style admin policy.
 fn managed_settings_env_flag(key: &str) -> Option<bool> {
-    let path = fuigo_config::claude_managed_settings_path()?;
-    let content = std::fs::read_to_string(&path).ok()?;
-    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
-    fuigo_workspace::permission::resolution::json_env_flag(json.get("env"), key)
+    // P183 round 7 (sweep): read the way startup validated it (types checked, last good copy kept); a broken file that was
+    // never validated counts as "disabled" (these flags only ever turn things off)
+    let path = fuigo_config::claude_managed_settings_probe_path()?;
+    match fuigo_config::managed_settings_json(&path) {
+        fuigo_config::ManagedSettingsJson::Absent => None,
+        fuigo_config::ManagedSettingsJson::Broken(_) => Some(true),
+        fuigo_config::ManagedSettingsJson::Loaded(json) => {
+            fuigo_workspace::permission::resolution::json_env_flag(json.get("env"), key)
+        }
+    }
 }
 /// Assemble the final model map. Priority (highest wins):
 /// config.toml `[model.*]` > prefetched (remote) > hardcoded defaults.
@@ -6107,7 +6221,8 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
 }
 /// Resolve a standalone `SamplerConfig` for an auxiliary model slug (image description, session summary, ...).
 /// Resolved through the catalog so a `[model.*]` override redirects it to its own endpoint, credentials, and routing `model`.
-/// On `None` the caller falls back to the active session's model.
+/// On `None` the caller falls back to the active session's model. `allowlist` is required: a fleet pin binds helper
+/// sampling (P169), so a caller cannot reach this without saying which allowlist is in force.
 pub(crate) fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -6116,6 +6231,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
     disable_api_key_auth: bool,
     alpha_test_key: Option<String>,
     client_version: Option<String>,
+    allowlist: &crate::agent::models::EffectiveAllowlist<'_>,
 ) -> Option<SamplerConfig> {
     resolve_aux_model_sampling_config_inner(
         model_id,
@@ -6127,6 +6243,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
         alpha_test_key,
         client_version,
         HelperModelChoice::Default,
+        allowlist,
     )
 }
 /// [`resolve_aux_model_sampling_config`] for the credential the `AuthManager` holds.
@@ -6142,6 +6259,7 @@ pub(crate) fn resolve_aux_model_sampling_config_for_held(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     choice: HelperModelChoice,
+    allowlist: &crate::agent::models::EffectiveAllowlist<'_>,
 ) -> Option<SamplerConfig> {
     resolve_aux_model_sampling_config_inner(
         model_id,
@@ -6153,6 +6271,7 @@ pub(crate) fn resolve_aux_model_sampling_config_for_held(
         alpha_test_key,
         client_version,
         choice,
+        allowlist,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -6166,7 +6285,16 @@ fn resolve_aux_model_sampling_config_inner(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     choice: HelperModelChoice,
+    allowlist: &crate::agent::models::EffectiveAllowlist<'_>,
 ) -> Option<SamplerConfig> {
+    // P169: a fleet `allowed_models` pin binds helper sampling too; `None` sends the caller to the session model.
+    if !crate::agent::models::helper_model_admitted(allowlist, models, model_id) {
+        tracing::warn!(
+            model = %model_id,
+            "helper model is outside the organization's allowed_models policy; not sampling it"
+        );
+        return None;
+    }
     let catalog_entry = find_model_by_id(models, model_id).cloned();
     if let Some(entry) = &catalog_entry {
         let credentials = resolve_credentials_enforced(entry, session_key, disable_api_key_auth);
@@ -6659,7 +6787,15 @@ pub(crate) fn resolve_web_search_sampling_config(
     alpha_test_key: Option<String>,
     client_version: Option<String>,
     endpoints: &EndpointsConfig,
+    allowlist: &crate::agent::models::EffectiveAllowlist<'_>,
 ) -> Option<SamplerConfig> {
+    if !crate::agent::models::helper_model_admitted(allowlist, models, model_id) {
+        tracing::warn!(
+            web_search_model = %model_id,
+            "web search model is outside the organization's allowed_models policy; disabling web search"
+        );
+        return None;
+    }
     let resolved = if let Some(entry) = find_model_by_id(models, model_id).cloned() {
         let credentials = resolve_credentials_enforced(&entry, session_key, disable_api_key_auth);
         if credentials.api_key.is_none() && entry.effective_auth_provider().is_some_and(|p| p.subscription_provider().is_none()) {

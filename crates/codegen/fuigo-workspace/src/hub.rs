@@ -399,8 +399,419 @@ impl SessionRoutedToolHandler {
     fn name(&self) -> &str {
         self.tool_id.as_str()
     }
+    #[cfg(test)]
     pub(crate) fn permission_access(&self, args: &Value) -> Option<crate::permission::AccessKind> {
         crate::permission::access_kind_for_hub_tool(self.semantic_kind, self.name(), args)
+    }
+    /// P173: everything this call touches, for the local policy: the toolset's own classification of the parsed input
+    /// (the same [`AccessKind::from`](crate::permission::AccessKind) a local call gets, after parameter renames and for
+    /// whichever implementation backs this name), plus the name-based accesses of
+    /// [`hub_policy_accesses`](crate::permission::hub_policy_accesses).
+    ///
+    /// A typed built-in is judged by its parsed input alone (every batch entry and patch target included); the
+    /// name-based list is added only where the toolset's classification is generic (a runtime-registered or MCP tool)
+    /// or the name is unknown. `toolset` is the snapshot the call will also run on. Arguments that do not parse fail
+    /// here with the parse error: the call could not run with them anyway.
+    #[cfg(test)]
+    async fn policy_accesses(
+        &self,
+        toolset: &fuigo_tools::registry::types::FinalizedToolset,
+        args: &Value,
+    ) -> Result<Vec<crate::permission::AccessKind>, ToolError> {
+        Ok(self.policy_input(toolset, args).await?.accesses)
+    }
+    /// The call's accesses (see `policy_accesses`) plus what else the check needs to know about the call: where a bash runs (its
+    /// `workdir`) and whether the search tool behind the name applies the Read-deny excludes itself.
+    ///
+    /// Everything is read from the arguments as the tool receives them (after the toolset's parameter renames, Grok
+    /// #3): the parsed input for typed tools, and the renamed arguments for the name-based accesses.
+    async fn policy_input(
+        &self,
+        toolset: &fuigo_tools::registry::types::FinalizedToolset,
+        args: &Value,
+    ) -> Result<HubCallInput, ToolError> {
+        use fuigo_tools::types::ToolInput;
+        let canonical = toolset
+            .canonical_params(self.name(), args)
+            .unwrap_or_else(|| args.clone());
+        let by_name =
+            || crate::permission::hub_policy_accesses(self.semantic_kind, self.name(), &canonical);
+        let input = match toolset.try_parse(self.name(), args).await {
+            Ok(input) => input,
+            // An unknown tool is reported by the dispatch below, unchanged.
+            Err(e) if e.kind == ToolErrorKind::NotFound => {
+                return Ok(HubCallInput {
+                    workdir: hub_bash_workdir(&by_name(), None, &canonical),
+                    accesses: by_name(),
+                    search_excludes_applied: false,
+                    patch_targets: crate::permission::hub_patch_targets_by_name(
+                        self.name(),
+                        &canonical,
+                    ),
+                    read_targets: None,
+                });
+            }
+            Err(e) => return Err(e),
+        };
+        let mut accesses = crate::permission::hub_input_accesses(&input);
+        // P184: the patch targets judged per file come from the parsed input of a typed `apply_patch`, and from the
+        // renamed arguments of a generic tool named `apply_patch`.
+        let mut patch_targets = crate::permission::hub_patch_targets(&input);
+        if crate::permission::hub_input_is_generic(&input) {
+            accesses.extend(by_name());
+            patch_targets = patch_targets
+                .or_else(|| crate::permission::hub_patch_targets_by_name(self.name(), &canonical));
+        }
+        let parsed_workdir = match &input {
+            ToolInput::Bash(b) => b.workdir.clone(),
+            _ => None,
+        };
+        // The search tools that pass the Read-deny globs to ripgrep as excludes: the native grep, codex
+        // `grep_files`, and the OpenCode `grep` / `glob` (dynamic inputs, told apart by their registry id). Anything
+        // else that searches (an MCP or runtime tool named like one) is walked without trusting an exclude.
+        let registry_id = toolset.registry_id_for_tool_name(self.name());
+        let search_excludes_applied = match &input {
+            ToolInput::Grep(_) | ToolInput::CodexGrepFiles(_) => true,
+            ToolInput::Dynamic(_) => registry_id
+                .as_deref()
+                .is_some_and(|id| id == "grep" || id == "glob"),
+            _ => false,
+        };
+        // The OpenCode `grep` and `glob` are dynamic inputs, which the local classification reads as a plain `Read` of
+        // the root, and the name-based supplement only sees them under their own names: judge them as the searches
+        // they are, from the renamed arguments, whatever name the hub exposes them under. `glob` lists what its
+        // `pattern` matches with `rg --files --glob <pattern>`, which also reaches ignored files, so the walk uses that
+        // pattern; `grep` filters by `include`.
+        if matches!(input, ToolInput::Dynamic(_))
+            && let Some(filter_key) = match registry_id.as_deref() {
+                Some("grep") => Some("include"),
+                Some("glob") => Some("pattern"),
+                _ => None,
+            }
+        {
+            let arg = |k: &str| {
+                canonical
+                    .get(k)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+            };
+            accesses.retain(|a| !matches!(a, crate::permission::AccessKind::Grep { .. }));
+            accesses.push(crate::permission::AccessKind::Grep {
+                path: arg("path"),
+                glob: arg(filter_key),
+            });
+        }
+        Ok(HubCallInput {
+            workdir: hub_bash_workdir(&accesses, parsed_workdir, &canonical),
+            accesses,
+            search_excludes_applied,
+            patch_targets,
+            read_targets: crate::permission::read_targets_for(&input),
+        })
+    }
+}
+/// What [`SessionRoutedToolHandler::policy_input`] found out about one call.
+struct HubCallInput {
+    accesses: Vec<crate::permission::AccessKind>,
+    /// The directory a bash runs in when it is not the session cwd.
+    workdir: Option<String>,
+    search_excludes_applied: bool,
+    /// An `apply_patch` call's targets, or why its patch is refused (P184); `None` for any other call.
+    patch_targets: Option<Result<Vec<String>, String>>,
+    /// The files the call's reader opens (P198).
+    read_targets: Option<crate::permission::ReadTargets>,
+}
+/// Where a bash call runs when it names a directory: the parsed input's `workdir`, else the renamed argument (a
+/// generic bash). `None` for a call that is not a bash.
+fn hub_bash_workdir(
+    accesses: &[crate::permission::AccessKind],
+    parsed: Option<String>,
+    canonical: &Value,
+) -> Option<String> {
+    if !accesses
+        .iter()
+        .any(|a| matches!(a, crate::permission::AccessKind::Bash(_)))
+    {
+        return None;
+    }
+    parsed
+        .or_else(|| canonical.get("workdir").and_then(Value::as_str).map(str::to_owned))
+        .filter(|w| !w.is_empty())
+}
+/// Facts about one hub-routed call that the policy check needs besides its accesses.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct HubCallFacts {
+    /// Where the call runs when it is not the session cwd (a bash `workdir`); judged in addition to the session cwd.
+    pub(crate) exec_cwd: Option<std::path::PathBuf>,
+    /// The toolset's display cwd, which the tools use to resolve model paths.
+    pub(crate) display_cwd: Option<std::path::PathBuf>,
+    /// Whether the search tool applies the Read-deny excludes itself.
+    pub(crate) search_excludes_applied: bool,
+    /// An `apply_patch` call's targets, judged per file as a local patch is, or why the patch is refused (it does not
+    /// parse, or writes nothing), as a local one is (P184).
+    pub(crate) patch_targets: Option<Result<Vec<String>, String>>,
+    /// The files the call's reader opens (P198), judged in every spelling as a local read is.
+    pub(crate) read_targets: Option<crate::permission::ReadTargets>,
+}
+/// P173: a hub-routed call answers to the workspace's local permission policy (the same rules, protected paths and
+/// side-effecting-tool floor as a local call), with or without `FUIGO_HITL_PERMISSION_LIVE`. See
+/// `hub_policy_verdict`.
+///
+/// `accesses` are judged (built from the real, path-virtualized arguments the tool will see); `prompt_accesses` are
+/// the same accesses built from the model-view arguments, shown in the hub prompt. `facts` carry where the call runs
+/// when it is not the session cwd (a bash `workdir`), the display cwd model paths resolve against, and whether the
+/// search tool applies the Read-deny excludes itself. The policy is resolved per call from the session's
+/// cwd, so a config edit applies to the next call. Every access that needs approval is asked for on its own; one
+/// refusal refuses the call. Returns the resolved Read-deny globs, which the caller hands to this call's search.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn enforce_hub_policy(
+    workspace: &WorkspaceHandle,
+    session: &crate::session::WorkspaceSession,
+    session_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    accesses: &[crate::permission::AccessKind],
+    prompt_accesses: &[crate::permission::AccessKind],
+    facts: HubCallFacts,
+) -> Result<Vec<String>, ToolError> {
+    use crate::permission::{HubPolicyContext, hub_policy_verdict_all};
+    // P184: a patch that does not parse, or writes nothing, is refused in every mode before anything is judged.
+    let patch_targets = match facts.patch_targets {
+        Some(Err(message)) => {
+            let reason = format!("apply_patch refused: {message}");
+            tracing::info!(
+                tool = %tool_name,
+                session = %session_id,
+                call_id = %call_id,
+                %reason,
+                "hub tool call refused by the local permission policy"
+            );
+            return Err(ToolError::new(
+                ToolErrorKind::PermissionDenied,
+                format!("tool call refused by the local permission policy: {reason}"),
+            ));
+        }
+        Some(Ok(targets)) => targets,
+        None => Vec::new(),
+    };
+    if accesses.is_empty() {
+        return Ok(Vec::new());
+    }
+    let session_cwd = session.cwd().to_path_buf();
+    let config = crate::permission::resolution::resolve_permission_config_with_fallback(
+        &session_cwd,
+        workspace.shared.project_permissions_trusted,
+    )
+    .await;
+    let deny_read_globs = config
+        .as_ref()
+        .map(crate::permission::resolution::deny_read_globs_from_config)
+        .unwrap_or_default();
+    let search_excludes_applied = facts.search_excludes_applied;
+    let walk_searches = config
+        .as_ref()
+        .is_some_and(|c| crate::permission::hub_searches_need_walk(c, search_excludes_applied));
+    let prompt_policy = config
+        .as_ref()
+        .map(|c| c.prompt_policy)
+        .unwrap_or_default();
+    let policy = config.map(crate::permission::CompiledPolicy::new);
+    // The managed always-approve pin clamps hub always-approve exactly as it clamps the local one.
+    let yolo =
+        session.yolo_mode() && crate::permission::resolution::yolo_disabled_by_policy().is_none();
+    let default_prompts = crate::permission::hitl_permission_live_enabled();
+    let judged = accesses.to_vec();
+    let excludes = deny_read_globs.clone();
+    // A `workdir` is judged as well as, never instead of, the session cwd: a tool that ignores the argument runs in the
+    // session cwd, so the call must pass in both.
+    let mut cwds = vec![session_cwd];
+    cwds.extend(facts.exec_cwd.filter(|w| *w != cwds[0]));
+    let display_cwd = facts.display_cwd;
+    // Every spelling of the files a read opens, as the local manager judges them (P198).
+    let read_spellings = crate::permission::hub_read_spellings(
+        policy.is_some(),
+        &cwds[0],
+        display_cwd.as_deref(),
+        facts.read_targets.as_ref(),
+    )
+    .await;
+    // The verdict can scan repository config (ambient git risk) and walk a search's files: keep it off the async
+    // workers.
+    let verdict = tokio::task::spawn_blocking(move || {
+        let mut merged = crate::permission::HubCallVerdict {
+            denied: None,
+            asks: Vec::new(),
+        };
+        for cwd in &cwds {
+            let ctx = HubPolicyContext {
+                policy: policy.as_ref(),
+                prompt_policy,
+                cwd,
+                display_cwd: display_cwd.as_deref(),
+                yolo,
+                default_prompts,
+                search_excludes: &excludes,
+                search_excludes_applied,
+                walk_searches,
+                patch_targets: &patch_targets,
+                read_spellings: &read_spellings,
+            };
+            let verdict = hub_policy_verdict_all(&judged, &ctx);
+            if verdict.denied.is_some() {
+                return verdict;
+            }
+            for ask in verdict.asks {
+                if !merged.asks.iter().any(|(_, i)| *i == ask.1) {
+                    merged.asks.push(ask);
+                }
+            }
+        }
+        merged
+    })
+    .await;
+    let verdict = match verdict {
+        Ok(verdict) => verdict,
+        Err(e) => crate::permission::HubCallVerdict {
+            denied: Some((format!("the permission check did not complete: {e}"), 0)),
+            asks: Vec::new(),
+        },
+    };
+    if let Some((reason, _)) = verdict.denied {
+        tracing::info!(
+            tool = %tool_name,
+            session = %session_id,
+            call_id = %call_id,
+            %reason,
+            "hub tool call refused by the local permission policy"
+        );
+        return Err(ToolError::new(
+            ToolErrorKind::PermissionDenied,
+            format!("tool call refused by the local permission policy: {reason}"),
+        ));
+    }
+    if verdict.asks.is_empty() {
+        return Ok(deny_read_globs);
+    }
+    let transport = workspace.hub_server_blocking().await.and_then(|server| {
+        crate::permission::ToolServerPermissionTransport::from_session_id(server, session_id)
+    });
+    crate::permission::settle_hub_asks(
+        transport
+            .as_ref()
+            .map(|t| t as &dyn crate::permission::PermissionHookTransport),
+        &verdict.asks,
+        accesses,
+        prompt_accesses,
+        call_id,
+        tool_name,
+    )
+    .await?;
+    Ok(deny_read_globs)
+}
+/// P173: a session MCP server's tool as advertised to the hub, gated by the local permission policy like every other
+/// hub-routed call. The bridge handlers that `workspace.configure_mcp` and the bind-time MCP set advertise would
+/// otherwise reach the MCP server directly.
+pub(crate) struct McpPolicyGatedHandler {
+    inner: Arc<dyn ToolServerHandler>,
+    /// `server__tool`, the name local MCP rules match.
+    mcp_name: String,
+    workspace: WorkspaceHandle,
+}
+impl McpPolicyGatedHandler {
+    pub(crate) fn new(inner: Arc<dyn ToolServerHandler>, workspace: WorkspaceHandle) -> Self {
+        let tool_id = inner.tool_id();
+        let mcp_name = match inner.description().namespace {
+            Some(namespace) => format!(
+                "{namespace}{}{}",
+                crate::permission::MCP_TOOL_NAME_DELIMITER,
+                tool_id.as_str()
+            ),
+            None => tool_id.as_str().to_owned(),
+        };
+        Self {
+            inner,
+            mcp_name,
+            workspace,
+        }
+    }
+}
+#[async_trait]
+impl ToolServerHandler for McpPolicyGatedHandler {
+    fn tool_id(&self) -> ToolId {
+        self.inner.tool_id()
+    }
+    fn description(&self) -> ToolDescription {
+        self.inner.description()
+    }
+    fn input_schema(&self) -> Option<Value> {
+        self.inner.input_schema()
+    }
+    async fn handle_call(&self, ctx: ToolCallContext, args: Value) -> ToolStream<TypedToolOutput> {
+        let Some(session_id) = ctx
+            .extensions
+            .get::<fuigo_tool_runtime::SessionContext>()
+            .map(|s| s.0.clone())
+        else {
+            return terminal_only(Err(ToolError::new(
+                ToolErrorKind::InvalidArguments,
+                "tool_call_request missing session_id",
+            )));
+        };
+        let Some(session) = self.workspace.session(&session_id) else {
+            return terminal_only(Err(ToolError::new(
+                ToolErrorKind::InvalidArguments,
+                format!("session not bound: {session_id}"),
+            )));
+        };
+        let call_id = ctx.call_id.to_string();
+        let access = [crate::permission::AccessKind::MCPTool {
+            name: self.mcp_name.clone(),
+            input: args.clone(),
+        }];
+        if let Err(e) = enforce_hub_policy(
+            &self.workspace,
+            &session,
+            &session_id,
+            &call_id,
+            &self.mcp_name,
+            &access,
+            &access,
+            HubCallFacts::default(),
+        )
+        .await
+        {
+            return terminal_only(Err(e));
+        }
+        self.inner.handle_call(ctx, args).await
+    }
+}
+/// P173: the hub registry a session's MCP tools are advertised through; every handler it registers is wrapped in
+/// [`McpPolicyGatedHandler`].
+pub(crate) struct PolicyGatedRegistry {
+    pub(crate) server: ToolServer,
+    pub(crate) workspace: WorkspaceHandle,
+}
+impl crate::mcp::HubToolRegistry for PolicyGatedRegistry {
+    async fn register_tool_dynamic(
+        &self,
+        handler: Arc<dyn ToolServerHandler>,
+        sessions: Vec<fuigo_tool_protocol::SessionId>,
+        life: u64,
+    ) -> Result<(), ClientError> {
+        let gated: Arc<dyn ToolServerHandler> =
+            Arc::new(McpPolicyGatedHandler::new(handler, self.workspace.clone()));
+        self.server.register_tool_dynamic(gated, sessions, life).await
+    }
+    async fn unregister_tool_dynamic(
+        &self,
+        tool_id: &ToolId,
+        session_id: &fuigo_tool_protocol::SessionId,
+        life: u64,
+    ) -> Result<bool, ClientError> {
+        self.server
+            .unregister_tool_dynamic(tool_id, session_id, life)
+            .await
     }
 }
 /// RAII guard that brackets a tool call's activity-tracker accounting.
@@ -481,60 +892,59 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             }
         };
         let call_id = ctx.call_id.to_string();
-        if crate::permission::hitl_permission_live_enabled()
-            && !session.yolo_mode()
-            && let Some(access) = self.permission_access(&args)
-        {
-            let transport = self
-                .workspace
-                .hub_server_blocking()
-                .await
-                .and_then(|server| {
-                    crate::permission::ToolServerPermissionTransport::from_session_id(
-                        server, session_id,
-                    )
-                });
-            match transport {
-                Some(transport) => {
-                    let outcome = crate::permission::request_permission_via_hub(
-                        &transport, &access, &call_id, None,
-                    )
-                    .await;
-                    if !crate::permission::prompt_outcome_allows(&outcome) {
-                        use crate::permission::PromptOutcome;
-                        let deny_msg = match &outcome {
-                            PromptOutcome::FollowupMessage(msg) => {
-                                format!("tool permission redirected: {msg}")
-                            }
-                            _ => format!("tool permission denied for {}", self.name()),
-                        };
-                        tracing::info!(
-                            tool = %self.name(),
-                            session = %session_id,
-                            call_id = %call_id,
-                            ?outcome,
-                            "tool-permission denied via hub; rejecting tool call"
-                        );
-                        return terminal_only(Err(ToolError::new(
-                            ToolErrorKind::PermissionDenied,
-                            deny_msg,
-                        )));
-                    }
-                }
-                None => {
-                    tracing::warn!(
-                        tool = %self.name(),
-                        session = %session_id,
-                        "FUIGO_HITL_PERMISSION_LIVE set but no hub ToolServer; rejecting guarded tool"
-                    );
-                    return terminal_only(Err(ToolError::new(
-                        ToolErrorKind::PermissionDenied,
-                        "tool permission unavailable (no hub transport)",
-                    )));
-                }
-            }
-        }
+        let virt = session.path_virtualization().cloned();
+        let real_args = match &virt {
+            Some(v) => v.rewrite_json_inbound(args.clone()),
+            None => args.clone(),
+        };
+        // One toolset snapshot from the permission check to the dispatch: a rebind while the hub prompt is open cannot
+        // swap in another implementation than the one that was judged.
         let toolset = session.toolset();
+        let input = match self.policy_input(&toolset, &real_args).await {
+            Ok(input) => input,
+            Err(e) => return terminal_only(Err(e)),
+        };
+        let accesses = input.accesses;
+        let prompt_accesses = match &virt {
+            Some(_) => self
+                .policy_input(&toolset, &args)
+                .await
+                .map(|i| i.accesses)
+                .unwrap_or_default(),
+            None => accesses.clone(),
+        };
+        // A bash `workdir` (after renames, Grok #3) is where the command runs: judge it there too, resolved the way
+        // the OpenCode bash resolves it (absolute, or under the session cwd).
+        let exec_cwd = input.workdir.map(|w| session.cwd().join(w));
+        let display_cwd = toolset
+            .resources
+            .lock()
+            .await
+            .get::<fuigo_tools::types::resources::DisplayCwd>()
+            .map(|d| d.0.clone());
+        let facts = HubCallFacts {
+            exec_cwd,
+            display_cwd,
+            search_excludes_applied: input.search_excludes_applied,
+            patch_targets: input.patch_targets,
+            read_targets: input.read_targets,
+        };
+        let deny_read_globs = match enforce_hub_policy(
+            &self.workspace,
+            &session,
+            session_id,
+            &call_id,
+            self.name(),
+            &accesses,
+            &prompt_accesses,
+            facts,
+        )
+        .await
+        {
+            Ok(globs) => globs,
+            Err(e) => return terminal_only(Err(e)),
+        };
+        let args = real_args;
         tracing::debug!(
             tool = %self.name(),
             call_id = %call_id,
@@ -542,12 +952,10 @@ impl ToolServerHandler for SessionRoutedToolHandler {
             "dispatching tool call"
         );
         tracker.tool_call_started(&call_id, self.name(), hub_session.as_deref());
-        let virt = session.path_virtualization().cloned();
-        let args = match &virt {
-            Some(v) => v.rewrite_json_inbound(args),
-            None => args,
-        };
-        let inner = toolset.call_streaming(self.name(), args, &call_id, None);
+        // Search tools skip what Read rules deny (grep under a permitted root), as in a local session. The policy's
+        // globs ride on this call only (Grok #9): nothing shared is written, so a concurrent call cannot replace them.
+        let inner =
+            toolset.call_streaming_with_deny_read_globs(self.name(), args, &call_id, deny_read_globs);
         let tracker = self.workspace.shared.activity_tracker.clone();
         let name = self.name().to_owned();
         let session_label = session_id.to_owned();
@@ -672,6 +1080,9 @@ pub(crate) fn client_error_to_workspace(err: ClientError) -> WorkspaceError {
 pub(crate) fn hub_result<T>(result: Result<T, ClientError>) -> WorkspaceResult<T> {
     result.map_err(client_error_to_workspace)
 }
+#[cfg(test)]
+#[path = "hub_p173_tests.rs"]
+mod p173_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

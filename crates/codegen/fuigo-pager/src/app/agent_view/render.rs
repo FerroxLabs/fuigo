@@ -2326,14 +2326,7 @@ impl AgentView {
                         .tracker
                         .running_execute_tool_call_id()
                         .is_some();
-                let is_pending_user_input = matches!(
-                    self.blocking_card(),
-                    Some(
-                        BlockingCard::Permission
-                            | BlockingCard::Question
-                            | BlockingCard::McpElicitation
-                    )
-                );
+                let is_pending_user_input = self.is_awaiting_user_answer();
                 let goal_verifying = self
                     .goal_state
                     .as_ref()

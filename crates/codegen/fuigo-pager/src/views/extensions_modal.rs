@@ -126,6 +126,12 @@ fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGr
     }
 }
 
+/// A marketplace catalog string as shown in a row: tag characters, soft hyphens, line separators and other invisible
+/// format characters are dropped and controls become spaces. Catalog text is third-party, so nothing in it may hide.
+fn marketplace_text(text: &str) -> String {
+    fuigo_tty_utils::scrub_unsafe_display(text, Some(' ')).into_owned()
+}
+
 fn is_official_marketplace_source(
     source: &fuigo_hooks_plugins_types::MarketplaceScanResult,
 ) -> bool {
@@ -1845,6 +1851,11 @@ pub struct ExtensionsModalState {
     /// Maps picker entry index to original data index (for action dispatch).
     /// Rebuilt every render. `None` for headers or error entries.
     pub entry_data_indices: Vec<Option<usize>>,
+    /// Marketplace tab: picker row to the plugin it showed (its index, raw name and relative path), as of the last render.
+    /// A label cannot name a plugin (two names can clean to one label), and the query or the catalog can change between a
+    /// render and the next key, so the row records which plugin it drew; Install runs the live relative path, so the index
+    /// still means it only while the name and the path both match.
+    pub marketplace_row_plugins: std::collections::HashMap<usize, (usize, String, String)>,
     /// Cached entry labels from last render (for group header identification in input handler).
     pub entry_labels_cache: Vec<String>,
     /// Maps picker entry index to group key for collapse/expand.
@@ -1916,6 +1927,7 @@ impl ExtensionsModalState {
             // PickerState mode is vestigial; ModalWindow handles framing
             picker_state: picker::PickerState::default(),
             entry_data_indices: Vec::new(),
+            marketplace_row_plugins: std::collections::HashMap::new(),
             entry_labels_cache: Vec::new(),
             entry_group_keys: Vec::new(),
             entry_non_selectable: Vec::new(),
@@ -2152,7 +2164,42 @@ impl ExtensionsModalState {
         }
         // Match plugin by name (entry_labels_cache stores plugin.name for plugin entries).
         let label = self.entry_labels_cache.get(sel)?;
-        let plugin_idx = source.plugins.iter().position(|p| p.name == *label)?;
+        // The row records which plugin it drew. A label cannot name one (`de\u{ad}ploy` and `deploy` clean to the same
+        // label) and the query or catalog may have changed since the render, so the label is only a fallback for a state
+        // no frame has drawn, and only when exactly one plugin has that cleaned name.
+        let plugin_idx = match self.marketplace_row_plugins.get(&sel) {
+            // The catalog can be replaced between a render and a key: the index counts only while it still names the
+            // plugin the row drew; otherwise the row's raw name finds it (as the label did before), or nothing does
+            Some((pi, raw, rel)) => {
+                let same = |p: &fuigo_hooks_plugins_types::MarketplacePluginEntry| {
+                    p.name == *raw && p.relative_path == *rel
+                };
+                if source.plugins.get(*pi).is_some_and(same) {
+                    *pi
+                } else {
+                    // On an index miss the exact (name, path) pair counts only when exactly one entry carries it
+                    let mut found = source.plugins.iter().enumerate().filter(|(_, p)| same(p)).map(|(i, _)| i);
+                    let only = found.next()?;
+                    if found.next().is_some() {
+                        return None;
+                    }
+                    only
+                }
+            }
+            None => {
+                let mut named = source
+                    .plugins
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| marketplace_text(&p.name) == *label)
+                    .map(|(pi, _)| pi);
+                let only = named.next()?;
+                if named.next().is_some() {
+                    return None;
+                }
+                only
+            }
+        };
         Some((source_idx, Some(plugin_idx)))
     }
 
@@ -2715,6 +2762,8 @@ pub fn render_extensions_modal(
     // The mapping is passed as locals to `action_key_footer_desc_for_mapping`
     // ── Build PickerEntry list for current tab ──
     // We build owned data here and reference it for the picker.
+    let mut marketplace_row_plugins: std::collections::HashMap<usize, (usize, String, String)> =
+        std::collections::HashMap::new();
     let mut entry_labels: Vec<String> = Vec::new();
     let mut entry_right_labels: Vec<String> = Vec::new();
     let mut entry_desc_lines: Vec<Vec<String>> = Vec::new();
@@ -3053,14 +3102,14 @@ pub fn render_extensions_modal(
                             !searching && state.marketplace_collapsed_sources.contains(&si);
                         entry_labels.push(format!(
                             "{} ({})",
-                            source.source_name,
+                            marketplace_text(&source.source_name),
                             plugin_count_label(source.plugins.len())
                         ));
                         entry_right_labels.push(String::new());
                         entry_desc_lines.push(vec![]);
                         entry_summary_lines.push(vec![]);
                         if let Some(ref err) = source.error {
-                            entry_fields.push(vec![("error".to_string(), err.clone())]);
+                            entry_fields.push(vec![("error".to_string(), marketplace_text(err))]);
                         } else {
                             entry_fields.push(vec![]);
                         }
@@ -3089,16 +3138,21 @@ pub fn render_extensions_modal(
                                 "update_available" => "[update available]",
                                 _ => "",
                             };
-                            entry_labels.push(plugin.name.clone());
-                            let right = match (plugin.version.as_deref(), plugin.author.as_deref())
-                            {
+                            marketplace_row_plugins.insert(
+                                entry_labels.len(),
+                                (pi, plugin.name.clone(), plugin.relative_path.clone()),
+                            );
+                            entry_labels.push(marketplace_text(&plugin.name));
+                            let version = plugin.version.as_deref().map(marketplace_text);
+                            let author = plugin.author.as_deref().map(marketplace_text);
+                            let right = match (version.as_deref(), author.as_deref()) {
                                 (Some(v), Some(a)) => format!("v{v} by {a}"),
                                 (Some(v), None) => format!("v{v}"),
                                 (None, Some(a)) => format!("by {a}"),
                                 (None, None) => String::new(),
                             };
                             entry_right_labels.push(right);
-                            let desc = plugin.description.as_deref().unwrap_or("");
+                            let desc = marketplace_text(plugin.description.as_deref().unwrap_or(""));
                             if desc.is_empty() {
                                 entry_desc_lines.push(vec![]);
                             } else {
@@ -3111,16 +3165,16 @@ pub fn render_extensions_modal(
                             // Fields for expanded view.
                             let mut fields = Vec::new();
                             if let Some(ref version) = plugin.version {
-                                fields.push(("version".to_string(), version.clone()));
+                                fields.push(("version".to_string(), marketplace_text(version)));
                             }
                             if let Some(ref author) = plugin.author {
-                                fields.push(("author".to_string(), author.clone()));
+                                fields.push(("author".to_string(), marketplace_text(author)));
                             }
                             if let Some(ref category) = plugin.category {
-                                fields.push(("category".to_string(), category.clone()));
+                                fields.push(("category".to_string(), marketplace_text(category)));
                             }
                             if !plugin.tags.is_empty() {
-                                fields.push(("tags".to_string(), plugin.tags.join(", ")));
+                                fields.push(("tags".to_string(), marketplace_text(&plugin.tags.join(", "))));
                             }
                             match &plugin.components {
                                 Some(components) if !components.is_empty() => {
@@ -3142,9 +3196,9 @@ pub fn render_extensions_modal(
                                 }
                             }
                             if plugin.install_status != "not_installed" {
-                                fields.push(("status".to_string(), plugin.install_status.clone()));
+                                fields.push(("status".to_string(), marketplace_text(&plugin.install_status)));
                                 if let Some(ref iv) = plugin.installed_version {
-                                    fields.push(("installed".to_string(), iv.clone()));
+                                    fields.push(("installed".to_string(), marketplace_text(iv)));
                                 }
                             }
                             entry_fields.push(fields);
@@ -3162,7 +3216,7 @@ pub fn render_extensions_modal(
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.marketplace_data {
-                    entry_labels.push(format!("Error: {}", msg));
+                    entry_labels.push(format!("Error: {}", marketplace_text(msg)));
                     entry_right_labels.push(String::new());
                     entry_desc_lines.push(vec![]);
                     entry_summary_lines.push(vec![]);
@@ -3241,10 +3295,14 @@ pub fn render_extensions_modal(
                             // Summary line: tools count and enabled count
                             // P152: say why the server is unavailable instead of guessing, on the collapsed row too
                             // (collapsed rows render only their summary line, Astra r1 #6).
-                            let reason_line = server
-                                .status_reason
-                                .as_deref()
-                                .map(|reason| format!("Not connected: {reason}"));
+                            let reason_line = server.status_reason.as_deref().map(|reason| {
+                                if server.status == crate::views::mcps_modal::McpServerDisplayStatus::NeedsAuth {
+                                    // K7: the automatic token refresh was refused
+                                    format!("Sign-in needed, refresh refused: {reason}")
+                                } else {
+                                    format!("Not connected: {reason}")
+                                }
+                            });
                             if let Some(line) = reason_line.clone() {
                                 entry_desc_lines.push(vec![line]);
                             } else if server.tools.is_empty() {
@@ -3273,7 +3331,10 @@ pub fn render_extensions_modal(
                             entry_indent.push(1);
                             entry_data_indices.push(Some(si));
                             entry_group_keys.push(Some(tools_group_key));
-                            let (badge_text, badge_col) = if !server.enabled {
+                            let (badge_text, badge_col) = if server.blocked_reason.is_some() {
+                                // P169: a policy verdict is not a personal disable.
+                                ("[blocked by policy]".to_string(), Some(theme.accent_error))
+                            } else if !server.enabled {
                                 ("[disabled]".to_string(), Some(theme.accent_error))
                             } else {
                                 (
@@ -3711,6 +3772,7 @@ pub fn render_extensions_modal(
         filter_rect,
     });
     state.entry_data_indices = entry_data_indices;
+    state.marketplace_row_plugins = marketplace_row_plugins;
     state.entry_labels_cache = entry_labels;
     state.entry_group_keys = entry_group_keys;
     state.entry_non_selectable = non_selectable;
@@ -4329,6 +4391,7 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::SetupRequired,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: true,
@@ -4441,6 +4504,7 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::NeedsAuth,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 0,
             auth_required: true,
             setup_required: false,
@@ -4493,6 +4557,7 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::Ready,
             status_reason: None,
+            blocked_reason: None,
             tool_count: tc,
             auth_required: false,
             setup_required: false,
@@ -4586,6 +4651,7 @@ mod tests {
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
                 status_reason: None,
+                blocked_reason: None,
                 tool_count: 0,
                 auth_required: false,
                 setup_required: false,
@@ -4603,6 +4669,7 @@ mod tests {
                 display_name: None,
                 status: McpServerDisplayStatus::Ready,
                 status_reason: None,
+                blocked_reason: None,
                 tool_count: 0,
                 auth_required: false,
                 setup_required: false,
@@ -4653,6 +4720,7 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::Ready,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -6730,6 +6798,173 @@ mod tests {
             1,
             "collapsed marketplace row must show the catalog component summary"
         );
+    }
+
+    /// P181: a plugin's name, version, author and description come from a marketplace catalog, so tag characters,
+    /// soft hyphens and line separators must not reach a row; the selection must still resolve to the plugin.
+    #[test]
+    fn marketplace_labels_drop_hidden_characters() {
+        let hidden = "\u{e0041}\u{00ad}";
+        let mut source = superpowers_source();
+        source.source_name = format!("super{hidden}powers");
+        source.plugins.truncate(1);
+        source.plugins[0] = TestPlugin {
+            name: "evil\u{e0041}\u{00ad}name",
+            version: Some("1\u{00ad}.0"),
+            author: Some("o\u{e0042}bra"),
+            description: Some("de\u{2028}sc\u{e0043}"),
+            ..Default::default()
+        }
+        .build();
+        let mut state = marketplace_modal_state(source.clone());
+        state.picker_state.expanded.insert(1);
+        let buf = render_marketplace_into_buffer(&mut state, 100, 40);
+        assert!(
+            state.entry_labels_cache.iter().any(|l| l == "evilname"),
+            "plugin label: {:?}",
+            state.entry_labels_cache
+        );
+        assert!(
+            state
+                .entry_labels_cache
+                .iter()
+                .any(|l| l.starts_with("superpowers (")),
+            "source label: {:?}",
+            state.entry_labels_cache
+        );
+        for label in &state.entry_labels_cache {
+            assert!(
+                !label.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+                "label keeps a hidden character: {label:?}"
+            );
+        }
+        let area = *buf.area();
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let symbol = buf[(x, y)].symbol();
+                assert!(
+                    !symbol.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+                    "cell ({x},{y}) keeps a hidden character: {symbol:?}"
+                );
+            }
+        }
+        // The selection resolves by the cleaned label
+        state.picker_state.selected = state
+            .entry_labels_cache
+            .iter()
+            .position(|l| l == "evilname")
+            .expect("plugin row");
+        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+    }
+
+    /// P181 (Astra round 1): two plugins whose names differ only by a hidden character show one label, and each row must
+    /// still act on its own plugin.
+    #[test]
+    fn marketplace_rows_with_the_same_cleaned_label_resolve_to_their_own_plugin() {
+        let mut source = superpowers_source();
+        source.plugins = vec![
+            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
+            TestPlugin { name: "deploy", ..Default::default() }.build(),
+        ];
+        let mut state = marketplace_modal_state(source.clone());
+        render_marketplace_into_buffer(&mut state, 100, 40);
+        assert_eq!(state.entry_labels_cache, ["superpowers (2 plugins)", "deploy", "deploy"]);
+        // Display order is by raw name then index, so the plain `deploy` (index 1) comes first
+        state.picker_state.selected = 1;
+        assert_eq!(state.resolve_marketplace_selection(&[source.clone()]), Some((0, Some(1))));
+        state.picker_state.selected = 2;
+        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+    }
+
+    /// P181 (Astra round 2): the query can change between a render and the next key; the row still names the plugin it drew.
+    #[test]
+    fn marketplace_row_keeps_its_plugin_when_the_query_changes_after_the_render() {
+        let mut source = superpowers_source();
+        source.plugins = vec![
+            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
+            TestPlugin { name: "deploy", ..Default::default() }.build(),
+            TestPlugin { name: "alpha", ..Default::default() }.build(),
+        ];
+        let mut state = marketplace_modal_state(source.clone());
+        state.picker_state.set_query("dep");
+        render_marketplace_into_buffer(&mut state, 100, 40);
+        // Rows: the source header, plain `deploy` (index 1), then `de\u{ad}ploy` (index 0)
+        assert_eq!(state.entry_labels_cache[1..], ["deploy", "deploy"]);
+        state.picker_state.set_query("");
+        state.picker_state.selected = 1;
+        assert_eq!(state.resolve_marketplace_selection(&[source.clone()]), Some((0, Some(1))));
+        state.picker_state.selected = 2;
+        assert_eq!(state.resolve_marketplace_selection(&[source]), Some((0, Some(0))));
+    }
+
+    /// P181 (Astra round 3): the catalog can be replaced between a render and the next key; a row keeps naming the plugin
+    /// it drew, by its raw name, and names nothing when that plugin is gone.
+    #[test]
+    fn marketplace_row_keeps_its_plugin_when_the_catalog_is_replaced_after_the_render() {
+        let mut source = superpowers_source();
+        source.plugins = vec![
+            TestPlugin { name: "alpha", ..Default::default() }.build(),
+            TestPlugin { name: "beta", ..Default::default() }.build(),
+        ];
+        let mut state = marketplace_modal_state(source.clone());
+        render_marketplace_into_buffer(&mut state, 100, 40);
+        assert_eq!(state.entry_labels_cache[1..], ["alpha", "beta"]);
+        state.picker_state.selected = 2; // beta, plugin index 1
+        // A refreshed catalog puts a new plugin first, so index 1 now means alpha
+        let mut replaced = source.clone();
+        replaced.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
+        assert_eq!(state.resolve_marketplace_selection(&[replaced]), Some((0, Some(2))));
+        // And a catalog without beta resolves the row to nothing, never to another plugin
+        let mut gone = source;
+        gone.plugins.truncate(1);
+        assert_eq!(state.resolve_marketplace_selection(&[gone]), None);
+    }
+
+    /// P181 (Grok round): Install sends the live `relative_path`, so a refresh that keeps a name at an index but swaps its
+    /// path must not pass the row's check; with duplicate names only the exact (name, path) pair counts.
+    #[test]
+    fn marketplace_row_requires_the_same_relative_path_not_just_the_name() {
+        let mut source = superpowers_source();
+        source.plugins = vec![
+            TestPlugin { name: "alpha", ..Default::default() }.build(),
+            TestPlugin { name: "helpful", ..Default::default() }.build(),
+            TestPlugin { name: "helpful", ..Default::default() }.build(),
+        ];
+        source.plugins[1].relative_path = "plugins/one".into();
+        source.plugins[2].relative_path = "plugins/two".into();
+        let mut state = marketplace_modal_state(source.clone());
+        render_marketplace_into_buffer(&mut state, 100, 40);
+        state.picker_state.selected = 2; // helpful at plugins/one, plugin index 1
+        // Same name at the same index, a different path: the row must not follow it
+        let mut swapped = source.clone();
+        swapped.plugins[1].relative_path = "plugins/three".into();
+        assert_eq!(state.resolve_marketplace_selection(&[swapped]), None);
+        // The exact pair moved: it is found once, by pair, not by the first of two equal names
+        let mut moved = source.clone();
+        moved.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
+        assert_eq!(state.resolve_marketplace_selection(&[moved]), Some((0, Some(2))));
+        // Two entries carrying the exact pair make the miss ambiguous
+        let mut twice = source;
+        let pair = twice.plugins[1].clone();
+        twice.plugins.insert(0, TestPlugin { name: "aardvark", ..Default::default() }.build());
+        twice.plugins.insert(0, pair);
+        assert_eq!(state.resolve_marketplace_selection(&[twice]), None);
+    }
+
+    /// P181 (Astra round 2): a state no frame has drawn cannot tell two plugins with one cleaned label apart, so it refuses.
+    #[test]
+    fn marketplace_ambiguous_label_without_a_drawn_row_resolves_to_nothing() {
+        let mut source = superpowers_source();
+        source.plugins = vec![
+            TestPlugin { name: "de\u{00ad}ploy", ..Default::default() }.build(),
+            TestPlugin { name: "deploy", ..Default::default() }.build(),
+        ];
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Marketplace);
+        state.entry_data_indices = vec![None, Some(0)];
+        state.entry_group_keys = vec![Some("0".into()), None];
+        state.entry_labels_cache = vec!["superpowers (2 plugins)".into(), "deploy".into()];
+        state.picker_state.selected = 1;
+        assert_eq!(state.resolve_marketplace_selection(&[source]), None);
     }
 
     #[test]

@@ -57,3 +57,13 @@ pub(crate) fn ensure_hermetic_git_on_path() {
     });
 }
 pub(crate) mod session_wire;
+
+/// An absolute scratch directory for tests that only need "some absolute cwd".
+/// Unix keeps the literal "/tmp"; on Windows "/tmp" is not absolute, so use a drive path.
+pub(crate) fn abs_tmp() -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\tmp")
+    } else {
+        std::path::PathBuf::from("/tmp")
+    }
+}

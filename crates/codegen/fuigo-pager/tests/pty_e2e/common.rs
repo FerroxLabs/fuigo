@@ -1300,6 +1300,127 @@ pub(crate) use fuigo_pager_pty_harness::host_clipboard::{
 #[cfg(target_os = "windows")]
 pub(crate) use fuigo_pager_pty_harness::host_clipboard::clipboard_roundtrip_works;
 
+// ── MCP elicitation e2e fixtures ────────────────────────────────────────
+
+/// Server name of the elicitation fixture; its one tool is called `ELICIT_TOOL`.
+pub(crate) const ELICIT_SERVER: &str = "ptyelicit";
+
+/// Qualified name the model calls (`<server>__<tool>`).
+pub(crate) const ELICIT_TOOL: &str = "ptyelicit__ask";
+
+/// What the fixture asks the user.
+pub(crate) const ELICIT_MESSAGE: &str = "Create the ticket?";
+
+/// A stdio MCP server whose tool `ask` sends an `elicitation/create` request to the client and returns
+/// `ELICITOUTCOME_<action>` once the user answered.
+/// Newline-delimited JSON-RPC, so it needs only python3.
+const ELICIT_MCP_SERVER_PY: &str = r#"import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+def recv():
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    return json.loads(line)
+
+while True:
+    msg = recv()
+    method = msg.get("method")
+    mid = msg.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "ptyelicit", "version": "1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"tools": [{
+            "name": "ask", "description": "Ask the user to confirm a ticket",
+            "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        send({"jsonrpc": "2.0", "id": 9001, "method": "elicitation/create", "params": {
+            "message": "Create the ticket?",
+            "requestedSchema": {"type": "object",
+                "properties": {"title": {"type": "string", "title": "Ticket title"}},
+                "required": ["title"]}}})
+        while True:
+            reply = recv()
+            if reply.get("id") == 9001:
+                break
+        action = reply.get("result", {}).get("action", "error")
+        send({"jsonrpc": "2.0", "id": mid, "result": {
+            "content": [{"type": "text", "text": "ELICITOUTCOME_" + action}]}})
+    elif mid is not None:
+        send({"jsonrpc": "2.0", "id": mid, "result": {}})
+"#;
+
+/// Write the elicitation fixture next to the sandbox config and register it as a user-scope MCP server.
+pub(crate) fn seed_elicit_mcp_server(content: &ContentController) {
+    let fuigo_home = content.home().join(".fuigo");
+    std::fs::create_dir_all(&fuigo_home).expect("create fake FUIGO_HOME");
+    let script = fuigo_home.join("elicit_mcp.py");
+    std::fs::write(&script, ELICIT_MCP_SERVER_PY).expect("write elicitation MCP fixture");
+    let config = format!(
+        "[mcp_servers.{ELICIT_SERVER}]\ncommand = \"python3\"\nargs = [\"{}\"]\nstartup_timeout_sec = 20\n",
+        script.display()
+    );
+    std::fs::write(fuigo_home.join("config.toml"), config).expect("write config.toml");
+}
+
+/// Script the model to call the fixture's tool once; the next request gets the default response.
+pub(crate) fn expect_elicit_tool_turn(content: &ContentController) -> AgentTurnExpectation {
+    expect_tool_turn(content, "call_elicit_1", ELICIT_TOOL, "{}".into())
+}
+
+/// Run one turn so a session exists on disk, quit, then damage every file of that session so that `session/load`
+/// fails although the session is found. Returns its id.
+pub(crate) fn create_then_break_a_session(
+    content: &ContentController,
+    binary: &Path,
+    cwd: &Path,
+) -> String {
+    let mut first = PtyHarness::spawn_with_content_in_dir(
+        binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        content,
+        &["--no-leader"],
+        Some(cwd),
+    )
+    .expect("spawn first pager");
+    first
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .expect("welcome text");
+    first
+        .inject_keys(format!("{PROMPT}\r").as_bytes())
+        .expect("submit turn 1");
+    first
+        .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(60))
+        .expect("turn 1 rendered");
+    let dir = session_dir(content, &mut first);
+    first.update(Duration::from_millis(500));
+    first.inject_keys(b"\x11").expect("ctrl-q once");
+    first.update(Duration::from_millis(200));
+    first.inject_keys(b"\x11").expect("ctrl-q confirm");
+    first.quit().expect("reap first pager");
+    let id = dir
+        .file_name()
+        .expect("session dir name")
+        .to_string_lossy()
+        .into_owned();
+    let mut damaged = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("read session dir").flatten() {
+        if entry.path().is_file() {
+            std::fs::write(entry.path(), b"\x00\xff{ not a session").expect("damage a session file");
+            damaged.push(entry.file_name().to_string_lossy().into_owned());
+        }
+    }
+    eprintln!("session {id}: damaged {damaged:?}");
+    id
+}
+
 #[cfg(test)]
 mod exit_status_wait_policy_tests {
     use super::*;

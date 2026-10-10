@@ -49,25 +49,82 @@ struct TrustDocument {
     folders: BTreeMap<String, FolderTrust>,
 }
 
+/// Result of a strict read of the store file. A failed read is not represented here: it is an `Err`.
+enum StoreRead {
+    /// No file at the path (nothing to lose): safe to create.
+    Missing,
+    /// Read and parsed; an empty or whitespace-only file is an empty document.
+    Document(TrustDocument),
+}
+
+impl StoreRead {
+    fn into_document(self) -> TrustDocument {
+        match self {
+            Self::Missing => TrustDocument::default(),
+            Self::Document(doc) => doc,
+        }
+    }
+}
+
+/// Why a locked write did not publish.
+#[derive(Debug)]
+pub(crate) enum TrustPersistError {
+    /// The existing store could not be read or parsed; nothing was written, so the user's grants are untouched.
+    Unreadable(io::Error),
+    /// The store was read (or is missing) but the lock, rename or write failed; no replacement was published.
+    Publish(io::Error),
+}
+
+impl TrustPersistError {
+    pub(crate) fn as_io(&self) -> &io::Error {
+        match self {
+            Self::Unreadable(e) | Self::Publish(e) => e,
+        }
+    }
+}
+
+impl From<TrustPersistError> for io::Error {
+    fn from(err: TrustPersistError) -> Self {
+        match err {
+            TrustPersistError::Unreadable(e) | TrustPersistError::Publish(e) => e,
+        }
+    }
+}
+
+/// Whether a write actually recorded the decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Recorded {
+    /// Written to disk.
+    Durable,
+    /// Over-broad root or no backing path: nothing written.
+    Skipped,
+}
+
 /// Persisted set of trusted folders.
 ///
 /// Construct with [`TrustStore::load`] (production) or [`TrustStore::load_from`] (tests).
 /// Mutating with [`TrustStore::set_trusted`] persists to disk.
 ///
 /// `path` is `None` only in a no-home environment (see [`TrustStore::load`]): such a store holds no folders, trusts nothing, and persists nothing.
+///
+/// A backing file that exists but cannot be read or parsed fails closed (P167): the store trusts nothing, and every
+/// write refuses with an error instead of replacing the user's file with a document built from an empty stand-in.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     doc: TrustDocument,
     /// Backing file, or `None` when no user home resolves; such a store trusts nothing and persists nothing.
     /// Never a cwd-relative path.
     path: Option<PathBuf>,
+    /// False when the backing file exists but could not be read or parsed. That is not an empty document.
+    disk_readable: bool,
 }
 
 impl TrustStore {
     /// Load the trust store from `<user_fuigo_home>/trusted_folders.toml`.
     ///
     /// When no user home resolves (see the module-level fail-closed note) the path is `None` and this returns an [`Self::empty`] store.
-    /// Otherwise an empty store is returned if the file is missing or unparseable (logged).
+    /// A missing file is an empty store. A file that exists but cannot be read or parsed is NOT: the store is marked
+    /// unreadable, trusts nothing, and refuses writes (logged), so the file is left exactly as it is.
     pub fn load() -> Self {
         match Self::default_path() {
             Some(path) => Self::load_from(path),
@@ -77,20 +134,46 @@ impl TrustStore {
 
     /// Load from a custom path (for tests).
     pub fn load_from(path: PathBuf) -> Self {
-        let doc = Self::read_doc(&path);
-        Self {
-            doc,
-            path: Some(path),
+        match Self::read_doc_strict(&path) {
+            Ok(read) => Self {
+                doc: read.into_document(),
+                path: Some(path),
+                disk_readable: true,
+            },
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "folder trust: failed to read trust store; trusting nothing and leaving the file untouched"
+                );
+                Self {
+                    doc: TrustDocument::default(),
+                    path: Some(path),
+                    disk_readable: false,
+                }
+            }
         }
     }
 
     /// An empty store with no backing path: trusts nothing and persists nothing.
     /// Used for the no-home environment where [`Self::default_path`] resolves to `None`.
+    /// `disk_readable` is true so a missing home is not confused with a corrupt file.
     fn empty() -> Self {
         Self {
             doc: TrustDocument::default(),
             path: None,
+            disk_readable: true,
         }
+    }
+
+    /// False when the backing file exists but could not be read or parsed (fail closed: trusts nothing, writes refuse).
+    pub fn disk_readable(&self) -> bool {
+        self.disk_readable
+    }
+
+    /// Whether a backing file path exists (false for the no-home empty store).
+    pub(crate) fn has_store_path(&self) -> bool {
+        self.path.is_some()
     }
 
     /// Default on-disk path: `<user_fuigo_home>/trusted_folders.toml`, or `None` when no user home resolves.
@@ -103,8 +186,14 @@ impl TrustStore {
 
     /// Map a resolved user-fuigo-home to the store path, preserving "no home" as "no path" (never synthesizing a fallback).
     /// Split from [`Self::default_path`] so the no-home branch is unit-testable without the process-global home cache.
+    /// A relative home (e.g. `FUIGO_HOME=.fuigo`) is also "no path": joining it would put the store under the cwd,
+    /// where a cloned repo could ship its own `trusted_folders.toml` and self-trust its checkout.
     fn default_path_in(user_fuigo_home: Option<PathBuf>) -> Option<PathBuf> {
-        Some(user_fuigo_home?.join(TRUST_FILE_NAME))
+        let home = user_fuigo_home?;
+        if !home.is_absolute() {
+            return None;
+        }
+        Some(home.join(TRUST_FILE_NAME))
     }
 
     /// Whether `key` is trusted, per the MOST-SPECIFIC recorded decision that applies to this workspace.
@@ -119,6 +208,10 @@ impl TrustStore {
     /// Over-broad keys are ignored on read (fail closed): an empty/relative key, the filesystem root, or the user's home directory are never honored.
     /// That holds even if such a record reaches the file via hand-edit or migration; see [`is_unsafe_trust_root`].
     pub fn is_trusted(&self, key: &Path) -> bool {
+        // An unreadable store is not an empty allow-list; fail closed.
+        if !self.disk_readable {
+            return false;
+        }
         let query = canonicalize_or_owned(key);
         let query_id = workspace_id(&query);
         // Among recorded folders that cover this workspace, the longest match decides
@@ -203,7 +296,22 @@ impl TrustStore {
     /// 2. re-read the current on-disk document so a peer's decisions are merged rather than clobbered;
     /// 3. insert the record and persist atomically;
     /// 4. only on success commit the new document to memory; on any lock/persist error `self.doc` is left unchanged.
+    ///
+    /// A store that exists but cannot be read or parsed (at load or at the locked re-read) is an error and nothing is
+    /// written: a failed read is never an empty document to insert into and publish over the user's grants.
     fn record_decision(&mut self, workspace_key: &Path, trusted: bool) -> io::Result<()> {
+        self.record_decision_strict(workspace_key, trusted)?;
+        Ok(())
+    }
+
+    /// [`Self::record_decision`] with the outcome kept apart: [`Recorded::Skipped`] for a refused root or no backing
+    /// path, [`TrustPersistError::Unreadable`] when the existing store could not be read (nothing written), and
+    /// [`TrustPersistError::Publish`] when the lock or the atomic write failed (nothing published).
+    pub(crate) fn record_decision_strict(
+        &mut self,
+        workspace_key: &Path,
+        trusted: bool,
+    ) -> Result<Recorded, TrustPersistError> {
         let canonical = canonicalize_or_owned(workspace_key);
         if is_unsafe_trust_root(&canonical) {
             tracing::warn!(
@@ -211,33 +319,43 @@ impl TrustStore {
                 trusted,
                 "folder trust: refusing to record an over-broad root (home, filesystem root, or non-absolute path); nothing recorded"
             );
-            return Ok(());
+            return Ok(Recorded::Skipped);
         }
 
-        // No backing file (no-home env): record nothing and return `Ok` so callers treat "no home" like "nothing to persist" (see fn doc)
-        let Some(path) = self.path.as_deref() else {
+        // No backing file (no-home env): record nothing. Callers must not treat this as a durable grant.
+        let Some(path) = self.path.clone() else {
             tracing::warn!(
                 path = %canonical.display(),
                 trusted,
                 "folder trust: no user fuigo home resolved; trust decision not recorded"
             );
-            return Ok(());
+            return Ok(Recorded::Skipped);
         };
+
+        // Loaded unreadable: confirm before any setup, so a still-corrupt store reports Unreadable (not a publish error).
+        if !self.disk_readable
+            && let Err(e) = Self::read_doc_strict(&path)
+        {
+            return Err(TrustPersistError::Unreadable(e));
+        }
 
         // The lock file lives beside the store, so ensure the dir exists first.
         let parent = path.parent().ok_or_else(|| {
-            io::Error::new(
+            TrustPersistError::Publish(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "trust store path has no parent",
-            )
+            ))
         })?;
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(TrustPersistError::Publish)?;
 
         // Serialize cross-process writers for the whole read-modify-write so a concurrent peer's records are preserved, not clobbered
-        let _lock = ExclusiveLock::acquire(&path.with_extension("toml.lock"))?;
+        let _lock = ExclusiveLock::acquire(&path.with_extension("toml.lock"))
+            .map_err(TrustPersistError::Publish)?;
 
-        // Re-read the latest on-disk state (merges a peer's concurrent writes).
-        let mut doc = Self::read_doc(path);
+        // Re-read under the lock (merges a peer's concurrent writes). A failed read is not an empty document and must not be written back.
+        let mut doc = Self::read_doc_strict(&path)
+            .map_err(TrustPersistError::Unreadable)?
+            .into_document();
         doc.folders.insert(
             canonical.to_string_lossy().to_string(),
             FolderTrust {
@@ -247,33 +365,52 @@ impl TrustStore {
         );
 
         // Commit to memory only after a successful durable write, so a failure leaves the in-memory store unchanged
-        Self::persist_doc(path, &doc)?;
+        Self::persist_doc(&path, &doc).map_err(TrustPersistError::Publish)?;
         self.doc = doc;
-        Ok(())
+        self.disk_readable = true;
+        Ok(Recorded::Durable)
     }
 
-    fn read_doc(path: &Path) -> TrustDocument {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(c) if c.trim().is_empty() => return TrustDocument::default(),
-            Ok(c) => c,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return TrustDocument::default(),
-            Err(e) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "folder trust: failed to read trust store; treating as empty"
-                );
-                return TrustDocument::default();
+    /// Strict read. Only a genuinely absent entry (`symlink_metadata` reports `NotFound` / `NotADirectory`) is
+    /// [`StoreRead::Missing`]; an empty or whitespace-only file is an empty document. Every other failure is an error:
+    /// unreadable, not valid TOML, or a directory squatting on the path.
+    /// A symlink, even a dangling one, is never `Missing`: a follow-time `NotFound` must not let a write replace the link.
+    fn read_doc_strict(path: &Path) -> io::Result<StoreRead> {
+        // Probe without following so a dangling symlink is an existing entry, not Missing.
+        let link_meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(e) if matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory) => {
+                return Ok(StoreRead::Missing);
             }
+            Err(e) => return Err(e),
         };
-        toml::from_str(&contents).unwrap_or_else(|e| {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "folder trust: failed to parse trust store; treating as empty"
-            );
-            TrustDocument::default()
-        })
+        let is_symlink = link_meta.file_type().is_symlink();
+
+        // Test-only seam: run a fixture's action in the window between the probe and the read.
+        #[cfg(test)]
+        if let Some(action) = AFTER_PROBE.with(|a| a.borrow_mut().take()) {
+            action();
+        }
+
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) if c.trim().is_empty() => return Ok(StoreRead::Document(TrustDocument::default())),
+            Ok(c) => c,
+            // Gone between the probe and the read: Missing only if a fresh no-follow probe still finds nothing there, so a
+            // regular file swapped for a dangling link in that window is an error, not an empty document (Astra r1).
+            Err(e)
+                if !is_symlink
+                    && matches!(e.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+                    && std::fs::symlink_metadata(path).is_err_and(|p| {
+                        matches!(p.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
+                    }) =>
+            {
+                return Ok(StoreRead::Missing);
+            }
+            Err(e) => return Err(e),
+        };
+        toml::from_str::<TrustDocument>(&contents)
+            .map(StoreRead::Document)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Write `doc` to `path` atomically (unique temp, fsync, rename) with owner-only (`0600`) permissions.
@@ -284,6 +421,11 @@ impl TrustStore {
     /// `persist` performs an atomic replace, including over an existing destination on Windows.
     fn persist_doc(path: &Path, doc: &TrustDocument) -> io::Result<()> {
         use std::io::Write;
+
+        #[cfg(test)]
+        if FAIL_PERSIST.with(std::cell::Cell::get) {
+            return Err(io::Error::other("injected persist failure (test)"));
+        }
 
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
@@ -473,6 +615,15 @@ fn migrate_legacy_hook_trust_in(legacy_file: &Path, store: &mut TrustStore) -> u
             return 0;
         }
     };
+    // A store with no backing file, or one that could not be read, is not "no decision": do not seed into an empty
+    // stand-in (the write would refuse, or have nowhere to go) and do not consume the legacy file.
+    if store.path.is_none() || !store.disk_readable() {
+        tracing::warn!(
+            path = %legacy_file.display(),
+            "leaving legacy hook-trust file in place; the folder-trust store has no readable document"
+        );
+        return 0;
+    }
     let mut migrated = 0;
     let mut had_seed_error = false;
     for project in &projects {
@@ -515,6 +666,16 @@ fn migrate_legacy_hook_trust_in(legacy_file: &Path, store: &mut TrustStore) -> u
         }
     }
     migrated
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: an action [`TrustStore::read_doc_strict`] runs once between its no-follow probe and its read, so a
+    /// test can swap the entry inside that window.
+    static AFTER_PROBE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Test-only: make [`TrustStore::persist_doc`] fail on this thread, AFTER the lock and the strict re-read, so a test
+    /// reaches the final publication step (a fixture that blocks the lock or the read never gets there).
+    static FAIL_PERSIST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -617,11 +778,12 @@ mod tests {
     #[test]
     fn migrate_legacy_hook_trust_leaves_file_in_place_on_seed_write_error() {
         // A seeding WRITE failure (e.g. a full disk) must not consume the legacy file either: leave it un-renamed so a future run retries the grants.
-        // Force set_trusted to error by making the store path a DIRECTORY so its atomic persist rename fails
-        // (Same trick as `persist_failure_leaves_memory_unchanged`, robust even when run as root.)
+        // Force set_trusted to error at the WRITE: a directory squats on the store's lock file, so the lock cannot be taken
+        // (robust even when run as root). P167: a directory at the store path itself is now an unreadable store, refused
+        // before any write, so it no longer exercises the seed-write path.
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        std::fs::create_dir_all(&store_path).unwrap(); // store path is a dir, not a file
+        std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
         let project = tmp.path().join("repo");
         std::fs::create_dir_all(&project).unwrap();
         let project_key = canonicalize_or_owned(&project);
@@ -630,6 +792,7 @@ mod tests {
         std::fs::write(&legacy, format!("{}\n", project_key.display())).unwrap();
 
         let mut store = TrustStore::load_from(store_path);
+        assert!(store.disk_readable(), "the store reads (missing); only the write fails");
         let migrated = migrate_legacy_hook_trust_in(&legacy, &mut store);
         assert_eq!(migrated, 0, "a seeding write error seeds nothing");
         assert!(
@@ -653,7 +816,9 @@ mod tests {
     #[test]
     fn default_path_in_maps_home_and_preserves_no_home() {
         // With a resolvable home the store sits at <home>/trusted_folders.toml.
-        let home = PathBuf::from("/home/alice/.fuigo");
+        // A platform-absolute home: `/home/alice/.fuigo` is not absolute on Windows (no drive), and P167 refuses relative homes.
+        let home = std::env::temp_dir().join(".fuigo");
+        assert!(home.is_absolute());
         assert_eq!(
             TrustStore::default_path_in(Some(home.clone())),
             Some(home.join(TRUST_FILE_NAME))
@@ -1250,12 +1415,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn persist_failure_leaves_memory_unchanged() {
-        // Make the destination path itself a DIRECTORY so the final atomic rename in persist fails (renaming a file over a directory)
-        // This is robust even when tests run as root (a chmod 0o500 dir would be bypassed by root)
-        // It exercises the invariant: on a write error the in-memory doc is left unchanged
+        // Deny the write: a directory squats on the store's lock file, so the locked write cannot start (robust even as root).
+        // P167: a directory at the store path itself is an unreadable store, refused before any write, so it no longer
+        // reaches the write path. It exercises the invariant: on a write error the in-memory doc is left unchanged
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join(TRUST_FILE_NAME);
-        std::fs::create_dir_all(&store_path).unwrap(); // store path is a dir, not a file
+        std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let key = canonicalize_or_owned(&repo);
@@ -1270,6 +1435,30 @@ mod tests {
             !store.is_trusted(&key),
             "memory must be unchanged on persist failure"
         );
+    }
+
+    /// Astra r2 #3: the failure at the very last step (publication), after the lock and a clean re-read of a store that
+    /// already holds a grant: memory and disk keep exactly the prior state.
+    #[test]
+    fn p167_publication_failure_leaves_memory_and_disk_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let kept = tmp.path().join("kept");
+        let new = tmp.path().join("new");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let (kept, new) = (canonicalize_or_owned(&kept), canonicalize_or_owned(&new));
+        let mut store = TrustStore::load_from(store_path.clone());
+        store.set_trusted(&kept).unwrap();
+        let before = std::fs::read(&store_path).unwrap();
+
+        FAIL_PERSIST.with(|f| f.set(true));
+        let result = store.record_decision_strict(&new, true);
+        FAIL_PERSIST.with(|f| f.set(false));
+        assert!(matches!(result, Err(TrustPersistError::Publish(_))), "{result:?}");
+        assert!(!store.is_trusted(&new), "memory must not commit an unpublished grant");
+        assert!(store.is_trusted(&kept), "the prior grant is still in memory");
+        assert_eq!(std::fs::read(&store_path).unwrap(), before, "disk unchanged");
     }
 
     #[test]
@@ -1547,5 +1736,185 @@ mod tests {
             canonicalize_or_owned(&source_repo),
             "it must not collapse onto the populated registry's source repo"
         );
+    }
+
+    // ── P167 (S8): an unreadable or corrupt store fails closed and is never rewritten from an empty document ──
+
+    /// A store with the user's grants, then corrupted: a grant must fail and leave the bytes exactly as they were.
+    /// Ported from upstream `corrupt_store_is_not_rewritten_by_set_trusted`.
+    #[test]
+    fn p167_corrupt_store_is_not_rewritten_by_set_trusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, b"[folders.\"/tmp/keep\"]\ntrusted = true\n[[[ not toml").unwrap();
+        let before = std::fs::read(&store_path).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        assert!(!store.is_trusted(Path::new("/tmp/keep")));
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(
+            store.set_trusted(&repo).is_err(),
+            "a grant over an unreadable store must fail, not write a one-entry store"
+        );
+        assert_eq!(
+            std::fs::read(&store_path).unwrap(),
+            before,
+            "a failed parse must not shrink or replace the file"
+        );
+        assert!(!TrustStore::load_from(store_path).is_trusted(&repo));
+    }
+
+    /// The deny path is the same write: an untrust over a corrupt store must not replace it either.
+    #[test]
+    fn p167_corrupt_store_is_not_rewritten_by_set_untrusted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, b"folders = not-a-table\n").unwrap();
+        let before = std::fs::read(&store_path).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        assert!(store.set_untrusted(&repo).is_err());
+        assert_eq!(std::fs::read(&store_path).unwrap(), before);
+    }
+
+    /// A store that exists but cannot be read (here a dangling symlink, which `read_to_string` reports as NotFound) is
+    /// not a missing file: the grant must fail and the link must survive, not be replaced by a fresh one-entry store.
+    #[cfg(unix)]
+    #[test]
+    fn p167_dangling_symlink_store_is_unreadable_not_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        let target = tmp.path().join("moved-away.toml");
+        std::os::unix::fs::symlink(&target, &store_path).unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        assert!(
+            store.set_trusted(&repo).is_err(),
+            "a dangling store link must not be treated as an absent file"
+        );
+        let meta = std::fs::symlink_metadata(&store_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "the store link must not be replaced");
+        assert!(!target.exists(), "nothing may be written through the dangling link");
+    }
+
+    /// A relative home would put the store under the cwd (a cloned repo could ship it): no path at all.
+    #[test]
+    fn p167_default_path_in_rejects_relative_home() {
+        assert_eq!(TrustStore::default_path_in(Some(PathBuf::from(".fuigo"))), None);
+        assert_eq!(TrustStore::default_path_in(Some(PathBuf::from("repo/.fuigo"))), None);
+        assert_eq!(TrustStore::default_path_in(Some(PathBuf::new())), None);
+    }
+
+    /// Ported from upstream: a corrupt store is not "no decision", so the legacy hook-trust file must not be consumed
+    /// into a store that then gets rewritten from an empty stand-in.
+    #[test]
+    fn p167_migrate_legacy_hook_trust_does_not_consume_on_unreadable_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, b"[[[not toml").unwrap();
+        let before = std::fs::read(&store_path).unwrap();
+        let project = tmp.path().join("repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let legacy = tmp.path().join("trusted-hook-projects");
+        std::fs::write(&legacy, format!("{}\n", canonicalize_or_owned(&project).display())).unwrap();
+
+        let mut store = TrustStore::load_from(store_path.clone());
+        assert_eq!(migrate_legacy_hook_trust_in(&legacy, &mut store), 0);
+        assert!(legacy.exists(), "an unread store must not consume the legacy file");
+        assert_eq!(std::fs::read(&store_path).unwrap(), before, "the store must not be rewritten");
+    }
+
+    /// P180 (P167 Astra LOW): the read-failed-with-NotFound branch must re-probe before it says Missing. A regular file
+    /// that is swapped for a dangling link between the probe and the read is an existing entry the store cannot read:
+    /// an error, never an empty store that a write would replace.
+    #[cfg(unix)]
+    #[test]
+    fn p180_read_swapped_for_dangling_link_after_probe_is_an_error_not_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, "[folders]\n").unwrap();
+        let target = tmp.path().join("moved-away.toml");
+
+        let swap_path = store_path.clone();
+        let swap_target = target.clone();
+        AFTER_PROBE.with(|a| {
+            *a.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&swap_path).unwrap();
+                std::os::unix::fs::symlink(&swap_target, &swap_path).unwrap();
+            }));
+        });
+        let result = TrustStore::read_doc_strict(&store_path);
+        AFTER_PROBE.with(|a| *a.borrow_mut() = None);
+
+        assert!(
+            result.is_err(),
+            "a link that appeared after the probe is an existing entry, not Missing"
+        );
+        assert!(std::fs::symlink_metadata(&store_path).unwrap().file_type().is_symlink());
+        assert!(!target.exists());
+    }
+
+    /// P182: the Windows variant of the dangling-link swap test. Creating a file symlink on Windows needs the
+    /// symlink privilege (or Developer Mode); when the OS refuses (`PermissionDenied` or raw error 1314) the swap cannot be staged and
+    /// the test says so and returns, any other error fails it.
+    #[cfg(windows)]
+    #[test]
+    fn p182_read_swapped_for_dangling_link_after_probe_is_an_error_not_missing_windows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, "[folders]\n").unwrap();
+        let target = tmp.path().join("moved-away.toml");
+
+        // Probe the privilege first, outside the seam, so a refusal never leaves the store half swapped.
+        let probe_link = tmp.path().join("privilege-probe");
+        match std::os::windows::fs::symlink_file(&target, &probe_link) {
+            Ok(()) => std::fs::remove_file(&probe_link).unwrap(),
+            // 1314 = ERROR_PRIVILEGE_NOT_HELD, which Rust 1.94 reports as `Uncategorized`, not `PermissionDenied`
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(1314) => {
+                eprintln!("skipped: no symlink privilege on this Windows host: {e}");
+                return;
+            }
+            Err(e) => panic!("unexpected symlink error: {e}"),
+        }
+
+        let swap_path = store_path.clone();
+        let swap_target = target.clone();
+        AFTER_PROBE.with(|a| {
+            *a.borrow_mut() = Some(Box::new(move || {
+                std::fs::remove_file(&swap_path).unwrap();
+                std::os::windows::fs::symlink_file(&swap_target, &swap_path).unwrap();
+            }));
+        });
+        let result = TrustStore::read_doc_strict(&store_path);
+        AFTER_PROBE.with(|a| *a.borrow_mut() = None);
+
+        assert!(
+            result.is_err(),
+            "a link that appeared after the probe is an existing entry, not Missing"
+        );
+        assert!(std::fs::symlink_metadata(&store_path).unwrap().file_type().is_symlink());
+        assert!(!target.exists());
+    }
+
+    /// P180: and the same window with the entry simply gone is still Missing (the re-probe finds nothing).
+    #[test]
+    fn p180_read_removed_after_probe_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join(TRUST_FILE_NAME);
+        std::fs::write(&store_path, "[folders]\n").unwrap();
+
+        let gone = store_path.clone();
+        AFTER_PROBE.with(|a| {
+            *a.borrow_mut() = Some(Box::new(move || std::fs::remove_file(&gone).unwrap()));
+        });
+        let result = TrustStore::read_doc_strict(&store_path);
+        AFTER_PROBE.with(|a| *a.borrow_mut() = None);
+
+        assert!(matches!(result, Ok(StoreRead::Missing)), "removed entry must be Missing");
     }
 }

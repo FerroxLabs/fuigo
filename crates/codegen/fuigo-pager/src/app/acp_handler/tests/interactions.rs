@@ -250,6 +250,58 @@
         );
     }
 
+    /// A newer request cancels the card on screen, answers it, and says so in the scrollback.
+    #[test]
+    fn mcp_elicit_superseding_a_card_cancels_it_and_leaves_a_notice() {
+        let open = |app: &mut AppView, tool_call_id: &str| {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": "sess-A",
+                "toolCallId": tool_call_id,
+                "serverName": "airlock",
+                "message": "Create ticket?",
+                "mode": "form",
+                "requestedSchema": { "type": "object", "properties": { "title": { "type": "string" } } }
+            }))
+            .unwrap();
+            handle(
+                AcpClientMessage::ExtMethod(fuigo_acp_lib::AcpArgs {
+                    request: acp::ExtRequest::new("fuigo/mcp/elicit", raw.into()),
+                    response_tx: tx,
+                }),
+                app,
+            );
+            rx
+        };
+        let mut app = make_app_with_agent("sess-A");
+        let mut first = open(&mut app, "mcp-elicit-1");
+        let _second = open(&mut app, "mcp-elicit-2");
+
+        let answer = first
+            .try_recv()
+            .expect("the superseded request is answered")
+            .expect("not an error");
+        assert_eq!(
+            serde_json::json!({ "outcome": "cancel" }),
+            serde_json::from_str::<serde_json::Value>(answer.0.get()).unwrap()
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            Some("mcp-elicit-2"),
+            agent.elicitation_view.as_ref().map(|ev| ev.tool_call_id.as_str())
+        );
+        let notes: Vec<String> = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.get(i))
+            .filter_map(|entry| entry.block.searchable_text())
+            .collect();
+        assert_eq!(
+            vec![
+                "Cancelled MCP “airlock” request for input to show a newer one.".to_owned()
+            ],
+            notes
+        );
+    }
+
     #[test]
     fn mcp_elicit_does_not_replace_url_waiting() {
         let mut app = make_app_with_agent("sess-A");

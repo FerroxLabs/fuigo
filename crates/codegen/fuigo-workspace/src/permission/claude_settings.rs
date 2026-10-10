@@ -390,7 +390,7 @@ pub(crate) fn claude_settings_paths_for_trust(cwd: &Path, project_trusted: bool)
 pub fn project_claude_settings_present(cwd: &Path) -> bool {
     collect_project_claude_paths(cwd)
         .iter()
-        .any(|p| p.is_file())
+        .any(|p| crate::folder_trust::path_present_or_uncertain(p))
 }
 
 /// Collect .claude settings file paths from cwd up to repo root.

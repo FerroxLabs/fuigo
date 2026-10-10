@@ -267,8 +267,9 @@ fn write_truncated(buf: &mut String, s: &str, max: usize) {
 ///
 /// Control characters are stripped here: title parts include strings from remote sources (e.g. grok.com conversation titles).
 /// Those must not terminate the OSC sequence early or inject escapes into the terminal.
+/// Invisible format characters and loose tags go too; ZWJ emoji sequences and valid subdivision flags stay.
 fn build_title_escape(title: &str) -> String {
-    let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    let sanitized = fuigo_tty_utils::scrub_unsafe_title(title);
     let mut buf = Vec::new();
     let _ = crossterm::queue!(&mut buf, SetTitle(sanitized));
     String::from_utf8(buf).expect("crossterm SetTitle produces valid UTF-8")
@@ -277,6 +278,23 @@ fn build_title_escape(title: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181: a tab title drops tag characters, soft hyphens and separators but keeps ZWJ emoji and a valid flag.
+    #[test]
+    fn title_escape_drops_hidden_characters_and_keeps_emoji_joiners() {
+        let payload = |t: &str| {
+            build_title_escape(t)
+                .strip_prefix("\u{1b}]0;")
+                .and_then(|s| s.strip_suffix('\u{7}'))
+                .expect("crossterm OSC 0 framing")
+                .to_owned()
+        };
+        assert_eq!(payload("a\u{e0041}b\u{00ad}c\u{2028}d\u{200b}e"), "abcde");
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        assert_eq!(payload(family), family);
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        assert_eq!(payload(scotland), scotland);
+    }
 
     fn default_config() -> TitleConfig {
         TitleConfig::default()

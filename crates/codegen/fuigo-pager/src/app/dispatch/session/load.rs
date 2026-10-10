@@ -239,12 +239,14 @@ fn dispatch_load_session_ungated(
         .registry_mut()
         .set_plugins_visible(!app.appearance.disable_plugins);
     switch_to_agent(app, agent_id, SwitchCause::Load);
+    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
     effects.push(Effect::LoadSession {
         agent_id,
         session_id,
         session_cwd,
         // Conversation-entry bit; the effects layer ORs in SessionFlags.chat_mode for the meta
         chat_kind,
+        attempt,
     });
     effects
 }
@@ -1066,6 +1068,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
     restore_degree: Option<fuigo_workspace::session::git::RestoreDegree>,
     running_prompt_id: Option<String>,
     scheduler_background_loops: Option<bool>,
+    attempt: u64,
 ) -> Vec<Effect> {
     tracing::info!(
         "Session loaded for agent {:?} session {:?}",
@@ -1073,6 +1076,10 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
         session_id,
     );
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        if agent.load_result_is_stale(attempt) {
+            tracing::warn!(agent = ?agent_id, attempt, current = agent.load_attempt, "ignoring the success of a superseded session load");
+            return vec![];
+        }
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
@@ -1208,9 +1215,14 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
     agent_id: AgentId,
     session_id: acp::SessionId,
     error: String,
+    attempt: u64,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
+        if agent.load_result_is_stale(attempt) {
+            tracing::warn!(agent = ?agent_id, attempt, current = agent.load_attempt, "ignoring the failure of a superseded session load");
+            return vec![];
+        }
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
         }
@@ -1220,16 +1232,94 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         agent.mark_turn_finished(TurnEnd::Aborted);
         agent.scrollback.end_batch();
         agent.session.loading_replay = false;
-        agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
+        agent.unbind_session_id();
+        agent.load_failed = true;
+        restore_prompts_held_during_load(agent);
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't load session: {error}"),
+                error: format!("Couldn't load session: {}", fuigo_tty_utils::untrusted(&error)),
                 elapsed: None,
             }));
     }
     vec![]
+}
+/// A reconnect load that fails leaves the new leader without this session: unbind the tab and refuse it like any failed open.
+/// Held rows go back to the composer or are listed, and `/resume` starts a fresh load.
+/// A late result of an earlier load attempt for this tab is dropped as stale, so it can neither revive nor refuse the tab again.
+pub(crate) fn fail_agent_after_failed_reconnect(agent: &mut AgentView) {
+    agent.session.loading_replay = false;
+    agent.unbind_session_id();
+    agent.load_failed = true;
+    restore_prompts_held_during_load(agent);
+    // Minimal mode shows no toasts, so the notice also goes to the scrollback
+    agent
+        .scrollback
+        .push_block(RenderBlock::system(crate::app::dispatch::prompt::LOAD_FAILED_NOTICE.to_owned()));
+    agent.show_toast(crate::app::dispatch::prompt::LOAD_FAILED_NOTICE);
+}
+/// A single row held during the load returns whole when the composer is empty, as a queue edit would.
+/// Otherwise the draft stays, and the held rows are listed as not sent, since their image numbers would clash.
+pub(in crate::app::dispatch) fn restore_prompts_held_during_load(agent: &mut AgentView) {
+    // A fork's first message waits in `pending_first_prompt`; it is held like the rows typed during the load
+    if let Some(directive) = agent.pending_first_prompt.take() {
+        agent.session.enqueue_prompt_front(directive);
+    }
+    if let crate::app::agent_view::PromptMode::EditingQueued {
+        id,
+        server_id: None,
+        ..
+    } = agent.prompt_mode
+    {
+        if agent.prompt.text().trim().is_empty() {
+            agent.exit_editing_mode();
+        } else {
+            agent.save_local_queued_edit(id);
+        }
+    }
+    let held: Vec<_> = agent.session.pending_prompts.drain(..).collect();
+    if held.is_empty() {
+        return;
+    }
+    if agent.prompt.text().is_empty()
+        && let [row] = held.as_slice()
+    {
+        agent
+            .prompt
+            .restore(crate::views::prompt_widget::StashedPrompt::from_submission(
+                row.text.clone(),
+                row.images.clone(),
+                row.chip_elements.clone(),
+            ));
+        agent.prompt_input_mode = if row.kind == crate::app::agent::QueueEntryKind::BashCommand {
+            crate::app::agent_view::PromptInputMode::Bash
+        } else {
+            crate::app::agent_view::PromptInputMode::Normal
+        };
+        return;
+    }
+    let mut dropped_images = 0;
+    let lines: Vec<String> = held
+        .into_iter()
+        .map(|mut row| {
+            dropped_images += row.images.len();
+            crate::prompt_images::drain_and_cleanup(&mut row.images);
+            match row.kind {
+                crate::app::agent::QueueEntryKind::BashCommand => format!("!{}", row.text),
+                _ => row.text,
+            }
+        })
+        .collect();
+    let images = match dropped_images {
+        0 => String::new(),
+        1 => " (1 image dropped)".to_owned(),
+        n => format!(" ({n} images dropped)"),
+    };
+    agent.scrollback.push_block(RenderBlock::system(format!(
+        "Not sent, since the session didn't open{images}:\n{}",
+        lines.join("\n")
+    )));
 }
 pub(in crate::app::dispatch) fn handle_session_search_debounce_expired(
     app: &mut AppView,
@@ -1327,12 +1417,14 @@ pub(in crate::app::dispatch) fn handle_session_restored(
         )));
     }
     let cwd = app.cwd.clone();
+    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
         session_id: local_session_id,
         session_cwd: Some(cwd),
         // Never a conversation entry (effects OR SessionFlags.chat_mode).
         chat_kind: false,
+        attempt,
     }]
 }
 pub(in crate::app::dispatch) fn handle_session_restore_failed(
@@ -1348,12 +1440,20 @@ pub(in crate::app::dispatch) fn handle_session_restore_failed(
         agent.pending_extensions_fetch = false;
         agent.session.loading_replay = false;
         agent.session.prompt_history_loading = false;
+        agent.pending_fork_banner = None;
+        if agent.session.session_id.is_none() {
+            agent.load_failed = true;
+            restore_prompts_held_during_load(agent);
+        }
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't restore session: {error}"),
+                error: format!("Couldn't restore session: {}", fuigo_tty_utils::untrusted(&error)),
                 elapsed: None,
             }));
+        if agent.load_failed {
+            agent.show_toast(crate::app::dispatch::prompt::LOAD_FAILED_NOTICE);
+        }
     }
     vec![]
 }

@@ -41,7 +41,7 @@ pub struct DiskUsageArgs {
 pub fn run(args: DiskUsageArgs) -> Result<()> {
     // resolve_fuigo_home resolves the home the way the registry does, unlike fuigo_config::fuigo_home()
     let fuigo_home = resolve_fuigo_home()?;
-    let mut out = std::io::stdout().lock();
+    let mut out = fuigo_tty_utils::best_effort_stdout::display_stdout();
     let present = fuigo_home
         .try_exists()
         .with_context(|| format!("cannot stat {}", fuigo_home.display()))?;

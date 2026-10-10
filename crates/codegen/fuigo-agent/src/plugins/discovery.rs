@@ -177,6 +177,43 @@ pub struct DiscoveryConfig {
     pub disabled: Vec<String>,
     /// `[plugins].enabled` plugin IDs or names (overrides default-disabled for project plugins).
     pub enabled: Vec<String>,
+    /// Managed `strictKnownMarketplaces` in force (P169): only these plugins may load. `None` = unrestricted.
+    pub source_restriction: Option<PluginSourceRestriction>,
+}
+
+/// The plugins managed policy lets load while `strictKnownMarketplaces` restricts marketplaces (P169, Grok 4.7 #1).
+///
+/// A plugin loads only when its full id is the id of an install the Fuigo install registry ties to an allowed source.
+/// Anything else (a project, user-dir or Claude-imported plugin, a `[plugins].paths` or `--plugin-dir` plugin, a plugin
+/// named only by a bare name) has no verifiable provenance and is dropped at discovery, so neither its hooks nor its MCP
+/// servers nor its skills reach a session.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PluginSourceRestriction {
+    /// Full plugin ids (`user/<hex8>/<name>`) of installs from allowed sources.
+    pub allowed_ids: Vec<String>,
+}
+
+impl PluginSourceRestriction {
+    /// Whether discovered plugin `dp` may load: never from a local source (`--plugin-dir`, `[plugins].paths`), and
+    /// otherwise only by its full id.
+    pub fn admits(&self, dp: &DiscoveredPlugin) -> bool {
+        !matches!(dp.scope, PluginScope::CliOverride | PluginScope::ConfigPath)
+            && self.allowed_ids.iter().any(|id| id == &dp.id.0)
+    }
+
+    /// Keep only the `enabled` entries that name an allowed install by its full id (a bare name never matches).
+    pub fn retain_enabled(&self, enabled: &mut Vec<String>) {
+        enabled.retain(|entry| {
+            let keep = self.allowed_ids.iter().any(|id| id == entry);
+            if !keep {
+                tracing::warn!(
+                    entry = %entry,
+                    "plugin enable entry ignored: strictKnownMarketplaces admits only installs from an allowed source, by full id"
+                );
+            }
+            keep
+        });
+    }
 }
 
 impl DiscoveryConfig {
@@ -185,7 +222,12 @@ impl DiscoveryConfig {
     /// Plugins from auto-enabled scopes (`CliOverride`, `ConfigPath`) are added to `enabled`.
     /// All others (`User`, `Project`) are added to `disabled`.
     /// Plugins already present in either list are left untouched.
+    /// Under a [`PluginSourceRestriction`] nothing is auto-enabled and `enabled` keeps only allowed full ids.
     pub fn populate_plugin_lists(&mut self, discovered: &[DiscoveredPlugin]) {
+        if let Some(restriction) = &self.source_restriction {
+            restriction.retain_enabled(&mut self.enabled);
+        }
+        let restricted = self.source_restriction.is_some();
         for dp in discovered {
             let name = &dp.manifest.name;
             let already_listed = self.enabled.iter().any(|e| e == name || e == &dp.id.0)
@@ -194,7 +236,7 @@ impl DiscoveryConfig {
                 tracing::debug!(plugin = %name, id = %dp.id.0, "plugin already in enabled/disabled list");
                 continue;
             }
-            if matches!(dp.scope, PluginScope::CliOverride | PluginScope::ConfigPath) {
+            if !restricted && matches!(dp.scope, PluginScope::CliOverride | PluginScope::ConfigPath) {
                 tracing::debug!(plugin = %name, scope = ?dp.scope, "auto-adding to enabled list");
                 self.enabled.push(name.clone());
             } else {
@@ -428,6 +470,23 @@ pub fn discover_plugins(
         }
     }
 
+    // P169: under strictKnownMarketplaces only installs from an allowed source load. Dropped before the name-conflict
+    // pass, so a dropped plugin cannot shadow an allowed one of the same name.
+    if let Some(restriction) = &config.source_restriction {
+        candidates.retain(|p| {
+            let admitted = restriction.admits(p);
+            if !admitted {
+                tracing::warn!(
+                    name = %p.manifest.name,
+                    id = %p.id.0,
+                    scope = %p.scope,
+                    "plugin not loaded: strictKnownMarketplaces is set and no install record ties it to an allowed source"
+                );
+            }
+            admitted
+        });
+    }
+
     // Within the same plugin_name, the highest-priority scope wins; within same scope, first-found (alphabetical by canonical path) wins
     resolve_name_conflicts(&mut candidates);
 
@@ -534,20 +593,25 @@ fn collect_installed_plugins(
                 super::install_registry::InstallKind::Local { .. } => None,
             },
         };
-        for plugin in repo.plugins.values() {
-            let plugin_root = match plugin.subdir.as_deref() {
-                Some(sub) => {
-                    if subdir_escapes(sub) {
-                        tracing::warn!(
-                            repo = %repo.path.display(),
-                            subdir = sub,
-                            "skipping installed plugin: registry subdir escapes repo root"
-                        );
-                        continue;
-                    }
-                    repo.path.join(sub)
-                }
-                None => repo.path.clone(),
+        for (name, plugin) in &repo.plugins {
+            if let Some(sub) = plugin.subdir.as_deref()
+                && subdir_escapes(sub)
+            {
+                tracing::warn!(
+                    repo = %repo.path.display(),
+                    subdir = sub,
+                    "skipping installed plugin: registry subdir escapes repo root"
+                );
+                continue;
+            }
+            // A symlink component can leave the checkout without a `..`: confine the canonical plugin root too.
+            let Some(plugin_root) = repo.plugin_root(name) else {
+                tracing::warn!(
+                    repo = %repo.path.display(),
+                    plugin = %name,
+                    "skipping installed plugin: its root resolves outside the checkout"
+                );
+                continue;
             };
             if plugin_root.is_dir() {
                 collect_plugin(
@@ -883,6 +947,69 @@ mod tests {
         let plugin_dir = tmp.join(name);
         std::fs::create_dir_all(plugin_dir.join("skills")).unwrap();
         plugin_dir
+    }
+
+    /// P169 (Grok 4.7 #1): under strictKnownMarketplaces `--plugin-dir` and `[plugins].paths` plugins are local sources
+    /// and never load, even when the restriction happens to list their id; without a restriction they load as before.
+    #[test]
+    fn source_restriction_drops_cli_and_config_path_plugins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = make_manifest_plugin(tmp.path(), "local-cli");
+        let configured = make_manifest_plugin(tmp.path(), "local-config");
+        let mut config = DiscoveryConfig {
+            auto_discover: Some(false),
+            cli_plugin_dirs: vec![cli],
+            config_paths: vec![configured],
+            ..Default::default()
+        };
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let unrestricted = discover_plugins(None, &config, &trust, true);
+        assert_eq!(unrestricted.len(), 2, "fixture: both local plugins load unrestricted");
+        let every_id: Vec<String> = unrestricted.iter().map(|p| p.id.0.clone()).collect();
+        config.source_restriction = Some(PluginSourceRestriction {
+            allowed_ids: every_id,
+        });
+        let restricted = discover_plugins(None, &config, &trust, true);
+        assert!(
+            restricted.is_empty(),
+            "local plugin sources must not load under a restriction: {:?}",
+            restricted.iter().map(|p| &p.id.0).collect::<Vec<_>>()
+        );
+    }
+
+    /// P169 (Grok 4.7 #1): a restriction admits a discovered plugin by its full id only; a same-named plugin elsewhere,
+    /// or one named in `enabled` by a bare name, does not load.
+    #[test]
+    fn source_restriction_admits_by_full_id_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        git2::Repository::init(&project).unwrap();
+        make_manifest_plugin(&project.join(".fuigo/plugins"), "keep");
+        make_manifest_plugin(&project.join(".fuigo/plugins"), "demo");
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let mut config = DiscoveryConfig::default();
+        let all = discover_plugins(Some(&project), &config, &trust, true);
+        let keep_id = all
+            .iter()
+            .find(|p| p.plugin_name() == "keep")
+            .map(|p| p.id.0.clone())
+            .expect("fixture: keep is discovered");
+        assert!(all.iter().any(|p| p.plugin_name() == "demo"), "fixture: demo is discovered");
+        config.source_restriction = Some(PluginSourceRestriction {
+            allowed_ids: vec![keep_id.clone(), "user/00000000/demo".to_string()],
+        });
+        config.enabled = vec!["demo".to_string(), keep_id.clone(), "keep".to_string()];
+        let restricted = discover_plugins(Some(&project), &config, &trust, true);
+        let names: Vec<&str> = restricted.iter().map(|p| p.plugin_name()).collect();
+        assert!(names.contains(&"keep"), "{names:?}");
+        assert!(!names.contains(&"demo"), "a same-named plugin with another id must not load: {names:?}");
+        config.populate_plugin_lists(&restricted);
+        assert_eq!(
+            config.enabled,
+            vec![keep_id],
+            "bare names (Claude-imported or hand-written) never enable a plugin under a restriction"
+        );
     }
 
     #[test]
@@ -1225,6 +1352,53 @@ mod tests {
                 git_url: Some("https://github.com/owner/repo.git".to_string()),
             }
         );
+    }
+
+    /// Round 7 (grok-p169-r6.md MEDIUM 2): a `subdir` symlink inside the checkout that leaves the install dir.
+    #[cfg(unix)]
+    #[test]
+    fn installed_plugins_skip_subdir_symlink_that_leaves_the_install_dir() {
+        use crate::plugins::install_registry::{
+            InstallKind, InstallRegistry, InstalledRepo, RepoPlugin,
+        };
+        use std::collections::HashMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("installed-plugins");
+        let repo_path = install_dir.join("stub");
+        std::fs::create_dir_all(&repo_path).unwrap();
+        let outside = tmp.path().join("evil-target");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("plugin.json"), r#"{"name": "evil"}"#).unwrap();
+        std::os::unix::fs::symlink(&outside, repo_path.join("escape")).unwrap();
+
+        let mut registry = InstallRegistry::empty(install_dir);
+        registry.insert(
+            "stub".to_string(),
+            InstalledRepo {
+                kind: InstallKind::Local {
+                    source_path: repo_path.clone(),
+                    subdir: None,
+                },
+                installed_at: String::new(),
+                updated_at: String::new(),
+                path: repo_path,
+                plugins: HashMap::from([(
+                    "evil".to_string(),
+                    RepoPlugin {
+                        subdir: Some("escape".to_string()),
+                        version: None,
+                    },
+                )]),
+                marketplace: None,
+            },
+        );
+        let trust = TrustStore::load_from(tmp.path().join("trust"));
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+        collect_installed_plugins(&registry, PluginScope::User, &trust, false, &mut seen, &mut candidates);
+        let names: Vec<&str> = candidates.iter().map(|p| p.plugin_name()).collect();
+        assert!(!names.contains(&"evil"), "a symlink out of the install dir must be skipped, got {names:?}");
     }
 
     #[test]

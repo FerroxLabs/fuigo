@@ -263,7 +263,7 @@ impl QueuedPromptEntry {
 
                 Line::from(spans)
             }
-            QueueEntryKind::Command => {
+            QueueEntryKind::Command | QueueEntryKind::SideQuestion => {
                 // Slash commands: `/command` in magenta, args (if any) in bright gray.
                 let trimmed = first_line.trim();
 

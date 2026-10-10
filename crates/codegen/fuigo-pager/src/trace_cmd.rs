@@ -53,7 +53,9 @@ pub async fn run(args: TraceArgs, agent_config: &AgentConfig) -> Result<()> {
         if !args.json {
             fuigo_tty_utils::cli_eprintln!(
                 "Trace uploads disabled. Set [telemetry] trace_upload = true in {}",
-                crate::util::display_user_fuigo_path(fuigo_config::USER_CONFIG_FILENAME)
+                fuigo_tty_utils::untrusted(crate::util::display_user_fuigo_path(
+                    fuigo_config::USER_CONFIG_FILENAME
+                ))
             );
             fuigo_tty_utils::cli_eprintln!("Falling back to local export.");
         }
@@ -213,7 +215,7 @@ fn append_bytes<W: std::io::Write>(archive: &mut tar::Builder<W>, path: &str, da
     set_mtime(&mut header);
     if let Err(e) = archive.append_data(&mut header, path, data) {
         tracing::warn!(error = %e, "trace_cmd: failed to add file to archive");
-        fuigo_tty_utils::cli_eprintln!("  Warning: failed to add {path}: {e}");
+        fuigo_tty_utils::cli_eprintln!("  Warning: failed to add {}: {}", fuigo_tty_utils::untrusted(path), fuigo_tty_utils::untrusted(e));
     }
 }
 
@@ -282,8 +284,8 @@ fn add_directory_to_tar<W: std::io::Write>(
                     );
                     fuigo_tty_utils::cli_eprintln!(
                         "  Warning: failed to read {}: {}",
-                        path.display(),
-                        e
+                        fuigo_tty_utils::untrusted(path.display()),
+                        fuigo_tty_utils::untrusted(e)
                     );
                 }
             }
@@ -411,7 +413,7 @@ async fn run_export(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        fuigo_tty_utils::cli_eprintln!("Found session at: {}", session_dir.display());
+        fuigo_tty_utils::cli_eprintln!("Found session at: {}", fuigo_tty_utils::untrusted(session_dir.display()));
         fuigo_tty_utils::cli_eprintln!("Building session trace archive...");
     }
 
@@ -430,8 +432,8 @@ async fn run_export(
     } else {
         let size_kb = archive.len() / 1024;
         fuigo_tty_utils::cli_eprintln!("Session trace exported ({size_kb} KB):");
-        fuigo_tty_utils::cli_eprintln!("  {}", output_path.display());
-        fuigo_tty_utils::cli_println!("{}", output_path.display());
+        fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(output_path.display()));
+        fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted_stdout_data(output_path.display()));
     }
     Ok(())
 }
@@ -449,7 +451,7 @@ async fn run_upload(
 ) -> Result<()> {
     let session_dir = find_session_dir(session_id)?;
     if !json {
-        fuigo_tty_utils::cli_eprintln!("Found session at: {}", session_dir.display());
+        fuigo_tty_utils::cli_eprintln!("Found session at: {}", fuigo_tty_utils::untrusted(session_dir.display()));
     }
 
     let (upload_method, upload_auth) = resolve_upload_method(agent_config).await;
@@ -519,7 +521,7 @@ async fn run_upload(
     if !json {
         let size_kb = archive_size / 1024;
         fuigo_tty_utils::cli_eprintln!("Uploading session trace ({size_kb} KB)...");
-        fuigo_tty_utils::cli_eprintln!("{method_desc}");
+        fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(&method_desc));
     }
 
     // P47: the credential's kind travels with the upload, so a static API key keeps its own rules and a session
@@ -541,8 +543,8 @@ async fn run_upload(
             } else {
                 fuigo_tty_utils::cli_eprintln!();
                 fuigo_tty_utils::cli_eprintln!("Session trace uploaded successfully.");
-                fuigo_tty_utils::cli_eprintln!("  {url}");
-                fuigo_tty_utils::cli_println!("{url}");
+                fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(&url));
+                fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted_stdout_data(&url));
             }
             Ok(())
         }
@@ -579,7 +581,7 @@ impl UploadAttempt<'_> {
 
         let export_path = save_local_bundle(self.archive, self.session_id, self.output)
             .unwrap_or_else(|write_err| {
-                fuigo_tty_utils::cli_eprintln!("Failed to save local bundle: {write_err}");
+                fuigo_tty_utils::cli_eprintln!("Failed to save local bundle: {}", fuigo_tty_utils::untrusted(write_err));
                 export_dir.join(format!("{}.tar.gz", self.session_id))
             });
 
@@ -596,11 +598,11 @@ impl UploadAttempt<'_> {
             fuigo_tty_utils::cli_println!("{}", serde_json::to_string(&result).unwrap_or_default());
         } else {
             fuigo_tty_utils::cli_eprintln!();
-            fuigo_tty_utils::cli_eprintln!("Trace upload failed: {error}");
-            fuigo_tty_utils::cli_eprintln!("  Bundle: {}", export_path.display());
-            fuigo_tty_utils::cli_eprintln!("  Log:    {}", log_path.display());
-            fuigo_tty_utils::cli_eprintln!("  Retry:  fuigo trace {}", self.session_id);
-            fuigo_tty_utils::cli_println!("{}", export_path.display());
+            fuigo_tty_utils::cli_eprintln!("Trace upload failed: {}", fuigo_tty_utils::untrusted(error));
+            fuigo_tty_utils::cli_eprintln!("  Bundle: {}", fuigo_tty_utils::untrusted(export_path.display()));
+            fuigo_tty_utils::cli_eprintln!("  Log:    {}", fuigo_tty_utils::untrusted(log_path.display()));
+            fuigo_tty_utils::cli_eprintln!("  Retry:  fuigo trace {}", fuigo_tty_utils::untrusted(self.session_id));
+            fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted_stdout_data(export_path.display()));
         }
 
         anyhow::anyhow!("Trace upload failed for session {}", self.session_id)
@@ -638,7 +640,7 @@ impl UploadAttempt<'_> {
         );
 
         if let Err(e) = std::fs::write(&log_path, &log) {
-            fuigo_tty_utils::cli_eprintln!("  Warning: failed to write debug log: {e}");
+            fuigo_tty_utils::cli_eprintln!("  Warning: failed to write debug log: {}", fuigo_tty_utils::untrusted(e));
         }
         log_path
     }

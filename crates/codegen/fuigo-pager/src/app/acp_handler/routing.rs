@@ -127,11 +127,12 @@ pub(super) fn find_session_match(
         return Some(SessionMatch::Child(id));
     }
     // Pass 3: race-window fallback for notifications that arrive before the root session_id has been assigned
-    // Only the active agent is eligible, and only when its `session_id` is still `None`
+    // Only the active agent is eligible, only while its `session_id` is still `None`, and never after its load failed
     // Otherwise we would misroute a stranger's notification to whichever agent happens to be foregrounded
     if let ActiveView::Agent(active_id) = app.active_view
         && let Some(agent) = app.agents.get(&active_id)
         && agent.session.session_id.is_none()
+        && !agent.load_failed
     {
         return Some(SessionMatch::Root(active_id));
     }

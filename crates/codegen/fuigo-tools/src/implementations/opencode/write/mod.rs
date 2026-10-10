@@ -112,6 +112,19 @@ impl fuigo_tool_runtime::Tool for WriteTool {
         // Resolve the model-provided path.
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
 
+        // P166 Grok r5 MEDIUM 3 sweep: like the edit tools, refuse a gitignored path (logical or physical) before reading
+        // the old content or writing.
+        if crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
+            &resources, &path, true,
+        )
+        .await
+        {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} is ignored by .gitignore and cannot be edited.",
+                input.file_path
+            )));
+        }
+
         // ── Check if file exists and read old content ────────────
         let (existed, old_content) = match fs.read_file(&path).await {
             Ok(bytes) => (true, Some(String::from_utf8_lossy(&bytes).into_owned())),
@@ -463,5 +476,36 @@ mod tests {
     fn notification_fields() {
         // Notification verification requires capturing handle.
         // Covered at integration layer.
+    }
+
+    /// P166 Grok r5 MEDIUM 3 sweep: the OpenCode write reads the old content (for the diff) and overwrites it; like the
+    /// other edit tools it refuses a gitignored path, logical or physical.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_write_refuses_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let mut resources = test_resources(repo.path());
+        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        let result = fuigo_tool_runtime::Tool::run(
+            &WriteTool,
+            test_ctx(resources.into_shared()),
+            WriteInput {
+                file_path: "secret/key.txt".to_owned(),
+                content: "x".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
     }
 }

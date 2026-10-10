@@ -162,7 +162,7 @@ async fn ext_call<T: serde::de::DeserializeOwned>(
     let envelope: ExtEnvelope<T> = serde_json::from_str(resp.0.get())
         .map_err(|e| anyhow::anyhow!("response parse error: {e}"))?;
     if let Some(err) = envelope.error {
-        bail!("ACP error: {}", ext_envelope_error_text(&err));
+        bail!("ACP error: {}", fuigo_tty_utils::untrusted(ext_envelope_error_text(&err)));
     }
     envelope
         .result
@@ -185,7 +185,7 @@ async fn cmd_list(
         }),
     )
     .await?;
-    let mut out = std::io::stdout().lock();
+    let mut out = fuigo_tty_utils::best_effort_stdout::display_stdout();
     let written = if json {
         display::print_json(&records, &mut out)
     } else {
@@ -202,10 +202,10 @@ async fn cmd_show(tx: &fuigo_acp_lib::AcpAgentTx, id_or_path: &str) -> Result<()
     .await?;
     match rec {
         Some(r) => {
-            let written = display::print_show(&r, &mut std::io::stdout().lock());
+            let written = display::print_show(&r, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
-        None => bail!("worktree not found: {id_or_path}"),
+        None => bail!("worktree not found: {}", fuigo_tty_utils::untrusted(id_or_path)),
     }
 }
 #[derive(serde::Deserialize)]
@@ -236,12 +236,12 @@ async fn cmd_rm(
             Ok(r) => {
                 let path = r.resolved_path.as_deref().unwrap_or(id_or_path);
                 if dry_run {
-                    fuigo_tty_utils::cli_println!("  would remove: {path}");
+                    fuigo_tty_utils::cli_println!("  would remove: {}", fuigo_tty_utils::untrusted(path));
                 } else if r.removed {
-                    fuigo_tty_utils::cli_println!("  removed: {path}");
+                    fuigo_tty_utils::cli_println!("  removed: {}", fuigo_tty_utils::untrusted(path));
                 }
             }
-            Err(e) => fuigo_tty_utils::cli_eprintln!("  error removing {id_or_path}: {e}"),
+            Err(e) => fuigo_tty_utils::cli_eprintln!("  error removing {}: {}", fuigo_tty_utils::untrusted(id_or_path), fuigo_tty_utils::untrusted(e)),
         }
     }
     Ok(())
@@ -262,7 +262,7 @@ async fn cmd_gc(
         }),
     )
     .await?;
-    let mut out = std::io::stdout().lock();
+    let mut out = fuigo_tty_utils::best_effort_stdout::display_stdout();
     let written = (|| {
         if dry_run {
             writeln!(out, "Dry run: no changes made.")?;
@@ -275,7 +275,7 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
     match command {
         WorktreeDbCommand::Stats => {
             let stats: DbStats = ext_call(tx, "fuigo/git/worktree/db/stats", &()).await?;
-            let written = display::print_stats(&stats, &mut std::io::stdout().lock());
+            let written = display::print_stats(&stats, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
         WorktreeDbCommand::Path => {
@@ -284,12 +284,12 @@ async fn cmd_db(tx: &fuigo_acp_lib::AcpAgentTx, command: WorktreeDbCommand) -> R
                 path: String,
             }
             let resp: PathResp = ext_call(tx, "fuigo/git/worktree/db/path", &()).await?;
-            fuigo_tty_utils::cli_println!("{}", resp.path);
+            fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(&resp.path));
             Ok(())
         }
         WorktreeDbCommand::Rebuild => {
             let report: RebuildReport = ext_call(tx, "fuigo/git/worktree/db/rebuild", &()).await?;
-            let written = display::print_rebuild(&report, &mut std::io::stdout().lock());
+            let written = display::print_rebuild(&report, &mut fuigo_tty_utils::best_effort_stdout::display_stdout());
             Ok(crate::util::ignore_broken_pipe(written)?)
         }
     }

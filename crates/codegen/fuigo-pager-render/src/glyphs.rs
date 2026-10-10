@@ -384,19 +384,15 @@ pub fn legacy_glyph_fallback(s: &str) -> Cow<'_, str> {
     Cow::Owned(to_legacy_glyphs(s))
 }
 
-/// Single-row toast sinks: glyph fallback, then map control chars to spaces.
+/// Single-row toast sinks: glyph fallback, then the shared unsafe-character scrub.
+/// Controls and line separators become spaces; tag characters, soft hyphens and other invisible format characters are dropped.
 /// Borrows when the input is already clean (common path).
 pub fn sanitize_toast_message(msg: &str) -> Cow<'_, str> {
     let glyph = legacy_glyph_fallback(msg);
-    if !glyph.chars().any(char::is_control) {
-        return glyph;
+    match fuigo_tty_utils::scrub_unsafe_display(&glyph, Some(' ')) {
+        Cow::Borrowed(_) => glyph,
+        Cow::Owned(clean) => Cow::Owned(clean),
     }
-    Cow::Owned(
-        glyph
-            .chars()
-            .map(|c| if c.is_control() { ' ' } else { c })
-            .collect(),
-    )
 }
 
 /// Pure glyph-to-legacy mapping behind [`legacy_glyph_fallback`], split out so tests can exercise the substitution without faking the host probe.
@@ -640,6 +636,13 @@ mod tests {
         let out = sanitize_toast_message("a\nb\tc");
         assert_eq!(out.as_ref(), "a b c");
         assert!(!out.chars().any(char::is_control));
+    }
+
+    /// P181: a toast must not carry tag characters, soft hyphens or line separators; the separator becomes a space.
+    #[test]
+    fn sanitize_toast_message_drops_hidden_characters() {
+        let out = sanitize_toast_message("a\u{e0041}b\u{00ad}c\u{2028}d");
+        assert_eq!(out.as_ref(), "abc d");
     }
 
     #[test]

@@ -669,6 +669,10 @@ pub(crate) struct PreparedToolCall {
     is_read_only: bool,
     rewriting_hook: Option<String>,
     additional_context: Vec<fuigo_hooks::dispatcher::AdditionalContext>,
+    /// The files the permission check judged for a `read_file` call (P174): each as spelled in the request, with the
+    /// file the reader opens for it; `None` for every other tool. Read-dedupe may only drop entries from a call, and
+    /// hashes only these opened files, never a path outside this list.
+    judged_read_paths: Option<Vec<(String, std::path::PathBuf)>>,
 }
 impl PreparedToolCall {
     /// The tool name hooks see: the resolved dispatch target, else the wire name.
@@ -926,6 +930,8 @@ pub(crate) struct SessionActor {
     /// First skill the current prompt activated via its slash-skill path, recorded as `skill.name` on the turn span.
     /// Reset at the start of each prompt (`handle_prompt`), so it never leaks across turns.
     pub(crate) active_skill: parking_lot::Mutex<Option<String>>,
+    /// P186c: what this session has already told its user about the admin-policy lock-down (once per broken version).
+    pub(crate) admin_policy_watch: crate::session::admin_policy_watch::AdminPolicyWatch,
     /// Canonical session mode last set via ACP `session/set_mode`.
     /// Used as the fallback start prompt mode when prompt request metadata does not explicitly provide one.
     pub(crate) current_prompt_mode: Arc<parking_lot::Mutex<PromptMode>>,
@@ -1988,6 +1994,165 @@ mod tool_meta_stamp_tests {
                 assert_eq!(t["name"], "read_file");
                 assert_eq!(t["kind"], "read");
                 assert_eq!(t["input"]["path"], "/tmp/stamp.txt");
+            })
+            .await;
+    }
+    /// P184: the ACP session asks permission for an `apply_patch` call with every file the patch writes, parsed from
+    /// the input that runs, so the manager can judge each one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_patch_permission_request_carries_every_target() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut fixture = make_replay_send_update_fixture().await;
+                fixture.actor.agent = std::cell::RefCell::new(
+                    test_agent_with_tools(vec![ToolConfig::from_id(
+                        "Codex:apply_patch".to_string(),
+                    )])
+                    .await,
+                );
+                let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
+                fixture.actor.permissions = PermissionHandle::Actor {
+                    cmd_tx: perm_tx,
+                    yolo_state: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    auto_state: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    side_query_wired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    yolo_pin: None,
+                    deny_read_globs: Arc::new(vec![]),
+                    in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    user_prompt_notify: Arc::new(parking_lot::Mutex::new(None)),
+                };
+                let captured = Arc::new(tokio::sync::Mutex::new(None));
+                let captured_in_task = captured.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(cmd) = perm_rx.recv().await {
+                        if let PermissionCommand::Request {
+                            request,
+                            respond_to,
+                        } = cmd
+                        {
+                            *captured_in_task.lock().await =
+                                Some((request.access.clone(), request.edit_targets.clone()));
+                            let _ = respond_to.send(
+                                fuigo_workspace::permission::PermissionResolution {
+                                    decision: Decision::Reject("test".to_owned()),
+                                    event: None,
+                                },
+                            );
+                        }
+                    }
+                });
+                let patch = "*** Begin Patch\n*** Add File: .git/hooks/pre-commit\n+x\n*** Update File: src/a.rs\n*** Move to: secrets/a.rs\n@@\n-a\n+b\n*** End Patch";
+                let call = crate::sampling::types::ToolCallResponse {
+                    id: "call-patch-1".to_string(),
+                    kind: "function".to_string(),
+                    function: crate::sampling::types::ToolCallFunction {
+                        name: "apply_patch".to_string(),
+                        arguments: serde_json::json!({ "patch": patch }).to_string(),
+                    },
+                };
+                let _ = fixture
+                    .actor
+                    .prepare_tool_call(call, &mut Vec::new())
+                    .await
+                    .expect("prepare_tool_call should not error");
+                let (access, targets) = captured
+                    .lock()
+                    .await
+                    .take()
+                    .expect("permission request must have been issued");
+                assert!(
+                    matches!(&access, fuigo_workspace::permission::AccessKind::Edit(p) if p == "apply_patch"),
+                    "{access:?}"
+                );
+                assert_eq!(
+                    targets,
+                    Some(fuigo_workspace::permission::EditTargets::Paths(vec![
+                        ".git/hooks/pre-commit".to_owned(),
+                        "src/a.rs".to_owned(),
+                        "secrets/a.rs".to_owned(),
+                    ]))
+                );
+            })
+            .await;
+    }
+    /// P174: the ACP session asks permission for a codex `read_file` call with a `files` list carrying every file the
+    /// call reads, from the input that runs, so the manager can judge each one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn read_file_permission_request_carries_every_path() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut fixture = make_replay_send_update_fixture().await;
+                fixture.actor.agent = std::cell::RefCell::new(
+                    test_agent_with_tools(vec![ToolConfig::from_id(
+                        "Codex:read_file".to_string(),
+                    )])
+                    .await,
+                );
+                let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
+                fixture.actor.permissions = PermissionHandle::Actor {
+                    cmd_tx: perm_tx,
+                    yolo_state: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    auto_state: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    side_query_wired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    yolo_pin: None,
+                    deny_read_globs: Arc::new(vec![]),
+                    in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    user_prompt_notify: Arc::new(parking_lot::Mutex::new(None)),
+                };
+                let captured = Arc::new(tokio::sync::Mutex::new(None));
+                let captured_in_task = captured.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(cmd) = perm_rx.recv().await {
+                        if let PermissionCommand::Request {
+                            request,
+                            respond_to,
+                        } = cmd
+                        {
+                            *captured_in_task.lock().await =
+                                Some((request.access.clone(), request.read_targets.clone()));
+                            let _ = respond_to.send(
+                                fuigo_workspace::permission::PermissionResolution {
+                                    decision: Decision::Reject("test".to_owned()),
+                                    event: None,
+                                },
+                            );
+                        }
+                    }
+                });
+                let call = crate::sampling::types::ToolCallResponse {
+                    id: "call-read-1".to_string(),
+                    kind: "function".to_string(),
+                    function: crate::sampling::types::ToolCallFunction {
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({
+                            "files": [{ "path": "/w/ok.txt" }, { "path": "/w/secrets/key" }]
+                        })
+                        .to_string(),
+                    },
+                };
+                let _ = fixture
+                    .actor
+                    .prepare_tool_call(call, &mut Vec::new())
+                    .await
+                    .expect("prepare_tool_call should not error");
+                let (access, targets) = captured
+                    .lock()
+                    .await
+                    .take()
+                    .expect("permission request must have been issued");
+                assert!(
+                    matches!(&access, fuigo_workspace::permission::AccessKind::Read(_)),
+                    "{access:?}"
+                );
+                assert_eq!(
+                    targets,
+                    Some(fuigo_workspace::permission::ReadTargets {
+                        paths: vec!["/w/ok.txt".to_owned(), "/w/secrets/key".to_owned()],
+                        resolution: fuigo_workspace::permission::ReadResolution::Literal,
+                    })
+                );
             })
             .await;
     }

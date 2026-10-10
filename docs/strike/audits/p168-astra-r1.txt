@@ -1,0 +1,25 @@
+# Astra round 1 verdict (final message; full transcript sha256 b19fbb6c696a8996ced4927112b8e2a79aec2a69811349b335b54629aa332251, kept off-repo)
+Audited `532e913..f356db2` read-only. No Cargo commands or builds ran.
+
+**S6 — NOT FIXED.** The requested abbreviations, clusters, attached values, and missing-value writes are covered. Plain `git status -uno` and `go test -json` remain non-writes. However:
+
+- **HIGH — remaining bypass, present in both baselines:** `git format-patch --output-directory=protected -1 HEAD` produces no detected write. [shell_access.rs:1202](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1202) checks only the `--output` family; Git defines [`--output-directory`](https://github.com/git/git/blob/v2.50.1/builtin/log.c#L1965). Both consumers consequently miss this output operand. **Fix:** recognize that option’s separated and attached forms; add extraction, Edit deny/ask, and auto-mode regression tests.
+
+**S14 — FIXED.** Both [prompt.md:3](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-agent/templates/prompt.md:3) and [apply_patch_prompt.md:113](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-agent/templates/apply_patch_prompt.md:113) contain the block. Fuigo identity lines remain unchanged, with no Grok/xAI branding. The complete encrypted file matches an in-memory regeneration, including seeds; the subagent template is unchanged. Apply-patch size is **21,307 / 21,473 bytes**. The requested test exists at [template.rs:305](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-agent/src/prompt/template.rs:305).
+
+**NEW regressions versus both `532e913` and v1.0.21:**
+
+1. **HIGH — Go’s equals handling also changes Git paths.**  
+   `git -c alias.a=archive a -o=blocked HEAD` targets literal `=blocked`; P168 reports `blocked`. Previously it preserved `=blocked`. Git aliases select `None`, whose [equals stripping at shell_access.rs:1157](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1157) contradicts [Git’s argument parser](https://github.com/git/git/blob/v2.50.1/parse-options.c#L42). This misses an Edit restriction on the actual path; `-o=/dev/null` also incorrectly becomes a safe sink. **Fix:** separate Go value syntax from Git’s unclustered fallback; preserve Git’s leading `=`.
+
+2. **MEDIUM — path operands select the Git command grammar.**  
+   `git status -uno .env archive` is read-only but now reports a write to `.env`, triggering its Edit restriction. [shell_access.rs:1109](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1109) treats any word `archive` as the verb. Native Git accepted this command; both baselines detected no write. **Fix:** identify the actual subcommand after consuming global options; add this negative case.
+
+3. **MEDIUM — option values and operands are rescanned as flags.**  
+   With an input file named `-ro`, `sort -- -ro .env` only reads files, but P168 reports `.env` as output. Likewise, `git log --grep --out -1` treats the search pattern as an output option. The scans at [shell_access.rs:1127](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1127) and [1144](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1144) ignore argument consumption and `--`. **Fix:** track both while retaining conservative abbreviation and missing-value behavior.
+
+Comparison used v1.0.21 code baseline `de6ca7dd`; affected files match release-preparation commit `b11045856`. Evidence comprises source review, native Git/GNU-sort probes, and a Python model matching the added helper-test vectors—not executed Rust tests. Independent Git permission gates may still prompt; these findings concern the required write/path checks.
+
+**NOT LAND-OK — 2 HIGH, 2 MEDIUM; zero BLOCKER.**
+
+

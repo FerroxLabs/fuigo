@@ -284,6 +284,43 @@ mod tests {
         assert_eq!(keyed["cancellation_context"]["<redacted>"], 1);
     }
 
+    /// P163 (1.0.21 K24): a recorded key that reaches an event re-encoded (inside HTTP `Basic`, a URL-safe base64
+    /// JSON blob, percent-encoded) is replaced in `events.jsonl` too.
+    #[test]
+    fn p163_written_events_hold_no_re_encoded_sent_credential() {
+        const KEY: &str = "p163-FAKE-events-key-7d1e";
+        // base64("alice:" + KEY), URL-safe base64 of {"k":"KEY"}, and KEY with every byte percent-encoded.
+        const BASIC: &str = "YWxpY2U6cDE2My1GQUtFLWV2ZW50cy1rZXktN2QxZQ==";
+        const BLOB: &str = "eyJrIjoicDE2My1GQUtFLWV2ZW50cy1rZXktN2QxZSJ9";
+        const PCT: &str =
+            "%70%31%36%33%2D%46%41%4B%45%2D%65%76%65%6E%74%73%2D%6B%65%79%2D%37%64%31%65";
+        fuigo_secrets::sent_credentials::record(KEY);
+        let dir = tempfile::tempdir().unwrap();
+        append_event_checked(
+            dir.path(),
+            Event::McpTransportDecodeError {
+                server_name: "s".into(),
+                error: format!("echoed Authorization: Basic {BASIC}"),
+                sample: format!("token={BLOB}&k={PCT}"),
+            },
+        )
+        .unwrap();
+        let text = std::fs::read_to_string(dir.path().join(EVENTS_FILE)).unwrap();
+        // The base64 characters that only the key determines, and the encoded key.
+        for leak in ["cDE2My1GQUtFLWV2ZW50cy1rZXkt", "%70%31%36%33%2D"] {
+            assert!(!text.contains(leak), "{leak}: {text}");
+        }
+        let event: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert!(
+            event["error"].as_str().unwrap().contains("<redacted>"),
+            "{text}"
+        );
+        assert!(
+            event["sample"].as_str().unwrap().ends_with("&k=<redacted>"),
+            "{text}"
+        );
+    }
+
     /// P113 (Astra r2 #6): a recorded credential that equals an event's `type` tag leaves the tag as written, so
     /// readers still recognise the event; the same text elsewhere in the event is still replaced. Its own process:
     /// recording `turn_ended` would rewrite every other test's events.

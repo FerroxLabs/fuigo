@@ -280,8 +280,19 @@ impl DirNode {
     }
 }
 /// Shared `WalkBuilder` for seed and deep walk (same `RespectGitignore` flags).
-fn list_dir_walk_builder(root: &Path, respect_gitignore: bool) -> ignore::WalkBuilder {
+fn list_dir_walk_builder(
+    root: &Path,
+    respect_gitignore: bool,
+    deny: Option<crate::util::read_deny::ReadDenyFilter>,
+) -> ignore::WalkBuilder {
     let mut builder = ignore::WalkBuilder::new(root);
+    // P198: Read-denied names are not listed (the walk prunes a denied directory with its subtree).
+    if let Some(deny) = deny {
+        let deny = deny.rooted(root);
+        builder.filter_entry(move |entry| {
+            !deny.denies(entry.path(), entry.file_type().is_some_and(|t| t.is_dir()))
+        });
+    }
     builder
         .standard_filters(true)
         .git_ignore(respect_gitignore)
@@ -296,8 +307,9 @@ fn seed_depth1_children(
     root_node: &mut DirNode,
     respect_gitignore: bool,
     max_seed: usize,
+    deny: Option<crate::util::read_deny::ReadDenyFilter>,
 ) -> bool {
-    let walker = list_dir_walk_builder(root, respect_gitignore)
+    let walker = list_dir_walk_builder(root, respect_gitignore, deny)
         .max_depth(Some(1))
         .build();
     let mut seed_count: usize = 0;
@@ -321,18 +333,25 @@ fn seed_depth1_children(
     false
 }
 /// Depth-1 seed first, then deep walk; only depth ≥ 2 counts toward `max_items`.
+#[cfg(test)]
 fn build_tree(root: &Path, respect_gitignore: bool) -> (DirNode, bool) {
-    build_tree_with_limit(root, respect_gitignore, MAX_GLOBAL_ITEMS)
+    build_tree_with_limit(root, respect_gitignore, MAX_GLOBAL_ITEMS, None)
 }
 fn build_tree_with_limit(
     root: &Path,
     respect_gitignore: bool,
     max_items: usize,
+    deny: Option<crate::util::read_deny::ReadDenyFilter>,
 ) -> (DirNode, bool) {
     let mut root_node = DirNode::new(0);
-    let seed_truncated =
-        seed_depth1_children(root, &mut root_node, respect_gitignore, MAX_SEED_ITEMS);
-    let walker = list_dir_walk_builder(root, respect_gitignore).build();
+    let seed_truncated = seed_depth1_children(
+        root,
+        &mut root_node,
+        respect_gitignore,
+        MAX_SEED_ITEMS,
+        deny.clone(),
+    );
+    let walker = list_dir_walk_builder(root, respect_gitignore, deny).build();
     let mut item_count: usize = 0;
     let mut walk_truncated = false;
     for entry in walker {
@@ -456,11 +475,13 @@ fn render_truncated_root(root: &DirNode, max_chars: usize, top_k: usize, notice:
 enum ListDirWalk {
     Legacy {
         max_output_bytes: usize,
+        deny: Option<crate::util::read_deny::ReadDenyFilter>,
     },
     Current {
         max_output_chars: usize,
         respect_gitignore: bool,
         truncation_notice: String,
+        deny: Option<crate::util::read_deny::ReadDenyFilter>,
     },
 }
 fn map_list_dir_join_error(
@@ -583,13 +604,19 @@ impl fuigo_tool_runtime::Tool for ListDirTool {
             });
         }
         let walk = if is_legacy {
-            let max_output_bytes = resources
-                .lock()
-                .await
+            let res = resources.lock().await;
+            let max_output_bytes = res
                 .get::<Params<ListDirParams>>()
                 .and_then(|p| p.0.max_output_chars)
                 .unwrap_or(crate::DEFAULT_TOOL_OUTPUT_BYTES);
-            ListDirWalk::Legacy { max_output_bytes }
+            let deny = crate::util::read_deny::ReadDenyFilter::new(
+                &cwd,
+                &crate::types::resources::deny_read_globs_for_call(&ctx, &res),
+            );
+            ListDirWalk::Legacy {
+                max_output_bytes,
+                deny,
+            }
         } else {
             let res = resources.lock().await;
             let max_output_chars = res
@@ -598,23 +625,34 @@ impl fuigo_tool_runtime::Tool for ListDirTool {
                 .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS);
             let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
             let truncation_notice = root_truncation_notice(res.get::<TemplateRenderer>());
+            // P198: Read-denied names are left out of the listing.
+            let deny = crate::util::read_deny::ReadDenyFilter::new(
+                &cwd,
+                &crate::types::resources::deny_read_globs_for_call(&ctx, &res),
+            );
             ListDirWalk::Current {
                 max_output_chars,
                 respect_gitignore,
                 truncation_notice,
+                deny,
             }
         };
         let (body, path) = spawn_list_dir_walk(&display_path, move || {
             let body = match walk {
-                ListDirWalk::Legacy { max_output_bytes } => {
-                    versions::legacy_0_4_10::render_legacy(&path, max_output_bytes)
+                ListDirWalk::Legacy {
+                    max_output_bytes,
+                    deny,
+                } => {
+                    versions::legacy_0_4_10::render_legacy(&path, max_output_bytes, deny)
                 }
                 ListDirWalk::Current {
                     max_output_chars,
                     respect_gitignore,
                     truncation_notice,
+                    deny,
                 } => {
-                    let (mut tree, truncated) = build_tree(&path, respect_gitignore);
+                    let (mut tree, truncated) =
+                        build_tree_with_limit(&path, respect_gitignore, MAX_GLOBAL_ITEMS, deny);
                     budget_expand(
                         &mut tree,
                         max_output_chars,
@@ -999,7 +1037,7 @@ mod tests {
             File::create(tmp.path().join(format!("f{}.rs", i))).unwrap();
         }
         let mut root_node = DirNode::new(0);
-        let truncated = seed_depth1_children(tmp.path(), &mut root_node, true, SEED_LIMIT);
+        let truncated = seed_depth1_children(tmp.path(), &mut root_node, true, SEED_LIMIT, None);
         assert!(truncated, "10 depth-1 entries should exceed seed cap of 3");
         root_node.sort_recursive();
         let body = budget_expand(
@@ -1034,7 +1072,7 @@ mod tests {
         }
         File::create(zzz.join("late.rs")).unwrap();
         const WALK_LIMIT: usize = 5;
-        let (mut tree, truncated) = build_tree_with_limit(tmp.path(), true, WALK_LIMIT);
+        let (mut tree, truncated) = build_tree_with_limit(tmp.path(), true, WALK_LIMIT, None);
         assert!(truncated, "30 depth≥2 files should exceed limit of 5");
         assert!(
             tree.subdirs.iter().any(|s| s == "zzz/"),
@@ -1488,7 +1526,7 @@ mod tests {
         File::create(listed.join("README.md")).unwrap();
         File::create(listed.join("Cargo.toml")).unwrap();
         let direct =
-            versions::legacy_0_4_10::render_legacy(&listed, crate::DEFAULT_TOOL_OUTPUT_BYTES);
+            versions::legacy_0_4_10::render_legacy(&listed, crate::DEFAULT_TOOL_OUTPUT_BYTES, None);
         let expected = format!("- {}/\n{}", listed.display(), direct.trim_end());
         let mut resources = Resources::new();
         resources.insert(Cwd(tmp.path().to_path_buf()));
@@ -1527,7 +1565,7 @@ mod tests {
                 File::create(dir.join(format!("f{i}.rs"))).unwrap();
             }
         }
-        let direct = versions::legacy_0_4_10::render_legacy(&listed, BUDGET);
+        let direct = versions::legacy_0_4_10::render_legacy(&listed, BUDGET, None);
         assert!(
             direct.contains("listing exceeds size limit"),
             "fixture must trip legacy byte fallback: {direct}"
@@ -1633,5 +1671,106 @@ mod tests {
                 .contains("${{ params.list.target_directory }}"),
             "param name should use MiniJinja template, not be hardcoded"
         );
+    }
+
+    /// P198: names under a Read-denied path are not listed, whether the denied subtree is below the listed directory
+    /// or is the listed directory; with no deny globs the listing is byte-identical.
+    #[tokio::test]
+    async fn read_denied_names_are_not_listed() {
+        use crate::types::resources::DenyReadGlobs;
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        fs::create_dir_all(tmp.path().join("public")).unwrap();
+        File::create(tmp.path().join("secrets/key_material.txt")).unwrap();
+        File::create(tmp.path().join("public/a_public.txt")).unwrap();
+        File::create(tmp.path().join("server_token.pem")).unwrap();
+        let list = |dir: &'static str, deny: Option<Vec<String>>| {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(tmp.path().to_path_buf()));
+            if let Some(deny) = deny {
+                resources.insert(DenyReadGlobs(deny));
+            }
+            async move {
+                match fuigo_tool_runtime::Tool::run(
+                    &ListDirTool,
+                    test_ctx(resources.into_shared()),
+                    ListDirInput { target_directory: dir.to_string() },
+                )
+                .await
+                .unwrap()
+                {
+                    ListDirOutput::Content(c) => c.content,
+                    other => panic!("unexpected: {other:?}"),
+                }
+            }
+        };
+        let deny = Some(vec!["secrets/**".to_string(), "**/*.pem".to_string()]);
+        let root = list(".", deny.clone()).await;
+        assert!(root.contains("a_public.txt"), "an allowed name stays: {root}");
+        assert!(!root.contains("key_material.txt"), "a name under a denied directory is hidden: {root}");
+        assert!(!root.contains("server_token.pem"), "a denied file name is hidden: {root}");
+        let inside = list("secrets", deny).await;
+        assert!(!inside.contains("key_material.txt"), "listing the denied directory itself: {inside}");
+        // Control, and the no-rule contract: no resource and an empty list print the same bytes, with every name.
+        let none = list(".", None).await;
+        assert!(none.contains("key_material.txt") && none.contains("server_token.pem"), "{none}");
+        assert_eq!(none, list(".", Some(Vec::new())).await);
+    }
+
+
+    /// P198 r2: the current and the legacy `list_dir` walkers against the shared contract, and the no-rule contract of the
+    /// legacy walker (an empty rule list prints the same bytes as none).
+    #[tokio::test]
+    async fn read_rules_follow_the_policy_matcher() {
+        use crate::types::resources::DenyReadGlobs;
+        for legacy in [false, true] {
+            let list = |cwd: std::path::PathBuf, dir: String, deny: Vec<String>| async move {
+                let mut resources = Resources::new();
+                resources.insert(Cwd(cwd));
+                if !deny.is_empty() {
+                    resources.insert(DenyReadGlobs(deny));
+                }
+                let mut ctx = test_ctx(resources.into_shared());
+                if legacy {
+                    ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
+                }
+                match fuigo_tool_runtime::Tool::run(&ListDirTool, ctx, ListDirInput { target_directory: dir })
+                    .await
+                    .unwrap()
+                {
+                    ListDirOutput::Content(c) => c.content,
+                    other => panic!("legacy={legacy}: unexpected: {other:?}"),
+                }
+            };
+                        crate::util::read_deny::fixture::check_list(&list).await;
+            crate::util::read_deny::fixture::check_list_round4(&list).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_walker_prints_the_same_bytes_with_an_empty_rule_list() {
+        use crate::types::resources::DenyReadGlobs;
+        let t = crate::util::read_deny::fixture::tree();
+        let list = |deny: Option<Vec<String>>| {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(t.proj.clone()));
+            if let Some(deny) = deny {
+                resources.insert(DenyReadGlobs(deny));
+            }
+            let mut ctx = test_ctx(resources.into_shared());
+            ctx.extensions.insert(fuigo_tool_runtime::BehaviorVersion("legacy-0.4.10".to_string()));
+            async move {
+                match fuigo_tool_runtime::Tool::run(&ListDirTool, ctx, ListDirInput { target_directory: ".".to_string() })
+                    .await
+                    .unwrap()
+                {
+                    ListDirOutput::Content(c) => c.content,
+                    other => panic!("unexpected: {other:?}"),
+                }
+            }
+        };
+        let none = list(None).await;
+        assert!(none.contains("key_material.txt"), "{none}");
+        assert_eq!(none, list(Some(Vec::new())).await);
     }
 }

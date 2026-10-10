@@ -171,7 +171,23 @@ impl fuigo_tool_runtime::Tool for ReadTool {
             (display_cwd, fs)
         };
         let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
-        let path = crate::util::fs::canonicalize_with_timeout(resolved).await;
+        let path = crate::util::fs::canonicalize_with_timeout(resolved.clone()).await;
+
+        // P166/S7 parity (Grok r4 MEDIUM 5): `.gitignore` on the logical path and the physical target, as `read_file`.
+        if let Some(filter) =
+            crate::implementations::fuigo_build::read_file::read_gitignore_filter(&resources).await
+            && crate::implementations::fuigo_build::read_file::gitignore_refuses(
+                filter,
+                resolved,
+                path.clone(),
+            )
+            .await
+        {
+            return Ok(ReadFileOutput::FileReadError(format!(
+                "Error: {} is ignored by .gitignore and cannot be read.",
+                input.file_path
+            )));
+        }
 
         // ── Stat the path ───────────────────────────────────────────
         let metadata = match tokio::fs::metadata(&path).await {
@@ -204,7 +220,12 @@ impl fuigo_tool_runtime::Tool for ReadTool {
             .to_lowercase();
 
         // Read the file bytes for all remaining branches.
-        let file_bytes = match fs.read_file(&path).await {
+        let file_bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(
+            fs.as_ref(),
+            &path,
+        )
+        .await
+        {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::debug!(?e, "Failed to read file");
@@ -1346,5 +1367,45 @@ mod tests {
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
+    }
+
+    /// P166 Grok r4 MEDIUM 5 (S7 parity): the OpenCode read tool denies an ignored LOGICAL path, even when its symlink
+    /// resolves outside the repo. Before, it never consulted the gitignore filter at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_read_denies_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        std::fs::write(repo.path().join("open.txt"), "fine\n").unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let shared = || {
+            let mut resources = test_resources(repo.path());
+            resources.insert(crate::types::resources::GitignoreFilter::new(
+                builder.build().unwrap(),
+                canonical.clone(),
+            ));
+            resources.insert(crate::types::resources::RespectGitignore(true));
+            resources.into_shared()
+        };
+        let input = |path: &str| ReadInput {
+            file_path: path.to_owned(),
+            offset: None,
+            limit: None,
+        };
+        let denied = fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("secret/key.txt"))
+            .await
+            .unwrap();
+        match denied {
+            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore denial, got {other:?}"),
+        }
+        let allowed = fuigo_tool_runtime::Tool::run(&ReadTool, test_ctx(shared()), input("open.txt"))
+            .await
+            .unwrap();
+        assert!(matches!(allowed, ReadFileOutput::FileContent(_)), "{allowed:?}");
     }
 }

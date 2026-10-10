@@ -297,6 +297,71 @@ mod tests {
         );
     }
 
+    // ── <dangerous_actions> (S14) ───────────────────────────────────
+
+    /// The main-agent prompts tell the model to confirm before destructive or shared-system actions,
+    /// with Fuigo's identity line unchanged and no third-party branding.
+    #[test]
+    fn test_main_prompts_carry_dangerous_actions_block() {
+        let interactive = render_base(&default_renderer(), &default_placeholders());
+        let mut headless_placeholders = default_placeholders();
+        headless_placeholders["is_non_interactive"] = serde_json::Value::Bool(true);
+        let headless = render_base(&default_renderer(), &headless_placeholders);
+        let codex = render_apply_patch(&codex_renderer(), &default_placeholders());
+        for (label, prompt) in [
+            ("base", &interactive),
+            ("base headless", &headless),
+            ("apply_patch", &codex),
+        ] {
+            let start = prompt
+                .find("<dangerous_actions>")
+                .unwrap_or_else(|| panic!("{label}: no <dangerous_actions> block"));
+            let end = prompt
+                .find("</dangerous_actions>")
+                .unwrap_or_else(|| panic!("{label}: <dangerous_actions> not closed"));
+            assert!(start < end, "{label}: block out of order");
+            let block = &prompt[start..end];
+            for needle in [
+                "Before destructive or hard-to-reverse actions, or changes to shared systems, confirm with the user",
+                "force-pushing",
+                "deleting files or branches",
+                "does not authorize unrelated actions",
+                "Quoted messages",
+            ] {
+                assert!(block.contains(needle), "{label}: block lacks {needle:?}");
+            }
+            for banned in ["xAI", "Grok", "grok"] {
+                assert!(!block.contains(banned), "{label}: block carries {banned:?}");
+            }
+            assert!(
+                !prompt.contains("${{") && !prompt.contains("${%"),
+                "{label}: unresolved template tokens"
+            );
+        }
+        // The block comes before the work policy, and the identity line is still the first line.
+        assert!(
+            interactive.find("<dangerous_actions>") < interactive.find("<work_policy>"),
+            "block precedes <work_policy>"
+        );
+        assert!(
+            interactive.starts_with(&format!(
+                "You are {}, running in Fuigo, a CLI coding agent by Ferrox Labs.",
+                crate::prompt::context::DEFAULT_SYSTEM_PROMPT_LABEL
+            )),
+            "identity line unchanged"
+        );
+        // A headless session has no one to confirm with: it must not act without explicit authorization.
+        let no_operator = "With no human operator to confirm with, take such an action only when the task explicitly authorizes it";
+        assert!(
+            headless.contains(no_operator),
+            "headless prompt carries the no-operator rule"
+        );
+        assert!(
+            !interactive.contains(no_operator),
+            "interactive prompt omits the no-operator rule"
+        );
+    }
+
     // ── Required sections regression ────────────────────────────────
 
     #[test]

@@ -710,7 +710,7 @@ impl JsonlStorageAdapter {
 
 /// Take `path`'s append lock exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`]. `Ok(None)` when the lock file cannot be
 /// opened at all.
-fn lock_append_for_snapshot(path: &Path) -> io::Result<Option<std::fs::File>> {
+fn lock_append_for_snapshot(path: &Path) -> io::Result<Option<super::HeldLock>> {
     let lock_path = path.with_extension("jsonl.lock");
     let lock = match crate::session::storage::owner_only::open(
         std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
@@ -725,7 +725,7 @@ fn lock_append_for_snapshot(path: &Path) -> io::Result<Option<std::fs::File>> {
     let deadline = std::time::Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
         match fs2::FileExt::try_lock_exclusive(&lock) {
-            Ok(()) => return Ok(Some(lock)),
+            Ok(()) => return Ok(Some(super::HeldLock::new(lock))),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
                 crate::session::storage::snapshot_lock::CONTENDED.lock().insert(lock_path.clone());
@@ -1025,7 +1025,7 @@ const STALE_FORK_STAGING_AGE: std::time::Duration = std::time::Duration::from_se
 
 /// A copy's staging directory. The lock is released (and closed) before the directory is removed.
 struct ForkStaging {
-    _lock: std::fs::File,
+    _lock: super::HeldLock,
     dir: tempfile::TempDir,
     /// Declared last, so it runs after the staging directory is gone.
     _created_cwd_dir: CreatedCwdDir,
@@ -1130,7 +1130,7 @@ fn remove_stale_fork_staging(parent: &Path) {
         if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
             continue;
         }
-        drop(lock);
+        drop(super::HeldLock::new(lock));
         if let Err(error) = std::fs::remove_dir_all(entry.path()) {
             tracing::warn!(path = %entry.path().display(), %error, "could not remove a stale fork staging directory");
         }
@@ -1157,6 +1157,7 @@ fn private_staging_dir(parent: &Path) -> io::Result<ForkStaging> {
     )
     .open(&initializing)?;
     fs2::FileExt::lock_exclusive(&lock)?;
+    let lock = super::HeldLock::new(lock);
     std::fs::rename(&initializing, dir.path().join(FORK_STAGING_LOCK))?;
     Ok(ForkStaging { _lock: lock, dir, _created_cwd_dir: CreatedCwdDir(None) })
 }

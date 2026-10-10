@@ -21,10 +21,47 @@ pub fn fuigo_application_in(home: &std::path::Path) -> PathBuf {
 
 /// System-wide config directory: `/etc/fuigo/` on Unix, `None` on Windows.
 pub fn system_config_dir() -> Option<PathBuf> {
+    #[cfg(feature = "test-seams")]
+    if let Some(dir) = admin_root_override::current() {
+        return Some(dir);
+    }
     if cfg!(unix) {
         Some(PathBuf::from("/etc/fuigo"))
     } else {
         None
+    }
+}
+
+/// P183 round 10: a test-only replacement for `/etc/fuigo`, so tests of the remote-fetch, crash-handler and hints sites can
+/// point the whole admin-policy reader at a temp directory. Guarded two ways: it exists only under the `test-seams` cargo
+/// feature (enabled solely from other crates' `[dev-dependencies]`; resolver 2 keeps it out of every normal build, so a
+/// release binary has neither this module nor a way to set it), and it is a function call (per thread), never an environment variable.
+#[cfg(feature = "test-seams")]
+pub mod admin_root_override {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    // Per thread: a test's code under test runs on the test's own thread, so parallel tests never see each other's override.
+    thread_local! {
+        static CURRENT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn current() -> Option<PathBuf> {
+        CURRENT.with(|c| c.borrow().clone())
+    }
+
+    /// Holds the override on this thread until dropped.
+    pub struct Guard(());
+
+    pub fn set(dir: PathBuf) -> Guard {
+        CURRENT.with(|c| *c.borrow_mut() = Some(dir));
+        Guard(())
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|c| *c.borrow_mut() = None);
+        }
     }
 }
 
@@ -150,6 +187,31 @@ pub fn tighten_file_owner_only(file: &std::fs::File, path: &std::path::Path) {
             && let Err(e) = file.set_permissions(std::fs::Permissions::from_mode(0o600))
         {
             tracing::debug!(?e, path = %path.display(), "failed to chmod session file owner-only");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (file, path);
+}
+
+/// [`tighten_file_owner_only`] for a lock/state file that the caller OPENED BY PATH (which follows symlinks): tighten only
+/// when the open handle is a regular file owned by this user AND `path` still names that same inode (not a symlink), so a
+/// symlinked or foreign file's mode is never changed. fstat + fchmod on the descriptor, never chmod by path.
+pub fn tighten_own_regular_file_owner_only(file: &std::fs::File, path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(open_meta), Ok(path_meta)) = (file.metadata(), std::fs::symlink_metadata(path)) else {
+            return;
+        };
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if open_meta.is_file()
+            && path_meta.is_file()
+            && open_meta.uid() == euid
+            && open_meta.dev() == path_meta.dev()
+            && open_meta.ino() == path_meta.ino()
+        {
+            tighten_file_owner_only(file, path);
         }
     }
     #[cfg(not(unix))]

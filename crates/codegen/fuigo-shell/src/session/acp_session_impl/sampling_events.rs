@@ -225,6 +225,12 @@ impl SessionActor {
                 })
                 .await;
             }
+            SamplingEvent::RedactedThinking { data, .. } => {
+                // Same buffered rail as `ReasoningCompleted`: ordered with the response's thought chunks, so a headless
+                // consumer places the redacted block exactly where the model put it
+                self.send_buffered_fuigo_update(FuigoSessionUpdate::RedactedThinking { data })
+                    .await;
+            }
             SamplingEvent::DoomLoopSignals {
                 request_id,
                 triggers,
@@ -475,6 +481,10 @@ impl SessionActor {
                     None,
                 )
                 .await;
+                // P201: the row is visible output of this attempt, and it spins until its completion arrives. It is
+                // registered once its `in_progress` update is queued, so a close can never be queued ahead of its row.
+                self.unaccepted_output
+                    .note_hosted_started(call_id.as_str(), &name);
             }
             SamplingEvent::BackendToolCallCompleted {
                 call_id,
@@ -492,6 +502,7 @@ impl SessionActor {
                         self.signals_handle().record_tool_success(&name);
                     }
                 }
+                self.unaccepted_output.note_hosted_finished(call_id.as_str());
                 let (title, _kind, _raw_input) = backend_tool_display(&name);
                 self.send_update(
                     acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(

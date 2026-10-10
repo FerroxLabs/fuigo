@@ -1,7 +1,8 @@
 pub mod auto_mode;
 pub mod bash_command_splitting;
+mod branch_switch;
 pub mod claude_settings;
-mod exec_risk;
+pub(crate) mod exec_risk;
 mod gate_preflight;
 mod hub_permission;
 mod manager;
@@ -52,6 +53,11 @@ pub use auto_mode::{
 };
 #[cfg(test)]
 pub(crate) use hub_permission::build_permission_payload_for_test;
+pub(crate) use hub_permission::{
+    HubCallVerdict, HubPolicyContext, HubReadSpelling, hub_read_spellings, hub_input_accesses, hub_input_is_generic, hub_patch_targets,
+    hub_patch_targets_by_name, hub_policy_accesses, hub_policy_verdict_all, hub_searches_need_walk,
+    settle_hub_asks,
+};
 pub use hub_permission::{
     PermissionHookTransport, ToolServerPermissionTransport, access_kind_for_hub_tool,
     hitl_permission_live_enabled, prompt_outcome_allows, request_permission_via_hub,
@@ -80,6 +86,7 @@ pub use shell_access::{ProtectedEditPermission, ProtectedEditReason};
 pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;
 pub use types::{
-    AccessKind, ClientType, Decision, HOOK_ASK_META_KEY, HookAsk, PermissionCommand,
-    PermissionEvent, PermissionRequest, PermissionResolution,
+    AccessKind, ClientType, Decision, EditTargets, HOOK_ASK_META_KEY, HookAsk, PermissionCommand,
+    PermissionEvent, PermissionRequest, PermissionResolution, ReadResolution, ReadTargets, edit_targets_for,
+    read_targets_for,
 };

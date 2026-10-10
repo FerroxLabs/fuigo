@@ -174,6 +174,7 @@ pub(crate) async fn run_search_replace(
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
     }
     let resolved = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+    let logical = resolved.clone();
     let path = match crate::util::fs::try_canonicalize(&resolved).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -194,11 +195,22 @@ pub(crate) async fn run_search_replace(
     }
     let is_legacy = SearchReplaceVersion::from_contract(contract_version.as_deref()).is_legacy();
     if !is_legacy {
-        let res = resources.lock().await;
-        let respect_gitignore = res.get::<RespectGitignore>().is_none_or(|r| r.0);
-        if respect_gitignore
-            && let Some(filter) = res.get::<GitignoreFilter>()
-            && filter.is_ignored(&path)
+        // Edits honour `.gitignore` unless it is turned off (reads default the other way).
+        let filter = {
+            let res = resources.lock().await;
+            res.get::<RespectGitignore>()
+                .is_none_or(|r| r.0)
+                .then(|| res.get::<GitignoreFilter>().cloned())
+                .flatten()
+        };
+        // P166/S7 parity (Grok r4 MEDIUM 5): the logical path too, not only the canonical target.
+        if let Some(filter) = filter
+            && crate::implementations::fuigo_build::read_file::gitignore_refuses(
+                filter,
+                logical,
+                path.clone(),
+            )
+            .await
         {
             return Ok(SearchReplaceOutput::InvalidInput(format!(
                 "Error: {} is ignored by .gitignore and cannot be edited.",
@@ -2642,5 +2654,33 @@ neutTest_set);
             }
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
+    }
+
+    /// P166 Grok r4 MEDIUM 5 (S7 parity): `search_replace` refuses an ignored LOGICAL path, even when its symlink
+    /// resolves outside the repo. Before, only the canonical (outside) path was checked, so the edit went through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_blocked_for_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOKEN=1\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut resources = test_resources(repo.path());
+        resources.insert(GitignoreFilter::new(build_gitignore(&canonical, &["secret/"]), canonical));
+        resources.insert(Params(SearchReplaceParams {
+            skip_read_before_edit: true,
+            empty_old_string_does_not_override: false,
+            ..Default::default()
+        }));
+        let input = make_input("secret/key.txt", "TOKEN=1", "TOKEN=2");
+        let result = fuigo_tool_runtime::Tool::run(&SearchReplaceTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOKEN=1\n");
     }
 }

@@ -52,13 +52,13 @@ pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io:
         writeln!(
             out,
             "  {} {} {} {} {} {:<AGE_WIDTH$} {}",
-            pad_to_width(&rec.id, id_width),
-            cell(rec.kind.as_str(), type_width),
-            cell(&rec.repo_name, REPO_WIDTH),
-            cell(label, label_width),
-            cell(branch, BRANCH_WIDTH),
+            fuigo_tty_utils::untrusted(pad_to_width(&rec.id, id_width)),
+            fuigo_tty_utils::untrusted(cell(rec.kind.as_str(), type_width)),
+            fuigo_tty_utils::untrusted(cell(&rec.repo_name, REPO_WIDTH)),
+            fuigo_tty_utils::untrusted(cell(label, label_width)),
+            fuigo_tty_utils::untrusted(cell(branch, BRANCH_WIDTH)),
             age,
-            path,
+            fuigo_tty_utils::untrusted(path),
         )?;
     }
     let total = records.len();
@@ -70,20 +70,20 @@ pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io:
                 m
             });
     let breakdown: Vec<String> = by_kind.iter().map(|(k, v)| format!("{v} {k}")).collect();
-    writeln!(out, "  {} worktrees ({})", total, breakdown.join(", "))
+    writeln!(out, "  {} worktrees ({})", total, fuigo_tty_utils::untrusted(breakdown.join(", ")))
 }
 pub fn print_json(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(records).unwrap_or_else(|_| "[]".to_string());
     writeln!(out, "{json}")
 }
 pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result<()> {
-    writeln!(out, "  Path:           {}", rec.path.display())?;
-    writeln!(out, "  ID:             {}", rec.id)?;
-    writeln!(out, "  Type:           {}", rec.kind.as_str())?;
-    writeln!(out, "  Source Repo:    {}", rec.source_repo.display())?;
-    writeln!(out, "  Creation Mode:  {}", rec.creation_mode)?;
+    writeln!(out, "  Path:           {}", fuigo_tty_utils::untrusted(rec.path.display()))?;
+    writeln!(out, "  ID:             {}", fuigo_tty_utils::untrusted(&rec.id))?;
+    writeln!(out, "  Type:           {}", fuigo_tty_utils::untrusted(rec.kind.as_str()))?;
+    writeln!(out, "  Source Repo:    {}", fuigo_tty_utils::untrusted(rec.source_repo.display()))?;
+    writeln!(out, "  Creation Mode:  {}", fuigo_tty_utils::untrusted(&rec.creation_mode))?;
     if let Some(ref git_ref) = rec.git_ref {
-        writeln!(out, "  Git Ref:        {git_ref}")?;
+        writeln!(out, "  Git Ref:        {}", fuigo_tty_utils::untrusted(git_ref))?;
     }
     if let Some(ref commit) = rec.head_commit {
         let short = if commit.len() > 12 {
@@ -91,7 +91,7 @@ pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result
         } else {
             commit
         };
-        writeln!(out, "  HEAD:           {short}")?;
+        writeln!(out, "  HEAD:           {}", fuigo_tty_utils::untrusted(short))?;
     }
     writeln!(
         out,
@@ -102,14 +102,14 @@ pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result
         writeln!(out, "  Last Accessed:  {}", format_timestamp(ts))?;
     }
     if let Some(ref sid) = rec.session_id {
-        writeln!(out, "  Session ID:     {sid}")?;
+        writeln!(out, "  Session ID:     {}", fuigo_tty_utils::untrusted(sid))?;
     }
     if let Some(pid) = rec.creator_pid {
         writeln!(out, "  Creator PID:    {pid}")?;
     }
-    writeln!(out, "  Status:         {}", rec.status.as_str())?;
+    writeln!(out, "  Status:         {}", fuigo_tty_utils::untrusted(rec.status.as_str()))?;
     if let Some(label) = rec.label() {
-        writeln!(out, "  Label:          {label}")?;
+        writeln!(out, "  Label:          {}", fuigo_tty_utils::untrusted(label))?;
     }
     if rec.path.exists() {
         let size = physical_dir_size(&rec.path, Volume::of(&rec.path));
@@ -158,12 +158,12 @@ pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> 
     if report.kept_unsafe > 0 {
         writeln!(out, "  Kept (not reclaimable):    {}", report.kept_unsafe)?;
         for (reason, count) in &report.kept_reasons {
-            writeln!(out, "    {reason}: {count}")?;
+            writeln!(out, "    {}: {count}", fuigo_tty_utils::untrusted(reason))?;
         }
         const MAX_KEPT_PRINTED: usize = 20;
         let printed = report.kept.len().min(MAX_KEPT_PRINTED);
         for kept in report.kept.iter().take(MAX_KEPT_PRINTED) {
-            writeln!(out, "      {}  ({})", kept.path, kept.reason)?;
+            writeln!(out, "      {}  ({})", fuigo_tty_utils::untrusted(&kept.path), fuigo_tty_utils::untrusted(&kept.reason))?;
         }
         let rest = usize::try_from(report.kept_unsafe)
             .unwrap_or(usize::MAX)

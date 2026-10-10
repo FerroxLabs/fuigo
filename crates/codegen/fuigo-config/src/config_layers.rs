@@ -171,8 +171,8 @@ impl ConfigLayers {
         if let (OverlayInclusion::Include, Some(overlay)) = (inclusion, env_overlay) {
             deep_merge_toml(&mut merged, overlay);
         }
-        for req in self.requirements_in_order() {
-            deep_merge_toml(&mut merged, &self.non_user_layer(req));
+        if let Some(r) = self.merged_requirements() {
+            deep_merge_toml(&mut merged, &r);
         }
         merged
     }
@@ -230,9 +230,20 @@ impl ConfigLayers {
     /// Re-merge the requirements layers so an admin's `requirements.toml` always wins over a campaign overlay, whatever the campaign's source layer.
     /// Campaigns are full-power (any field), so this is the structural guarantee that a lower-trust campaign can't override an admin-set field.
     fn reapply_requirements(&self, merged: &mut toml::Value) {
-        for req in self.requirements_in_order() {
-            deep_merge_toml(merged, &self.non_user_layer(req));
+        if let Some(r) = self.merged_requirements() {
+            deep_merge_toml(merged, &r);
         }
+    }
+
+    /// P183 round 4: the requirements layers merged among themselves type-preservingly (a wrong-type higher value cannot erase
+    /// a lower typed pin), to be laid over the config of any type.
+    fn merged_requirements(&self) -> Option<toml::Value> {
+        let mut layers = self.requirements_in_order();
+        let mut merged = self.non_user_layer(layers.next()?);
+        for req in layers {
+            crate::loader::merge_requirements_toml(&mut merged, &self.non_user_layer(req));
+        }
+        Some(merged)
     }
 
     /// Apply campaign patches, re-apply the `FUIGO_CONFIG` overlay, then restore requirements.
@@ -646,6 +657,62 @@ mod tests {
         assert_eq!(
             layers.effective_config_disk_only()["features"]["web_fetch"].as_bool(),
             Some(false),
+        );
+    }
+
+    /// P183 round 4 (Grok M6): a higher requirements layer's wrong-type value does not erase a lower layer's typed pin.
+    #[test]
+    fn requirements_merge_keeps_lower_typed_pin_p183r4() {
+        let layers = ConfigLayers {
+            user: toml::from_str("[ui]\nyolo = true\n").unwrap(),
+            system_requirements: Some(
+                toml::from_str("[ui]\nyolo = false\n[features]\nweb_fetch = false\n").unwrap(),
+            ),
+            mdm_requirements: Some(
+                toml::from_str("ui = \"x\"\n[features]\nweb_fetch = \"true\"\n").unwrap(),
+            ),
+            ..Default::default()
+        };
+        let eff = layers.effective_config_disk_only();
+        assert_eq!(eff["ui"]["yolo"].as_bool(), Some(false));
+        assert_eq!(eff["features"]["web_fetch"].as_bool(), Some(false));
+        // A requirements pin still overrides the user's own config of another type
+        let layers = ConfigLayers {
+            user: toml::from_str("[features]\nweb_fetch = \"yes\"\n").unwrap(),
+            system_requirements: Some(toml::from_str("[features]\nweb_fetch = false\n").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            layers.effective_config_disk_only()["features"]["web_fetch"].as_bool(),
+            Some(false)
+        );
+    }
+
+    /// P183 round 5 (Grok r2 H1): a LOWER layer's wrong-type value must not block a typed higher pin.
+    #[test]
+    fn requirements_merge_higher_typed_pin_beats_lower_wrong_type_p183r5() {
+        let layers = ConfigLayers {
+            user_requirements: Some(
+                toml::from_str("[auto_mode]\nenabled = \"yes\"\n[sandbox]\nprofile = 1\n").unwrap(),
+            ),
+            system_requirements: Some(
+                toml::from_str("[auto_mode]\nenabled = false\n[sandbox]\nprofile = \"strict\"\n")
+                    .unwrap(),
+            ),
+            ..Default::default()
+        };
+        let eff = layers.effective_config_disk_only();
+        assert_eq!(eff["auto_mode"]["enabled"].as_bool(), Some(false));
+        assert_eq!(eff["sandbox"]["profile"].as_str(), Some("strict"));
+        // ...and a wrong-type MDM value still cannot erase the system's typed pin
+        let layers = ConfigLayers {
+            system_requirements: Some(toml::from_str("[sandbox]\nprofile = \"strict\"\n").unwrap()),
+            mdm_requirements: Some(toml::from_str("[sandbox]\nprofile = 1\n").unwrap()),
+            ..Default::default()
+        };
+        assert_eq!(
+            layers.effective_config_disk_only()["sandbox"]["profile"].as_str(),
+            Some("strict")
         );
     }
 

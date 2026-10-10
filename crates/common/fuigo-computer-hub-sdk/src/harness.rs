@@ -1719,6 +1719,9 @@ impl ToolHarness {
         // an `inner` clone here would keep the strong count above 1 and
         // suppress the `Drop` teardown gate.
         let hook_request_handler = self.inner.hook_request_handler.clone();
+        // Weak, for the same reason: answering an unhandled permission request must not keep the connection alive.
+        let reply_connection = Arc::downgrade(connection);
+        let reply_session = self.inner.session.clone();
         tokio::spawn(async move {
             while let Some(frame) = inbox_rx.recv().await {
                 match frame {
@@ -1730,7 +1733,22 @@ impl ToolHarness {
                         }
                     }
                     crate::demux::InboundFrame::Request(value) => {
-                        dispatch_inbound_hook_request(&value, &hook_request_handler);
+                        if let Some(reply) =
+                            dispatch_inbound_hook_request(&value, &hook_request_handler)
+                            && let Some(connection) = reply_connection.upgrade()
+                        {
+                            let notif = build_hook_reply_notification(&reply_session, reply);
+                            match serde_json::to_string(&notif) {
+                                Ok(text) => {
+                                    if let Err(err) = connection.send_outbound(text).await {
+                                        tracing::debug!(?err, "could not reject an unhandled permission request");
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::debug!(?err, "could not encode a permission reject")
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1891,14 +1909,17 @@ fn parse_permission_request_hook(value: &Value) -> Option<fuigo_tool_protocol::H
 }
 
 /// Dispatch one inbound `Request`: hand a permission-request hook to `handler`;
-/// drop anything else (and permission requests with no handler registered).
+/// drop anything else. A permission request with no handler registered is
+/// answered with the returned `reject` reply, which the caller sends at once:
+/// nobody here can approve it, and leaving it unanswered would hold the
+/// workspace's call until its backstop deadline (P173, Grok #5).
 fn dispatch_inbound_hook_request(
     value: &Value,
     handler: &parking_lot::Mutex<Option<HookRequestHandler>>,
-) {
+) -> Option<fuigo_tool_protocol::HookReplyFrame> {
     let Some(hook) = parse_permission_request_hook(value) else {
         tracing::debug!("inbound request frame is not a permission-request hook; dropping");
-        return;
+        return None;
     };
     // Clone out of the lock so the handler never runs while it is held.
     let handler = handler.lock().clone();
@@ -1912,9 +1933,18 @@ fn dispatch_inbound_hook_request(
                     "inbound hook request handler panicked; dropping frame and continuing"
                 );
             }
+            None
         }
         None => {
-            tracing::debug!("inbound hook request received but no handler is registered; dropping")
+            tracing::debug!(
+                "permission request received but no handler is registered; rejecting it"
+            );
+            let hook_id = hook.hook_id?;
+            Some(fuigo_tool_protocol::HookReplyFrame {
+                session_id: hook.session_id,
+                hook_id,
+                result: serde_json::json!({ "outcome": "reject" }),
+            })
         }
     }
 }
@@ -3060,7 +3090,7 @@ mod tests {
             fuigo_tool_protocol::turn_hook::TURN_HOOK_KIND.to_owned(),
             serde_json::json!({}),
         );
-        dispatch_inbound_hook_request(&inbound_hook_request_frame(&other), slot);
+        assert!(dispatch_inbound_hook_request(&inbound_hook_request_frame(&other), slot).is_none());
         assert!(
             rx.try_recv().is_err(),
             "non-permission request must be dropped"
@@ -3072,7 +3102,10 @@ mod tests {
             PERMISSION_REQUEST_KIND.to_owned(),
             serde_json::json!({ "tool_call_id": "call-1" }),
         );
-        dispatch_inbound_hook_request(&inbound_hook_request_frame(&perm), slot);
+        assert!(
+            dispatch_inbound_hook_request(&inbound_hook_request_frame(&perm), slot).is_none(),
+            "a handled request is answered by the handler, not here"
+        );
         let received = rx.recv().await.expect("handler invoked");
         assert_eq!(received.hook_id.as_deref(), Some("hook-7"));
     }
@@ -3095,16 +3128,19 @@ mod tests {
         );
         let frame = inbound_hook_request_frame(&perm);
 
-        dispatch_inbound_hook_request(&frame, &slot);
+        assert!(dispatch_inbound_hook_request(&frame, &slot).is_none());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         *slot.lock() = None;
-        dispatch_inbound_hook_request(&frame, &slot);
+        let reject = dispatch_inbound_hook_request(&frame, &slot)
+            .expect("an unhandled permission request is rejected at once");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "no-handler path must invoke nothing"
         );
+        assert_eq!(reject.hook_id, "hook-7");
+        assert_eq!(reject.result["outcome"], "reject");
     }
 
     #[test]
@@ -3589,5 +3625,104 @@ mod tests {
         drop(conn);
         assert_eq!(pool.sweep_idle(Duration::ZERO), 1);
         assert!(weak.upgrade().is_none());
+    }
+
+    // --- P173 (Grok 4.7 #5): a permission request with no handler is rejected at once ---
+
+    /// A hub that answers `session_open` and `tools.list`; after the `tools.list` reply it sends one
+    /// `permission_request` hook to the harness and forwards the harness's `hook_reply` params to `replies`.
+    async fn spawn_permission_mock_hub(replies: mpsc::Sender<Value>) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let app = Router::new().route(
+                "/v1/tools",
+                get(move |ws: WebSocketUpgrade| {
+                    let replies = replies.clone();
+                    async move { ws.on_upgrade(move |socket| permission_handle_socket(socket, replies)) }
+                }),
+            );
+            let _ = axum::serve(listener, app.into_make_service()).await;
+        });
+        tokio::task::yield_now().await;
+        addr
+    }
+
+    async fn permission_handle_socket(mut socket: WebSocket, replies: mpsc::Sender<Value>) {
+        let _ = socket.recv().await;
+        let ack = json!({
+            "connection_id": "permission-mock",
+            "user_id": "test",
+            "computer_hub_version": "test",
+            "supported_protocol_versions": ["1.0.0"],
+        });
+        let _ = socket.send(Message::Text(ack.to_string().into())).await;
+        while let Some(Ok(msg)) = socket.recv().await {
+            let Message::Text(text) = msg else { continue };
+            let Ok(value) = serde_json::from_str::<Value>(text.as_ref()) else {
+                continue;
+            };
+            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            let id = value.get("id").cloned().unwrap_or(Value::Null);
+            match method {
+                "session_open" => {
+                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
+                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                }
+                "tools.list" => {
+                    let resp = json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": [] } });
+                    let _ = socket.send(Message::Text(resp.to_string().into())).await;
+                    let session = value
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("perm-no-handler");
+                    let hook = fuigo_tool_protocol::HookFrame::custom_request(
+                        SessionId::new(session).expect("valid"),
+                        "hook-p173".to_owned(),
+                        PERMISSION_REQUEST_KIND.to_owned(),
+                        json!({ "tool_call_id": "call-1" }),
+                    );
+                    let frame = inbound_hook_request_frame(&hook);
+                    let _ = socket.send(Message::Text(frame.to_string().into())).await;
+                }
+                "hook_reply" => {
+                    let _ = replies
+                        .send(value.get("params").cloned().unwrap_or(Value::Null))
+                        .await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn permission_request_without_a_handler_is_rejected_at_once() {
+        let (tx, mut rx) = mpsc::channel::<Value>(4);
+        let addr = spawn_permission_mock_hub(tx).await;
+        let url = Url::parse(&format!("ws://{addr}/v1/tools")).expect("valid url");
+        let harness = ToolHarnessBuilder::default()
+            .pool(HubConnectionPool::new())
+            .url(url)
+            .auth(AuthCredential::bearer("ignored"))
+            .session(SessionId::new("perm-no-handler").expect("valid"))
+            .build()
+            .await
+            .expect("build harness");
+        let _events = harness
+            .subscribe_notifications()
+            .await
+            .expect("subscribe");
+        harness
+            .query_remote_tools()
+            .await
+            .expect("tools.list must succeed");
+        let reply = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the harness must answer an unhandled permission request at once, not leave it to the backstop")
+            .expect("reply");
+        assert_eq!(reply["hook_id"], "hook-p173");
+        assert_eq!(reply["result"]["outcome"], "reject");
     }
 }

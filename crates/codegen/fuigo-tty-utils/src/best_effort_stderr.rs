@@ -121,16 +121,68 @@ pub fn eprint_bytes(bytes: &[u8]) -> Outcome {
     STDERR.write(&mut err, bytes)
 }
 
-/// Write formatted text to the process stderr, best-effort. The arguments are rendered once.
-pub fn eprint_fmt(args: std::fmt::Arguments<'_>) -> Outcome {
-    eprint_bytes(args.to_string().as_bytes())
+/// Write Fuigo's own control text to the process stderr unfiltered: the sign-in spinner's `CR ESC [ K`, trusted colour.
+/// Only [`cli_eprint_trusted!`] may call this (it accepts a string literal and nothing else); the name and
+/// `doc(hidden)` keep it out of the API, and a test pins that the workspace has no other caller. Any value another
+/// party wrote belongs in [`crate::Untrusted`] on the filtered path ([`eprint_fmt`]), never here.
+#[doc(hidden)]
+pub fn __eprint_trusted_literal(text: &'static str) -> Outcome {
+    eprint_bytes(text.as_bytes())
 }
 
-/// Write `line` and a newline to `w`; `false` when the write failed. Never panics.
+/// Reset of all terminal attributes. Fuigo writes it through the trusted path before its own denial and notice lines,
+/// so styling left behind by earlier output cannot restyle or hide them.
+pub const RESET_ATTRIBUTES: &str = "\x1b[0m";
+
+/// The sign-in flow's spinner clear: carriage return, erase to end of line. Fuigo-written, so it uses the trusted path;
+/// the line filter refuses it in any text another party touched.
+pub const CLEAR_LINE: &str = "\r\x1b[K";
+
+/// Write formatted text to the process stderr, best-effort. The arguments are rendered once.
+pub fn eprint_fmt(args: std::fmt::Arguments<'_>) -> Outcome {
+    let stderr = std::io::stderr();
+    let mut err = stderr.lock();
+    write_fmt_scrubbed(&mut err, args)
+}
+
+/// [`eprint_fmt`] against any writer. Diagnostics interpolate names, paths and messages from project files and servers,
+/// so the text goes through the shared terminal filter before it is written.
+fn write_fmt_scrubbed(w: &mut impl Write, args: std::fmt::Arguments<'_>) -> Outcome {
+    let text = args.to_string();
+    STDERR.write(w, crate::scrub_terminal_text(&text).as_bytes())
+}
+
+/// Write `line` and a newline to `w` through the terminal line filter ([`crate::scrub_terminal_text`]); `false` when
+/// the write failed. Never panics. The filter runs here, so a caller cannot forget it. For Fuigo's own voice on the
+/// process stderr use [`write_fuigo_line`], which also resets terminal attributes first.
 ///
 /// The writer is a parameter so callers can be tested against a closed pipe in-process.
 pub fn write_line(w: &mut impl Write, line: &str) -> bool {
-    crate::best_effort_stdout::write_line(w, line)
+    write_line_scrubbed(w, line, false)
+}
+
+/// [`write_line`] for Fuigo's own denial and notice lines: when the process stderr is a terminal the line starts with
+/// [`RESET_ATTRIBUTES`] written on the trusted path.
+pub fn write_fuigo_line(w: &mut impl Write, line: &str) -> bool {
+    use std::io::IsTerminal;
+    write_fuigo_line_with(w, line, std::io::stderr().is_terminal())
+}
+
+/// [`write_fuigo_line`] with the terminal decision made by the caller (tests, and writers that know their own stream).
+pub fn write_fuigo_line_with(w: &mut impl Write, line: &str, reset: bool) -> bool {
+    write_line_scrubbed(w, line, reset)
+}
+
+/// Writes the trusted reset when `reset` is set, then `body`; one buffer, one write call.
+fn write_reset_and(w: &mut impl Write, reset: bool, body: &[u8]) -> bool {
+    if !reset {
+        return STDERR.write_within(w, body, 0) == Outcome::Written;
+    }
+    // One buffer, one write: the reset and the line cannot be split by another writer on the same stream.
+    let mut buf = Vec::with_capacity(RESET_ATTRIBUTES.len() + body.len());
+    buf.extend_from_slice(RESET_ATTRIBUTES.as_bytes());
+    buf.extend_from_slice(body);
+    STDERR.write_within(w, &buf, 0) == Outcome::Written
 }
 
 /// `line` plus a newline to the process stderr in ONE attempt (no `WouldBlock` wait), outcome
@@ -142,10 +194,19 @@ pub fn eprint_line(line: &str) {
 
 /// [`eprint_line`], reporting whether the line was written.
 pub fn eprint_line_reported(line: &str) -> bool {
-    let text = format!("{line}\n");
+    use std::io::IsTerminal;
     let stderr = std::io::stderr();
+    let reset = stderr.is_terminal();
     let mut err = stderr.lock();
-    STDERR.write_within(&mut err, text.as_bytes(), 0) == Outcome::Written
+    write_line_scrubbed(&mut err, line, reset)
+}
+
+/// [`eprint_line_reported`] against any writer; the line goes through the shared terminal filter. `reset` writes
+/// [`RESET_ATTRIBUTES`] first (set when the writer is a terminal): these lines are Fuigo's own voice and follow
+/// untrusted stream content, which must not leave styling behind that hides or restyles them.
+fn write_line_scrubbed(w: &mut impl Write, line: &str, reset: bool) -> bool {
+    let text = format!("{line}\n");
+    write_reset_and(w, reset, crate::scrub_terminal_text(&text).as_bytes())
 }
 
 /// `eprintln!` that never panics on a dead, full or non-blocking stderr; the outcome is recorded
@@ -165,6 +226,15 @@ macro_rules! cli_eprintln {
     }};
 }
 
+/// Trusted-bytes counterpart of [`cli_eprint!`]: a `'static` literal written without the line filter (see
+/// [`best_effort_stderr::__eprint_trusted_literal`]).
+#[macro_export]
+macro_rules! cli_eprint_trusted {
+    ($text:literal) => {{
+        let _ = $crate::best_effort_stderr::__eprint_trusted_literal($text);
+    }};
+}
+
 /// `eprint!` that never panics on a dead, full or non-blocking stderr; see [`cli_eprintln!`].
 #[macro_export]
 macro_rules! cli_eprint {
@@ -176,6 +246,130 @@ macro_rules! cli_eprint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181 (Grok round): diagnostics are display text, so an escape sequence in an interpolated name never reaches fd 2.
+    #[test]
+    fn diagnostics_are_scrubbed_before_they_are_written() {
+        let mut buf = Vec::new();
+        assert_eq!(
+            write_fmt_scrubbed(&mut buf, format_args!("warn: {}\u{2028}end\n", "a\x1b]0;t\x07b")),
+            Outcome::Written
+        );
+        assert_eq!(String::from_utf8(buf).unwrap(), "warn: a ]0;t b end\n");
+        let mut buf = Vec::new();
+        assert!(write_line_scrubbed(&mut buf, "x\u{e0041}\x1b[31my\x1b[2J", false));
+        assert_eq!(String::from_utf8(buf).unwrap(), "x [31my [2J\n");
+        let mut buf = Vec::new();
+        assert!(write_line_scrubbed(&mut buf, "\r\x1b[Kfuigo: forged\x1b[8m", false));
+        assert_eq!(String::from_utf8(buf).unwrap(), "  [Kfuigo: forged [8m\n");
+    }
+
+    /// P181 (S5, M4, c): Fuigo's one production grey (the device-code warning) is trusted literal bytes around scrubbed
+    /// text, and renders exactly `ESC[90m text ESC[0m LF` on a terminal; the spinner erase equals [`CLEAR_LINE`].
+    #[test]
+    fn the_device_code_grey_renders_its_exact_bytes() {
+        let mut w = Scripted::new([]);
+        assert_eq!(STDERR.write(&mut w, "\x1b[90m".as_bytes()), Outcome::Written);
+        assert_eq!(
+            write_fmt_scrubbed(&mut w, format_args!("Only continue with a code you requested. Don't share it with anyone.")),
+            Outcome::Written
+        );
+        assert_eq!(STDERR.write(&mut w, "\x1b[0m\n".as_bytes()), Outcome::Written);
+        assert_eq!(
+            w.seen,
+            b"\x1b[90mOnly continue with a code you requested. Don't share it with anyone.\x1b[0m\n".to_vec()
+        );
+        assert_eq!(CLEAR_LINE, "\r\x1b[K");
+    }
+
+    /// P181 (S3): the sign-in spinner's erase-line and Fuigo's own colour reach the terminal through the trusted path
+    /// exactly, while the same bytes in the filtered path lose the erase-line AND the colour (S5: the line filter passes no escape).
+    #[test]
+    fn trusted_control_text_is_exact_and_the_filtered_path_refuses_the_erase() {
+        let mut w = Scripted::new([]);
+        assert_eq!(STDERR.write(&mut w, CLEAR_LINE.as_bytes()), Outcome::Written);
+        assert_eq!(w.seen, b"\r\x1b[K");
+        let mut buf = Vec::new();
+        assert_eq!(
+            write_fmt_scrubbed(&mut buf, format_args!("{CLEAR_LINE}\x1b[1;32m\u{2713} Signed in\x1b[0m\n")),
+            Outcome::Written
+        );
+        assert_eq!(String::from_utf8(buf).unwrap(), "  [K [1;32m\u{2713} Signed in [0m\n");
+    }
+
+    /// P181 (S5, M4): a foreground colour that hides text (`ESC[30m`, `ESC[90m`, truecolor) never survives the filter.
+    #[test]
+    fn the_line_filter_passes_no_colour_sequence() {
+        for hide in ["\x1b[30m", "\x1b[37m", "\x1b[90m", "\x1b[97m", "\x1b[38;5;0m", "\x1b[38;2;0;0;0m", "\x1b[1;32m"] {
+            let mut buf = Vec::new();
+            assert_eq!(write_fmt_scrubbed(&mut buf, format_args!("a{hide}hidden")), Outcome::Written);
+            let out = String::from_utf8(buf).unwrap();
+            assert!(!out.contains('\x1b'), "{out:?}");
+            let mut buf = Vec::new();
+            assert!(write_line_scrubbed(&mut buf, &format!("a{hide}hidden"), false));
+            assert!(!String::from_utf8(buf).unwrap().contains('\x1b'));
+        }
+        assert_eq!(crate::scrub_terminal_text("x\x1b[30mY").as_ref(), "x [30mY");
+    }
+
+    /// P181 (S5, L1): the reset and the line are ONE write call, so no other writer lands between them.
+    #[test]
+    fn reset_and_line_are_one_write() {
+        struct Count(Vec<Vec<u8>>);
+        impl Write for Count {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.push(b.to_vec());
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut w = Count(Vec::new());
+        assert!(write_line_scrubbed(&mut w, "fuigo: blocked", true));
+        assert_eq!(w.0, vec![b"\x1b[0mfuigo: blocked\n".to_vec()]);
+    }
+
+    /// P181 (Grok r3): Fuigo's own lines start with a trusted reset when the stream is a terminal, and the model's
+    /// restyling bytes cannot follow it; the reset is not written for a pipe or file.
+    #[test]
+    fn fuigo_lines_start_with_a_reset_on_a_terminal_only() {
+        let mut buf = Vec::new();
+        assert!(write_line_scrubbed(&mut buf, "fuigo: blocked \x1b[30;40m", true));
+        assert_eq!(buf, b"\x1b[0mfuigo: blocked  [30;40m\n");
+        let mut buf = Vec::new();
+        assert!(write_line_scrubbed(&mut buf, "fuigo: blocked", false));
+        assert_eq!(buf, b"fuigo: blocked\n");
+        let mut buf = Vec::new();
+        assert!(write_line(&mut buf, "a\x1b[2Jb"));
+        assert_eq!(buf, b"a [2Jb\n");
+    }
+
+    /// P181 (Grok r3, L4): the unfiltered writer has one caller in the workspace, the literal macro.
+    #[test]
+    fn the_unfiltered_literal_writer_is_called_only_by_its_macro() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut stack = vec![root];
+        let mut callers = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    if path.file_name().is_some_and(|n| n == "target" || n == "node_modules") {
+                        continue;
+                    }
+                    stack.push(path);
+                } else if path.extension().is_some_and(|x| x == "rs")
+                    && std::fs::read_to_string(&path).is_ok_and(|t| t.contains(concat!("__eprint_trusted", "_literal(")))
+                {
+                    callers.push(path);
+                }
+            }
+        }
+        assert_eq!(callers.len(), 1, "{callers:?}");
+        assert!(callers[0].ends_with("best_effort_stderr.rs"), "{callers:?}");
+    }
 
     #[test]
     fn write_line_appends_a_newline_and_reports_success() {

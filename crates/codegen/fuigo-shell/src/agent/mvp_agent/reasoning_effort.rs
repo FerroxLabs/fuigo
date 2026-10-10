@@ -49,7 +49,17 @@ impl ModelsManager {
         // Some models are a different model id at each effort, so swap in the id this effort asks for.
         // Do this before the log, or the log records an id we are not sending.
         if let Some(routed) = self.model_for_effort(&sampling.model, effort) {
-            sampling.model = routed;
+            // P169 (Astra r1 #6): a fleet `allowed_models` pin also binds the per-effort model id.
+            if self.effort_route_allowed(&routed) {
+                sampling.model = routed;
+            } else {
+                tracing::warn!(
+                    session_id = %session_id.0,
+                    model = %sampling.model,
+                    routed = %routed,
+                    "reasoning_effort: the effort's model id is not allowed by the organization's allowed_models policy; keeping the base model"
+                );
+            }
         }
         // Same fields at every target; only the level differs
         // tracing bakes the level into a static callsite, so match a const level per arm

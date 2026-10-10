@@ -78,4 +78,48 @@ mod tests {
         assert_eq!(flatten_spoofable("\u{200B}\u{00AD}\u{E0041}"), None);
         assert_eq!(flatten_spoofable(""), None);
     }
+
+    /// The widened classes of the shared display set, as inclusive ranges
+    const WIDENED: &[(char, char)] = &[
+        ('\u{00AD}', '\u{00AD}'),
+        ('\u{180E}', '\u{180E}'),
+        ('\u{2028}', '\u{2029}'),
+        ('\u{FFF9}', '\u{FFFB}'),
+        ('\u{13430}', '\u{1343F}'),
+        ('\u{1BCA0}', '\u{1BCA3}'),
+        ('\u{1D173}', '\u{1D17A}'),
+        ('\u{E0001}', '\u{E0001}'),
+        ('\u{E0020}', '\u{E007F}'),
+    ];
+
+    /// The tag block is handled by `strip_loose_tags` so a valid flag survives a title
+    fn is_flag_pass_class(c: char) -> bool {
+        ('\u{E0020}'..='\u{E007F}').contains(&c)
+    }
+
+    /// Drift guard: this crate's policy is a superset of the shared display set over every code point
+    #[test]
+    fn spoofing_policy_covers_the_shared_display_set() {
+        for c in '\0'..=char::MAX {
+            if fuigo_tty_utils::is_unsafe_display_char(c) {
+                assert!(is_invisible_or_spoofing_char(c), "U+{:04X}", c as u32);
+            }
+        }
+    }
+
+    /// Titles lose every widened class (they stay narrower on ZWJ and ZWNJ for emoji and Persian text)
+    #[test]
+    fn rename_title_sanitizer_drops_every_widened_class() {
+        for &(first, last) in WIDENED {
+            for c in (first..=last).filter(|c| !is_flag_pass_class(*c)) {
+                assert!(
+                    crate::session::persistence::is_forbidden_title_char(c),
+                    "U+{:04X}",
+                    c as u32
+                );
+            }
+        }
+        assert!(!crate::session::persistence::is_forbidden_title_char('\u{200D}'));
+        assert!(!crate::session::persistence::is_forbidden_title_char('\u{1F3F4}'));
+    }
 }

@@ -62,7 +62,7 @@ pub fn run(args: ExportArgs) -> Result<()> {
             bytes = md.len(),
             "export_cmd: wrote transcript to file"
         );
-        fuigo_tty_utils::cli_eprintln!("Conversation exported to {}", expanded.display());
+        fuigo_tty_utils::cli_eprintln!("Conversation exported to {}", fuigo_tty_utils::untrusted(expanded.display()));
     } else if args.clipboard {
         let _ = crate::clipboard::copy_text(&md);
         let lines = md.lines().count();
@@ -78,8 +78,10 @@ pub fn run(args: ExportArgs) -> Result<()> {
             lines
         );
     } else {
-        std::io::stdout().write_all(md.as_bytes())?;
-        std::io::stdout().write_all(b"\n")?;
+        let mut out = fuigo_tty_utils::best_effort_stdout::display_stdout();
+        out.write_all(md.as_bytes())?;
+        out.write_all(b"\n")?;
+        out.flush()?;
     }
 
     Ok(())

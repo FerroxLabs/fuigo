@@ -106,9 +106,16 @@ pub(crate) fn replay_if_latest_compaction_active(
 ///
 /// This handles:
 /// - `RewindMarker`: discards accumulated state beyond the marker's target.
-/// - `CompactionCheckpoint`: loads/ignores checkpoints based on whether the target is before or after the compaction boundary.
+/// - `CompactionCheckpoint`: loads the checkpoint, or reads only its `original_user_info`, depending on whether the
+///   target is at/after or before the compaction boundary.
 ///
 /// `session_dir` is the path to the session directory (for reading checkpoint files).
+///
+/// # Errors
+/// P172 (D2): only the checkpoint the target is rebuilt from is required. The call fails iff the innermost base still
+/// installed at the end of the transcript is an unreadable checkpoint (missing, refused by P146, corrupt or of an
+/// unsupported schema); any other unreadable checkpoint (an older one a later compaction supersedes, one a rewind
+/// marker abandoned, or one after the target) is skipped with a warning.
 pub fn replay_to_prompt(
     updates_path: &Path,
     session_dir: &Path,
@@ -124,6 +131,7 @@ pub fn replay_to_prompt(
     };
 
     let mut state = ReplayState::new(target_prompt_index);
+    state.abandon_floor = abandon_floors(updates_path)?;
 
     for update_result in iter {
         let update = match update_result {
@@ -134,37 +142,25 @@ pub fn replay_to_prompt(
             }
         };
 
-        let action = state.process_update(&update, session_dir)?;
-        if action == ReplayAction::Stop {
-            break;
-        }
+        state.process_update(&update, session_dir);
     }
 
     // Flush any trailing partial messages.
     state.flush_pending_user();
     state.flush_pending_agent();
 
+    if let Some(Base { blob: Err(e), .. }) = state.bases.pop_if(|base| base.blob.is_err()) {
+        return Err(e);
+    }
+
     // After processing the entire file, the conversation may extend beyond the target
     // `target_prompt_index` means "rewind to before prompt N", so keep prompts 0..N-1 (N prompts total)
     if state.prompt_counter > target_prompt_index {
-        if state.checkpoint_active && target_prompt_index >= state.checkpoint_prompt_index {
-            let turns_to_keep = target_prompt_index - state.checkpoint_prompt_index;
-            let mut seen_marker = false;
-            let mut user_count = 0;
-            let mut cut_pos = state.conversation.len();
-            for (i, item) in state.conversation[state.checkpoint_base_len..]
-                .iter()
-                .enumerate()
-            {
-                if counts_as_replay_turn_progressive(item, &mut seen_marker) {
-                    user_count += 1;
-                    if user_count > turns_to_keep {
-                        cut_pos = state.checkpoint_base_len + i;
-                        break;
-                    }
-                }
-            }
-            state.conversation.truncate(cut_pos);
+        if let Some(top) = state.bases.last()
+            && target_prompt_index >= top.prompt_index
+        {
+            let (base_len, base_index) = (top.base_len, top.prompt_index);
+            state.truncate_after_base(base_len, target_prompt_index - base_index);
         } else if target_prompt_index == 0 {
             state.conversation.clear();
         } else {
@@ -180,16 +176,42 @@ pub fn replay_to_prompt(
         conversation: state.conversation,
         prompt_index_reached: state.prompt_counter,
         original_user_info: state.original_user_info,
-        last_compaction_prompt_index: state
-            .checkpoint_active
-            .then_some(state.checkpoint_prompt_index),
+        last_compaction_prompt_index: state.bases.last().map(|base| base.prompt_index),
     })
 }
 
-#[derive(Debug, PartialEq)]
-enum ReplayAction {
-    Continue,
-    Stop,
+/// `floors[k]` is the lowest target among the rewind markers after the first `k` of them (`usize::MAX` past the last):
+/// a checkpoint at prompt `n` met after `k` markers can only be abandoned later if `floors[k] < n`. A first pass over
+/// the transcript, parsed exactly as the replay parses it, so the two always agree on which markers exist.
+fn abandon_floors(updates_path: &Path) -> io::Result<Vec<usize>> {
+    let mut targets = Vec::new();
+    if let Some(iter) = UpdatesIterator::open(updates_path)? {
+        for update in iter.flatten() {
+            if let SessionUpdate::Fuigo(notification) = &update
+                && let FuigoSessionUpdate::RewindMarker { target_prompt_index, .. } = &notification.update
+            {
+                targets.push(*target_prompt_index);
+            }
+        }
+    }
+    let mut floors = vec![usize::MAX; targets.len() + 1];
+    for k in (0..targets.len()).rev() {
+        floors[k] = floors[k + 1].min(targets[k]);
+    }
+    Ok(floors)
+}
+
+/// One compaction checkpoint installed as the conversation base; `blob: Err` means its file was unreadable.
+struct Base {
+    prompt_index: usize,
+    /// Conversation length right after installation; items below it are the opaque base and are never counted.
+    base_len: usize,
+    blob: Result<(), io::Error>,
+    /// For a loaded checkpoint: the conversation it replaced. A rewind marker that abandons this compaction restores
+    /// it, so the timeline below (an older base, or the raw turns) is rebuilt exactly instead of truncating this
+    /// checkpoint's summary of the abandoned work. `None` for an unreadable checkpoint, which replaced nothing, and
+    /// for one no later marker can abandon (see [`abandon_floors`]), so memory stays one conversation without rewinds.
+    replaced: Option<Vec<ConversationItem>>,
 }
 
 struct ReplayState {
@@ -221,19 +243,20 @@ struct ReplayState {
 
     has_pending_agent: bool,
 
-    /// When set, the replay is operating "after" a loaded checkpoint.
-    /// In this mode, only real `UserMessageChunk` turns from updates.jsonl are counted; the User messages inside the compacted history are ignored.
-    checkpoint_active: bool,
-
-    /// The conversation length right after loading a checkpoint.
-    /// Items before this index are the opaque compacted history blob and must NOT be truncated or counted for prompt indexing.
-    checkpoint_base_len: usize,
-
-    /// The `prompt_index_at_compaction` from the loaded checkpoint.
-    checkpoint_prompt_index: usize,
+    /// Installed checkpoint bases, innermost last. Every checkpoint at or before the target stacks on top (a loaded
+    /// one keeps the conversation it replaced; an unreadable one replaced nothing), and a rewind marker pops every base
+    /// above its target, restoring what each popped loaded base replaced. Only the innermost base matters for the
+    /// result, so an unreadable base anywhere below a loaded one is never needed unless a marker exposes it again.
+    /// While non-empty, only real `UserMessageChunk` turns count; the User messages inside the compacted history are
+    /// ignored.
+    bases: Vec<Base>,
 
     /// The original User(user_info) text from before the first compaction.
     original_user_info: Option<String>,
+
+    /// Rewind markers met so far, and [`abandon_floors`] of the whole transcript.
+    markers_seen: usize,
+    abandon_floor: Vec<usize>,
 }
 
 impl ReplayState {
@@ -249,30 +272,25 @@ impl ReplayState {
             seen_prompt_index_marker: false,
             current_agent_text: String::new(),
             has_pending_agent: false,
-            checkpoint_active: false,
-            checkpoint_base_len: 0,
-            checkpoint_prompt_index: 0,
+            bases: Vec::new(),
             original_user_info: None,
+            markers_seen: 0,
+            abandon_floor: Vec::new(),
         }
     }
 
-    fn process_update(
-        &mut self,
-        update: &SessionUpdate,
-        session_dir: &Path,
-    ) -> io::Result<ReplayAction> {
+    fn process_update(&mut self, update: &SessionUpdate, session_dir: &Path) {
         match update {
             SessionUpdate::Fuigo(notification) => {
                 match &notification.update {
                     FuigoSessionUpdate::CompactionCheckpoint(info) => {
-                        return self.handle_checkpoint(info, session_dir);
+                        self.handle_checkpoint(info, session_dir);
                     }
                     FuigoSessionUpdate::RewindMarker {
                         target_prompt_index,
                         ..
                     } => {
                         self.handle_rewind_marker(*target_prompt_index);
-                        return Ok(ReplayAction::Continue);
                     }
                     // Other Ferrox Labs notifications are informational; skip them
                     _ => {}
@@ -281,7 +299,7 @@ impl ReplayState {
             SessionUpdate::Acp(notification) => {
                 match &notification.update {
                     agent_client_protocol::SessionUpdate::UserMessageChunk(chunk) => {
-                        return Ok(self.handle_user_chunk(chunk));
+                        self.handle_user_chunk(chunk);
                     }
                     agent_client_protocol::SessionUpdate::AgentMessageChunk(chunk) => {
                         self.handle_agent_chunk(chunk);
@@ -292,179 +310,135 @@ impl ReplayState {
                 }
             }
         }
-        Ok(ReplayAction::Continue)
     }
 
-    fn handle_checkpoint(
-        &mut self,
-        info: &CompactionCheckpointInfo,
-        session_dir: &Path,
-    ) -> io::Result<ReplayAction> {
-        if info.schema_version != 1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
-        }
-        if self.target < info.prompt_index_at_compaction {
-            // Target is before this compaction, so don't load the compacted history (we'll reconstruct from raw updates)
-            // But the checkpoint is still required for original_user_info
-            // That is the historical User(user_info) the model saw for these pre-compaction turns
-            // Without it we'd use the post-compaction rebuilt user_info, which is wrong data
-            let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &info.checkpoint_file);
-            let bytes = match crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot restore original user_info"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-                Err(e) => return Err(e),
-            };
-            match serde_json::from_slice::<CompactionCheckpointFile>(&bytes) {
+    /// Never fails: an unreadable checkpoint the target needs is pushed as a `blob: Err` base, which a later
+    /// checkpoint or rewind marker can still supersede; only one still installed at the end fails the replay.
+    fn handle_checkpoint(&mut self, info: &CompactionCheckpointInfo, session_dir: &Path) {
+        let compaction_at = info.prompt_index_at_compaction;
+
+        if self.target < compaction_at {
+            // Target is before this compaction: the conversation is rebuilt from raw updates, which do not need the
+            // checkpoint. It is read only for the historical User(user_info) the model saw for these turns; when it
+            // is unreadable the current user_info is kept (a later checkpoint may still supply it).
+            match read_checkpoint_file(info, session_dir) {
                 Ok(file) => {
-                    if file.schema_version != 1 {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported compaction checkpoint schema"));
-                    }
                     if self.original_user_info.is_none() {
                         self.original_user_info = file.original_user_info;
                     }
                 }
                 Err(e) => {
-                    tracing::error!(
+                    tracing::warn!(
                         ?e,
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot restore original user_info"
+                        compaction_at,
+                        target = self.target,
+                        "checkpoint unreadable; pre-compaction rewind keeps the current user_info"
                     );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
                 }
             }
             tracing::debug!(
                 target = self.target,
-                checkpoint_at = info.prompt_index_at_compaction,
-                "Replay: using raw updates (target is pre-compaction), original_user_info extracted"
+                checkpoint_at = compaction_at,
+                "Replay: using raw updates (target is pre-compaction)"
             );
-            Ok(ReplayAction::Continue)
-        } else {
-            let checkpoint_path = crate::extensions::notification::contained_checkpoint_path(session_dir, &info.checkpoint_file);
-            let bytes = match crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file) {
-                Ok(b) => b,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    tracing::error!(
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file missing, cannot reconstruct conversation"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!(
-                            "Compaction checkpoint file missing: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-                Err(e) => return Err(e),
-            };
-            let file: CompactionCheckpointFile = match serde_json::from_slice(&bytes) {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::error!(
-                        ?e,
-                        path = %checkpoint_path.display(),
-                        "Compaction checkpoint file corrupt, cannot reconstruct conversation"
-                    );
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "Compaction checkpoint file corrupt: {}. \
-                             Cannot safely rewind past the compaction point.",
-                            checkpoint_path.display()
-                        ),
-                    ));
-                }
-            };
+            return;
+        }
 
-            if file.schema_version != 1 {
-                tracing::error!(
-                    schema_version = file.schema_version,
-                    path = %checkpoint_path.display(),
-                    "Unsupported checkpoint schema version, cannot reconstruct conversation"
+        let read = read_checkpoint_file(info, session_dir);
+        if read.is_ok() {
+            // The conversation this checkpoint replaces is kept for a rewind marker that abandons the compaction (see
+            // `Base::replaced`), so it is completed first, exactly as a raw replay would have recorded it
+            if self.in_user_message {
+                self.flush_pending_user();
+            }
+            self.flush_pending_agent();
+        }
+        // Drop any in-progress message state (already flushed above when the checkpoint loads).
+        self.in_user_message = false;
+        self.current_user_text.clear();
+        self.current_user_is_interjection = false;
+        self.current_user_prompt_index = None;
+        self.current_agent_text.clear();
+        self.has_pending_agent = false;
+
+        // Counting proceeds as if the blob loaded, so later markers and checkpoints resolve identically either way
+        self.prompt_counter = compaction_at;
+
+        match read {
+            Ok(file) => {
+                // handle_rewind needs original_user_info for the raw-updates prefix case even when the conversation is replaced
+                if self.original_user_info.is_none() {
+                    self.original_user_info = file.original_user_info;
+                }
+
+                let replaced = std::mem::replace(&mut self.conversation, file.compacted_history);
+                // Checkpoints predate this binary's validation (or the API's current validators), so heal them like the jsonl loader does
+                // Otherwise a cross-compaction rewind re-injects a stripped poison image and every turn 400s until the next restart
+                let stripped_images =
+                    crate::session::storage::jsonl::strip_invalid_images(&mut self.conversation);
+                if stripped_images > 0 {
+                    tracing::warn!(
+                        count = stripped_images,
+                        "stripped invalid images from compaction checkpoint history"
+                    );
+                }
+                // The synthetic auto-continue prompt goes inside the base so neither the counter nor truncation sees it as a turn
+                if let Some(ac) = &info.auto_continue {
+                    self.conversation
+                        .push(ConversationItem::user(ac.prompt_text.clone()));
+                }
+                self.bases.push(Base {
+                    prompt_index: compaction_at,
+                    base_len: self.conversation.len(),
+                    blob: Ok(()),
+                    replaced: self.can_be_abandoned(compaction_at).then_some(replaced),
+                });
+
+                tracing::debug!(
+                    prompt_counter = self.prompt_counter,
+                    "Replay: loaded compaction checkpoint"
                 );
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "Unsupported checkpoint schema version {}. \
-                         Cannot safely rewind past the compaction point.",
-                        file.schema_version
-                    ),
-                ));
             }
-
-            // Capture original_user_info from the checkpoint even when we replace the conversation
-            // handle_rewind needs it for the raw-updates prefix case
-            if self.original_user_info.is_none() {
-                self.original_user_info = file.original_user_info.clone();
-            }
-
-            self.conversation = file.compacted_history;
-            // Checkpoints predate this binary's validation (or the API's current validators), so heal them like the jsonl loader does
-            // Otherwise a cross-compaction rewind re-injects a stripped poison image and every turn 400s until the next restart
-            let stripped_images =
-                crate::session::storage::jsonl::strip_invalid_images(&mut self.conversation);
-            if stripped_images > 0 {
+            Err(e) => {
                 tracing::warn!(
-                    count = stripped_images,
-                    "stripped invalid images from compaction checkpoint history"
+                    ?e,
+                    compaction_at,
+                    "checkpoint unreadable; rewind fails unless a later checkpoint or rewind marker supersedes it"
                 );
-            }
-            self.prompt_counter = info.prompt_index_at_compaction;
-            self.checkpoint_active = true;
-            self.checkpoint_base_len = self.conversation.len();
-            self.checkpoint_prompt_index = info.prompt_index_at_compaction;
-
-            // Flush any in-progress message state.
-            self.in_user_message = false;
-            self.current_user_text.clear();
-            self.current_user_is_interjection = false;
-            self.current_user_prompt_index = None;
-            self.current_agent_text.clear();
-            self.has_pending_agent = false;
-
-            tracing::debug!(
-                prompt_counter = self.prompt_counter,
-                "Replay: loaded compaction checkpoint"
-            );
-
-            if let Some(ref ac) = info.auto_continue {
-                self.conversation
-                    .push(ConversationItem::user(ac.prompt_text.clone()));
-                // The auto-continue prompt counts as a user turn.
-                // prompt_counter already equals prompt_index_at_compaction.
-            }
-
-            if self.prompt_counter > self.target {
-                // The checkpoint itself is past our target; this shouldn't normally happen
-                Ok(ReplayAction::Stop)
-            } else {
-                Ok(ReplayAction::Continue)
+                let word = match e.kind() {
+                    io::ErrorKind::NotFound => "missing",
+                    io::ErrorKind::InvalidData => "corrupt",
+                    io::ErrorKind::Unsupported => "unsupported",
+                    _ => "unreadable",
+                };
+                // The marker's path comes from the transcript (possibly a remote or shared session): escaped, never raw
+                let user_error = io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the compaction checkpoint for prompts #{compaction_at} onward is {word} ({}); \
+                         pick a prompt before #{compaction_at}, or one at or after the next compaction",
+                        info.checkpoint_file.escape_debug()
+                    ),
+                );
+                // An unreadable checkpoint never replaced the conversation, so the base below it stays
+                self.bases.push(Base {
+                    prompt_index: compaction_at,
+                    base_len: self.conversation.len(),
+                    blob: Err(user_error),
+                    replaced: None,
+                });
             }
         }
     }
 
+    /// Whether a rewind marker still to come can abandon a compaction at `compaction_at`.
+    fn can_be_abandoned(&self, compaction_at: usize) -> bool {
+        // Without a first pass (none ran), keep everything: correct, only larger
+        self.abandon_floor.get(self.markers_seen).is_none_or(|&floor| floor < compaction_at)
+    }
+
     fn handle_rewind_marker(&mut self, marker_target: usize) {
+        self.markers_seen += 1;
         // Discard any in-progress partial messages: they belong to the timeline being discarded, so we drop them rather than flushing
         self.current_user_text.clear();
         self.current_user_is_interjection = false;
@@ -478,37 +452,21 @@ impl ReplayState {
         }
 
         // `marker_target = N` means "rewind to before prompt N", keeping prompts 0..N-1 (N prompts total)
-        if self.checkpoint_active && marker_target >= self.checkpoint_prompt_index {
-            // Post-checkpoint truncation: keep the compacted history blob intact and only discard real user turns appended after it
-            let turns_to_keep = marker_target - self.checkpoint_prompt_index;
-            let mut seen_marker = false;
-            let mut user_count = 0;
-            let mut cut_pos = self.conversation.len();
-            for (i, item) in self.conversation[self.checkpoint_base_len..]
-                .iter()
-                .enumerate()
-            {
-                if counts_as_replay_turn_progressive(item, &mut seen_marker) {
-                    user_count += 1;
-                    if user_count > turns_to_keep {
-                        cut_pos = self.checkpoint_base_len + i;
-                        break;
-                    }
-                }
+        while let Some(base) = self.bases.pop_if(|base| base.prompt_index > marker_target) {
+            if let Some(replaced) = base.replaced {
+                // The abandoned compaction's summary goes; the conversation it replaced comes back
+                self.conversation = replaced;
             }
-            self.conversation.truncate(cut_pos);
+        }
+        if let Some(top) = self.bases.last() {
+            // Post-checkpoint truncation: keep the compacted history blob intact and only discard real user turns appended after it
+            let (base_len, base_index) = (top.base_len, top.prompt_index);
+            self.truncate_after_base(base_len, marker_target - base_index);
         } else if marker_target == 0 {
             // Rewind to the very beginning: discard everything
             self.conversation.clear();
-            self.checkpoint_active = false;
-        } else if self.checkpoint_active {
-            // Marker target is before the checkpoint: discard the checkpoint entirely and truncate the pre-checkpoint conversation
-            self.checkpoint_active = false;
-            let truncate_at = self.truncate_target(marker_target);
-            let keep =
-                crate::sampling::conversation_truncate_for_prompt(&self.conversation, truncate_at);
-            self.conversation.truncate(keep);
         } else {
+            // No base left: the conversation is the raw turns again (every popped loaded base restored what it replaced)
             let truncate_at = self.truncate_target(marker_target);
             let keep =
                 crate::sampling::conversation_truncate_for_prompt(&self.conversation, truncate_at);
@@ -518,10 +476,29 @@ impl ReplayState {
         self.prompt_counter = marker_target;
     }
 
-    fn handle_user_chunk(&mut self, chunk: &agent_client_protocol::ContentChunk) -> ReplayAction {
+    /// Keeps the base blob intact and only the first `turns_to_keep` real user turns appended after it.
+    fn truncate_after_base(&mut self, base_len: usize, turns_to_keep: usize) {
+        let mut seen_marker = false;
+        let mut user_count = 0;
+        let mut cut_pos = self.conversation.len();
+        if let Some(tail) = self.conversation.get(base_len..) {
+            for (i, item) in tail.iter().enumerate() {
+                if counts_as_replay_turn_progressive(item, &mut seen_marker) {
+                    user_count += 1;
+                    if user_count > turns_to_keep {
+                        cut_pos = base_len + i;
+                        break;
+                    }
+                }
+            }
+        }
+        self.conversation.truncate(cut_pos);
+    }
+
+    fn handle_user_chunk(&mut self, chunk: &agent_client_protocol::ContentChunk) {
         if crate::session::storage::is_host_turn_chunk(chunk) {
             self.flush_host_turn_boundary();
-            return ReplayAction::Continue;
+            return;
         }
         let chunk_prompt_index = chunk
             .meta
@@ -564,7 +541,6 @@ impl ReplayState {
 
         // We do NOT early-stop when prompt_counter > target because a later RewindMarker could reset the counter back below the target
         // The replay processes the entire file and the final conversation state is correct regardless of timeline branches
-        ReplayAction::Continue
     }
 
     fn handle_agent_chunk(&mut self, chunk: &agent_client_protocol::ContentChunk) {
@@ -646,6 +622,30 @@ impl ReplayState {
             self.has_pending_agent = false;
         }
     }
+}
+
+/// Read and validate the checkpoint a marker names. The file is read only through [`read_contained_checkpoint`]
+/// (inside `session_dir`, never through a symlink: a refused one reads as missing, P146). Error kinds: `NotFound`
+/// (missing or refused), `InvalidData` (corrupt), `Unsupported` (schema other than 1), else the read error's own kind.
+///
+/// [`read_contained_checkpoint`]: crate::extensions::notification::read_contained_checkpoint
+fn read_checkpoint_file(info: &CompactionCheckpointInfo, session_dir: &Path) -> io::Result<CompactionCheckpointFile> {
+    if info.schema_version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported compaction checkpoint marker schema {}", info.schema_version),
+        ));
+    }
+    let bytes = crate::extensions::notification::read_contained_checkpoint(session_dir, &info.checkpoint_file)?;
+    let file: CompactionCheckpointFile = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("compaction checkpoint file corrupt ({e})")))?;
+    if file.schema_version != 1 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("unsupported compaction checkpoint schema version {}", file.schema_version),
+        ));
+    }
+    Ok(file)
 }
 
 /// Progressive post-checkpoint turn: unmarked users count until the first marker in the slice; after that only marked users count.
@@ -1531,5 +1531,382 @@ mod tests {
         assert_eq!(result.conversation.len(), 2);
         assert_eq!(result.conversation[0].text_content(), "sys");
         assert_eq!(result.conversation[1].text_content(), "summary2");
+    }
+
+    // ── P172 (D2): a rewind needs only its own base checkpoint ──
+
+    fn try_replay_updates(updates: &[SessionUpdate], session_dir: &Path, target: usize) -> io::Result<ReplayResult> {
+        let updates_path = session_dir.join("updates.jsonl");
+        let mut content = Vec::new();
+        for u in updates {
+            let envelope = crate::session::storage::SessionUpdateEnvelope::from_update(u).unwrap();
+            content.extend(serde_json::to_vec(&envelope).unwrap());
+            content.push(b'\n');
+        }
+        std::fs::write(&updates_path, content).unwrap();
+        replay_to_prompt(&updates_path, session_dir, target)
+    }
+
+    fn texts_of(result: &ReplayResult) -> Vec<String> {
+        result.conversation.iter().map(ConversationItem::text_content).collect()
+    }
+
+    fn two_compactions_updates() -> Vec<SessionUpdate> {
+        vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_checkpoint("ckpt2", 3, None),
+            make_user_update("s1", "P3"),
+            make_agent_update("s1", "R3"),
+        ]
+    }
+
+    fn write_summary_checkpoint(session_dir: &Path, id: &str, at: usize, summary: &str) {
+        write_checkpoint_file(session_dir, id, at, vec![ConversationItem::system("sys"), ConversationItem::user(summary)]);
+    }
+
+    fn needed_base_message(at: usize, word: &str, file: &str) -> String {
+        format!(
+            "the compaction checkpoint for prompts #{at} onward is {word} ({file}); \
+             pick a prompt before #{at}, or one at or after the next compaction"
+        )
+    }
+
+    /// The bug: the 30-day sweep (D1) deleted the OLDER checkpoint of a session compacted twice. A rewind to a prompt
+    /// after the second compaction only needs the second checkpoint, yet it failed with "Compaction checkpoint file
+    /// missing" for the first. It must rebuild exactly what it rebuilds with both files present.
+    #[test]
+    fn rewind_past_a_newer_compaction_ignores_a_missing_older_checkpoint() {
+        let updates = vec![
+            make_user_update_pi("s1", "P0", 0),
+            make_agent_update("s1", "R0"),
+            make_user_update_pi("s1", "P1", 1),
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update_pi("s1", "P2", 2),
+            make_agent_update("s1", "R2"),
+            make_checkpoint("ckpt2", 3, None),
+            make_user_update_pi("s1", "P3", 3),
+            make_agent_update("s1", "R3"),
+        ];
+        let both_present = TempDir::new().unwrap();
+        write_summary_checkpoint(both_present.path(), "ckpt1", 2, "summary1");
+        write_summary_checkpoint(both_present.path(), "ckpt2", 3, "summary2");
+        let loaded = try_replay_updates(&updates, both_present.path(), 4).unwrap();
+
+        let first_missing = TempDir::new().unwrap();
+        write_summary_checkpoint(first_missing.path(), "ckpt2", 3, "summary2");
+        let damaged = try_replay_updates(&updates, first_missing.path(), 4).expect("only the target's base is needed");
+
+        assert_eq!(vec!["sys", "summary2", "P3", "R3"], texts_of(&loaded));
+        assert_eq!(texts_of(&loaded), texts_of(&damaged));
+        assert_eq!(4, damaged.prompt_index_reached);
+        assert_eq!(loaded.last_compaction_prompt_index, damaged.last_compaction_prompt_index);
+        assert_eq!(Some(3), damaged.last_compaction_prompt_index);
+    }
+
+    /// A pre-compaction target is rebuilt from the raw transcript; its checkpoint only refines `original_user_info`.
+    #[test]
+    fn rewind_before_a_compaction_whose_checkpoint_is_missing_uses_the_raw_transcript() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+        ];
+
+        let result = try_replay_updates(&updates, tmp.path(), 1).unwrap();
+
+        assert_eq!(vec!["P0", "R0"], texts_of(&result));
+        assert_eq!(None, result.original_user_info);
+        assert_eq!(None, result.last_compaction_prompt_index);
+        assert_eq!(1, result.prompt_index_reached);
+    }
+
+    #[test]
+    fn missing_needed_checkpoint_fails_and_names_it() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
+
+        let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
+
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+        assert_eq!(needed_base_message(3, "missing", "compaction_checkpoints/ckpt2.json"), err.to_string());
+    }
+
+    #[test]
+    fn corrupt_needed_checkpoint_fails_and_names_it() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
+        std::fs::write(tmp.path().join("compaction_checkpoints/ckpt2.json"), b"{not json").unwrap();
+
+        let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
+
+        assert_eq!(io::ErrorKind::InvalidData, err.kind());
+        assert_eq!(needed_base_message(3, "corrupt", "compaction_checkpoints/ckpt2.json"), err.to_string());
+    }
+
+    #[test]
+    fn unsupported_schema_needed_checkpoint_fails_and_names_it() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
+        let newer = CompactionCheckpointFile {
+            inherited_prefix_len: None,
+            checkpoint_id: "ckpt2".to_owned(),
+            prompt_index_at_compaction: 3,
+            compacted_history: vec![ConversationItem::system("sys")],
+            schema_version: 2,
+            created_at: "2024-01-01T00:00:00Z".to_owned(),
+            original_user_info: None,
+            reread_file_paths: vec![],
+        };
+        std::fs::write(tmp.path().join("compaction_checkpoints/ckpt2.json"), serde_json::to_vec(&newer).unwrap())
+            .unwrap();
+
+        let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap_err();
+
+        assert_eq!(io::ErrorKind::Unsupported, err.kind());
+        assert_eq!(needed_base_message(3, "unsupported", "compaction_checkpoints/ckpt2.json"), err.to_string());
+    }
+
+    /// A rewind marker that abandons the compaction also abandons its (missing) checkpoint.
+    #[test]
+    fn a_rewind_marker_abandons_a_missing_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update_pi("s1", "P0", 0),
+            make_agent_update("s1", "R0"),
+            make_user_update_pi("s1", "P1", 1),
+            make_agent_update("s1", "R1"),
+            make_user_update_pi("s1", "P2", 2),
+            make_agent_update("s1", "R2"),
+            make_checkpoint("ckpt1", 3, None),
+            make_user_update_pi("s1", "P3", 3),
+            make_agent_update("s1", "R3"),
+            make_rewind_marker(1),
+            make_user_update_pi("s1", "P1_prime", 1),
+            make_agent_update("s1", "R1_prime"),
+            make_user_update_pi("s1", "P2_prime", 2),
+            make_agent_update("s1", "R2_prime"),
+        ];
+
+        let result = try_replay_updates(&updates, tmp.path(), 3).unwrap();
+
+        assert_eq!(vec!["P0", "R0", "P1_prime", "R1_prime", "P2_prime", "R2_prime"], texts_of(&result));
+        assert_eq!(None, result.last_compaction_prompt_index);
+        assert_eq!(3, result.prompt_index_reached);
+    }
+
+    /// The marker abandons the unreadable ckpt2; the loaded ckpt1 below it is the base again.
+    #[test]
+    fn a_rewind_marker_between_a_loaded_and_an_unreadable_checkpoint_keeps_the_loaded_base() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
+        let updates = vec![
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_user_update("s1", "P3"),
+            make_agent_update("s1", "R3"),
+            make_checkpoint("ckpt2", 4, None),
+            make_user_update("s1", "P4"),
+            make_agent_update("s1", "R4"),
+            make_rewind_marker(3),
+            make_user_update("s1", "P3_prime"),
+            make_agent_update("s1", "R3_prime"),
+        ];
+
+        let result = try_replay_updates(&updates, tmp.path(), 4).unwrap();
+
+        assert_eq!(vec!["sys", "summary1", "P2", "R2", "P3_prime", "R3_prime"], texts_of(&result));
+        assert_eq!(Some(2), result.last_compaction_prompt_index);
+        assert_eq!(4, result.prompt_index_reached);
+    }
+
+    /// Both checkpoints are unreadable; the marker abandons ckpt2 and the remaining base ckpt1 still fails the replay.
+    #[test]
+    fn a_rewind_marker_above_an_unreadable_base_still_fails_on_that_base() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_user_update("s1", "P3"),
+            make_agent_update("s1", "R3"),
+            make_checkpoint("ckpt2", 4, None),
+            make_user_update("s1", "P4"),
+            make_agent_update("s1", "R4"),
+            make_rewind_marker(3),
+        ];
+
+        let err = try_replay_updates(&updates, tmp.path(), 4).unwrap_err();
+
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"), err.to_string());
+    }
+
+    /// Astra r1 (HIGH): a rewind marker that abandons a loaded checkpoint exposes the base below it again. When that
+    /// older checkpoint is missing the replay must fail on it, not succeed with the abandoned checkpoint's summary.
+    #[test]
+    fn a_marker_that_abandons_a_loaded_checkpoint_needs_the_missing_base_below_it() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckptB", 4, "summaryB");
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckptA", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_user_update("s1", "P3"),
+            make_agent_update("s1", "R3"),
+            make_checkpoint("ckptB", 4, None),
+            make_user_update("s1", "P4"),
+            make_agent_update("s1", "R4"),
+            make_rewind_marker(3),
+            make_user_update("s1", "P3_prime"),
+            make_agent_update("s1", "R3_prime"),
+            make_user_update("s1", "P4_prime"),
+            make_agent_update("s1", "R4_prime"),
+        ];
+
+        let err = try_replay_updates(&updates, tmp.path(), 4).unwrap_err();
+
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckptA.json"), err.to_string());
+    }
+
+    /// With both checkpoints present, the same marker rebuilds the older base exactly (its summary and the turns after
+    /// it), instead of truncating the abandoned newer summary.
+    #[test]
+    fn a_marker_that_abandons_a_loaded_checkpoint_restores_the_base_below_it() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckptA", 2, "summaryA");
+        write_summary_checkpoint(tmp.path(), "ckptB", 4, "summaryB");
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckptA", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_user_update("s1", "P3"),
+            make_agent_update("s1", "R3"),
+            make_checkpoint("ckptB", 4, None),
+            make_user_update("s1", "P4"),
+            make_agent_update("s1", "R4"),
+            make_rewind_marker(3),
+            make_user_update("s1", "P3_prime"),
+            make_agent_update("s1", "R3_prime"),
+            make_user_update("s1", "P4_prime"),
+            make_agent_update("s1", "R4_prime"),
+        ];
+
+        let result = try_replay_updates(&updates, tmp.path(), 4).unwrap();
+
+        assert_eq!(vec!["sys", "summaryA", "P2", "R2", "P3_prime", "R3_prime"], texts_of(&result));
+        assert_eq!(Some(2), result.last_compaction_prompt_index);
+        assert_eq!(4, result.prompt_index_reached);
+    }
+
+    /// A marker that abandons the only (loaded) compaction rebuilds the raw turns it replaced, including the last reply
+    /// before the compaction, instead of truncating the abandoned summary.
+    #[test]
+    fn a_marker_that_abandons_the_only_compaction_restores_the_raw_turns() {
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt1", 2, "summary1");
+        let updates = vec![
+            make_user_update("s1", "P0"),
+            make_agent_update("s1", "R0"),
+            make_user_update("s1", "P1"),
+            make_agent_update("s1", "R1"),
+            make_checkpoint("ckpt1", 2, None),
+            make_user_update("s1", "P2"),
+            make_agent_update("s1", "R2"),
+            make_rewind_marker(1),
+            make_user_update("s1", "P1_prime"),
+            make_agent_update("s1", "R1_prime"),
+        ];
+
+        let result = try_replay_updates(&updates, tmp.path(), 2).unwrap();
+
+        assert_eq!(vec!["P0", "R0", "P1_prime", "R1_prime"], texts_of(&result));
+        assert_eq!(None, result.last_compaction_prompt_index);
+        assert_eq!(2, result.prompt_index_reached);
+    }
+
+    /// Astra r2 (MEDIUM): a loaded checkpoint keeps the conversation it replaced only when a later rewind marker can
+    /// still abandon it, so a transcript without rewinds holds one conversation, not every checkpoint's.
+    #[test]
+    fn abandon_floors_are_the_lowest_later_marker_target() {
+        let tmp = TempDir::new().unwrap();
+        let updates = vec![
+            make_rewind_marker(5),
+            make_user_update("s1", "P0"),
+            make_rewind_marker(3),
+            make_rewind_marker(7),
+        ];
+        try_replay_updates(&updates, tmp.path(), usize::MAX).unwrap();
+        assert_eq!(vec![3, 3, 7, usize::MAX], abandon_floors(&tmp.path().join("updates.jsonl")).unwrap());
+
+        try_replay_updates(&[make_user_update("s1", "P0")], tmp.path(), usize::MAX).unwrap();
+        assert_eq!(vec![usize::MAX], abandon_floors(&tmp.path().join("updates.jsonl")).unwrap());
+    }
+
+    /// P146 still holds: an older checkpoint planted as a symlink is never read (it is treated as missing) and, being
+    /// superseded, does not stop the rewind; the same symlink as the needed base fails as "missing".
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_checkpoint_is_never_followed_whether_superseded_or_needed() {
+        let outside = TempDir::new().unwrap();
+        let planted = outside.path().join("outside.json");
+        write_summary_checkpoint(outside.path(), "x", 2, "OUTSIDE-SENTINEL");
+        std::fs::rename(outside.path().join("compaction_checkpoints/x.json"), &planted).unwrap();
+
+        let tmp = TempDir::new().unwrap();
+        write_summary_checkpoint(tmp.path(), "ckpt2", 3, "summary2");
+        std::os::unix::fs::symlink(&planted, tmp.path().join("compaction_checkpoints/ckpt1.json")).unwrap();
+        let superseded = try_replay_updates(&two_compactions_updates(), tmp.path(), 3).unwrap();
+        assert_eq!(vec!["sys", "summary2"], texts_of(&superseded));
+
+        let err = try_replay_updates(&two_compactions_updates(), tmp.path(), 2).unwrap_err();
+        assert_eq!(io::ErrorKind::NotFound, err.kind());
+        assert_eq!(needed_base_message(2, "missing", "compaction_checkpoints/ckpt1.json"), err.to_string());
+        assert!(!err.to_string().contains("OUTSIDE-SENTINEL"));
+    }
+
+    /// The resume / copy path (`replay_if_latest_compaction_active`) of a session whose OLDER checkpoint the old sweep
+    /// deleted still rebuilds from the latest checkpoint instead of failing.
+    #[test]
+    fn a_swept_older_checkpoint_does_not_stop_the_latest_compaction_rebuild() {
+        let tmp = TempDir::new().unwrap();
+        write_resolved_checkpoint_file(
+            tmp.path(),
+            "ckpt2",
+            3,
+            vec![ConversationItem::system("sys"), ConversationItem::user("summary2")],
+        );
+        let updates_path = tmp.path().join("updates.jsonl");
+        try_replay_updates(&two_compactions_updates(), tmp.path(), usize::MAX).expect("replay of a swept session");
+
+        let rebuilt = replay_if_latest_compaction_active(&updates_path, tmp.path())
+            .expect("the swept older checkpoint is not needed")
+            .expect("the latest compaction is active");
+
+        assert_eq!(vec!["sys", "summary2", "P3", "R3"], rebuilt.iter().map(ConversationItem::text_content).collect::<Vec<_>>());
     }
 }

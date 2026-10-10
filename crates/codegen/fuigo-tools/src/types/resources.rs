@@ -466,6 +466,31 @@ pub struct DisplayCwd(pub PathBuf);
 /// Empty when no managed Read denies apply.
 #[derive(Debug, Clone, Default)]
 pub struct DenyReadGlobs(pub Vec<String>);
+/// Read-deny glob patterns for ONE call, carried in the call's context extensions rather than the shared
+/// [`Resources`] (P173: a hub-routed call resolves the local policy per call; writing its globs into the shared
+/// resources would let a concurrent call replace them between the check and the search). The search tools apply
+/// these in addition to [`DenyReadGlobs`]; see [`deny_read_globs_for_call`].
+#[derive(Debug, Clone, Default)]
+pub struct CallDenyReadGlobs(pub Vec<String>);
+/// The Read-deny globs a search tool excludes for this call: the toolset's [`DenyReadGlobs`] plus the call's own
+/// [`CallDenyReadGlobs`], without duplicates.
+pub fn deny_read_globs_for_call(
+    ctx: &fuigo_tool_runtime::ToolCallContext,
+    resources: &Resources,
+) -> Vec<String> {
+    let mut globs = resources
+        .get::<DenyReadGlobs>()
+        .map(|d| d.0.clone())
+        .unwrap_or_default();
+    if let Some(call) = ctx.extensions.get::<CallDenyReadGlobs>() {
+        for glob in &call.0 {
+            if !globs.contains(glob) {
+                globs.push(glob.clone());
+            }
+        }
+    }
+    globs
+}
 /// Resolve a model-provided path, rewriting absolute paths from conversation
 /// history when [`DisplayCwd`] is set.
 ///
@@ -608,6 +633,51 @@ impl GitignoreFilter {
             git_root,
         }
     }
+    /// Whether the LOGICAL path the model named is ignored, before any symlink in it is resolved (P166/S7, upstream 4247f661).
+    ///
+    /// [`Self::is_ignored`] sees only the physical target, so an ignored `secret/` that is a symlink to a directory outside
+    /// the repo, or an ignored `.env` symlinked to an outside file, would read freely. Each candidate below is a real
+    /// spelling of the same file: the physical form of a leading prefix (resolving aliases such as macOS `/var`, or a
+    /// symlinked checkout) joined with the remaining logical components. Ignored under any of them means ignored.
+    pub(crate) fn is_logical_path_ignored(&self, path: &std::path::Path) -> bool {
+        // The lexical form decides `a/../b` as the model wrote it; the raw form keeps `..` physical, as the OS does.
+        let lexical = normalize_lexically(path);
+        [lexical.as_path(), path]
+            .into_iter()
+            .any(|spelling| self.any_prefix_resolution_ignored(spelling))
+    }
+    fn any_prefix_resolution_ignored(&self, path: &std::path::Path) -> bool {
+        use std::path::Component;
+        // A spelling with `..` is not a path the matcher can judge: its ancestor walk would see `build/` in `build/../README.md`.
+        let has_parent_dir = path.components().any(|c| matches!(c, Component::ParentDir));
+        if !has_parent_dir
+            && crate::gitignore::is_ignored(&self.gitignore, path, Some(&self.git_root))
+        {
+            return true;
+        }
+        let components: Vec<Component<'_>> = path.components().collect();
+        let mut prefix = std::path::PathBuf::new();
+        for (i, component) in components.iter().enumerate() {
+            prefix.push(component);
+            let rest = components.get(i + 1..).unwrap_or_default();
+            // Once the prefix is resolved physically, a `..` in the tail no longer names the same file.
+            if rest.is_empty() || rest.iter().any(|c| matches!(c, Component::ParentDir)) {
+                continue;
+            }
+            let Ok(physical_prefix) = dunce::canonicalize(&prefix) else {
+                // A missing prefix has no physical form, and nothing below it resolves either.
+                break;
+            };
+            let candidate = rest.iter().fold(physical_prefix, |acc, c| match c {
+                Component::CurDir => acc,
+                other => acc.join(other),
+            });
+            if crate::gitignore::is_ignored(&self.gitignore, &candidate, Some(&self.git_root)) {
+                return true;
+            }
+        }
+        false
+    }
     /// Check whether a path is gitignored.
     ///
     /// For non-existent files (new file creation), canonicalizes the parent
@@ -624,6 +694,23 @@ impl GitignoreFilter {
         });
         crate::gitignore::is_ignored(&self.gitignore, &normalized, Some(&self.git_root))
     }
+}
+/// Resolve `.` and `..` without touching the filesystem (`..` never climbs above the root).
+fn normalize_lexically(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !matches!(out.components().next_back(), None | Some(Component::RootDir | Component::Prefix(_))) {
+                    out.pop();
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 impl std::fmt::Debug for GitignoreFilter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

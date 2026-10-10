@@ -43,6 +43,7 @@ fuigo-pager-diff = { path = "../fuigo-pager-diff" }
 chrono = { workspace = true }
 similar = { workspace = true }
 fuigo-shell = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 fuigo-version = { workspace = true }
 fuigo-token-estimation = { workspace = true }
 

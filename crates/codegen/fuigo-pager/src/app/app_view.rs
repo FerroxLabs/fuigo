@@ -909,6 +909,9 @@ pub struct AppView {
     pub welcome_privacy_banner_policy_rect: Option<ratatui::layout::Rect>,
     /// Transient welcome toast: (message, wall-clock expiry).
     pub welcome_toast: Option<(String, std::time::Instant)>,
+    /// P167: why the last "yes" to the folder-trust question recorded nothing; shown with the question until it is
+    /// answered (the minimal view paints no welcome toast). Cleared when trust resolves.
+    pub trust_error: Option<String>,
     /// Sticky hover flag for the privacy banner buttons (redraw on enter/leave).
     pub welcome_on_privacy_banner: bool,
     /// Sticky hover flag for the welcome upgrade CTA (redraw on enter/leave).
@@ -1604,6 +1607,7 @@ impl AppView {
             welcome_privacy_banner_terms_rect: None,
             welcome_privacy_banner_policy_rect: None,
             welcome_toast: None,
+            trust_error: None,
             welcome_on_privacy_banner: false,
             welcome_on_upgrade_cta: false,
             welcome_changelog_cta_rect: None,
@@ -5709,6 +5713,13 @@ impl AppView {
     /// Produces redraws when there are running entries with animated accents.
     /// Also when a pending action expires (to clear the "press again" hint) or new tracing entries arrive via the channel.
     pub fn tick(&mut self) -> bool {
+        self.tick_with_input(false)
+    }
+
+    /// [`Self::tick`], told whether terminal input is waiting in the queue.
+    /// While input waits, the scroll stream is left to the (input-gated) scroll clock, so an overdue animation tick cannot finalize
+    /// a stream before the buffered wheel events are processed.
+    pub fn tick_with_input(&mut self, input_pending: bool) -> bool {
         let mut needs_redraw = false;
         needs_redraw |= self.drain_relay_notices();
         needs_redraw |= self.drain_leader_notices();
@@ -5933,7 +5944,9 @@ impl AppView {
                 *remaining -= 1;
             }
         }
-        needs_redraw |= self.tick_scroll();
+        if !input_pending {
+            needs_redraw |= self.tick_scroll();
+        }
         self.update_status_line();
         needs_redraw |= self.status_line.take_changed();
         needs_redraw

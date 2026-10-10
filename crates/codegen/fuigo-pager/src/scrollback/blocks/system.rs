@@ -25,7 +25,11 @@ impl BlockContent for SystemMessageBlock {
         let styled_lines: Vec<Line<'static>> = self
             .text
             .lines()
-            .map(|line| Line::from(Span::styled(line.to_string(), style)))
+            .map(|line| {
+                // A note can carry config keys, paths and API errors: hidden characters and row breaks never reach the row
+                let clean = fuigo_tty_utils::scrub_unsafe_display(line, Some(' '));
+                Line::from(Span::styled(clean.into_owned(), style))
+            })
             .collect();
         let wrapped = word_wrap_lines(styled_lines, ctx.width as usize);
         let all_lines: Vec<BlockLine> = wrapped
@@ -86,5 +90,34 @@ impl BlockContent for SystemMessageBlock {
 
     fn is_groupable(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scrollback::types::DisplayMode;
+
+    /// P181 (Grok round): a system note can carry config keys and API errors, so row breaks and hidden characters
+    /// must not reach the painted line.
+    #[test]
+    fn system_note_is_scrubbed_before_painting() {
+        let ctx = BlockContext {
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            width: 120,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        };
+        let out = SystemMessageBlock::new("warn\u{2028}next\u{e0041}\u{00ad}\u{202e}tail").output(&ctx);
+        let text: String = out
+            .lines
+            .iter()
+            .flat_map(|l| l.content.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert_eq!(text, "warn nexttail");
     }
 }

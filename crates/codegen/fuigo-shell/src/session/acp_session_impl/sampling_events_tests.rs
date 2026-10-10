@@ -1414,3 +1414,62 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
         })
         .await;
 }
+
+/// P195 (U17): a `redacted_thinking` block rides the buffered rail as its own update, in order with the signed blocks around
+/// it, so headless can write it into the assistant frame where the model put it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_redacted_thinking_event_is_forwarded_in_order_on_the_buffered_rail() {
+    use crate::extensions::notification::SessionUpdate;
+    use crate::session::replay_events::{SessionEvent, SessionNotification};
+    use fuigo_sampler::{RequestId, SamplingEvent};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let fixture = make_replay_send_update_fixture().await;
+            let actor = Arc::new(fixture.actor);
+            let mut event_rx = fixture.event_rx;
+            let req = RequestId::random();
+            own_request(&actor, &req);
+
+            actor
+                .handle_sampling_event(SamplingEvent::ReasoningCompleted {
+                    request_id: req.clone(),
+                    signature: "sig-1".to_string(),
+                })
+                .await;
+            actor
+                .handle_sampling_event(SamplingEvent::RedactedThinking {
+                    request_id: req.clone(),
+                    data: "opaque-blob".to_string(),
+                })
+                .await;
+            actor
+                .handle_sampling_event(SamplingEvent::ReasoningCompleted {
+                    request_id: req.clone(),
+                    signature: "sig-2".to_string(),
+                })
+                .await;
+
+            let mut updates = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                if let SessionEvent::Notification(SessionNotification::Fuigo(notification)) = event {
+                    updates.push(notification.update);
+                }
+            }
+            assert_eq!(
+                updates,
+                vec![
+                    SessionUpdate::ReasoningCompleted {
+                        signature: Some("sig-1".to_string()),
+                    },
+                    SessionUpdate::RedactedThinking {
+                        data: "opaque-blob".to_string(),
+                    },
+                    SessionUpdate::ReasoningCompleted {
+                        signature: Some("sig-2".to_string()),
+                    },
+                ]
+            );
+        })
+        .await;
+}

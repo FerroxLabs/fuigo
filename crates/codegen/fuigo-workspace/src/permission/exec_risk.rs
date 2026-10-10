@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::permission::branch_switch::BranchSwitchPlan;
+
 use crate::permission::bash_command_splitting::{
     MAX_TRANSPARENT_PREFIX_DEPTH, MAX_WRAPPER_DEPTH, TransparentPrefixPeel,
     peel_transparent_prefixes, unwrap_wrappers_checked,
@@ -50,7 +52,7 @@ fn normalize_for_exec_risk(words: &[String]) -> NormalizedArgv<'_> {
 }
 
 /// `min_len` is the shortest unique stem vs sibling options (e.g. sort `--co` vs `--check`).
-fn is_accepted_long_option_prefix(flag: &str, full: &str, min_len: usize) -> bool {
+pub(crate) fn is_accepted_long_option_prefix(flag: &str, full: &str, min_len: usize) -> bool {
     flag.starts_with("--")
         && flag.len() >= min_len
         && full.starts_with(flag)
@@ -68,6 +70,13 @@ fn normalized_program_name(words: &[String]) -> Option<String> {
         name = stem.to_owned();
     }
     Some(name)
+}
+
+/// Whether the branch-switch planner counts this raw segment as a `git` command: the planner's own predicate
+/// (canonical wrappers peeled, program name `git`). `ShellWriteFacts::git_starts` uses this same function, so the two
+/// ordinals cannot drift.
+pub(crate) fn is_planned_git_segment(raw: &[String]) -> bool {
+    matches!(normalize_for_exec_risk(raw), NormalizedArgv::Ready(inner) if normalized_program_name(inner).as_deref() == Some("git"))
 }
 
 fn is_git_program(words: &[String]) -> bool {
@@ -104,7 +113,7 @@ fn sort_has_compress_program_flag(words: &[String]) -> bool {
     false
 }
 
-fn is_git_config_env_flag(tok: &str) -> bool {
+pub(crate) fn is_git_config_env_flag(tok: &str) -> bool {
     if tok == "--config-env" || tok.starts_with("--config-env=") {
         return true;
     }
@@ -114,7 +123,7 @@ fn is_git_config_env_flag(tok: &str) -> bool {
 }
 
 /// Presence fails closed: these retarget which config git reads.
-fn is_git_repo_retarget_flag(tok: &str) -> bool {
+pub(crate) fn is_git_repo_retarget_flag(tok: &str) -> bool {
     if tok == "--git-dir"
         || tok.starts_with("--git-dir=")
         || tok == "--work-tree"
@@ -124,20 +133,330 @@ fn is_git_repo_retarget_flag(tok: &str) -> bool {
     }
     let flag = tok.split_once('=').map(|(f, _)| f).unwrap_or(tok);
     // git.c globals: `--gi` unique vs `--glob-pathspecs`; `--wor` sole `--wor*`.
+    // P166 r9: `--exec-path[=<dir>]` makes git run its sub-programs (and `git-<verb>` helpers) from another directory;
+    // git accepts it down to `--exec-p` (`--exec` is ambiguous with nothing, but the stem below stays one past it).
+    // `--namespace`, `--super-prefix` and `--list-cmds` only name a ref namespace, prefix output paths, or print: not
+    // retargets, deliberately NOT flagged (tests: `git_exec_risk_r9_harmless_globals`).
     is_accepted_long_option_prefix(flag, "--git-dir", 4)
         || is_accepted_long_option_prefix(flag, "--work-tree", 4)
+        || is_accepted_long_option_prefix(flag, "--exec-path", 7)
 }
 
-fn is_attached_git_config_c(tok: &str) -> bool {
+/// P166 r9: git environment variables that retarget the repository or make git run a program, so a prefix assignment
+/// (`GIT_DIR=/tmp/evil git commit`) is the same exec risk as the matching flag. Case-sensitive: environment names are.
+const GIT_EXEC_ENV_NAMES: &[&str] = &[
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_EXEC_PATH", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_ASKPASS", "GIT_EXTERNAL_DIFF", "GIT_PROXY_COMMAND", "GIT_TEMPLATE_DIR",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+];
+
+/// `NAME=value` where NAME is one of [`GIT_EXEC_ENV_NAMES`], unless the value is an allowlisted harmless one
+/// ([`HARMLESS_COMMAND_VALUES`], P166 r13B): that removes only this finding, not the unvetted-env classification.
+pub(crate) fn is_git_exec_env_assignment(text: &str) -> bool {
+    text.split_once('=').is_some_and(|(name, value)| {
+        (GIT_EXEC_ENV_NAMES.contains(&name) && !harmless_env_value(name, value)) || is_git_config_env_name(name)
+    })
+}
+
+/// One row of the harmless-value allowlist: environment names and config key patterns (same pattern syntax as
+/// [`COMMAND_VALUED_CONFIG_KEYS`]) that accept exactly the listed values.
+pub(crate) struct HarmlessValueRow {
+    pub env: &'static [&'static str],
+    pub keys: &'static [&'static str],
+    pub values: &'static [&'static str],
+}
+
+/// P166 r13B (owner-approved 2026-10-08): the ONE table of exact-value allowlists for editor, pager and
+/// credential-helper values. Matching is the exact full string: no whitespace, no option, no path, no case folding.
+/// `GIT_SSH_COMMAND` is deliberately absent. Read by the env path (`is_git_exec_env_assignment`) and the config-key
+/// path (`command_valued_config`).
+pub(crate) const HARMLESS_COMMAND_VALUES: &[HarmlessValueRow] = &[
+    HarmlessValueRow { env: &["GIT_PAGER", "PAGER"], keys: &["core.pager", "pager.*"], values: &["cat"] },
+    HarmlessValueRow {
+        env: &["GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "VISUAL"],
+        keys: &["core.editor", "sequence.editor"],
+        values: &["true", "nano"],
+    },
+    HarmlessValueRow {
+        env: &[],
+        keys: &["credential.helper", "credential.*.helper"],
+        values: &["store", "cache", "osxkeychain", "manager"],
+    },
+];
+
+/// The shell-decoded value of an env assignment's right-hand side: one pair of plain quotes around a quote-free,
+/// expansion-free word is removed; anything else is returned unchanged (and so will not match the allowlist).
+fn decode_plain_quotes(value: &str) -> &str {
+    for quote in ['\'', '"'] {
+        if let Some(inner) = value.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote))
+            && !inner.contains(['\'', '"', '$', '`', '\\'])
+        {
+            return inner;
+        }
+    }
+    value
+}
+
+/// Whether `NAME=value` (value as written, maybe plainly quoted) is an allowlisted harmless env value.
+pub(crate) fn harmless_env_value(name: &str, value: &str) -> bool {
+    let value = decode_plain_quotes(value);
+    HARMLESS_COMMAND_VALUES.iter().any(|row| row.env.contains(&name) && row.values.contains(&value))
+}
+
+/// Whether the config `key` (any case) set to exactly `value` is an allowlisted harmless value.
+pub(crate) fn harmless_config_value(key: &str, value: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    HARMLESS_COMMAND_VALUES
+        .iter()
+        .any(|row| row.values.contains(&value) && row.keys.iter().any(|pattern| config_key_matches(pattern, &key)))
+}
+
+/// P166 r11 rule 3(c): ANY assignment of git's config-by-environment variables fails closed (keys and values are not
+/// paired): `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`, `GIT_CONFIG_PARAMETERS`.
+pub(crate) fn is_git_config_env_name(name: &str) -> bool {
+    name == "GIT_CONFIG_COUNT"
+        || name == "GIT_CONFIG_PARAMETERS"
+        || ["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"].iter().any(|prefix| name.starts_with(prefix))
+}
+
+/// How a command-valued config key's value decides whether it is a command.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigValue {
+    /// Any value (even a path) is run or retargets execution.
+    Any,
+    /// A boolean spelling is harmless (`core.fsmonitor=true`, `pager.log=false`); anything else is a command.
+    NotBool,
+    /// P166 r10: the command is the KEY's middle segment, not the value (`url.<base>.insteadOf`: git rewrites a URL
+    /// that starts with the value so it starts with `<base>`, so a `<base>` of `ext::...` runs on the next fetch).
+    ExtBase,
+    /// Only a value that starts with `!` is a shell command (`submodule.<name>.update`).
+    Bang,
+    /// Only a path (`/usr/bin/x`, `./x`, `~/x`) is a command (`sendemail.smtpServer` is otherwise a host name).
+    PathLike,
+    /// Any value but `never` (`protocol.ext.allow`).
+    NotNever,
+    /// P166 r12 item 4: a repository URL; a value that is not an ordinary [`UrlRole::Source`] URL is a command.
+    Url,
+}
+
+/// P166 r9: the ONE table of command-valued git config keys. Lower-case; `*` is a middle segment (a section's
+/// subsection: a driver, tool, remote or URL base, which may itself contain dots); a trailing `.*` is any non-empty
+/// name. Read by the `git config` SET classifier (`git_config_key_redirects_hooks`) and by the ambient scan
+/// (`local_git_config_entry_is_exec`), so the two cannot drift.
+pub(crate) const COMMAND_VALUED_CONFIG_KEYS: &[(&str, ConfigValue)] = &[
+    ("core.hookspath", ConfigValue::Any),
+    ("core.fsmonitor", ConfigValue::NotBool),
+    ("core.sshcommand", ConfigValue::Any),
+    ("core.pager", ConfigValue::Any),
+    ("core.editor", ConfigValue::Any),
+    ("core.askpass", ConfigValue::Any),
+    ("core.gitproxy", ConfigValue::Any),
+    ("core.alternaterefscommand", ConfigValue::Any),
+    ("diff.external", ConfigValue::Any),
+    ("diff.*.command", ConfigValue::Any),
+    ("diff.*.textconv", ConfigValue::Any),
+    ("diff.*.external", ConfigValue::Any),
+    ("filter.*.clean", ConfigValue::Any),
+    ("filter.*.smudge", ConfigValue::Any),
+    ("filter.*.process", ConfigValue::Any),
+    ("credential.helper", ConfigValue::Any),
+    ("credential.*.helper", ConfigValue::Any),
+    ("uploadpack.packobjectshook", ConfigValue::Any),
+    ("remote.*.receivepack", ConfigValue::Any),
+    ("remote.*.uploadpack", ConfigValue::Any),
+    ("sequence.editor", ConfigValue::Any),
+    ("gpg.program", ConfigValue::Any),
+    ("gpg.*.program", ConfigValue::Any),
+    ("gpg.ssh.defaultkeycommand", ConfigValue::Any),
+    ("merge.*.driver", ConfigValue::Any),
+    ("mergetool.*.cmd", ConfigValue::Any),
+    ("mergetool.*.path", ConfigValue::Any),
+    ("difftool.*.cmd", ConfigValue::Any),
+    ("difftool.*.path", ConfigValue::Any),
+    ("browser.*.cmd", ConfigValue::Any),
+    ("browser.*.path", ConfigValue::Any),
+    ("pager.*", ConfigValue::NotBool),
+    ("sendemail.smtpserver", ConfigValue::PathLike),
+    ("protocol.ext.allow", ConfigValue::NotNever),
+    ("url.*.insteadof", ConfigValue::ExtBase),
+    ("url.*.pushinsteadof", ConfigValue::ExtBase),
+    // P166 r10 (Grok r9 MEDIUM).
+    ("trailer.*.command", ConfigValue::Any),
+    ("trailer.*.cmd", ConfigValue::Any),
+    ("submodule.*.update", ConfigValue::Bang),
+    ("interactive.difffilter", ConfigValue::Any),
+    ("init.templatedir", ConfigValue::Any),
+    ("remote.*.vcs", ConfigValue::Any),
+    ("man.*.cmd", ConfigValue::Any),
+    ("man.*.path", ConfigValue::Any),
+    ("instaweb.httpd", ConfigValue::Any),
+    ("guitool.*.cmd", ConfigValue::Any),
+    // P166 r11 (Grok r10 MEDIUM 8).
+    ("tar.*.command", ConfigValue::Any),
+    ("imap.tunnel", ConfigValue::Any),
+    ("sendemail.tocmd", ConfigValue::Any),
+    ("sendemail.cccmd", ConfigValue::Any),
+    ("sendemail.headercmd", ConfigValue::Any),
+    ("protocol.allow", ConfigValue::NotNever),
+    ("protocol.*.allow", ConfigValue::NotNever),
+    // P166 r12 item 4 (Grok r11 HIGH 5): a URL that names a remote helper or a transport option runs on the next fetch.
+    ("remote.*.url", ConfigValue::Url),
+    ("remote.*.pushurl", ConfigValue::Url),
+    ("submodule.*.url", ConfigValue::Url),
+];
+
+/// P166 r11 rule 3(b): the suffix fail-safe. A key whose LAST segment names a program, hook or command is
+/// command-valued (a boolean value is harmless) even when the full key is not in the table. Exemption: `alias.*`
+/// (the alias NAME is the user's choice, `alias.cmd`; an alias runs a command only when its value starts with `!`,
+/// which `local_git_config_entry_is_exec` and the SET classifier judge separately).
+fn config_key_has_command_suffix(key: &str) -> bool {
+    let Some((section, last)) = key.rsplit_once('.') else {
+        return false;
+    };
+    if section.is_empty() || section == "alias" || section.starts_with("alias.") {
+        return false;
+    }
+    matches!(
+        last,
+        "command" | "cmd" | "program" | "helper" | "tunnel" | "driver" | "editor" | "pager" | "textconv" | "hook" | "hookspath"
+    ) || last.ends_with("cmd")
+        || last.ends_with("command")
+}
+
+/// Where a git URL appears (P166 r12 item 4).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UrlRole {
+    /// A repository the user names (command line, `remote.<n>.url`, `submodule.<n>.url`): a `file://` URL or a local
+    /// path is an ordinary source.
+    Source,
+    /// The `<base>` of `url.<base>.insteadOf|pushInsteadOf`: rewrites other URLs to it, so a `file://` base would make
+    /// a later fetch run the local repository's configured programs. Not ordinary.
+    InsteadOfBase,
+}
+
+/// `::` marks a remote helper (`ext::...`) or a daemon module, but not inside a bracketed IPv6 host (`[2001:db8::1]`).
+fn contains_helper_colons(url: &str) -> bool {
+    let mut outside = String::with_capacity(url.len());
+    let mut depth = 0u32;
+    for c in url.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => outside.push(c),
+            _ => {}
+        }
+    }
+    outside.contains("::")
+}
+
+/// P166 r12 item 4: the ONE predicate for every git URL. Ordinary: scheme `http`, `https`, `ssh`, `git`, `ftp`, `ftps`
+/// followed by `://` and a host not starting with `-`; scp-like `[user@]host:path` with a plain host not starting with
+/// `-`; and, only for [`UrlRole::Source`], `file://` and a bare local path. Everything else (`ext::...`, any `word::`,
+/// a `-` host, an unknown scheme) is a command (a remote helper, a transport option or an unrecognised form).
+pub(crate) fn url_is_ordinary(url: &str, role: UrlRole) -> bool {
+    if url.is_empty() || url.starts_with('-') || url.contains(char::is_whitespace) || contains_helper_colons(url) {
+        return false;
+    }
+    // P166 r13 item 6: `file:` with any number of slashes is the file scheme (`file:/tmp/x.git`).
+    if url.len() >= 5 && url[..5].eq_ignore_ascii_case("file:") {
+        return role == UrlRole::Source;
+    }
+    if let Some((scheme, rest)) = url.split_once("://") {
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme == "file" {
+            return role == UrlRole::Source;
+        }
+        if !matches!(scheme.as_str(), "http" | "https" | "ssh" | "git" | "ftp" | "ftps") {
+            return false;
+        }
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        return !host.is_empty() && !host.starts_with(['-', ':']);
+    }
+    // scp-like `host:path` needs the colon before any slash; otherwise this is a local path.
+    match (url.find(':'), url.find('/')) {
+        (Some(colon), slash) if slash.is_none_or(|slash| colon < slash) => {
+            let host = &url[..colon];
+            let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
+            !host.is_empty()
+                && !host.starts_with('-')
+                && (host.starts_with('[') && host.ends_with(']')
+                    || host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_')))
+        }
+        _ => role == UrlRole::Source,
+    }
+}
+
+fn config_key_matches(pattern: &str, key: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        return key.strip_prefix(prefix).and_then(|rest| rest.strip_prefix('.')).is_some_and(|rest| !rest.is_empty());
+    }
+    let Some((head, tail)) = pattern.split_once(".*.") else {
+        return pattern == key;
+    };
+    key.strip_prefix(head)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(tail))
+        .and_then(|rest| rest.strip_suffix('.'))
+        .is_some_and(|mid| !mid.is_empty())
+}
+
+fn config_value_is_command(rule: ConfigValue, key: &str, value: Option<&str>) -> bool {
+    if rule == ConfigValue::ExtBase {
+        // The subsection between `url.` and the last `.`; the value is irrelevant.
+        let mid = key.strip_prefix("url.").and_then(|rest| rest.rsplit_once('.')).map_or("", |(mid, _)| mid);
+        return !url_is_ordinary(mid, UrlRole::InsteadOfBase);
+    }
+    let Some(value) = value.map(str::trim) else {
+        // No value known (a key named without one): fail closed.
+        return true;
+    };
+    match rule {
+        ConfigValue::Any => true,
+        ConfigValue::NotBool => git2::Config::parse_bool(value).is_err(),
+        ConfigValue::ExtBase => false,
+        ConfigValue::Bang => value.starts_with('!'),
+        ConfigValue::PathLike => value.starts_with(['/', '.', '~']),
+        ConfigValue::NotNever => !value.eq_ignore_ascii_case("never"),
+        ConfigValue::Url => !url_is_ordinary(value, UrlRole::Source),
+    }
+}
+
+/// Whether `key` (any case) names a command-valued git config key whose `value` is a command. `None` value: fail closed.
+pub(crate) fn command_valued_config(key: &str, value: Option<&str>) -> bool {
+    let key = key.to_ascii_lowercase();
+    // P166 r13B: an exact allowlisted value (matched on the untrimmed text) is not a command.
+    if value.is_some_and(|value| harmless_config_value(&key, value)) {
+        return false;
+    }
+    COMMAND_VALUED_CONFIG_KEYS
+        .iter()
+        .any(|(pattern, rule)| config_key_matches(pattern, &key) && config_value_is_command(*rule, &key, value))
+        || (config_key_has_command_suffix(&key) && config_value_is_command(ConfigValue::NotBool, &key, value))
+}
+
+/// A `git config` SET's argument words (`key value ...`) or `-c`/env `key=value` text: some word names a
+/// command-valued key whose following word (or inline `=value`) is a command.
+pub(crate) fn config_words_set_command_valued<S: AsRef<str>>(words: &[S]) -> bool {
+    words.iter().enumerate().any(|(at, word)| {
+        let word = word.as_ref();
+        match word.split_once('=') {
+            Some((key, value)) => command_valued_config(key, Some(value)),
+            None => command_valued_config(word, words.get(at + 1).map(|next| next.as_ref())),
+        }
+    })
+}
+
+pub(crate) fn is_attached_git_config_c(tok: &str) -> bool {
     tok.starts_with("-c") && tok.len() > 2 && !tok.starts_with("--")
 }
 
-fn attached_git_c_path(tok: &str) -> Option<&str> {
+pub(crate) fn attached_git_c_path(tok: &str) -> Option<&str> {
     tok.strip_prefix("-C")
         .filter(|rest| !rest.is_empty() && !tok.starts_with("--"))
 }
 
-fn git_global_option_takes_value(tok: &str) -> bool {
+pub(crate) fn git_global_option_takes_value(tok: &str) -> bool {
     matches!(
         tok,
         "-C" | "-c"
@@ -200,9 +519,196 @@ pub(crate) fn segment_has_exec_risk_flag(words: &[String]) -> bool {
         return sort_has_compress_program_flag(words);
     }
     if is_git_program(words) {
-        return git_has_exec_risk_global(words);
+        return git_has_exec_risk_global(words)
+            || git_config_sets_shell_alias(words)
+            || git_command_url_operand(words);
     }
     false
+}
+
+/// `git config [opts] alias.<name> '!<shell text>'`: stores a shell command that a later `git <name>` runs (P166 r8B).
+/// The stored text is the risk, so the SET is exec risk whatever the alias is called.
+pub(crate) fn git_config_sets_shell_alias(words: &[String]) -> bool {
+    let Some(config_at) = words.iter().position(|word| word == "config") else {
+        return false;
+    };
+    words[config_at + 1..].windows(2).any(|pair| {
+        pair[0].to_ascii_lowercase().starts_with("alias.") && pair[1].starts_with('!')
+    })
+}
+
+/// How a git URL verb treats one option (P166 r13 rule 2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GitOpt {
+    /// Runs its value as a command (`--upload-pack`, `--receive-pack`, `--exec`, `clone -u`, `clone --template`):
+    /// exec risk whatever the value, in `--opt=VALUE`, `--opt VALUE` and attached short forms.
+    Exec,
+    /// `clone -c|--config KEY=VALUE`: exec risk when the key is command-valued (the config table applies).
+    Config,
+    /// The value is a repository URL (`push --repo`, `archive --remote`): judged like the URL operand.
+    Url,
+    /// Consumes a value that is not a URL.
+    Value,
+}
+
+/// Per-verb table of value-taking git options (long and short). An option that is not listed does not consume
+/// the next word; the word after it is ALSO judged as a possible URL so a command URL cannot hide behind it.
+/// Sources: git-clone, git-fetch, git-pull, git-push, git-ls-remote, git-archive, git-remote, git-submodule manuals.
+/// `fetch -u` is `--update-head-ok` and `push -u` is `--set-upstream` (both boolean), so `-u` is Exec for `clone` only.
+fn git_url_verb_option(verb: &str, option: &str) -> Option<GitOpt> {
+    use GitOpt::{Config, Exec, Url, Value};
+    let table: &[(&str, GitOpt)] = match verb {
+        "clone" => &[
+            ("-u", Exec), ("--upload-pack", Exec), ("--template", Exec), ("--exec", Exec), ("--receive-pack", Exec),
+            ("-c", Config), ("--config", Config),
+            ("-o", Value), ("--origin", Value), ("-b", Value), ("--branch", Value), ("--reference", Value),
+            ("--reference-if-able", Value), ("--separate-git-dir", Value), ("--depth", Value),
+            ("--shallow-since", Value), ("--shallow-exclude", Value), ("--filter", Value), ("-j", Value),
+            ("--jobs", Value), ("--server-option", Value), ("--bundle-uri", Value), ("--ref-format", Value),
+            ("--revision", Value),
+        ],
+        "fetch" | "pull" => &[
+            ("--upload-pack", Exec), ("--exec", Exec), ("--receive-pack", Exec),
+            ("--depth", Value), ("--deepen", Value), ("--shallow-since", Value), ("--shallow-exclude", Value),
+            ("--filter", Value), ("-j", Value), ("--jobs", Value), ("--refmap", Value), ("--negotiation-tip", Value),
+            ("--recurse-submodules-default", Value), ("-o", Value), ("--server-option", Value), ("-s", Value),
+            ("--strategy", Value), ("-X", Value), ("--strategy-option", Value),
+        ],
+        "push" => &[
+            ("--receive-pack", Exec), ("--exec", Exec), ("--upload-pack", Exec),
+            ("--repo", Url), ("--push-option", Value), ("-o", Value),
+        ],
+        "ls-remote" => &[
+            ("--upload-pack", Exec), ("--exec", Exec), ("--receive-pack", Exec),
+            ("--sort", Value), ("-o", Value), ("--server-option", Value),
+        ],
+        "remote" => &[("-t", Value), ("-m", Value), ("--track", Value), ("--master", Value)],
+        "submodule" => &[
+            ("-b", Value), ("--branch", Value), ("--name", Value), ("--reference", Value), ("--depth", Value),
+            ("--jobs", Value), ("-j", Value),
+        ],
+        "archive" => &[
+            ("--exec", Exec), ("--upload-pack", Exec), ("--receive-pack", Exec), ("--remote", Url),
+            ("--format", Value), ("--prefix", Value), ("--output", Value), ("-o", Value), ("--add-file", Value),
+            ("--add-virtual-file", Value),
+        ],
+        _ => &[],
+    };
+    table.iter().find(|(name, _)| *name == option).map(|(_, kind)| *kind)
+}
+
+/// P166 r12 item 4: whether a git URL operand of `clone`, `fetch`, `pull`, `push`, `ls-remote`, `remote add|set-url`,
+/// `submodule add` or `archive --remote` is not ordinary ([`url_is_ordinary`], role [`UrlRole::Source`]): a remote
+/// helper (`ext::`, any `word::`), a transport option as host (`ssh://-oProxyCommand=...`) or an unrecognised form.
+/// Pre-verb global options are skipped; the `-c`/repo-retarget globals are judged by [`git_has_exec_risk_global`].
+pub(crate) fn git_command_url_operand(words: &[String]) -> bool {
+    let mut i = 1;
+    while i < words.len() {
+        let tok = words[i].as_str();
+        if !tok.starts_with('-') || tok == "-" {
+            break;
+        }
+        if !tok.contains('=') && git_global_option_takes_value(tok) {
+            i += 1;
+        }
+        i += 1;
+    }
+    let Some(verb) = words.get(i).map(String::as_str) else {
+        return false;
+    };
+    if !matches!(verb, "clone" | "fetch" | "pull" | "push" | "ls-remote" | "remote" | "submodule" | "archive") {
+        return false;
+    }
+    let mut operands: Vec<&str> = Vec::new();
+    // URLs named by option, and words after an unlisted option (a possible value, or the URL itself).
+    let mut urls: Vec<&str> = Vec::new();
+    let mut unlisted_value_seen = false;
+    let mut rest = words[i + 1..].iter();
+    let mut dashdash = false;
+    while let Some(word) = rest.next() {
+        if !dashdash && word == "--" {
+            dashdash = true;
+            continue;
+        }
+        if dashdash || !word.starts_with('-') || word == "-" {
+            operands.push(word);
+            continue;
+        }
+        let (name, mut value) = match word.split_once('=') {
+            Some((name, value)) if word.starts_with("--") => (name, Some(value)),
+            _ => (word.as_str(), None),
+        };
+        let mut kind = git_url_verb_option(verb, name);
+        // An attached short value: `clone -ush`, `-cKEY=V`, `-b main`.
+        if kind.is_none()
+            && !word.starts_with("--")
+            && word.len() > 2
+            && word.is_char_boundary(2)
+            && let Some(found) = git_url_verb_option(verb, &word[..2])
+        {
+            kind = Some(found);
+            value = Some(&word[2..]);
+        }
+        match kind {
+            Some(GitOpt::Exec) => return true,
+            Some(kind) => {
+                let value = match value {
+                    Some(value) => Some(value.to_owned()),
+                    None => rest.next().cloned(),
+                };
+                match (kind, value) {
+                    (GitOpt::Config, Some(value)) => {
+                        if config_words_set_command_valued(&[value]) {
+                            return true;
+                        }
+                    }
+                    (GitOpt::Config, None) => return true,
+                    (GitOpt::Url, Some(value)) => {
+                        if !url_is_ordinary(&value, UrlRole::Source) {
+                            return true;
+                        }
+                    }
+                    (GitOpt::Url, None) => return true,
+                    _ => {}
+                }
+            }
+            None => {
+                // Unlisted: `--opt=VALUE` is skipped; `--opt WORD` leaves WORD possibly a URL.
+                if value.is_none()
+                    && !word.contains('=')
+                    && let Some(next) = rest.as_slice().first().filter(|next| !next.starts_with('-'))
+                {
+                    urls.push(next);
+                    unlisted_value_seen = true;
+                }
+            }
+        }
+    }
+    if urls.iter().any(|url| !url_is_ordinary(url, UrlRole::Source)) {
+        return true;
+    }
+    if verb == "archive" {
+        return false;
+    }
+    let judged: &[&str] = match verb {
+        // `git clone URL [DIR]`, `fetch|pull|push|ls-remote REPO …`.
+        // After an unlisted option that was followed by a word, the real URL may be the second operand.
+        "clone" | "fetch" | "pull" | "push" | "ls-remote" => {
+            operands.get(..if unlisted_value_seen { 2 } else { 1 }).or(Some(&operands[..])).unwrap_or_default()
+        }
+        // `git remote add NAME URL`, `git remote set-url NAME NEWURL [OLDURL]` (a `--delete` URL is a pattern).
+        "remote" => match operands.first() {
+            Some(&"add") => operands.get(2..3).unwrap_or_default(),
+            Some(&"set-url") if !words.iter().any(|word| word == "--delete") => operands.get(2..3).unwrap_or_default(),
+            _ => &[],
+        },
+        // `git submodule add [-b B] URL [PATH]`.
+        _ => match operands.first() {
+            Some(&"add") => operands.get(1..2).unwrap_or_default(),
+            _ => &[],
+        },
+    };
+    judged.iter().any(|url| !url_is_ordinary(url, UrlRole::Source))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -213,6 +719,10 @@ pub(crate) struct SegmentExecFacts {
 
 /// Normalize raw segment words, then inspect git/sort. Unmodeled peels fail closed.
 pub(crate) fn segment_exec_facts(words: &[String]) -> SegmentExecFacts {
+    // P166 r9: `env GIT_DIR=/tmp/evil git commit` keeps the assignment as a word; the wrapper peel below drops it.
+    if words.iter().any(|word| is_git_exec_env_assignment(word)) {
+        return SegmentExecFacts { exec_risk: true, has_git: words.iter().any(|word| normalized_token_basename(word) == "git") };
+    }
     match normalize_for_exec_risk(words) {
         NormalizedArgv::FailClosed => SegmentExecFacts {
             exec_risk: true,
@@ -337,91 +847,29 @@ pub(crate) fn git_words_are_read_only_query(words: &[String]) -> bool {
     !git_words_have_unsafe_query_option(words)
 }
 
-fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
+pub(crate) fn local_git_config_entry_is_exec(name: &str, value: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let value = value.trim();
     if value.is_empty() {
         return false;
     }
-    if name == "core.fsmonitor" {
-        return git2::Config::parse_bool(value).is_err();
-    }
-    if name == "diff.external" {
+    // P166 r9: the shared command-valued key table (also read by the `git config` SET classifier).
+    if command_valued_config(&name, Some(value)) {
         return true;
     }
-    if let Some(rest) = name.strip_prefix("diff.")
-        && (rest.ends_with(".command")
-            || rest.ends_with(".textconv")
-            || rest.ends_with(".external"))
-    {
-        return true;
-    }
-    if let Some(alias) = name.strip_prefix("alias.")
-        && SAFE_GIT_SUBCOMMANDS.contains(&alias)
-        && value.starts_with('!')
-    {
-        return true;
-    }
-    false
-}
-
-fn path_unreadable(path: &Path) -> bool {
-    // Directories open on Linux, so require a readable regular file after following symlinks.
-    match std::fs::File::open(path) {
-        Ok(f) => match f.metadata() {
-            Ok(meta) => !meta.is_file(),
-            Err(_) => true,
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
-    }
+    // P166 r8B: a shell alias (`alias.<any> = !cmd`) runs a stored command on a later `git <alias>`; the alias name
+    // need not shadow a safe verb for the later command to execute it.
+    name.starts_with("alias.") && value.starts_with('!')
 }
 
 /// Local/worktree only via libgit2 (include/includeIf). Fail closed on read errors.
 pub(crate) fn local_repo_config_has_exec_risk(cwd: &Path) -> bool {
-    let repo = match git2::Repository::discover(cwd) {
-        Ok(repo) => repo,
-        Err(e)
-            if e.code() == git2::ErrorCode::NotFound
-                && e.class() == git2::ErrorClass::Repository =>
-        {
-            return false;
-        }
-        Err(_) => return true,
-    };
-    // `repo.config()` can still open global levels when local is unreadable.
-    let git_dir = repo.path();
-    let common = repo.commondir();
-    if path_unreadable(&common.join("config"))
-        || path_unreadable(&git_dir.join("config"))
-        || path_unreadable(&git_dir.join("config.worktree"))
-    {
-        return true;
+    match crate::git_content_filters::read_local_git_config_entries(cwd) {
+        None => true,
+        Some(entries) => entries
+            .iter()
+            .any(|(name, value)| local_git_config_entry_is_exec(name, value)),
     }
-    let config = match repo.config() {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
-    let mut entries = match config.entries(None) {
-        Ok(e) => e,
-        Err(_) => return true,
-    };
-    while let Some(entry) = entries.next() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => return true,
-        };
-        match entry.level() {
-            git2::ConfigLevel::Local | git2::ConfigLevel::Worktree => {}
-            _ => continue,
-        }
-        let name = entry.name().unwrap_or("");
-        let value = entry.value().unwrap_or("");
-        if local_git_config_entry_is_exec(name, value) {
-            return true;
-        }
-    }
-    false
 }
 
 fn is_static_path_operand(p: &str) -> bool {
@@ -463,6 +911,102 @@ fn apply_literal_chdir(cwd: &Path, words: &[String]) -> Option<PathBuf> {
         return None;
     }
     Some(join_cwd(cwd, target))
+}
+
+/// P175d: the first line (up to `\n` or `\r`) of a git pointer file (`follow`: a symlink is followed, as git follows a
+/// symlinked `.git` or `commondir`), read as git reads it: at most 4096 bytes, any
+/// bytes. The file is opened `O_NONBLOCK` (and, when `follow` is false, `O_NOFOLLOW`) so a FIFO cannot block the
+/// caller, and only a REGULAR file is accepted, judged on the open handle (fstat), so a swap between a check and the
+/// open cannot make this wait. Non-unix: a metadata check then a plain open (unverified).
+fn read_pointer_first_line(path: &Path, follow: bool) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
+        if !follow {
+            flags |= libc::O_NOFOLLOW;
+        }
+        options.custom_flags(flags);
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = if follow { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) }.ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes).ok()?;
+    let end = bytes.iter().position(|b| matches!(b, b'\n' | b'\r')).unwrap_or(bytes.len());
+    bytes.truncate(end);
+    Some(bytes)
+}
+
+fn bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes).ok().map(PathBuf::from)
+    }
+}
+
+/// P175d: a pointer's canonical target counts only if it is an existing directory holding a `HEAD` that is a regular file or a symlink (git follows it; looked
+/// at with `symlink_metadata`, never opened) and is neither `/`, the worktree root, nor an ancestor of it (which
+/// would make every write in the tree look like a git-directory write).
+fn plausible_git_dir(dir: &Path, worktree_root: &Path) -> bool {
+    dir.parent().is_some()
+        && !worktree_root.starts_with(dir)
+        && std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
+        && std::fs::symlink_metadata(dir.join("HEAD")).is_ok_and(|m| m.is_file() || m.file_type().is_symlink())
+}
+
+/// P175d: the git directories a write must not touch before a branch switch in `effective`: the nearest `.git`
+/// directory above it (as before) AND, when a nearer `.git` is a FILE (linked worktree, submodule checkout; or a
+/// symlink to one, as git follows it), the `gitdir:` it names plus that directory's `commondir` (where the shared
+/// refs live). A pointer that cannot be read as git reads it adds nothing, so the result is never smaller than before.
+fn protected_git_dirs(effective: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = effective.ancestors().map(|dir| dir.join(".git")).filter(|dir| dir.is_dir()).take(1).collect();
+    let pointer_dirs = || -> Option<Vec<PathBuf>> {
+        let (root, file, is_link) = effective.ancestors().find_map(|dir| {
+            let dot_git = dir.join(".git");
+            let meta = std::fs::symlink_metadata(&dot_git).ok()?;
+            (meta.is_dir() || meta.is_file() || meta.file_type().is_symlink()).then_some((dir, dot_git, meta.file_type().is_symlink()))
+        })?;
+        // A symlink is followed one level (open without O_NOFOLLOW; the handle must still be a regular file).
+        let line = read_pointer_first_line(&file, is_link)?;
+        let rest = line.strip_prefix(b"gitdir:")?;
+        let start = rest.iter().position(|b| !b.is_ascii_whitespace())?;
+        let end = rest.iter().rposition(|b| !b.is_ascii_whitespace())?;
+        let gitdir = dunce::canonicalize(root.join(bytes_to_path(&rest[start..=end])?)).ok()?;
+        if !plausible_git_dir(&gitdir, root) {
+            return None;
+        }
+        let mut found = vec![gitdir.clone()];
+        if let Some(line) = read_pointer_first_line(&gitdir.join("commondir"), true) {
+            let trimmed = line.trim_ascii();
+            if !trimmed.is_empty()
+                && let Some(named) = bytes_to_path(trimmed)
+                && let Ok(common) = dunce::canonicalize(gitdir.join(named))
+                && plausible_git_dir(&common, root)
+            {
+                found.push(common);
+            }
+        }
+        Some(found)
+    };
+    dirs.extend(pointer_dirs().unwrap_or_default());
+    dirs
 }
 
 /// Pre-subcommand `git -C` / `-Cpath` chains. Returns `None` on an unmodeled path or a repo-retarget global.
@@ -543,6 +1087,316 @@ pub(crate) fn ambient_scan_plan_from_segments(
     } else {
         AmbientScanPlan::CheckDirs(git_cwds)
     }
+}
+
+/// P166 r13B feature 1: which trees a branch-moving git verb involves, per git segment, with the same cwd tracking as
+/// the ambient scan (`cd`, `git -C`). Only the verbs `checkout|switch|merge|rebase|pull|stash pop|apply` are modelled;
+/// any other segment is ignored. A listed verb in a form not modelled (flags, pathspecs, `--detach`, ...) is
+/// [`BranchSwitchPlan::Undetermined`]. `switch -c <name>` / `checkout -b <name>` (a new branch at HEAD) rewrite
+/// nothing and need no probe.
+pub(crate) fn branch_switch_plan(raw_segments: &[Vec<String>], session_cwd: &Path) -> BranchSwitchPlan {
+    branch_switch_plan_with(raw_segments, session_cwd, None)
+}
+
+/// [`branch_switch_plan`] with the script's write targets (P175 part B, decision 11): an EARLIER non-git command that
+/// writes inside the git directory of the repository the switch runs in unsettles the plan like an earlier git verb.
+pub(crate) fn branch_switch_plan_with(
+    raw_segments: &[Vec<String>],
+    session_cwd: &Path,
+    facts: Option<&crate::permission::shell_access::ShellWriteFacts>,
+) -> BranchSwitchPlan {
+    use crate::permission::branch_switch::{TreeProbe, TreeRef};
+    let mut cwd = session_cwd.to_path_buf();
+    let mut probes = Vec::new();
+    let mut undetermined = false;
+    let req = |rev: &str| TreeRef::new(rev, true);
+    let opt = |rev: String| TreeRef::new(rev, false);
+    // HEAD: an unborn HEAD is skipped, only the target tree is judged.
+    let head = || TreeRef { unborn_ok: true, ..TreeRef::new("HEAD", true) };
+    // Set once an earlier segment can move refs or is not a recognised read-only git command: the trees git would
+    // read later no longer match what a probe sees now.
+    let mut unsettled = false;
+    let mut git_ordinal = 0usize;
+    for raw in raw_segments {
+        if raw.iter().any(|word| word.contains("GIT_NO_REPLACE_OBJECTS") || word.contains("GIT_REPLACE_REF_BASE")) {
+            return BranchSwitchPlan::Undetermined;
+        }
+        let words = match normalize_for_exec_risk(raw) {
+            NormalizedArgv::FailClosed => return BranchSwitchPlan::Undetermined,
+            NormalizedArgv::Ready(inner) => inner,
+        };
+        match normalized_program_name(words).as_deref() {
+            Some("cd") | Some("pushd") => match apply_literal_chdir(&cwd, words) {
+                Some(next) => cwd = next,
+                None => return BranchSwitchPlan::Undetermined,
+            },
+            Some("popd") => return BranchSwitchPlan::Undetermined,
+            Some("git") => {
+                let this_git = git_ordinal;
+                git_ordinal += 1;
+                // The verb: after the global options (`-C <dir>` and the value-less ones; exec-risk ones never get here).
+                let mut at = 1;
+                while let Some(tok) = words.get(at) {
+                    if tok == "--" || !tok.starts_with('-') || tok == "-" {
+                        break;
+                    }
+                    // `-c submodule.recurse=true` / `--config-env`: recursion the config child cannot see.
+                    if matches!(tok.as_str(), "-c") || tok.starts_with("--config-env") {
+                        let value = words.get(at + 1).map(|v| v.to_ascii_lowercase()).unwrap_or_default();
+                        if tok.to_ascii_lowercase().contains("recurse") || value.contains("recurse") || value.contains("submodule") {
+                            return BranchSwitchPlan::Undetermined;
+                        }
+                    }
+                    at += if !tok.contains('=') && git_global_option_takes_value(tok) { 2 } else { 1 };
+                }
+                let Some(verb) = words.get(at).map(String::as_str) else {
+                    continue;
+                };
+                if !matches!(verb, "checkout" | "switch" | "merge" | "rebase" | "pull" | "stash") {
+                    // Read-only verbs (and `add`, which only touches the index) leave refs alone; every other verb
+                    // (fetch, remote, commit, push, an alias, ...) may move one.
+                    let rest = &words[at + 1..];
+                    // `add -f` can stage an ignored file, which the work-tree listing does not show.
+                    let forced_add = verb == "add" && git_add_is_force(rest);
+                    // `git commit` runs hooks (`.git/hooks/post-commit` can move any ref), so like every verb that is
+                    // not read-only it makes the later probes unsettled. Bare listing forms of branch/tag/reflog are
+                    // read-only.
+                    if forced_add
+                        || !(matches!(
+                            verb,
+                            "status" | "log" | "diff" | "show" | "rev-parse" | "ls-tree" | "ls-files" | "cat-file" | "describe"
+                                | "blame" | "grep" | "shortlog" | "add" | "for-each-ref" | "show-ref" | "rev-list"
+                        ) || git_readonly_listing(verb, rest))
+                    {
+                        unsettled = true;
+                    }
+                    continue;
+                }
+                let args: Vec<&str> = words[at + 1..].iter().map(String::as_str).collect();
+                let plain = |arg: &&str| !arg.starts_with('-') && !arg.is_empty() && !arg.contains(['\\', ':', '^', '~', '@', '*', '?', '[']);
+                let trees: Option<Vec<TreeRef>> = match (verb, args.as_slice()) {
+                    ("stash", [sub @ ("pop" | "apply"), rest @ ..]) => {
+                        let _ = sub;
+                        let rest: Vec<&&str> = rest.iter().filter(|arg| !matches!(**arg, "--index" | "-q" | "--quiet")).collect();
+                        let stash = match rest.as_slice() {
+                            [] => Some("stash@{0}".to_owned()),
+                            [one] if one.len() > 8 && one.starts_with("stash@{") && one.ends_with('}') && one[7..one.len() - 1].bytes().all(|b| b.is_ascii_digit()) => Some(one.to_string()),
+                            [one] if one.bytes().all(|b| b.is_ascii_digit()) => Some(format!("stash@{{{one}}}")),
+                            _ => None,
+                        };
+                        // No such stash: git errors out and rewrites nothing.
+                        stash.map(|stash| {
+                            let na = TreeRef { na_if_absent: true, ..TreeRef::new(stash.as_str(), true) };
+                            vec![na, head(), opt(format!("{stash}^3"))]
+                        })
+                    }
+                    // `stash -u` / `-a` (push, save, or bare) deletes untracked (and ignored) files: judge them.
+                    ("stash", _) => match git_stash_untracked_scope(&words[at + 1..]) {
+                        Some(rev) => Some(vec![TreeRef::new(rev, false)]),
+                        None => continue,
+                    },
+                    ("checkout" | "switch", ["-"]) => Some(vec![head(), req("@{-1}")]),
+                    ("switch", ["-c" | "-C" | "--create", name]) | ("checkout", ["-b" | "-B", name]) if plain(name) => {
+                        continue;
+                    }
+                    // New branch at a start point: the working tree goes from HEAD to the start point's tree.
+                    ("switch", ["-c" | "-C" | "--create", name, start]) | ("checkout", ["-b" | "-B", name, start])
+                        if plain(name) && plain(start) =>
+                    {
+                        Some(vec![head(), req(start)])
+                    }
+                    ("checkout" | "switch", [target]) if plain(target) => {
+                        Some(vec![head(), TreeRef { guess_remote: true, ..TreeRef::new(*target, true) }])
+                    }
+                    ("merge" | "rebase", [target]) if plain(target) => Some(vec![head(), req(target)]),
+                    ("pull", rest) => {
+                        let mut positional = Vec::new();
+                        let mut ok = true;
+                        for arg in rest {
+                            if matches!(
+                                *arg,
+                                "--rebase" | "--no-rebase" | "--ff" | "--ff-only" | "--no-ff" | "--no-edit" | "--autostash"
+                                    | "--no-autostash" | "-q" | "--quiet" | "-v" | "--verbose" | "-r" | "--rebase=true"
+                                    | "--rebase=false" | "--rebase=merges"
+                            ) {
+                                continue;
+                            }
+                            if plain(arg) && !arg.contains('/') || (plain(arg) && positional.len() == 1) {
+                                positional.push(*arg);
+                            } else {
+                                ok = false;
+                            }
+                        }
+                        if !ok || positional.len() > 2 {
+                            None
+                        } else {
+                            let mut trees = vec![head(), opt("@{upstream}".to_owned())];
+                            if let [remote, branch] = positional.as_slice() {
+                                trees.push(opt(format!("refs/remotes/{remote}/{branch}")));
+                            }
+                            Some(trees)
+                        }
+                    }
+                    _ => None,
+                };
+                let effective_cwd = git_effective_cwd(words, &cwd);
+                if !unsettled
+                    && trees.is_some()
+                    && let (Some(facts), Some(effective)) = (facts, effective_cwd.as_deref())
+                    && protected_git_dirs(effective).iter().any(|git_dir| {
+                        facts.writes_into_git_dir_before(
+                            session_cwd,
+                            &crate::permission::shell_access::lexical_clean(git_dir),
+                            this_git,
+                        )
+                    })
+                {
+                    unsettled = true;
+                }
+                match (trees, effective_cwd) {
+                    (Some(_), Some(_)) if unsettled => undetermined = true,
+                    (Some(trees), Some(effective)) => probes.push(TreeProbe { cwd: effective, trees }),
+                    _ => undetermined = true,
+                }
+                // A pull fetches: later segments read refs it moves.
+                if verb == "pull" {
+                    unsettled = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    // Safety net: the write facts and this planner must see the same git commands. If they ever disagree, the ordinal
+    // that places an earlier write is not trustworthy, so a plan that would probe is not.
+    if !probes.is_empty() && facts.is_some_and(|facts| facts.git_start_count() != git_ordinal) {
+        undetermined = true;
+    }
+    if undetermined {
+        BranchSwitchPlan::Undetermined
+    } else if probes.is_empty() {
+        BranchSwitchPlan::NotApplicable
+    } else {
+        BranchSwitchPlan::Probe(probes)
+    }
+}
+
+/// `git add` options that force-add ignored files: `-f` in a short cluster, `--force`, `--force=<bool>`, or any
+/// unique prefix of `--force` git accepts (`--f` ... `--forc`, with or without `=<value>`).
+fn git_add_is_force(args: &[String]) -> bool {
+    args.iter().take_while(|a| a.as_str() != "--").any(|a| {
+        if let Some(long) = a.strip_prefix("--") {
+            let name = format!("--{}", long.split('=').next().unwrap_or(""));
+            name == "--force" || is_accepted_long_option_prefix(&name, "--force", 3)
+        } else {
+            a.starts_with('-') && a.contains('f')
+        }
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn git_add_is_force_for_tests(args: &[String]) -> bool {
+    git_add_is_force(args)
+}
+
+/// Read-only listing forms of `branch`, `tag` and `reflog`. Anything else on those verbs (and any unknown flag) is not.
+fn git_readonly_listing(verb: &str, args: &[String]) -> bool {
+    let valued = |flag: &str| {
+        let name = flag.split('=').next().unwrap_or(flag);
+        ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"].contains(&name)
+    };
+    let optional_value = |flag: &str| {
+        let name = flag.split('=').next().unwrap_or(flag);
+        !flag.contains('=') && ["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort"].contains(&name)
+    };
+    match verb {
+        "reflog" => {
+            // `reflog [show] <rev>` lists; a flag or a reflog subcommand name in the revision slot does not.
+            let rev_ok = |rev: &str| {
+                !rev.starts_with('-') && !["expire", "delete", "exists", "list", "drop", "write"].contains(&rev)
+            };
+            match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                [] | ["show"] => true,
+                [rev] => rev_ok(rev),
+                ["show", rev] => rev_ok(rev),
+                _ => false,
+            }
+        }
+        "branch" | "tag" => {
+            let mut list_mode = false;
+            let mut positional = false;
+            let mut i = 0;
+            while i < args.len() {
+                let a = args[i].as_str();
+                i += 1;
+                if let Some(long) = a.strip_prefix("--") {
+                    let name = long.split('=').next().unwrap_or("");
+                    match name {
+                        "list" => list_mode = true,
+                        "show-current" | "verbose" | "all" | "remotes" | "no-color" | "color" | "column" | "no-column" => {
+                            if name == "show-current" && verb == "tag" {
+                                return false;
+                            }
+                        }
+                        _ if valued(a) => {
+                            if optional_value(a) && args.get(i).is_some_and(|v| !v.starts_with('-')) {
+                                i += 1;
+                            }
+                        }
+                        _ => return false,
+                    }
+                } else if a.starts_with('-') && a.len() > 1 {
+                    let flags = &a[1..];
+                    if verb == "tag" {
+                        // A cluster of only `l` and `n` with an optional trailing digit run: -l, -n, -n3, -ln, -nl, -ln5
+                        let letters = flags.trim_end_matches(|c: char| c.is_ascii_digit());
+                        if !letters.is_empty() && letters.bytes().all(|b| matches!(b, b'l' | b'n')) {
+                            list_mode = true;
+                        } else {
+                            return false;
+                        }
+                    } else if flags.bytes().all(|b| matches!(b, b'l' | b'a' | b'r' | b'v')) {
+                        list_mode |= flags.contains('l');
+                    } else {
+                        return false;
+                    }
+                } else {
+                    positional = true;
+                }
+            }
+            // A positional is a name to create unless a list flag turns it into a pattern.
+            !positional || list_mode
+        }
+        _ => false,
+    }
+}
+
+/// For `stash` (bare, `push`, `save`) carrying an untracked flag: the pseudo revision of the files it would remove.
+fn git_stash_untracked_scope(args: &[String]) -> Option<&'static str> {
+    use crate::permission::branch_switch::{UNTRACKED_ALL_REV, UNTRACKED_REV};
+    let first = args.first().map(String::as_str);
+    if !matches!(first, None | Some("push") | Some("save")) && !first.is_some_and(|f| f.starts_with('-')) {
+        return None;
+    }
+    let mut scope = None;
+    for a in args.iter().take_while(|a| a.as_str() != "--") {
+        if let Some(long) = a.strip_prefix("--") {
+            let name = format!("--{}", long.split('=').next().unwrap_or(""));
+            if is_accepted_long_option_prefix(&name, "--all", 3) {
+                return Some(UNTRACKED_ALL_REV);
+            }
+            if is_accepted_long_option_prefix(&name, "--include-untracked", 3) {
+                scope = Some(UNTRACKED_REV);
+            }
+        } else if a.starts_with('-') {
+            if a.contains('a') {
+                return Some(UNTRACKED_ALL_REV);
+            }
+            if a.contains('u') {
+                scope = Some(UNTRACKED_REV);
+            }
+        }
+    }
+    scope
 }
 
 pub(crate) fn ambient_exec_risk_from_plan(plan: &AmbientScanPlan) -> bool {
@@ -805,11 +1659,25 @@ mod tests {
             ("[diff \"evil\"]\n\tcommand = /tmp/pwn\n", true),
             ("[diff \"evil\"]\n\ttextconv = /tmp/pwn\n", true),
             ("[alias]\n\tstatus = !/tmp/pwn\n", true),
+            // P166 r8B: a configured hooks path, and a shell alias whatever its name, are ambient exec
+            ("[core]\n\thooksPath = /tmp/evil\n", true),
+            ("[alias]\n\tx = !sh -c 'cp e .git/hooks/pre-commit'\n", true),
+            ("[alias]\n\tco = checkout\n", false),
+            // P158 (upstream 75810042): a repo-local content filter runs on status/diff
+            ("[filter \"pwn\"]\n\tclean = /tmp/pwn ; cat\n", true),
+            ("[filter \"pwn\"]\n\tsmudge = /tmp/pwn\n", true),
+            ("[filter \"pwn\"]\n\tprocess = /tmp/pwn\n", true),
             (
                 "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
                  [filter \"lfs\"]\n\tclean = git-lfs clean -- %f\n\
                  \tsmudge = git-lfs smudge -- %f\n\
                  \tprocess = git-lfs filter-process\n\
+                 [alias]\n\tst = status\n",
+                true,
+            ),
+            (
+                "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
+                 [filter \"lfs\"]\n\trequired = true\n\
                  [alias]\n\tst = status\n",
                 false,
             ),

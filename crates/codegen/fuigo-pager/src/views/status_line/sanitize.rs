@@ -188,6 +188,13 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
             i += 1;
             continue;
         }
+        // Tag characters, soft hyphens, joiners and the like paint nothing, but they do change how wide the text measures.
+        // Dropping them here, before any column is read, keeps every link on the glyphs that are actually painted.
+        // Controls go too, C1 (U+009B is a CSI) included: only the SGR taken in the escape arm above reaches the parser.
+        if fuigo_tty_utils::is_unsafe_display_char(c) {
+            i += 1;
+            continue;
+        }
         out.push(c);
         visible.push(c);
         i += 1;
@@ -199,8 +206,13 @@ fn extract_osc8_links(text: &str) -> (String, Vec<CommandLink>) {
 /// The target to hand the terminal, or `None` when the scheme is not allowed.
 /// Trimmed first, so the checked and emitted strings are one string.
 fn safe_link_target(uri: &str) -> Option<Arc<str>> {
+    // A hidden character in a target is refused, not deleted: deleting it would open a different address than the one given.
+    // Checked before the trim, which would delete a trailing line separator.
+    if uri.contains(fuigo_tty_utils::is_unsafe_display_char) {
+        return None;
+    }
     let uri = uri.trim();
-    if uri.is_empty() || uri.contains(char::is_whitespace) || uri.contains(char::is_control) {
+    if uri.is_empty() || uri.contains(char::is_whitespace) {
         return None;
     }
     if !crate::app::link_opener::is_safe_to_open(

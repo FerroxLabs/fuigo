@@ -105,6 +105,22 @@
         );
     }
 
+    /// A tab whose load failed has no session id but is not waiting for one, so it takes no stray notification
+    #[test]
+    fn failed_load_tab_takes_no_race_window_notifications() {
+        let mut app = make_app_with_agent("sess-A");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = None;
+        agent.load_failed = true;
+
+        let _ = handle(
+            make_agent_chunk_message("someone-else", "stray chunk"),
+            &mut app,
+        );
+
+        assert!(app.agents.get(&AgentId(0)).unwrap().scrollback.is_empty());
+    }
+
     #[test]
     fn session_id_none_race_window_routes_to_active_agent() {
         // Pin the existing race-window behavior: notifications that arrive before `TaskResult::SessionCreated` must still land on the active agent

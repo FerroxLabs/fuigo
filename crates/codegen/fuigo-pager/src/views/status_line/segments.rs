@@ -51,13 +51,13 @@ impl StatusSegment {
         Self::new(text, SegmentTone::Warn)
     }
 
-    /// Control characters are dropped here rather than at the painter.
+    /// Control characters and the shared unsafe set (tag characters, soft hyphens, line separators) are dropped here rather than at the painter.
     /// A segment carries the user's own text: a cwd, a model name, a config value they typed.
     /// Only [`SanitizedText`](super::SanitizedText) filters the path a script's output takes.
     fn new(text: impl Into<String>, tone: SegmentTone) -> Self {
         let text: String = text.into();
         Self {
-            text: text.chars().filter(|c| !c.is_control()).collect(),
+            text: fuigo_tty_utils::scrub_unsafe_display(&text, None).into_owned(),
             tone,
         }
     }

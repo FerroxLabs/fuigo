@@ -2274,6 +2274,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             display_name: None,
             status: McpServerDisplayStatus::Initializing,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,

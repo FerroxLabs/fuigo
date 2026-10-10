@@ -17,7 +17,7 @@ fn dummy_gateway() -> AcpAgentGatewaySender {
 
 fn install_real_permissions(actor: &mut SessionActor) {
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
-        .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
+        .unwrap_or_else(|_| AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap());
     let (handle, _ev) = spawn_permission_manager(
         actor.session_info.id.clone(),
         dummy_gateway(),

@@ -13,6 +13,7 @@ pub(crate) mod helper_epoch;
 mod helper_epoch_tests;
 pub(crate) mod handlers;
 pub mod init;
+pub mod init_flags;
 /// Provider credentials already present in the environment, for first run.
 pub mod key_discovery;
 pub mod model_providers;

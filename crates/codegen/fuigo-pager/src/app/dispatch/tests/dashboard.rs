@@ -4685,6 +4685,37 @@ fn dashboard_rename_end_to_end_top_level_row() {
         "commit must clear the rename overlay",
     );
 }
+/// A valid subdivision flag survives the whole rename (draft, commit, display name, effect); a loose tag does not
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_rename_commit_keeps_valid_flag_tags_and_drops_loose_ones() {
+    let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    let id = AgentId(0);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    }
+    dispatch_dashboard_begin_rename(&mut app);
+    app.dashboard
+        .as_mut()
+        .and_then(|dashboard| dashboard.rename.as_mut())
+        .expect("rename draft")
+        .set_text(format!("go {scotland} team\u{e0041}"));
+    let effects = dispatch(Action::DashboardCommitRename, &mut app);
+    let expected = format!("go {scotland} team");
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::RenameSession { title, .. } if *title == expected
+        )),
+        "the committed title must keep the flag tags and carry no replacement characters, got {effects:?}",
+    );
+    assert_eq!(
+        app.agents.get(&id).and_then(|a| a.display_name.clone()),
+        Some(expected),
+    );
+}
 /// Dashboard rename of a chat-kind agent must stamp `kind: Chat` so the
 /// shell takes the conversations fork.
 #[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
@@ -6177,6 +6208,24 @@ fn dashboard_permission_select_for_missing_row_clears_peek() {
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.peek.is_none());
     assert!(d.error_toast.is_some());
+}
+/// A tab whose session never opened refuses a peek reply and keeps nothing queued
+#[serial_test::serial(FUIGO_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_peek_reply_to_failed_load_tab_toasts() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    app.agents.get_mut(&AgentId(0)).unwrap().load_failed = true;
+    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    let effects = dispatch_dashboard_peek_reply(&mut app, row, "hi".into(), false);
+    assert!(effects.is_empty());
+    assert_eq!(0, app.agents[&AgentId(0)].session.queue_len());
+    assert!(
+        app.dashboard
+            .as_ref()
+            .and_then(|d| d.error_toast.as_deref())
+            .is_some_and(|toast| toast.contains("didn't open"))
+    );
 }
 /// Peek reply to an IDLE agent sends immediately: the prompt drains
 /// (one `SendPrompt` effect), the turn starts, and the reply draft

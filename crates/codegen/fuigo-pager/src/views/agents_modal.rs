@@ -1027,6 +1027,8 @@ fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     let mut current = String::new();
     let mut current_width = 0;
+    // Agent descriptions come from files and catalogs: hidden characters go before the text is measured
+    let text = fuigo_tty_utils::scrub_unsafe_display(text, Some(' '));
     for word in text.split_whitespace() {
         let word_width = word.width();
         if current_width == 0 {
@@ -1201,6 +1203,12 @@ fn scope_badge(scope: AgentScope, theme: &Theme) -> (String, Style) {
     (label.to_string(), Style::default().fg(fg))
 }
 /// Render the agents modal as a centered overlay.
+/// Untrusted text for one painted row (agent and persona names, details, tags): the shared display filter, row breaks
+/// become spaces. ratatui paints U+2028 and U+2029, so the buffer cannot be relied on to drop them.
+fn clean_label(text: &str) -> std::borrow::Cow<'_, str> {
+    fuigo_tty_utils::scrub_unsafe_display(text, Some(' '))
+}
+
 pub fn render_agents_modal(
     buf: &mut Buffer,
     area: Rect,
@@ -1596,9 +1604,10 @@ fn render_agents_tab(
                 };
                 buf.set_string(x, row_y, status, status_style);
                 x += 2;
-                let name_w = entry.name.width();
+                let clean_name = clean_label(&entry.name);
+                let name_w = clean_name.width();
                 let remaining = (content_area.x + content_area.width).saturating_sub(x) as usize;
-                let name_display: String = entry.name.chars().take(remaining).collect();
+                let name_display: String = clean_name.chars().take(remaining).collect();
                 let mut name_style = Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD);
@@ -1694,7 +1703,7 @@ fn render_agents_tab(
             }
             FlatRow::Detail(text) => {
                 let detail_style = Style::default().fg(theme.gray);
-                let display: String = text.chars().take(w).collect();
+                let display: String = clean_label(text).chars().take(w).collect();
                 buf.set_string(content_area.x, row_y, &display, detail_style);
             }
         }
@@ -1856,7 +1865,8 @@ fn render_personas_tab(
                 x += 2;
                 let persona = &state.personas[*idx];
                 let remaining = (content_area.x + content_area.width).saturating_sub(x) as usize;
-                let name_display: String = persona.name.chars().take(remaining).collect();
+                let name_display: String =
+                    clean_label(&persona.name).chars().take(remaining).collect();
                 let mut name_style = Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD);
@@ -1866,7 +1876,7 @@ fn render_personas_tab(
                 buf.set_string(x, row_y, &name_display, name_style);
                 x += name_display.width() as u16;
                 if let Some(ref scope) = persona.scope_label {
-                    let badge = format!(" {scope} ");
+                    let badge = format!(" {} ", clean_label(scope));
                     let mut scope_style = Style::default().fg(theme.accent_user);
                     if let Some(bg_color) = bg {
                         scope_style = scope_style.bg(bg_color);
@@ -1890,7 +1900,7 @@ fn render_personas_tab(
                         x += sep.width() as u16;
                         let max_desc =
                             (content_area.x + content_area.width).saturating_sub(x) as usize;
-                        let truncated: String = desc.chars().take(max_desc).collect();
+                        let truncated: String = clean_label(desc).chars().take(max_desc).collect();
                         buf.set_string(x, row_y, &truncated, desc_style);
                     }
                 }
@@ -1937,7 +1947,7 @@ fn render_personas_tab(
                         }
                     }
                 }
-                let display = format!("[{tags}]");
+                let display = format!("[{}]", clean_label(tags));
                 buf.set_string(tag_x, row_y, &display, tag_style);
             }
             PersonaFlatRow::Hint(idx, text) => {
@@ -2759,6 +2769,12 @@ pub fn handle_agents_mouse(state: &mut AgentsModalState, mouse: &MouseEvent) -> 
 mod tests {
     use super::*;
     use fuigo_shell::agent::config::DEFAULT_AGENT_TYPE;
+
+    /// P181 (Astra round 1): a description holds no hidden character once wrapped.
+    #[test]
+    fn word_wrap_drops_hidden_characters() {
+        assert_eq!(word_wrap("ab\u{e0041}c\u{00ad} d\u{2028}e", 80), ["abc d e"]);
+    }
 
     /// A default-agent change and eight toggles racing each other must ALL land.
     /// Both go through `edit_config_at`, which holds `config.toml.lock` across
@@ -3903,5 +3919,42 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("other = 1"), "concurrent write lost: {text}");
         assert!(text.contains("chosen"), "{text}");
+    }
+
+    fn painted_text(buf: &Buffer) -> String {
+        buf.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    /// P181 (Grok round): ratatui paints U+2028/U+2029, so names and details from agent and persona files are scrubbed.
+    #[test]
+    fn persona_and_agent_labels_never_paint_an_unsafe_character() {
+        let _theme = crate::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 100, 30);
+        let personas = vec![PersonaDetail {
+            name: "helper\u{2028}system\u{e0041}".to_string(),
+            description: Some("de\u{2029}sc\u{00ad}ription".to_string()),
+            has_inputs: false,
+            has_outputs: false,
+            source_path: None,
+            scope_label: Some("pro\u{2028}ject".to_string()),
+        }];
+        let mut state = make_persona_state(personas, "", 0);
+        let mut buf = Buffer::empty(area);
+        render_agents_modal(&mut buf, area, &mut state, false, &theme);
+        let text = painted_text(&buf);
+        assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+        assert!(text.contains("helper system"), "{text}");
+        assert!(text.contains("de sc"), "{text}");
+
+        let mut state = make_persona_state(Vec::new(), "", 0);
+        state.active_tab = AgentsTab::Agents;
+        state.agents = build_agent_list(Path::new("/nonexistent-p181"), &HashMap::new(), None);
+        state.agents[0].name = "agent\u{2028}evil\u{e0041}".to_string();
+        let mut buf = Buffer::empty(area);
+        render_agents_modal(&mut buf, area, &mut state, false, &theme);
+        let text = painted_text(&buf);
+        assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+        assert!(text.contains("agent evil"), "{text}");
     }
 }

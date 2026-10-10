@@ -69,6 +69,11 @@ fn claim_not_consulted_on_sidecar_read_blip() {
 /// Keyed build: a garbage claim alone (no fail-closed) does not trip the gate or force a refetch.
 #[test]
 fn garbage_claim_without_fail_closed_is_not_imposing() {
+    // The gate reads the process-global kill-switch: hold the lock for the whole body.
+    crate::test_support::with_remote_disarm_lock(garbage_claim_body);
+}
+
+fn garbage_claim_body() {
     assert!(crate::signed_policy::verification_active());
     let dir = tempfile::tempdir().unwrap();
     let home = dir.path();

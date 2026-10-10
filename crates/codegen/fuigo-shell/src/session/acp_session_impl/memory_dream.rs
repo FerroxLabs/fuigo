@@ -667,11 +667,23 @@ impl SessionActor {
                 "Now write the memory summary as described in the system prompt.",
             ));
 
-            let model = match self.memory.flush_config.flush_model.clone() {
-                Some(m) => m,
-                None => self.chat_state_handle.get_sampling_config().await
-                    .map(|c| c.model)
-                    .unwrap_or_default(),
+            let session_model = self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|c| c.model);
+            let flush_model = self.memory.flush_config.flush_model.clone();
+            let Some(model) = self.models_manager.with_helper_catalog(|allowlist, models| {
+                crate::agent::models::flush_wire_model(
+                    allowlist,
+                    models,
+                    flush_model.as_deref(),
+                    session_model.as_deref(),
+                )
+            }) else {
+                return Err(crate::acp_error::internal_error(
+                    "memory flush skipped: no model the organization's policy admits",
+                ));
             };
             tracing::info!(
                 target: fuigo_telemetry::memory_log::TARGET,
@@ -959,11 +971,21 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
+        let session_model = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.model);
+        let Some(model) = self.models_manager.with_helper_catalog(|allowlist, models| {
+            crate::agent::models::rewrite_note_wire_model(allowlist, models, session_model.as_deref())
+        }) else {
+            return Err("no model the organization's policy admits".to_owned());
+        };
         let request = ConversationRequest {
             purpose: fuigo_sampling_types::RequestPurpose::Memory,
             items,
             tools: vec![],
-            model: Some("grok-4.6".to_owned()),
+            model: Some(model),
             temperature: Some(0.3),
             max_output_tokens: Some(1024),
             ..Default::default()

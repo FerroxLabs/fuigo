@@ -308,6 +308,13 @@ pub struct BashToolInput {
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
     pub is_background: bool,
+
+    /// The directory a variant that takes one (OpenCode bash `workdir`) runs the command in. Not part of this tool's
+    /// wire input or schema: it is carried here only so a permission check on the parsed input sees where the command
+    /// runs (P173).
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub workdir: Option<String>,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -2592,6 +2599,7 @@ mod tests {
             timeout: None,
             description: "test".to_string(),
             is_background: false,
+            workdir: None,
         }
     }
 
@@ -2601,6 +2609,7 @@ mod tests {
             timeout: None,
             description: "test".to_string(),
             is_background: true,
+            workdir: None,
         }
     }
 

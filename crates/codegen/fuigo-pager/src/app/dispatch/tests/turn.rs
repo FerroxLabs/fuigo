@@ -83,10 +83,17 @@ fn queued_prompt_rpc_error_does_not_kill_running_turn() {
         Some(running_pid.as_str()),
         "current_prompt_id must still point at the running turn"
     );
+    // W3B item 3: the failure is no longer silent. Exactly one system line says the message was not sent;
+    // still no TurnFailed block.
+    let sb = &app.agents[&id].scrollback;
     assert_eq!(
-        app.agents[&id].scrollback.len(),
-        scrollback_before,
-        "no TurnFailed block may be pushed for a non-running prompt's error"
+        sb.len(),
+        scrollback_before + 1,
+        "one not-sent line, and no TurnFailed block, for a non-running prompt's error"
+    );
+    assert!(
+        matches!(&sb.get(scrollback_before).unwrap().block, RenderBlock::System(sys) if sys.text.contains("Your message was not sent")),
+        "the added block is the not-sent system line"
     );
 
     // Sanity: an error for the ACTUAL running prompt is NOT discarded; it ends the turn and renders the failure
@@ -2652,4 +2659,87 @@ fn cancel_and_arm_anchors_before_the_cancel_teardown() {
         requested_at <= teardown_at,
         "the latency anchor must be sampled before the cancel teardown finishes the turn"
     );
+}
+
+#[test]
+fn cancel_resend_due_mirrors_the_resend_conditions() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::{CANCEL_RESEND_GRACE, cancel_resend_due, reconcile_overdue_cancels};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    assert!(!cancel_resend_due(&app), "nothing is cancelling");
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    }
+    let _ = dispatch(Action::CancelTurn, &mut app);
+    assert!(!cancel_resend_due(&app), "inside the grace");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .pending_cancel_resend
+        .as_mut()
+        .unwrap()
+        .sent_at = std::time::Instant::now() - CANCEL_RESEND_GRACE;
+    assert!(cancel_resend_due(&app), "overdue cancel is due");
+    // The read-only twin must not consume the attempt.
+    assert!(cancel_resend_due(&app));
+    assert_eq!(
+        app.agents[&id].pending_cancel_resend.as_ref().unwrap().attempts,
+        1
+    );
+    assert!(reconcile_overdue_cancels(&mut app).is_some());
+    assert!(!cancel_resend_due(&app), "the resend restarted the grace");
+}
+
+/// The event loop's fence sees a turn-end reconcile as stale-state work too (mutation proof: dropping it from
+/// `stale_state_due` lets the reconcile run unfenced behind a buffered `prompt_complete`).
+#[test]
+fn stale_state_due_covers_an_overdue_turn_end_reconcile() {
+    use crate::app::event_loop::stale_state_due;
+    let mut app = test_app_with_agent();
+    assert!(!stale_state_due(&app));
+    app.agents.get_mut(&AgentId(0)).unwrap().pending_turn_end_reconcile =
+        Some(crate::app::agent_view::PendingTurnEnd {
+            prompt_id: "pid".into(),
+            stop_reason: Some("cancelled".into()),
+            agent_result: None,
+            cancel_trigger: None,
+            cancellation_category: None,
+            cancellation_context: None,
+            error_kind: None,
+            verdicts: None,
+            received_at: std::time::Instant::now()
+                - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
+        });
+    assert!(stale_state_due(&app), "an overdue turn-end reconcile must be fenced");
+}
+
+/// P196 round 4: re-issuing a cancel (which resets `sent_at`) changes the request's fence key.
+#[test]
+fn a_reissued_cancel_has_a_new_stale_request_key() {
+    use crate::app::actions::CancelTrigger;
+    use crate::app::dispatch::{CANCEL_RESEND_GRACE, stale_request_keys};
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.cancel_trigger_hint = Some(CancelTrigger::Mouse);
+    }
+    let _ = dispatch(Action::CancelTurn, &mut app);
+    let set = |app: &mut AppView, d: std::time::Duration| {
+        app.agents.get_mut(&id).unwrap().pending_cancel_resend.as_mut().unwrap().sent_at =
+            std::time::Instant::now() - CANCEL_RESEND_GRACE - d;
+    };
+    set(&mut app, std::time::Duration::from_millis(5));
+    let first = stale_request_keys(&app);
+    assert_eq!(first.len(), 1);
+    set(&mut app, std::time::Duration::from_millis(1));
+    let second = stale_request_keys(&app);
+    assert_eq!(second.len(), 1);
+    assert_ne!(first[0], second[0], "a re-issued cancel must be a different request");
 }

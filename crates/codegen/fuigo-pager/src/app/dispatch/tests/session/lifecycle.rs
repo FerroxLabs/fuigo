@@ -1376,6 +1376,129 @@ fn trust_folder_grants_and_resolves() {
         "accepting must persist the trust grant for the workspace",
     );
 }
+/// P167: the accept mapping. Saved resolves; session-only resolves for the embedded agent (never quits, the
+/// upstream `--sandbox` exit) but not for a leader-hosted one; nothing recorded keeps the question.
+#[test]
+fn p167_trust_gate_outcome_maps_each_resolution() {
+    use crate::app::dispatch::session::lifecycle::{TrustGateOutcome, trust_gate_outcome};
+    use fuigo_workspace::folder_trust::GrantResolution;
+    assert_eq!(trust_gate_outcome(GrantResolution::Trusted, false), TrustGateOutcome::Finish);
+    assert_eq!(trust_gate_outcome(GrantResolution::Trusted, true), TrustGateOutcome::Finish);
+    assert_eq!(trust_gate_outcome(GrantResolution::SessionLocal, false), TrustGateOutcome::FinishSessionLocal);
+    assert_eq!(trust_gate_outcome(GrantResolution::SessionLocal, true), TrustGateOutcome::StayPending);
+    assert_eq!(trust_gate_outcome(GrantResolution::Unrecorded, false), TrustGateOutcome::StayPending);
+    assert_eq!(trust_gate_outcome(GrantResolution::Unrecorded, true), TrustGateOutcome::StayPending);
+}
+fn p167_welcome_toast(app: &AppView) -> String {
+    app.welcome_toast
+        .as_ref()
+        .map(|(m, _)| m.clone())
+        .unwrap_or_default()
+}
+/// P167 (S9): accepting over an unreadable trust store records nothing, so the question must not silently resolve.
+/// It stays on screen with the reason (the user can fix the file and press y again, or press n), and the store is
+/// left exactly as it was.
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn p167_trust_folder_over_unreadable_store_reports_and_stays_pending() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_workspace::trust::{TrustStore, workspace_key};
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _fuigo_home = crate::test_util::EnvVarGuard::set("FUIGO_HOME", home.path());
+    simulate_release_build();
+    let store_path = TrustStore::default_path().expect("FUIGO_HOME is set");
+    let before = b"[folders.\"/srv/kept\"]\ntrusted = true\n[[[".to_vec();
+    std::fs::write(&store_path, &before).unwrap();
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let workspace = workspace_key(repo.path());
+    let mut app = test_app();
+    assert!(matches!(app.active_view, ActiveView::Welcome));
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+    };
+    let _ = dispatch(Action::TrustFolder, &mut app);
+    assert!(
+        matches!(app.trust_state, TrustState::Pending { .. }),
+        "a grant that recorded nothing must not resolve the question"
+    );
+    assert_eq!(std::fs::read(&store_path).unwrap(), before, "the store must not be rewritten");
+    let toast = p167_welcome_toast(&app);
+    assert!(toast.contains("trust store could not be read"), "{toast}");
+    assert!(
+        app.trust_error.as_deref().is_some_and(|e| e.contains("trust store could not be read")),
+        "the reason stays with the question for views without a welcome toast"
+    );
+    // Fixed and answered again: the question resolves and the reason clears.
+    std::fs::remove_file(&store_path).unwrap();
+    let _ = dispatch(Action::TrustFolder, &mut app);
+    assert!(matches!(app.trust_state, TrustState::Done));
+    assert!(app.trust_error.is_none());
+}
+/// P167 (S9, upstream 1.0.36 "`--sandbox` exits when accepting folder trust"): when the store is readable but the
+/// write is denied (as under `--sandbox`), accepting trusts the folder for this session and continues; it never
+/// quits. The user is told the grant was not saved.
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn p167_trust_folder_with_denied_store_write_continues_for_this_session() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_workspace::trust::{TrustStore, workspace_key};
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _fuigo_home = crate::test_util::EnvVarGuard::set("FUIGO_HOME", home.path());
+    simulate_release_build();
+    let store_path = TrustStore::default_path().expect("FUIGO_HOME is set");
+    // The write lock cannot be opened (a directory squats on it), like a sandbox that denies writes under the home.
+    std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let workspace = workspace_key(repo.path());
+    let mut app = test_app();
+    // `--sandbox` turns leader mode off (`warn_leader_disabled_by_sandbox`): the agent is embedded in this process.
+    app.leader_mode = false;
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+    };
+    let _ = dispatch(Action::TrustFolder, &mut app);
+    assert!(matches!(app.trust_state, TrustState::Done), "a session-local grant must not quit or block");
+    assert!(!TrustStore::load().is_trusted(&workspace), "nothing durable was written");
+    assert!(
+        fuigo_workspace::folder_trust::is_trusted_this_process(&workspace),
+        "the folder is trusted for this session"
+    );
+    assert!(
+        app.leader_notices.iter().any(|n| n.contains("this session only")),
+        "the session-only warning is queued as a one-off note for the session (shown in both views): {:?}",
+        app.leader_notices
+    );
+}
+/// P167: the same denied write with a leader-hosted agent. The leader is another process and only sees a saved grant,
+/// so the question stays up with the reason instead of resolving into a gated session; it does not quit either.
+#[serial_test::serial(FUIGO_HOME)]
+#[test]
+fn p167_trust_folder_with_denied_store_write_under_a_leader_stays_pending() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_workspace::trust::{TrustStore, workspace_key};
+    let home = tempfile::tempdir().expect("home tempdir");
+    let _fuigo_home = crate::test_util::EnvVarGuard::set("FUIGO_HOME", home.path());
+    simulate_release_build();
+    let store_path = TrustStore::default_path().expect("FUIGO_HOME is set");
+    std::fs::create_dir_all(store_path.with_extension("toml.lock")).unwrap();
+    let repo = tempfile::tempdir().expect("repo tempdir");
+    let workspace = workspace_key(repo.path());
+    let mut app = test_app();
+    app.leader_mode = true;
+    app.trust_state = TrustState::Pending {
+        workspace: workspace.clone(),
+    };
+    let _ = dispatch(Action::TrustFolder, &mut app);
+    assert!(matches!(app.trust_state, TrustState::Pending { .. }));
+    let toast = p167_welcome_toast(&app);
+    assert!(toast.contains("leader process"), "{toast}");
+}
 /// When BOTH auth and trust are pending, `AuthComplete` must NOT replay the deferred startup.
 /// The trust question renders next, and its answer drains it.
 /// Verifies the symmetric two-gate ordering.

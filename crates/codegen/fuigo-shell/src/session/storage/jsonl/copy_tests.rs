@@ -3273,3 +3273,35 @@ async fn the_snapshot_releases_its_locks_before_it_reads_the_history() {
     super::AFTER_SNAPSHOT_LOCKS_RELEASED.with(|hook| assert!(hook.borrow().is_none(), "the seam ran"));
     assert_eq!(free.get(), (true, true, true), "the snapshot still held a lock while it read the history");
 }
+
+/// Lock hygiene (R-lock-hygiene): the append lock a fork snapshot takes is free once released, even while a copy of its
+/// descriptor (a forked child's, here `try_clone`) lives on.
+#[test]
+fn a_released_append_lock_is_free_although_a_copy_of_its_descriptor_lives_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("chat_history.jsonl");
+    let held = super::lock_append_for_snapshot(&file).unwrap().unwrap();
+    let inherited = held.try_clone().unwrap();
+    drop(held);
+    let lock = std::fs::OpenOptions::new().read(true).write(true).open(file.with_extension("jsonl.lock")).unwrap();
+    let free = fs2::FileExt::try_lock_exclusive(&lock).is_ok();
+    drop(inherited);
+    assert!(free, "the released append lock stayed held by an inherited descriptor");
+}
+
+/// Lock hygiene follow-up 2 (R-lock-hygiene): the lock `lock_append` takes is free once its holder is dropped without
+/// the explicit unlock (a panic or early return), even while a copy of its descriptor (a forked child's, here
+/// `try_clone`) lives on.
+#[cfg(unix)]
+#[test]
+fn a_dropped_lock_append_guard_is_free_although_a_copy_of_its_descriptor_lives_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("chat_history.jsonl");
+    let held = JsonlStorageAdapter::lock_append(&file).unwrap();
+    let inherited = held.try_clone().unwrap();
+    drop(held);
+    let lock = std::fs::OpenOptions::new().read(true).write(true).open(file.with_extension("jsonl.lock")).unwrap();
+    let free = fs2::FileExt::try_lock_exclusive(&lock).is_ok();
+    drop(inherited);
+    assert!(free, "the dropped append lock stayed held by an inherited descriptor");
+}

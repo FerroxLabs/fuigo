@@ -212,6 +212,17 @@ impl fuigo_tool_runtime::Tool for EditTool {
                 "File path is a directory".to_owned(),
             ));
         }
+        // P166 Grok r5 MEDIUM 3: refuse a gitignored path (logical or physical) before reading it, like `search_replace`.
+        if crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
+            &resources, &path, true,
+        )
+        .await
+        {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} is ignored by .gitignore and cannot be edited.",
+                input.file_path
+            )));
+        }
         if input.old_string == input.new_string {
             return Ok(SearchReplaceOutput::InvalidInput(
                 "Old string and new string are the same".to_owned(),
@@ -1139,4 +1150,32 @@ mod tests {
 
     // Notification verification requires a capturing handle not available
     // in unit tests. Covered at integration layer.
+
+    /// P166 Grok r5 MEDIUM 3: the OpenCode edit refuses a gitignored path (logical or physical) before reading it, so a
+    /// no-match result cannot hand back the file's bytes (`file_snapshot_at_edit`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_edit_refuses_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let mut resources = test_resources(repo.path());
+        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        let result = fuigo_tool_runtime::Tool::run(
+            &EditTool,
+            test_ctx(resources.into_shared()),
+            make_input("secret/key.txt", "no such text", "x"),
+        )
+        .await
+        .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
+    }
 }

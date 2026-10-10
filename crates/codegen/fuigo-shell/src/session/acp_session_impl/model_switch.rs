@@ -174,6 +174,12 @@ impl SessionActor {
             ));
         }
         if let Some(routed) = self.models_manager.model_for_effort(&cfg.model, effort) {
+            // P169 (Astra r1 #6): the fleet `allowed_models` pin binds the per-effort model id.
+            if !self.models_manager.effort_route_allowed(&routed) {
+                return Err(crate::acp_error::invalid_params(
+                    "This reasoning effort uses a model your organization's policy (requirements.toml allowed_models) does not allow.",
+                ));
+            }
             cfg.model = routed;
         }
         cfg.reasoning_effort = Some(effort);

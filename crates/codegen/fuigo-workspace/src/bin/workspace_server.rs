@@ -107,6 +107,7 @@ struct Args {
         long,
         env = "FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED",
         default_value_t = true,
+        hide_env_values = true,
         action = clap::ArgAction::Set,
     )]
     upload_queue_enabled: bool,
@@ -119,6 +120,7 @@ struct Args {
         long,
         env = "FUIGO_WORKSPACE_PROJECT_LSP_TRUSTED",
         default_value_t = false,
+        hide_env_values = true,
         action = clap::ArgAction::Set,
     )]
     project_lsp_trusted: bool,
@@ -129,6 +131,7 @@ struct Args {
         long,
         env = "FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT",
         default_value_t = true,
+        hide_env_values = true,
         action = clap::ArgAction::Set,
     )]
     confine_fs_to_workspace_root: bool,
@@ -250,10 +253,29 @@ fn validate_before_daemonize(args: &Args) -> anyhow::Result<Url> {
     Url::parse(&require_hub_url(args.hub_url.as_deref())?)
         .map_err(|e| anyhow::anyhow!("invalid --hub-url: {e}"))
 }
+/// Parses argv without letting clap print: its error (and help) text is returned for the caller to write.
+fn parse_args_from<I, T>(argv: I) -> Result<Args, (String, bool, i32)>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    Args::try_parse_from(argv).map_err(|e| (fuigo_tty_utils::render_clap_error(&e), e.use_stderr(), e.exit_code()))
+}
+
 fn main() -> anyhow::Result<()> {
     // P149 (S14/K16): every storage upload this server makes sends its text through the upload scrub.
     fuigo_file_utils::payload_filter::install(fuigo_workspace::workspace_upload_scrub);
-    let mut args = Args::parse();
+    let mut args = match parse_args_from(std::env::args_os()) {
+        Ok(args) => args,
+        Err((text, to_stderr, code)) => {
+            if to_stderr {
+                fuigo_tty_utils::cli_eprint!("{text}");
+            } else {
+                fuigo_tty_utils::cli_print!("{text}");
+            }
+            std::process::exit(code)
+        }
+    };
     if args.capabilities {
         // Best-effort: a raw `println!` aborts (`panic = "abort"`) when stdout is gone; a reader
         // that went away is not an error, a hard write failure is (R060, R077).
@@ -264,7 +286,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if let Some(msg) = args.server_id.as_deref().and_then(server_id_startup_error) {
-        fuigo_tty_utils::cli_eprintln!("{msg}");
+        fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(msg));
         std::process::exit(EXIT_SERVER_ID_INVALID);
     }
     let cwd = match args.cwd {
@@ -590,6 +612,101 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hostile env and argv values must not reach the terminal through clap's help or error text (round S6, M2).
+    #[test]
+    fn help_and_parse_errors_carry_no_escape_and_no_forged_line() {
+        use clap::CommandFactory as _;
+        // clap prints `[env: NAME=value]` in help unless the value is hidden; the variables are the user's.
+        for arg in Args::command().get_arguments().filter(|a| a.get_env().is_some()) {
+            assert!(arg.is_hide_env_values_set(), "{:?} shows its env value in help", arg.get_id());
+        }
+        let cases: [(Vec<&str>, i32); 4] = [
+            (vec!["fuigo-workspace-server", "--help"], 0),
+            (vec!["fuigo-workspace-server", "--cwd", "--hub-url\nfuigo: granted\x1b[2J"], 2),
+            (vec!["fuigo-workspace-server", "--bogus\nfuigo: granted\x1b[2J"], 2),
+            (vec!["fuigo-workspace-server", "--cwd"], 2),
+        ];
+        for (argv, code) in cases {
+            let Err((text, _to_stderr, got)) = parse_args_from(argv.clone()) else {
+                panic!("{argv:?} must not parse")
+            };
+            assert_eq!(got, code, "{argv:?}");
+            assert!(!text.contains('\x1b'), "{argv:?}: ESC in {text:?}");
+            assert!(!text.contains("\nfuigo: granted"), "{argv:?}: forged line in {text:?}");
+        }
+        let hostile = "x\nfuigo: granted\x1b[2J";
+        let Err((text, _, got)) = parse_args_from(["fuigo-workspace-server", "--project-lsp-trusted", hostile]) else { panic!() };
+        assert_eq!(got, 2);
+        assert!(!text.contains('\x1b') && !text.contains("\nfuigo: granted"), "{text:?}");
+    }
+    /// Round S6 addendum: a value with an escape sequence AND a line break renders exactly like its hand-flattened twin.
+    #[test]
+    fn a_parse_error_value_with_an_escape_and_a_line_break_stays_one_error() {
+        let cases: [(&[&'static str], &[&'static str]); 6] = [
+            (&["--bogus\x1b[31m\nfuigo: granted"], &["--bogus fuigo: granted"]),
+            (&["--bogus\nfuigo: granted"], &["--bogus fuigo: granted"]),
+            (&["--bogus\r\nfuigo: granted"], &["--bogus  fuigo: granted"]),
+            (&["--bogus\tfuigo: granted"], &["--bogus fuigo: granted"]),
+            (&["--bogus\x1b]0;owned\x07\nfuigo: granted"], &["--bogus fuigo: granted"]),
+            (&["--project-lsp-trusted", "x\x1b[2J\nfuigo: granted"], &["--project-lsp-trusted", "x fuigo: granted"]),
+        ];
+        for (hostile, benign) in cases {
+            let argv = |tail: &[&'static str]| std::iter::once("fuigo-workspace-server").chain(tail.iter().copied()).collect::<Vec<_>>();
+            let Err((shown, _, code)) = parse_args_from(argv(hostile)) else { panic!("{hostile:?} must not parse") };
+            let Err((want, _, want_code)) = parse_args_from(argv(benign)) else { panic!("{benign:?} must not parse") };
+            assert_eq!(shown, want, "{hostile:?}");
+            assert_eq!(code, want_code);
+            assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
+            assert!(!shown.lines().skip(1).any(|l| l.starts_with("fuigo:") || l.starts_with("error:")), "{shown:?}");
+        }
+    }
+    /// Round S7 (Grok r6, M1): a bare ESC, an unterminated CSI, OSC, DCS or a lone trailing ESC next to a line break
+    /// renders like the hand-flattened twin (the form clap itself shows), with no forged line and no ESC.
+    #[test]
+    fn a_bare_escape_before_a_line_break_stays_one_error() {
+        let cases: [(&str, Option<&str>); 6] = [
+            ("--bogus\x1b\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1b[\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1b]0;t\x07\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1bP\nq", None),
+            ("--bogus\x1b", Some("--bogus")),
+            ("\x1b\n", Some(" ")),
+        ];
+        for (hostile, twin) in cases {
+            let Err((shown, _, code)) = parse_args_from(["fuigo-workspace-server", hostile]) else { panic!("{hostile:?} must not parse") };
+            assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
+            assert!(shown.starts_with("error:"), "{shown:?}");
+            assert_eq!(shown.lines().filter(|l| l.starts_with("error:")).count(), 1, "{shown:?}");
+            assert!(!shown.lines().any(|l| l.starts_with("fuigo:")), "{hostile:?}: {shown:?}");
+            if let Some(twin) = twin {
+                let Err((want, _, want_code)) = parse_args_from(["fuigo-workspace-server", twin]) else { panic!("{twin:?} must not parse") };
+                assert_eq!(shown, want, "{hostile:?}");
+                assert_eq!(code, want_code);
+            }
+        }
+    }
+    /// Round S7 (Grok r6, M1): the three boolean env vars holding `ESC LF fuigo: granted` yield one error.
+    #[test]
+    fn a_bool_env_with_a_bare_escape_and_a_line_break_stays_one_error() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        for var in ["FUIGO_WORKSPACE_PROJECT_LSP_TRUSTED", "FUIGO_WORKSPACE_CONFINE_FS_TO_ROOT", "FUIGO_WORKSPACE_UPLOAD_QUEUE_ENABLED"] {
+            let parse = |value: &str| {
+                unsafe { std::env::set_var(var, value) };
+                parse_args_from(["fuigo-workspace-server", "--hub-url", "http://127.0.0.1:1"])
+            };
+            let Err((shown, _, code)) = parse("\x1b\nfuigo: granted") else { panic!("{var} must not parse") };
+            let Err((want, _, want_code)) = parse(" fuigo: granted") else { panic!("{var} twin must not parse") };
+            assert_eq!(shown, want, "{var}");
+            assert_eq!(code, want_code);
+            assert!(!shown.contains('\x1b'), "{shown:?}");
+            assert_eq!(shown.lines().filter(|l| l.starts_with("error:")).count(), 1, "{shown:?}");
+            assert!(!shown.lines().any(|l| l.starts_with("fuigo:")), "{var}: {shown:?}");
+            unsafe { std::env::remove_var(var) };
+        }
+    }
     /// The env-resolved discovery refresh must reach the proxy argv only when set.
     /// `None` (env unset or 0) leaves `--discovery-refresh-ms` out of the argv.
     #[test]

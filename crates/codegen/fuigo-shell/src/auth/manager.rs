@@ -393,9 +393,7 @@ impl AuthManager {
         // Resolved before the FUIGO_AUTH branch so inline-credential managers also honor it
         // Their later refresh persistence (`update()`) writes to this path
         // Hardcoding the default here would silently split reads (inline) from writes (default path)
-        let path = std::env::var("FUIGO_AUTH_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| fuigo_home.join("auth.json"));
+        let path = super::storage::auth_json_path(fuigo_home);
 
         // FUIGO_AUTH: inline JSON credentials (highest priority, read-only).
         if let Ok(inline_json) = std::env::var("FUIGO_AUTH") {
@@ -2814,6 +2812,7 @@ impl AuthManager {
                     cfg.endpoints.alpha_test_key.clone(),
                     cfg.client_version.clone(),
                     &cfg.endpoints,
+                    &crate::agent::models::effective_allowlist(&cfg),
                 ) else {
                     return CredentialResolution::Denied;
                 };
@@ -2851,6 +2850,7 @@ impl AuthManager {
                     cfg.endpoints.alpha_test_key.clone(),
                     cfg.client_version.clone(),
                     &cfg.endpoints,
+                    &crate::agent::models::effective_allowlist(&cfg),
                 ) else {
                     return CredentialResolution::Denied;
                 };

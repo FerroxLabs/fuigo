@@ -1137,7 +1137,7 @@ pub(crate) fn apply_policy(config: &mut crate::agent::config::Config) {
 /// Clamp `AgentConfig` fields per `requirements.toml`. No-op if absent.
 /// System pins win over user pins on conflict.
 pub(crate) fn apply_requirements(config: &mut crate::agent::config::Config) -> Vec<EnforcedField> {
-    let enforced: Vec<EnforcedField> = requirements_layers()
+    let mut enforced: Vec<EnforcedField> = requirements_layers()
         .into_iter()
         .flat_map(|layer| {
             apply_requirements_inner(
@@ -1149,7 +1149,43 @@ pub(crate) fn apply_requirements(config: &mut crate::agent::config::Config) -> V
             )
         })
         .collect();
+    enforced.extend(fail_closed_on_unreadable_requirements(
+        config,
+        &fuigo_config::policy_sources::policy_sources(),
+    ));
     keep_the_deciding_layer(enforced)
+}
+
+/// P169: an admin requirements layer (`/etc/fuigo`, MDM) that exists but cannot be read or parsed is skipped by the layer
+/// loader, so its pins would silently not apply. Policy fails closed instead: the model allowlist pins to nothing
+/// selectable, naming the file. A broken user-home requirements file warns and is skipped (P169 Grok 4.7 C, P183).
+fn fail_closed_on_unreadable_requirements(
+    config: &mut crate::agent::config::Config,
+    sources: &[fuigo_config::policy_sources::PolicySource],
+) -> Vec<EnforcedField> {
+    use fuigo_config::policy_sources::PolicyLayerTier;
+    let mut enforced = Vec::new();
+    for source in sources {
+        if matches!(
+            source.tier,
+            PolicyLayerTier::SystemRequirements | PolicyLayerTier::Mdm
+        ) && source.policy.is_err()
+        {
+            let source = RequirementSource::Requirements {
+                path: source.path.clone(),
+            };
+            config.requirements.allowed_models.pin(
+                crate::agent::config::AllowlistPin::FailClosed,
+                source.clone(),
+            );
+            enforced.push(EnforcedField {
+                path: "models.allowed_models",
+                value: "(requirements file unreadable; nothing selectable)".to_owned(),
+                source,
+            });
+        }
+    }
+    enforced
 }
 /// Layers arrive user first, system last, and the last write is the pin that holds.
 /// Report that one, so an operator reading the log sees the file that decided rather than the first that asked.
@@ -1181,6 +1217,34 @@ fn apply_requirements_inner(
     }
     fn req_str<'a>(req: &'a toml::Value, section: &str, key: &str) -> Option<&'a str> {
         req.get(section)?.get(key)?.as_str()
+    }
+    enum ReqStrArray {
+        Absent,
+        Value(Vec<String>),
+        Malformed,
+    }
+    fn req_str_array(
+        req: &toml::Value,
+        section: &str,
+        key: &str,
+        source: &RequirementSource,
+    ) -> ReqStrArray {
+        let Some(value) = req.get(section).and_then(|s| s.get(key)) else {
+            return ReqStrArray::Absent;
+        };
+        let Some(arr) = value.as_array() else {
+            tracing::error!(section, key, kind = value.type_str(), source = %source, "requirements value is not an array; the constraint fails closed");
+            return ReqStrArray::Malformed;
+        };
+        let mut out = Vec::with_capacity(arr.len());
+        for item in arr {
+            let Some(s) = item.as_str() else {
+                tracing::error!(section, key, kind = item.type_str(), source = %source, "requirements array entry is not a string; the constraint fails closed");
+                return ReqStrArray::Malformed;
+            };
+            out.push(s.to_owned());
+        }
+        ReqStrArray::Value(out)
     }
     let mut enforced: Vec<EnforcedField> = Vec::new();
     let mut push = |path: &'static str, value: String| {
@@ -1317,6 +1381,32 @@ fn apply_requirements_inner(
     }
     enforce_str!("models", "default", config.models.default);
     enforce_str!("models", "web_search", config.models.web_search);
+    // P169: `[models] allowed_models` pins the selectable models; a malformed value fails closed.
+    match req_str_array(req, "models", "allowed_models", source) {
+        ReqStrArray::Absent => {}
+        ReqStrArray::Value(val) => {
+            let reported = if val.is_empty() {
+                "(unrestricted)".to_owned()
+            } else {
+                val.join(", ")
+            };
+            config
+                .requirements
+                .allowed_models
+                .pin(crate::agent::config::AllowlistPin::List(val), source.clone());
+            push("models.allowed_models", reported);
+        }
+        ReqStrArray::Malformed => {
+            config
+                .requirements
+                .allowed_models
+                .pin(crate::agent::config::AllowlistPin::FailClosed, source.clone());
+            push(
+                "models.allowed_models",
+                "(invalid; nothing selectable)".to_owned(),
+            );
+        }
+    }
     enforce_str!("cli", "channel", config.cli.channel);
     enforce_str!("cli", "minimum_version", config.cli.minimum_version);
     enforce_str!("cli", "maximum_version", config.cli.maximum_version);
@@ -1506,7 +1596,7 @@ pub fn apply_sandbox(
     let resolved = config.resolve_profile(cli_profile, profile_req);
     fuigo_sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash(auto_allow_req).value);
     let sandbox_profile: fuigo_sandbox::ProfileName = resolved.value.parse().unwrap_or_else(|e| {
-        fuigo_tty_utils::cli_eprintln!("warning: {e}, defaulting to no sandbox");
+        fuigo_tty_utils::cli_eprintln!("warning: {}, defaulting to no sandbox", fuigo_tty_utils::untrusted(&e));
         fuigo_sandbox::ProfileName::Off
     });
     fuigo_sandbox::set_configured_profile(&resolved.value);
@@ -1529,8 +1619,7 @@ pub fn apply_sandbox(
         let refuse_unprotected = |cause: &str| {
             fuigo_tty_utils::cli_eprintln!(
                 "error: this sandbox could not enforce its deny list on Linux: \
-                 {cause} Refusing to start with denied paths unprotected."
-            );
+                 {} Refusing to start with denied paths unprotected.", fuigo_tty_utils::untrusted(&cause));
         };
         let command = fuigo_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace);
         match route_bwrap_startup(command, fuigo_sandbox::is_inside_bwrap(), requires_bwrap) {
@@ -1547,20 +1636,25 @@ pub fn apply_sandbox(
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
                 fuigo_tty_utils::cli_eprintln!(
-                    "WARNING: bwrap exec failed: {err}. \
+                    "WARNING: bwrap exec failed: {}. \
                      Falling back to Landlock sandbox. \
-                     Install bubblewrap: apt install -y bubblewrap"
-                );
+                     Install bubblewrap: apt install -y bubblewrap", fuigo_tty_utils::untrusted(&err));
             }
             BwrapStartup::Verify => {
                 if requires_hook_write_deny
-                    && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced()
+                    && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced().and_then(
+                        |()| {
+                            fuigo_sandbox::verify_git_write_deny_enforced(
+                                &sandbox_profile,
+                                &workspace,
+                            )
+                        },
+                    )
                 {
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required hook write-deny \
-                         mounts are missing or writable ({e}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)"
-                    );
+                         mounts are missing or writable ({}); refusing to start \
+                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
                     std::process::exit(1);
                 }
                 if requires_read_deny
@@ -1569,9 +1663,8 @@ pub fn apply_sandbox(
                 {
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but required read-deny mounts \
-                         are not in effect ({e}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)"
-                    );
+                         are not in effect ({}); refusing to start \
+                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
                     std::process::exit(1);
                 }
                 if requires_data_write_deny
@@ -1580,9 +1673,8 @@ pub fn apply_sandbox(
                 {
                     fuigo_tty_utils::cli_eprintln!(
                         "error: sandbox reports bwrap but the required /data write-deny \
-                         mount is not in effect ({e}); refusing to start \
-                         (possible __FUIGO_INSIDE_BWRAP spoof)"
-                    );
+                         mount is not in effect ({}); refusing to start \
+                         (possible __FUIGO_INSIDE_BWRAP spoof)", fuigo_tty_utils::untrusted(&e));
                     std::process::exit(1);
                 }
             }
@@ -1605,7 +1697,7 @@ pub fn apply_sandbox(
         };
         let mut sandbox = fuigo_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
-            fuigo_tty_utils::cli_eprintln!("warning: sandbox could not be applied: {e}");
+            fuigo_tty_utils::cli_eprintln!("warning: sandbox could not be applied: {}", fuigo_tty_utils::untrusted(&e));
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
@@ -1615,19 +1707,20 @@ pub fn apply_sandbox(
                     "error: could not apply the '{}' sandbox profile; see the \
                      warning above for the cause. Refusing to start with its \
                      protections missing.",
-                    sandbox.profile()
+                    fuigo_tty_utils::untrusted(&sandbox.profile())
                 );
                 std::process::exit(1);
             }
             #[cfg(target_os = "linux")]
             if requires_hook_write_deny
                 && fuigo_sandbox::is_inside_bwrap()
-                && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced()
+                && let Err(e) = fuigo_sandbox::verify_hook_write_deny_enforced().and_then(|()| {
+                    fuigo_sandbox::verify_git_write_deny_enforced(sandbox.profile(), &workspace)
+                })
             {
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: required hook write-deny mounts not verified after apply ({e}); \
-                     refusing to start"
-                );
+                    "error: required hook write-deny mounts not verified after apply ({}); \
+                     refusing to start", fuigo_tty_utils::untrusted(&e));
                 std::process::exit(1);
             }
         }
@@ -1646,19 +1739,20 @@ pub use fuigo_workspace::project_config::find_project_configs;
 pub(crate) fn resolve_effective_plugins_config(
     cwd: &std::path::Path,
 ) -> crate::agent::config::PluginsConfig {
-    let extract = |toml_val: &toml::Value| -> Option<crate::agent::config::PluginsConfig> {
+    // Per-field lenient read: a malformed field must not drop `disabled` (fail-open re-enable).
+    let extract = |toml_val: &toml::Value, source: &str| -> Option<crate::agent::config::PluginsConfig> {
         toml_val
             .get("plugins")
-            .and_then(|v| v.clone().try_into().ok())
+            .map(|_| crate::agent::config::PluginsConfig::from_config_warn(toml_val, source))
     };
     let mut plugins_cfg = load_effective_config()
         .ok()
-        .and_then(|t| extract(&t))
+        .and_then(|t| extract(&t, "user config"))
         .unwrap_or_default();
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
     for config_path in find_project_configs(cwd) {
         if let Ok(toml_val) = load_config_file(&config_path)
-            && let Some(proj) = extract(&toml_val)
+            && let Some(proj) = extract(&toml_val, &config_path.display().to_string())
         {
             if project_trusted {
                 plugins_cfg.paths.extend(proj.paths);
@@ -1666,7 +1760,14 @@ pub(crate) fn resolve_effective_plugins_config(
             plugins_cfg.disabled.extend(proj.disabled);
         }
     }
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
+    // P169 (Grok 4.7 #1): under strictKnownMarketplaces a Claude `enabledPlugins` bare name cannot be tied to an allowed
+    // source, so it is not merged (discovery would refuse it anyway).
+    if !fuigo_workspace::permission::resolution::managed_settings()
+        .marketplace_allowlist
+        .is_restricted()
+    {
+        plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
+    }
     plugins_cfg
 }
 pub use fuigo_config::{deep_merge_toml, expand_env_vars_in_string, expand_env_vars_in_toml};
@@ -1989,12 +2090,37 @@ pub(crate) fn post_install_plugin(repo_key: &str) -> (Vec<String>, Vec<String>) 
     };
     let names: Vec<String> = repo.plugins.keys().cloned().collect();
     let mut warnings = Vec::new();
+    // P169 (Astra r3): under strictKnownMarketplaces the auto-enable names this install's own plugin id, so a
+    // same-named plugin from another source (a project plugin, say) is not switched on by the name.
+    let restricted = fuigo_workspace::permission::resolution::managed_settings()
+        .marketplace_allowlist
+        .is_restricted();
     for name in &names {
-        if let Err(e) = add_enabled_plugin(name) {
+        let Some(target) = auto_enable_target(restricted, repo, name) else {
+            warnings.push(format!(
+                "auto-enable {name}: skipped, managed policy restricts marketplaces and no install id names this plugin"
+            ));
+            continue;
+        };
+        if let Err(e) = add_enabled_plugin(&target) {
             warnings.push(format!("auto-enable {name}: {e}"));
         }
     }
     (names, warnings)
+}
+/// What a post-install auto-enable persists: the bare name, or under a marketplace restriction the install's own id.
+/// Under a restriction with no install id for `name`, nothing: a bare name would enable every plugin of that name
+/// (P169, Grok 4.7 #6).
+fn auto_enable_target(
+    restricted: bool,
+    repo: &fuigo_agent::plugins::install_registry::InstalledRepo,
+    name: &str,
+) -> Option<String> {
+    if restricted {
+        repo.plugin_id(name)
+    } else {
+        Some(name.to_string())
+    }
 }
 /// Add a plugin to `[plugins].enabled` in `~/.fuigo/config.toml`.
 ///

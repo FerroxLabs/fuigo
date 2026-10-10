@@ -48,6 +48,7 @@ use std::io::BufRead;
 
 use tokio::sync::mpsc;
 
+use crate::line_reader::MAX_LINE_SIZE;
 use crate::normalize::normalize_json_line;
 
 /// Channel depth for buffered stdin lines. Small: the reader thread blocks on a
@@ -106,14 +107,22 @@ pub fn spawn_stdin_line_reader() -> mpsc::Receiver<Vec<u8>> {
 /// [`normalize_json_line`], so bytes are verbatim except for the lines that
 /// workaround rewrites (terminator always preserved) — until EOF, a read
 /// error, or the receiver is dropped.
+///
+/// A line longer than [`MAX_LINE_SIZE`] is never acquired whole (P166/S12): the capped prefix is forwarded, the line
+/// reader downstream refuses it with its own over-limit error, and reading stops, exactly as when that reader meets an
+/// over-limit line itself. Before, `read_until` buffered the whole line first (a 300 MiB file-read response included).
 fn forward_lines<R: BufRead>(mut reader: R, tx: &mpsc::Sender<Vec<u8>>) {
     let mut line = Vec::new();
     loop {
         line.clear();
-        match reader.read_until(b'\n', &mut line) {
+        match read_until_capped(&mut reader, &mut line, MAX_LINE_SIZE) {
             // EOF or a fatal read error: return, dropping `tx` closes the channel.
             Ok(0) | Err(_) => break,
             Ok(_) => {}
+        }
+        if line.len() > MAX_LINE_SIZE {
+            let _ = tx.blocking_send(std::mem::take(&mut line));
+            break;
         }
         let normalized = normalize_json_line(std::mem::take(&mut line));
         // `blocking_send` parks this thread (not a runtime worker) when the
@@ -121,6 +130,41 @@ fn forward_lines<R: BufRead>(mut reader: R, tx: &mpsc::Sender<Vec<u8>>) {
         // which point there is nothing left to feed.
         if tx.blocking_send(normalized).is_err() {
             break;
+        }
+    }
+}
+
+/// `read_until(b'\n')` that stops once `buf` holds more than `max` bytes, so a newline-free flood is never buffered whole.
+/// Returns the bytes read (0 at EOF), like `read_until`.
+fn read_until_capped<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+    max: usize,
+) -> std::io::Result<usize> {
+    loop {
+        let (consumed, done) = {
+            let available = match reader.fill_buf() {
+                Ok(available) => available,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            if available.is_empty() {
+                return Ok(buf.len());
+            }
+            match available.iter().position(|&byte| byte == b'\n') {
+                Some(pos) => {
+                    buf.extend_from_slice(&available[..=pos]);
+                    (pos + 1, true)
+                }
+                None => {
+                    buf.extend_from_slice(available);
+                    (available.len(), false)
+                }
+            }
+        };
+        reader.consume(consumed);
+        if done || buf.len() > max {
+            return Ok(buf.len());
         }
     }
 }
@@ -212,5 +256,43 @@ fn isolate_process_stdin() -> Option<std::fs::File> {
         }
 
         Some(std::fs::File::from_raw_handle(duplicate as _))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P166/S12: a newline-free flood stops at the frame cap instead of buffering forever; ordinary lines pass through.
+    #[test]
+    fn forward_lines_caps_an_endless_line() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let reader = std::thread::spawn(move || {
+            forward_lines(
+                std::io::BufReader::new(std::io::Read::chain(
+                    &b"{\"a\":1}\n"[..],
+                    std::io::repeat(b'x'),
+                )),
+                &tx,
+            );
+        });
+        assert_eq!(b"{\"a\":1}\n".to_vec(), rx.blocking_recv().unwrap());
+        let capped = rx.blocking_recv().unwrap();
+        assert!(capped.len() > MAX_LINE_SIZE, "{}", capped.len());
+        assert!(capped.len() <= MAX_LINE_SIZE + 64 * 1024, "{}", capped.len());
+        assert!(rx.blocking_recv().is_none(), "reading stops after the over-cap line");
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn read_until_capped_matches_read_until_under_the_cap() {
+        let mut reader = std::io::BufReader::new(&b"one\ntwo"[..]);
+        let mut buf = Vec::new();
+        assert_eq!(4, read_until_capped(&mut reader, &mut buf, 16).unwrap());
+        assert_eq!(b"one\n", buf.as_slice());
+        buf.clear();
+        assert_eq!(3, read_until_capped(&mut reader, &mut buf, 16).unwrap());
+        buf.clear();
+        assert_eq!(0, read_until_capped(&mut reader, &mut buf, 16).unwrap());
     }
 }

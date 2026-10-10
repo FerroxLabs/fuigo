@@ -69,7 +69,7 @@ fn print_not_cleared(storage: &MemoryStorage, targets: &[ClearTarget]) {
         return;
     }
     for line in not_cleared_lines(storage) {
-        fuigo_tty_utils::cli_println!("{line}");
+        fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(line));
     }
 }
 
@@ -105,7 +105,7 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
 
     fuigo_tty_utils::cli_println!("The following will be deleted:");
     for t in &existing {
-        fuigo_tty_utils::cli_println!("  {}: {}", t.label, t.path.display());
+        fuigo_tty_utils::cli_println!("  {}: {}", fuigo_tty_utils::untrusted(t.label), fuigo_tty_utils::untrusted(t.path.display()));
     }
 
     if !skip_confirm {
@@ -126,7 +126,7 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
         match (t.clear)(storage) {
             Ok(true) => {
                 cleared = true;
-                fuigo_tty_utils::cli_println!("  Cleared: {}", t.label);
+                fuigo_tty_utils::cli_println!("  Cleared: {}", fuigo_tty_utils::untrusted(t.label));
             }
             Ok(false) => {} // nothing to clear for this scope
             Err(e) => {
@@ -141,13 +141,13 @@ fn run_clear(storage: &MemoryStorage, targets: &[ClearTarget], skip_confirm: boo
     } else if cleared {
         fuigo_tty_utils::cli_println!("Memory partially cleared. Errors:");
         for e in &errors {
-            fuigo_tty_utils::cli_eprintln!("  {e}");
+            fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(e));
         }
         print_not_cleared(storage, targets);
     } else if !errors.is_empty() {
         fuigo_tty_utils::cli_eprintln!("Failed to clear memory:");
         for e in &errors {
-            fuigo_tty_utils::cli_eprintln!("  {e}");
+            fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(e));
         }
         return Err(anyhow::anyhow!("clear failed"));
     } else {

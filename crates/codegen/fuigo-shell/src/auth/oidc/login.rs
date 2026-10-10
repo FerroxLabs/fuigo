@@ -230,7 +230,7 @@ fn spawn_stdin_reader(tx: tokio::sync::mpsc::Sender<CallbackResult>) {
                 }
                 Err(OidcError::InvalidPastedInput(msg)) => {
                     tracing::debug!(input = %msg, "OIDC: invalid stdin paste, retrying");
-                    fuigo_tty_utils::cli_eprintln!("  Invalid input: {msg}. Try again:");
+                    fuigo_tty_utils::cli_eprintln!("  Invalid input: {}. Try again:", fuigo_tty_utils::untrusted(&msg));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "OIDC: stdin paste returned auth error");
@@ -431,13 +431,13 @@ pub async fn run_login_flow_with_config(
         } else {
             oidc.issuer.clone()
         };
-        fuigo_tty_utils::cli_eprintln!("Signing in with {}...", provider_label);
+        fuigo_tty_utils::cli_eprintln!("Signing in with {}...", fuigo_tty_utils::untrusted(&provider_label));
         fuigo_tty_utils::cli_eprintln!();
         if let Err(e) = open_browser(&auth_url) {
             tracing::debug!(error = %e, "OIDC: failed to open browser");
         }
         fuigo_tty_utils::cli_eprintln!("Open this URL to sign in:");
-        fuigo_tty_utils::cli_eprintln!("  {}", auth_url);
+        fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(&auth_url));
     }
 
     let use_stdin = !has_client_ui && std::io::stdin().is_terminal();

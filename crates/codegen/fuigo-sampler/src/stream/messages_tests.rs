@@ -1168,3 +1168,255 @@ async fn an_untagged_unknown_delta_on_a_tool_use_block_still_fails_the_turn() {
         other => panic!("expected Failed, got {other:?}"),
     }
 }
+
+// --- P160: thinking signature reassembly and multi-block passback ---
+
+fn thinking_start_seeded(index: u32, thinking: &str, signature: &str) -> MessageStreamEvent {
+    MessageStreamEvent::ContentBlockStart {
+        index,
+        content_block: Open::Known(ContentBlock::Thinking {
+            thinking: thinking.into(),
+            signature: signature.into(),
+        }),
+    }
+}
+
+fn thinking_text_delta(index: u32, text: &str) -> MessageStreamEvent {
+    MessageStreamEvent::ContentBlockDelta {
+        index,
+        delta: Open::Known(StreamDelta::ThinkingDelta {
+            thinking: text.into(),
+        }),
+    }
+}
+
+fn signature_delta(index: u32, sig: &str) -> MessageStreamEvent {
+    MessageStreamEvent::ContentBlockDelta {
+        index,
+        delta: Open::Known(StreamDelta::SignatureDelta {
+            signature: sig.into(),
+        }),
+    }
+}
+
+fn redacted_block_start(index: u32, data: &str) -> MessageStreamEvent {
+    MessageStreamEvent::ContentBlockStart {
+        index,
+        content_block: Open::Known(ContentBlock::RedactedThinking { data: data.into() }),
+    }
+}
+
+async fn run_events(events: Vec<MessageStreamEvent>) -> Vec<SamplingEvent> {
+    let mut all: Vec<Result<MessageStreamEvent, SamplingError>> = vec![Ok(message_start())];
+    all.extend(events.into_iter().map(Ok));
+    all.push(Ok(MessageStreamEvent::MessageStop));
+    collect(stream_messages(
+        stream::iter(all).boxed(),
+        None,
+        rid(),
+        Duration::from_secs(60),
+    ))
+    .await
+}
+
+fn completed_items(evs: &[SamplingEvent]) -> &[ConversationItem] {
+    match evs.last().unwrap() {
+        SamplingEvent::Completed { response, .. } => &response.items,
+        other => panic!("expected Completed, got {other:?}"),
+    }
+}
+
+fn reasoning_of(item: &ConversationItem) -> &rs::ReasoningItem {
+    match item {
+        ConversationItem::Reasoning(r) => r,
+        other => panic!("expected Reasoning, got {other:?}"),
+    }
+}
+
+/// A signature split across several `signature_delta` events is the concatenation of all of them,
+/// in the persisted item and in the `ReasoningCompleted` event.
+#[tokio::test]
+async fn split_signature_deltas_concatenate() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", ""),
+        thinking_text_delta(0, "hmm"),
+        signature_delta(0, "AAAA"),
+        signature_delta(0, "BBBB"),
+        signature_delta(0, "CC"),
+        block_stop(0),
+    ])
+    .await;
+    let items = completed_items(&evs);
+    assert_eq!(items.len(), 2, "{items:#?}");
+    assert_eq!(reasoning_of(&items[0]).encrypted_content.as_deref(), Some("AAAABBBBCC"));
+    let sigs: Vec<&str> = evs
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::ReasoningCompleted { signature, .. } => Some(signature.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sigs, vec!["AAAABBBBCC"]);
+}
+
+/// A gateway that seeds the signature on `content_block_start` AND streams it again must not double it:
+/// the first delta replaces the seed, later deltas append.
+#[tokio::test]
+async fn start_seeded_signature_is_replaced_by_first_delta_then_appended() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", "SEEDSEED"),
+        signature_delta(0, "AAAA"),
+        signature_delta(0, "BBBB"),
+        block_stop(0),
+    ])
+    .await;
+    assert_eq!(
+        reasoning_of(&completed_items(&evs)[0]).encrypted_content.as_deref(),
+        Some("AAAABBBB")
+    );
+}
+
+/// With no delta at all the start-seeded signature stands.
+#[tokio::test]
+async fn start_seeded_signature_without_deltas_is_kept() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "t", "SEEDSEED"),
+        block_stop(0),
+    ])
+    .await;
+    assert_eq!(
+        reasoning_of(&completed_items(&evs)[0]).encrypted_content.as_deref(),
+        Some("SEEDSEED")
+    );
+}
+
+/// Every thinking block of a message is kept as its own sibling, in order, each with its own signature.
+#[tokio::test]
+async fn every_thinking_block_is_kept_in_order() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", ""),
+        thinking_text_delta(0, "first"),
+        signature_delta(0, "s1a"),
+        signature_delta(0, "s1b"),
+        block_stop(0),
+        text_block_start(1),
+        text_delta(1, "interlude"),
+        block_stop(1),
+        thinking_start_seeded(2, "", ""),
+        thinking_text_delta(2, "second"),
+        signature_delta(2, "s2"),
+        block_stop(2),
+    ])
+    .await;
+    let items = completed_items(&evs);
+    assert_eq!(items.len(), 3, "{items:#?}");
+    let a = reasoning_of(&items[0]);
+    let b = reasoning_of(&items[1]);
+    assert_eq!(fuigo_sampling_types::reasoning_item_text(a), "first");
+    assert_eq!(a.encrypted_content.as_deref(), Some("s1as1b"));
+    assert_eq!(fuigo_sampling_types::reasoning_item_text(b), "second");
+    assert_eq!(b.encrypted_content.as_deref(), Some("s2"));
+    assert!(matches!(&items[2], ConversationItem::Assistant(x) if x.content.as_ref() == "interlude"));
+}
+
+/// A `redacted_thinking` block is kept in position between thinking blocks.
+#[tokio::test]
+async fn redacted_thinking_block_is_kept_in_order() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", ""),
+        thinking_text_delta(0, "first"),
+        signature_delta(0, "s1"),
+        block_stop(0),
+        redacted_block_start(1, "opaque-blob"),
+        block_stop(1),
+        thinking_start_seeded(2, "", ""),
+        thinking_text_delta(2, "second"),
+        signature_delta(2, "s2"),
+        block_stop(2),
+    ])
+    .await;
+    let items = completed_items(&evs);
+    assert_eq!(items.len(), 4, "{items:#?}");
+    assert_eq!(reasoning_of(&items[0]).encrypted_content.as_deref(), Some("s1"));
+    let mid = reasoning_of(&items[1]);
+    assert!(fuigo_sampling_types::is_redacted_thinking_item(mid));
+    assert_eq!(mid.encrypted_content.as_deref(), Some("opaque-blob"));
+    assert_eq!(reasoning_of(&items[2]).encrypted_content.as_deref(), Some("s2"));
+}
+
+/// P195 (U17): a `redacted_thinking` block is forwarded as its own event at the block's stop, in wire order with the
+/// signed thinking blocks around it, so the headless reducer can keep it in the assistant frame.
+#[tokio::test]
+async fn redacted_thinking_block_emits_its_own_event_in_wire_order() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", ""),
+        thinking_text_delta(0, "first"),
+        signature_delta(0, "s1"),
+        block_stop(0),
+        redacted_block_start(1, "opaque-blob"),
+        block_stop(1),
+        thinking_start_seeded(2, "", ""),
+        thinking_text_delta(2, "second"),
+        signature_delta(2, "s2"),
+        block_stop(2),
+    ])
+    .await;
+    let order: Vec<String> = evs
+        .iter()
+        .filter_map(|e| match e {
+            SamplingEvent::ReasoningCompleted { signature, .. } => Some(format!("sig:{signature}")),
+            SamplingEvent::RedactedThinking { data, .. } => Some(format!("redacted:{data}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["sig:s1", "redacted:opaque-blob", "sig:s2"],
+        "each block's own event, in wire order"
+    );
+}
+
+/// An empty `data` blob carries nothing to replay: no event (the same rule that keeps it out of the stored items).
+#[tokio::test]
+async fn an_empty_redacted_thinking_block_emits_no_event() {
+    let evs = run_events(vec![redacted_block_start(0, ""), block_stop(0)]).await;
+    assert!(
+        !evs.iter().any(|e| matches!(e, SamplingEvent::RedactedThinking { .. })),
+        "an empty blob is not forwarded"
+    );
+}
+
+/// End to end: what the stream produced replays on the next request as the same blocks, unchanged.
+#[tokio::test]
+async fn streamed_blocks_round_trip_unchanged_into_the_next_request() {
+    let evs = run_events(vec![
+        thinking_start_seeded(0, "", ""),
+        thinking_text_delta(0, "first"),
+        signature_delta(0, "s1a"),
+        signature_delta(0, "s1b"),
+        block_stop(0),
+        redacted_block_start(1, "opaque-blob"),
+        block_stop(1),
+        thinking_start_seeded(2, "", ""),
+        thinking_text_delta(2, "second"),
+        signature_delta(2, "s2"),
+        block_stop(2),
+        text_block_start(3),
+        text_delta(3, "answer"),
+        block_stop(3),
+    ])
+    .await;
+    let mut items = vec![ConversationItem::user("go")];
+    items.extend(completed_items(&evs).iter().cloned());
+    items.push(ConversationItem::user("next"));
+    let req = fuigo_sampling_types::ConversationRequest::from_items(items).with_model("m");
+    let json = serde_json::to_value(fuigo_sampling_types::build_messages_request(&req)).unwrap();
+    let blocks = json["messages"][1]["content"].as_array().unwrap();
+    let kinds: Vec<&str> = blocks.iter().map(|b| b["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["thinking", "redacted_thinking", "thinking", "text"], "{json:#}");
+    assert_eq!(blocks[0]["thinking"], "first");
+    assert_eq!(blocks[0]["signature"], "s1as1b");
+    assert_eq!(blocks[1]["data"], "opaque-blob");
+    assert_eq!(blocks[2]["thinking"], "second");
+    assert_eq!(blocks[2]["signature"], "s2");
+}

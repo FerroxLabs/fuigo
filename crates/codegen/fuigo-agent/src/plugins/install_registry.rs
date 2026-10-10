@@ -93,6 +93,81 @@ pub struct RepoPlugin {
     pub version: Option<String>,
 }
 
+impl InstalledRepo {
+    /// The source identity managed `strictKnownMarketplaces` judges (P169): the marketplace provenance's source, else
+    /// the git URL, else the local source path (which never matches an allowed URL).
+    pub fn source_identity(&self) -> String {
+        match &self.marketplace {
+            Some(provenance) => provenance.source_url_or_path.clone(),
+            None => match &self.kind {
+                InstallKind::Git { url, .. } => url.clone(),
+                InstallKind::Local { source_path, .. } => source_path.display().to_string(),
+            },
+        }
+    }
+
+    /// Whether this checkout, with symlinks resolved, lies strictly inside `install_dir`.
+    pub fn is_confined_to(&self, install_dir: &Path) -> bool {
+        match (dunce::canonicalize(install_dir), dunce::canonicalize(&self.path)) {
+            (Ok(root), Ok(path)) => path != root && path.starts_with(&root),
+            _ => false,
+        }
+    }
+
+    /// The root of this install's plugin `name`: the checkout, or its `subdir`, canonical. `None` when the
+    /// repo has no plugin of that name, when the checkout or `subdir` does not canonicalize, or when `subdir` resolves
+    /// (a symlink component, an absolute path) outside the checkout. A plugin
+    /// root outside the checkout is never a root of this install (P169 round 7).
+    pub fn plugin_root(&self, name: &str) -> Option<PathBuf> {
+        let plugin = self.plugins.get(name)?;
+        let repo = dunce::canonicalize(&self.path).ok()?;
+        let Some(subdir) = plugin.subdir.as_deref() else {
+            return Some(repo);
+        };
+        let canonical = dunce::canonicalize(self.path.join(subdir)).ok()?;
+        canonical.starts_with(&repo).then_some(canonical)
+    }
+
+    /// The full plugin id discovery gives this install's plugin `name` (user scope, canonical root), or `None` when the
+    /// repo has no plugin of that name or its root leaves the checkout.
+    pub fn plugin_id(&self, name: &str) -> Option<String> {
+        let root = self.plugin_root(name)?;
+        Some(super::discovery::PluginId::new(super::discovery::PluginScope::User, &root, name).0)
+    }
+}
+
+/// The `url` of `[remote "origin"]` in `<repo>/.git/config`; `None` when the directory is not a git checkout.
+fn git_origin_url(repo: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(repo.join(".git").join("config")).ok()?;
+    let mut in_origin = false;
+    for line in config.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_origin = line.replace(' ', "") == "[remote\"origin\"]";
+        } else if in_origin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "url"
+        {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// The one URL normaliser for `strictKnownMarketplaces` (P169): the policy's allowlist membership and the checkout
+/// origin check both use it, so they cannot disagree. Lowercases and drops a trailing `.git`; nothing else, so a
+/// difference it does not erase (a trailing slash, `ssh` against `https`) stays a mismatch (fail closed).
+pub fn normalize_git_url(url: &str) -> String {
+    url.to_lowercase().trim_end_matches(".git").to_string()
+}
+
+/// The `origin` URL of the nearest git checkout at or above `path`, or `None`.
+fn enclosing_git_origin(path: &Path) -> Option<String> {
+    path.ancestors()
+        .find(|dir| dir.join(".git").join("config").is_file())
+        .and_then(git_origin_url)
+}
+
 fn paths_match_plugin_root(
     installed_plugin_root: &Path,
     plugin_root: &Path,
@@ -106,6 +181,39 @@ fn paths_match_plugin_root(
 }
 
 impl InstallRegistry {
+    /// The source identity managed `strictKnownMarketplaces` may trust for `repo`, or `None` when the record cannot be
+    /// tied to its checkout (P169 round 6, Grok r5 MEDIUM).
+    ///
+    /// `registry.json` is user-writable, so a recorded source string alone proves nothing, and the string returned is
+    /// never one from the record that was not itself compared with a checkout. The checkout must canonicalize to a
+    /// directory inside this registry's install dir (a symlink or `..` out of it, or any path the user chose, is
+    /// refused), and the identity is the URL read from a checkout's `origin` remote after it matched the record: the
+    /// install's own origin for a git install, the source checkout's origin for a marketplace copy (see below).
+    ///
+    /// Residual (see receipt): a user who can write both the install dir and the registry can still forge a matching
+    /// checkout. Closing that needs an admin-owned ledger or signed checkouts, which is outside this crate.
+    pub fn verified_source_identity(&self, repo: &InstalledRepo) -> Option<String> {
+        if !repo.is_confined_to(&self.install_dir) {
+            return None;
+        }
+        match &repo.kind {
+            // The allowlist sees the checkout's own origin, once it is known to name the recorded URL.
+            InstallKind::Git { url, .. } => {
+                let origin = git_origin_url(&repo.path)?;
+                (normalize_git_url(&origin) == normalize_git_url(url)).then_some(origin)
+            }
+            // A marketplace copy has no remote of its own: it is bound to the checkout it was copied from. That
+            // checkout's origin must name the recorded marketplace source, and is what the allowlist sees. A direct
+            // local install (no provenance), or a source with no origin, has no identity.
+            InstallKind::Local { source_path, .. } => {
+                let provenance = repo.marketplace.as_ref()?;
+                let origin = enclosing_git_origin(source_path)?;
+                (normalize_git_url(&origin) == normalize_git_url(&provenance.source_url_or_path))
+                    .then_some(origin)
+            }
+        }
+    }
+
     /// Load the registry from the resolved install directory.
     /// If the registry file doesn't exist, returns an empty registry.
     pub fn load() -> Self {

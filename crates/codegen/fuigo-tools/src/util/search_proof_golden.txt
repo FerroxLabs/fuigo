@@ -1,0 +1,2404 @@
+=== fuigo-content-0 | path=None | pat="FAKE"
+
+
+
+
+
+
+
+
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-content-1 | path=None | pat="FAKE"
+
+
+
+
+
+
+
+
+1-one
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2-other
+2:FAKE in src a
+2:FAKE short
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-content-2 | path=None | pat="FAKE"
+
+
+
+
+
+1:FAKE in sub b
+1:FAKE spaced name
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 8 matching lines
+=== fuigo-content-3 | path=None | pat="FAKE"
+
+
+
+
+
+
+
+
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-files-0 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-files-1 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-files-2 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 6 files
+=== fuigo-files-3 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README
+<CWD>/far.bin
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-count-0 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README:1
+<CWD>/long.txt:2
+<CWD>/secrets/k.txt:1
+<CWD>/sp ace.txt:1
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== fuigo-count-1 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README:1
+<CWD>/long.txt:2
+<CWD>/secrets/k.txt:1
+<CWD>/sp ace.txt:1
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== fuigo-count-2 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt:2
+<CWD>/secrets/k.txt:1
+<CWD>/sp ace.txt:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 8 across 6 files
+=== fuigo-count-3 | path=None | pat="FAKE"
+</workspace_result>
+<CWD>/README:1
+<CWD>/long.txt:2
+<CWD>/secrets/k.txt:1
+<CWD>/sp ace.txt:1
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== oc-grep | path=None | pat="FAKE"
+
+
+
+
+
+
+
+
+  Line 1: FAKE early
+  Line 1: FAKE in sub b
+  Line 1: FAKE root readme
+  Line 1: FAKE spaced name
+  Line 1: FAKE src readme
+  Line 1: FAKE text
+  Line 1: FAKE_DENIED
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE in src a
+  Line 2: FAKE short
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/README:
+<CWD>/far.bin:
+<CWD>/long.txt:
+<CWD>/secrets/k.txt:
+<CWD>/sp ace.txt:
+<CWD>/src/README:
+<CWD>/src/a.txt:
+<CWD>/src/sub/b.txt:
+<CWD>/text.txt:
+Found 11 matches
+=== oc-grep-include | path=None | pat="FAKE"
+
+
+
+
+
+  Line 1: FAKE in sub b
+  Line 1: FAKE spaced name
+  Line 1: FAKE text
+  Line 1: FAKE_DENIED
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE in src a
+  Line 2: FAKE short
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/long.txt:
+<CWD>/secrets/k.txt:
+<CWD>/sp ace.txt:
+<CWD>/src/a.txt:
+<CWD>/src/sub/b.txt:
+<CWD>/text.txt:
+Found 8 matches
+=== codex | path=None | pat="FAKE"
+<CWD>/README
+<CWD>/far.bin
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+count=9
+=== codex-include | path=None | pat="FAKE"
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+count=6
+=== fuigo-content-0 | path=None | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=None | pat="FAKE two words"
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=None | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=None | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=None | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=None | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/a.txt:
+Found 1 matches
+=== oc-grep-include | path=None | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/a.txt:
+Found 1 matches
+=== codex | path=None | pat="FAKE two words"
+<CWD>/src/a.txt
+count=1
+=== codex-include | path=None | pat="FAKE two words"
+<CWD>/src/a.txt
+count=1
+=== fuigo-content-0 | path=Some(".") | pat="FAKE"
+
+
+
+
+
+
+
+
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-content-1 | path=Some(".") | pat="FAKE"
+
+
+
+
+
+
+
+
+1-one
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2-other
+2:FAKE in src a
+2:FAKE short
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-content-2 | path=Some(".") | pat="FAKE"
+
+
+
+
+
+1:FAKE in sub b
+1:FAKE spaced name
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 8 matching lines
+=== fuigo-content-3 | path=Some(".") | pat="FAKE"
+
+
+
+
+
+
+
+
+1:FAKE early
+1:FAKE in sub b
+1:FAKE root readme
+1:FAKE spaced name
+1:FAKE src readme
+1:FAKE text
+1:FAKE_DENIED
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE in src a
+2:FAKE short
+4:FAKE two words here
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./far.bin: WARNING: stopped searching binary file after match (found "\0" byte around offset 500011)
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 11 matching lines
+=== fuigo-files-0 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-files-1 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-files-2 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 6 files
+=== fuigo-files-3 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+Found 9 files
+=== fuigo-count-0 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README:1
+<CWD>/./long.txt:2
+<CWD>/./secrets/k.txt:1
+<CWD>/./sp ace.txt:1
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<CWD>/./text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== fuigo-count-1 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README:1
+<CWD>/./long.txt:2
+<CWD>/./secrets/k.txt:1
+<CWD>/./sp ace.txt:1
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<CWD>/./text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== fuigo-count-2 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./long.txt:2
+<CWD>/./secrets/k.txt:1
+<CWD>/./sp ace.txt:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<CWD>/./text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 8 across 6 files
+=== fuigo-count-3 | path=Some(".") | pat="FAKE"
+</workspace_result>
+<CWD>/./README:1
+<CWD>/./long.txt:2
+<CWD>/./secrets/k.txt:1
+<CWD>/./sp ace.txt:1
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<CWD>/./text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 10 across 8 files
+=== oc-grep | path=Some(".") | pat="FAKE"
+
+
+
+
+
+
+
+
+  Line 1: FAKE early
+  Line 1: FAKE in sub b
+  Line 1: FAKE root readme
+  Line 1: FAKE spaced name
+  Line 1: FAKE src readme
+  Line 1: FAKE text
+  Line 1: FAKE_DENIED
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE in src a
+  Line 2: FAKE short
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./README:
+<CWD>/./far.bin:
+<CWD>/./long.txt:
+<CWD>/./secrets/k.txt:
+<CWD>/./sp ace.txt:
+<CWD>/./src/README:
+<CWD>/./src/a.txt:
+<CWD>/./src/sub/b.txt:
+<CWD>/./text.txt:
+Found 11 matches
+=== oc-grep-include | path=Some(".") | pat="FAKE"
+
+
+
+
+
+  Line 1: FAKE in sub b
+  Line 1: FAKE spaced name
+  Line 1: FAKE text
+  Line 1: FAKE_DENIED
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE in src a
+  Line 2: FAKE short
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./long.txt:
+<CWD>/./secrets/k.txt:
+<CWD>/./sp ace.txt:
+<CWD>/./src/a.txt:
+<CWD>/./src/sub/b.txt:
+<CWD>/./text.txt:
+Found 8 matches
+=== codex | path=Some(".") | pat="FAKE"
+<CWD>/./README
+<CWD>/./far.bin
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+count=9
+=== codex-include | path=Some(".") | pat="FAKE"
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+count=6
+=== fuigo-content-0 | path=Some(".") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some(".") | pat="FAKE two words"
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some(".") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some(".") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some(".") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some(".") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/a.txt:
+Found 1 matches
+=== oc-grep-include | path=Some(".") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/a.txt:
+Found 1 matches
+=== codex | path=Some(".") | pat="FAKE two words"
+<CWD>/./src/a.txt
+count=1
+=== codex-include | path=Some(".") | pat="FAKE two words"
+<CWD>/./src/a.txt
+count=1
+=== fuigo-content-0 | path=Some("./src") | pat="FAKE"
+
+
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-content-1 | path=Some("./src") | pat="FAKE"
+
+
+1-one
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-content-2 | path=Some("./src") | pat="FAKE"
+
+1:FAKE in sub b
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 matching lines
+=== fuigo-content-3 | path=Some("./src") | pat="FAKE"
+
+
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-files-0 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-files-1 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-files-2 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 files
+=== fuigo-files-3 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-count-0 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== fuigo-count-1 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== fuigo-count-2 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 3 across 2 files
+=== fuigo-count-3 | path=Some("./src") | pat="FAKE"
+</workspace_result>
+<CWD>/./src/README:1
+<CWD>/./src/a.txt:2
+<CWD>/./src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== oc-grep | path=Some("./src") | pat="FAKE"
+
+
+  Line 1: FAKE in sub b
+  Line 1: FAKE src readme
+  Line 2: FAKE in src a
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/README:
+<CWD>/./src/a.txt:
+<CWD>/./src/sub/b.txt:
+Found 4 matches
+=== oc-grep-include | path=Some("./src") | pat="FAKE"
+
+  Line 1: FAKE in sub b
+  Line 2: FAKE in src a
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/a.txt:
+<CWD>/./src/sub/b.txt:
+Found 3 matches
+=== codex | path=Some("./src") | pat="FAKE"
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+count=3
+=== codex-include | path=Some("./src") | pat="FAKE"
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+count=2
+=== fuigo-content-0 | path=Some("./src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("./src") | pat="FAKE two words"
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("./src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("./src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("./src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/./src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("./src") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/a.txt:
+Found 1 matches
+=== oc-grep-include | path=Some("./src") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/./src/a.txt:
+Found 1 matches
+=== codex | path=Some("./src") | pat="FAKE two words"
+<CWD>/./src/a.txt
+count=1
+=== codex-include | path=Some("./src") | pat="FAKE two words"
+<CWD>/./src/a.txt
+count=1
+=== fuigo-content-0 | path=Some("link/../README") | pat="FAKE"
+1:FAKE src readme
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("link/../README") | pat="FAKE"
+1:FAKE src readme
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("link/../README") | pat="FAKE"
+1:FAKE src readme
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("link/../README") | pat="FAKE"
+1:FAKE src readme
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("link/../README") | pat="FAKE"
+</workspace_result>
+<CWD>/link/../README:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("link/../README") | pat="FAKE"
+  Line 1: FAKE src readme
+--stderr--
+<CWD>/link/../README:
+Found 1 matches
+=== oc-grep-include | path=Some("link/../README") | pat="FAKE"
+  Line 1: FAKE src readme
+--stderr--
+<CWD>/link/../README:
+Found 1 matches
+=== codex | path=Some("link/../README") | pat="FAKE"
+<CWD>/link/../README
+count=1
+=== codex-include | path=Some("link/../README") | pat="FAKE"
+<CWD>/link/../README
+count=1
+=== fuigo-content-0 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("link/../README") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("link/../README") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("link/../README") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("link/../README") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("link/../README") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("<CWD>/src") | pat="FAKE"
+
+
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-content-1 | path=Some("<CWD>/src") | pat="FAKE"
+
+
+1-one
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-content-2 | path=Some("<CWD>/src") | pat="FAKE"
+
+1:FAKE in sub b
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 matching lines
+=== fuigo-content-3 | path=Some("<CWD>/src") | pat="FAKE"
+
+
+1:FAKE in sub b
+1:FAKE src readme
+2:FAKE in src a
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 4 matching lines
+=== fuigo-files-0 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-files-1 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-files-2 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 files
+=== fuigo-files-3 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+Found 3 files
+=== fuigo-count-0 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== fuigo-count-1 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== fuigo-count-2 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 3 across 2 files
+=== fuigo-count-3 | path=Some("<CWD>/src") | pat="FAKE"
+</workspace_result>
+<CWD>/src/README:1
+<CWD>/src/a.txt:2
+<CWD>/src/sub/b.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 4 across 3 files
+=== oc-grep | path=Some("<CWD>/src") | pat="FAKE"
+
+
+  Line 1: FAKE in sub b
+  Line 1: FAKE src readme
+  Line 2: FAKE in src a
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/README:
+<CWD>/src/a.txt:
+<CWD>/src/sub/b.txt:
+Found 4 matches
+=== oc-grep-include | path=Some("<CWD>/src") | pat="FAKE"
+
+  Line 1: FAKE in sub b
+  Line 2: FAKE in src a
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/a.txt:
+<CWD>/src/sub/b.txt:
+Found 3 matches
+=== codex | path=Some("<CWD>/src") | pat="FAKE"
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+count=3
+=== codex-include | path=Some("<CWD>/src") | pat="FAKE"
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+count=2
+=== fuigo-content-0 | path=Some("<CWD>/src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("<CWD>/src") | pat="FAKE two words"
+3-three
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("<CWD>/src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("<CWD>/src") | pat="FAKE two words"
+4:FAKE two words here
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("<CWD>/src") | pat="FAKE two words"
+</workspace_result>
+<CWD>/src/a.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("<CWD>/src") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/a.txt:
+Found 1 matches
+=== oc-grep-include | path=Some("<CWD>/src") | pat="FAKE two words"
+  Line 4: FAKE two words here
+--stderr--
+<CWD>/src/a.txt:
+Found 1 matches
+=== codex | path=Some("<CWD>/src") | pat="FAKE two words"
+<CWD>/src/a.txt
+count=1
+=== codex-include | path=Some("<CWD>/src") | pat="FAKE two words"
+<CWD>/src/a.txt
+count=1
+=== fuigo-content-0 | path=Some("text.txt") | pat="FAKE"
+1:FAKE text
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("text.txt") | pat="FAKE"
+1:FAKE text
+2-other
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("text.txt") | pat="FAKE"
+1:FAKE text
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("text.txt") | pat="FAKE"
+1:FAKE text
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("text.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/text.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("text.txt") | pat="FAKE"
+  Line 1: FAKE text
+--stderr--
+<CWD>/text.txt:
+Found 1 matches
+=== oc-grep-include | path=Some("text.txt") | pat="FAKE"
+  Line 1: FAKE text
+--stderr--
+<CWD>/text.txt:
+Found 1 matches
+=== codex | path=Some("text.txt") | pat="FAKE"
+<CWD>/text.txt
+count=1
+=== codex-include | path=Some("text.txt") | pat="FAKE"
+<CWD>/text.txt
+count=1
+=== fuigo-content-0 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("text.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("text.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("text.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("text.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("text.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("sp ace.txt") | pat="FAKE"
+1:FAKE spaced name
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("sp ace.txt") | pat="FAKE"
+1:FAKE spaced name
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("sp ace.txt") | pat="FAKE"
+1:FAKE spaced name
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("sp ace.txt") | pat="FAKE"
+1:FAKE spaced name
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("sp ace.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/sp ace.txt:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("sp ace.txt") | pat="FAKE"
+  Line 1: FAKE spaced name
+--stderr--
+<CWD>/sp ace.txt:
+Found 1 matches
+=== oc-grep-include | path=Some("sp ace.txt") | pat="FAKE"
+  Line 1: FAKE spaced name
+--stderr--
+<CWD>/sp ace.txt:
+Found 1 matches
+=== codex | path=Some("sp ace.txt") | pat="FAKE"
+<CWD>/sp ace.txt
+count=1
+=== codex-include | path=Some("sp ace.txt") | pat="FAKE"
+<CWD>/sp ace.txt
+count=1
+=== fuigo-content-0 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("sp ace.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("sp ace.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("sp ace.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("sp ace.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("sp ace.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("long.txt") | pat="FAKE"
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE short
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 matching lines
+=== fuigo-content-1 | path=Some("long.txt") | pat="FAKE"
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE short
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 matching lines
+=== fuigo-content-2 | path=Some("long.txt") | pat="FAKE"
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE short
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 matching lines
+=== fuigo-content-3 | path=Some("long.txt") | pat="FAKE"
+1:FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx [... truncated (1033 chars total)]
+2:FAKE short
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 2 matching lines
+=== fuigo-files-0 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt:2
+<workspace_result workspace_path="<CWD>">
+Found 2 across 1 files
+=== fuigo-count-1 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt:2
+<workspace_result workspace_path="<CWD>">
+Found 2 across 1 files
+=== fuigo-count-2 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt:2
+<workspace_result workspace_path="<CWD>">
+Found 2 across 1 files
+=== fuigo-count-3 | path=Some("long.txt") | pat="FAKE"
+</workspace_result>
+<CWD>/long.txt:2
+<workspace_result workspace_path="<CWD>">
+Found 2 across 1 files
+=== oc-grep | path=Some("long.txt") | pat="FAKE"
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE short
+--stderr--
+<CWD>/long.txt:
+Found 2 matches
+=== oc-grep-include | path=Some("long.txt") | pat="FAKE"
+  Line 1: FAKExxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...
+  Line 2: FAKE short
+--stderr--
+<CWD>/long.txt:
+Found 2 matches
+=== codex | path=Some("long.txt") | pat="FAKE"
+<CWD>/long.txt
+count=1
+=== codex-include | path=Some("long.txt") | pat="FAKE"
+<CWD>/long.txt
+count=1
+=== fuigo-content-0 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("long.txt") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("long.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("long.txt") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("long.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("long.txt") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin: binary file matches (found "\0" byte around offset 11)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-1 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin: binary file matches (found "\0" byte around offset 11)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-2 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin: binary file matches (found "\0" byte around offset 11)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-3 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin: binary file matches (found "\0" byte around offset 11)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-files-0 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("bin_before.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_before.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("bin_before.bin") | pat="FAKE"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_before.bin") | pat="FAKE"
+--stderr--
+No files found
+=== codex | path=Some("bin_before.bin") | pat="FAKE"
+<CWD>/bin_before.bin
+count=1
+=== codex-include | path=Some("bin_before.bin") | pat="FAKE"
+<CWD>/bin_before.bin
+count=1
+=== fuigo-content-0 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("bin_before.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("bin_before.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_before.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("bin_before.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("bin_before.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin: binary file matches (found "\0" byte around offset 8)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-1 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin: binary file matches (found "\0" byte around offset 8)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-2 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin: binary file matches (found "\0" byte around offset 8)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-3 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin: binary file matches (found "\0" byte around offset 8)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-files-0 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("bin_both.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_both.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("bin_both.bin") | pat="FAKE"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_both.bin") | pat="FAKE"
+--stderr--
+No files found
+=== codex | path=Some("bin_both.bin") | pat="FAKE"
+<CWD>/bin_both.bin
+count=1
+=== codex-include | path=Some("bin_both.bin") | pat="FAKE"
+<CWD>/bin_both.bin
+count=1
+=== fuigo-content-0 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("bin_both.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("bin_both.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_both.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("bin_both.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("bin_both.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin: binary file matches (found "\0" byte around offset 7)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-1 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin: binary file matches (found "\0" byte around offset 7)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-2 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin: binary file matches (found "\0" byte around offset 7)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-content-3 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin: binary file matches (found "\0" byte around offset 7)
+<workspace_result workspace_path="<CWD>">
+Found 0 matching lines
+=== fuigo-files-0 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("bin_off7.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/bin_off7.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("bin_off7.bin") | pat="FAKE"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_off7.bin") | pat="FAKE"
+--stderr--
+No files found
+=== codex | path=Some("bin_off7.bin") | pat="FAKE"
+<CWD>/bin_off7.bin
+count=1
+=== codex-include | path=Some("bin_off7.bin") | pat="FAKE"
+<CWD>/bin_off7.bin
+count=1
+=== fuigo-content-0 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("bin_off7.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("bin_off7.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("bin_off7.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("bin_off7.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("bin_off7.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== fuigo-content-0 | path=Some("far.bin") | pat="FAKE"
+1:FAKE early
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-1 | path=Some("far.bin") | pat="FAKE"
+1:FAKE early
+2-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-2 | path=Some("far.bin") | pat="FAKE"
+1:FAKE early
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-content-3 | path=Some("far.bin") | pat="FAKE"
+1:FAKE early
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 matching lines
+=== fuigo-files-0 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-1 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-2 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-files-3 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+Found 1 files
+=== fuigo-count-0 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-1 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-2 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== fuigo-count-3 | path=Some("far.bin") | pat="FAKE"
+</workspace_result>
+<CWD>/far.bin:1
+<workspace_result workspace_path="<CWD>">
+Found 1 across 1 files
+=== oc-grep | path=Some("far.bin") | pat="FAKE"
+  Line 1: FAKE early
+--stderr--
+<CWD>/far.bin:
+Found 1 matches
+=== oc-grep-include | path=Some("far.bin") | pat="FAKE"
+  Line 1: FAKE early
+--stderr--
+<CWD>/far.bin:
+Found 1 matches
+=== codex | path=Some("far.bin") | pat="FAKE"
+<CWD>/far.bin
+count=1
+=== codex-include | path=Some("far.bin") | pat="FAKE"
+<CWD>/far.bin
+count=1
+=== fuigo-content-0 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-1 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-2 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-content-3 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-0 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-1 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-2 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-files-3 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-0 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-1 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-2 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== fuigo-count-3 | path=Some("far.bin") | pat="FAKE two words"
+</workspace_result>
+<workspace_result workspace_path="<CWD>">
+No matches found
+=== oc-grep | path=Some("far.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== oc-grep-include | path=Some("far.bin") | pat="FAKE two words"
+--stderr--
+No files found
+=== codex | path=Some("far.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== codex-include | path=Some("far.bin") | pat="FAKE two words"
+NoMatches("No matches found.")
+=== glob | path=None | pat="**/*"
+</workspace_result>
+<CWD>/README
+<CWD>/bin_before.bin
+<CWD>/bin_both.bin
+<CWD>/bin_off7.bin
+<CWD>/far.bin
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+count=12 total=12
+=== glob | path=None | pat="*.txt"
+</workspace_result>
+<CWD>/long.txt
+<CWD>/secrets/k.txt
+<CWD>/sp ace.txt
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<CWD>/text.txt
+<workspace_result workspace_path="<CWD>">
+count=6 total=6
+=== glob | path=None | pat="*.bin"
+</workspace_result>
+<CWD>/bin_before.bin
+<CWD>/bin_both.bin
+<CWD>/bin_off7.bin
+<CWD>/far.bin
+<workspace_result workspace_path="<CWD>">
+count=4 total=4
+=== glob | path=None | pat="sp ace*"
+</workspace_result>
+<CWD>/sp ace.txt
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some(".") | pat="**/*"
+</workspace_result>
+<CWD>/./README
+<CWD>/./bin_before.bin
+<CWD>/./bin_both.bin
+<CWD>/./bin_off7.bin
+<CWD>/./far.bin
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+count=12 total=12
+=== glob | path=Some(".") | pat="*.txt"
+</workspace_result>
+<CWD>/./long.txt
+<CWD>/./secrets/k.txt
+<CWD>/./sp ace.txt
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<CWD>/./text.txt
+<workspace_result workspace_path="<CWD>">
+count=6 total=6
+=== glob | path=Some(".") | pat="*.bin"
+</workspace_result>
+<CWD>/./bin_before.bin
+<CWD>/./bin_both.bin
+<CWD>/./bin_off7.bin
+<CWD>/./far.bin
+<workspace_result workspace_path="<CWD>">
+count=4 total=4
+=== glob | path=Some(".") | pat="sp ace*"
+</workspace_result>
+<CWD>/./sp ace.txt
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some("./src") | pat="**/*"
+</workspace_result>
+<CWD>/./src/README
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+count=3 total=3
+=== glob | path=Some("./src") | pat="*.txt"
+</workspace_result>
+<CWD>/./src/a.txt
+<CWD>/./src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+count=2 total=2
+=== glob | path=Some("./src") | pat="*.bin"
+No files found
+count=0 total=0
+=== glob | path=Some("./src") | pat="sp ace*"
+No files found
+count=0 total=0
+=== glob | path=Some("link/../README") | pat="**/*"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some("link/../README") | pat="*.txt"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some("link/../README") | pat="*.bin"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some("link/../README") | pat="sp ace*"
+</workspace_result>
+<CWD>/link/../README
+<workspace_result workspace_path="<CWD>">
+count=1 total=1
+=== glob | path=Some("src") | pat="**/*"
+</workspace_result>
+<CWD>/src/README
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+count=3 total=3
+=== glob | path=Some("src") | pat="*.txt"
+</workspace_result>
+<CWD>/src/a.txt
+<CWD>/src/sub/b.txt
+<workspace_result workspace_path="<CWD>">
+count=2 total=2
+=== glob | path=Some("src") | pat="*.bin"
+No files found
+count=0 total=0
+=== glob | path=Some("src") | pat="sp ace*"
+No files found
+count=0 total=0

@@ -160,18 +160,22 @@ pub(super) fn eligible_team_principal(auth: FuigoAuth) -> Option<FuigoAuth> {
 }
 
 /// Single-team: managed config is a grok.com feature with one grok.com auth.
-pub(super) fn read_active_team_auth() -> Option<FuigoAuth> {
+/// Reads the login where the auth manager keeps it (`FUIGO_AUTH_PATH` or `<home>/auth.json`): reading only the default
+/// path made a login at a custom path look signed out, and startup then deleted the organisation's policy (P167).
+fn read_team_principal() -> std::io::Result<Option<FuigoAuth>> {
     let home = crate::util::fuigo_home::fuigo_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    let team = store.values().find(|a| a.is_team_principal())?.clone();
-    eligible_team_principal(team)
+    let store = crate::auth::read_auth_json(&crate::auth::auth_json_path(&home))?;
+    Ok(store.into_values().find(|a| a.is_team_principal()))
+}
+
+pub(super) fn read_active_team_auth() -> Option<FuigoAuth> {
+    eligible_team_principal(read_team_principal().ok().flatten()?)
 }
 
 /// Ignores expiry; `Err` is not a logout — treating it as one would wipe policy on a read blip.
 pub(super) fn team_principal_signed_in() -> std::io::Result<bool> {
-    let home = crate::util::fuigo_home::fuigo_home();
-    match crate::auth::read_auth_json(&home.join("auth.json")) {
-        Ok(store) => Ok(store.values().any(|a| a.is_team_principal())),
+    match read_team_principal() {
+        Ok(team) => Ok(team.is_some()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
@@ -263,12 +267,17 @@ fn lock_is_contended(e: &std::io::Error) -> bool {
 }
 
 fn open_managed_config_lock(home: &std::path::Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(home.join("managed_config.lock"))
+    let path = home.join("managed_config.lock");
+    let file = fuigo_config::owner_only_file_options(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(&path)?;
+    fuigo_config::tighten_own_regular_file_owner_only(&file, &path);
+    Ok(file)
 }
 
 const GATE_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
@@ -687,13 +696,9 @@ pub fn current_serving_identity() -> crate::config::ServingIdentity {
 
 /// Ignores expiry; no deployment-key special case, or envelope binding would be off for team users.
 pub(super) fn active_team_id_any_expiry() -> Option<String> {
-    let home = crate::util::fuigo_home::fuigo_home();
-    let store = crate::auth::read_auth_json(&home.join("auth.json")).ok()?;
-    store
-        .values()
-        .find(|a| a.is_team_principal())
-        // The id must read the same everywhere it feeds (gate, purge, envelope binding).
-        .and_then(|a| crate::config::normalize_identity(a.team_id.as_deref()))
+    let team = read_team_principal().ok().flatten()?;
+    // The id must read the same everywhere it feeds (gate, purge, envelope binding).
+    crate::config::normalize_identity(team.team_id.as_deref())
 }
 
 pub(super) fn current_serving_identity_any_expiry() -> crate::config::ServingIdentity {

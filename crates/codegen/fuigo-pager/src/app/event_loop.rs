@@ -1085,6 +1085,212 @@ fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool 
         && !app.is_zdr_blocked()
 }
 
+/// Backlog fence in front of the stale-state timer handlers (P196 round 3, Astra r2 HIGH and the turn-end class).
+///
+/// The cancel-resend and the turn-end reconcile read state that an already-buffered ACP message (a `prompt_complete`)
+/// would change. When one of them first becomes due, the fence captures a finite boundary FOR THAT REQUEST (round 4:
+/// the key is the request's identity, see `StaleRequestKey`): the number of ACP messages processed so far plus the
+/// number buffered right now (receiver queue plus the peeked one). It holds that handler back until that many
+/// messages have actually been PROCESSED (`note_processed` counts progress, never attempts), while every unrelated
+/// timer keeps running. Messages that arrive after the capture are not waited on, so a flood cannot extend the wait.
+///
+/// Round 4 (Astra r3): the time cap NEVER releases the handler (a timeout cannot prove that a buffered completion is
+/// absent). At `CAP` the loop ESCALATES instead (`escalated`): ACP gets priority over input until the boundary is
+/// reached. The fence releases only when the boundary is reached, nothing is buffered (queue empty or closed), or the
+/// request is gone. A request that is re-issued (new key) gets a fresh boundary; a resolved one is dropped.
+#[derive(Debug, Default)]
+struct StaleStateFence {
+    processed: u64,
+    armed: std::collections::HashMap<dispatch::StaleRequestKey, (std::time::Instant, u64)>,
+}
+
+impl StaleStateFence {
+    /// Time after the first due observation at which the loop escalates ACP over input (state: 2 s).
+    const CAP: Duration = Duration::from_secs(2);
+
+    /// One ACP message was handled by the ACP arm.
+    fn note_processed(&mut self) {
+        self.processed += 1;
+    }
+
+    /// True while a due handler must wait for already-buffered ACP messages. `due` is the set of requests due now.
+    fn hold_requests(
+        &mut self,
+        now: std::time::Instant,
+        due: &[dispatch::StaleRequestKey],
+        buffered: usize,
+    ) -> bool {
+        self.armed.retain(|k, _| due.contains(k));
+        let processed = self.processed;
+        let mut held = false;
+        for k in due {
+            let (_, boundary) = *self
+                .armed
+                .entry(k.clone())
+                .or_insert((now, processed + buffered as u64));
+            held |= buffered > 0 && processed < boundary;
+        }
+        held
+    }
+
+    /// Aggregate-boolean form kept for the unit tests: one anonymous request.
+    #[cfg(test)]
+    fn hold(&mut self, now: std::time::Instant, due: bool, buffered: usize) -> bool {
+        let key = dispatch::StaleRequestKey {
+            kind: dispatch::StaleKind::TurnEnd,
+            agent: 0,
+            subagent: None,
+            at: self.anon_at(),
+        };
+        let keys = if due { vec![key] } else { Vec::new() };
+        self.hold_requests(now, &keys, buffered)
+    }
+
+    #[cfg(test)]
+    fn anon_at(&self) -> std::time::Instant {
+        use std::sync::OnceLock;
+        static AT: OnceLock<std::time::Instant> = OnceLock::new();
+        *AT.get_or_init(std::time::Instant::now)
+    }
+
+    /// True when a captured boundary is still owed, messages are buffered, and `CAP` has passed since capture: ACP
+    /// must then be served ahead of input until `processed >= boundary` (a finite count fixed at capture).
+    fn escalated(&self, now: std::time::Instant, buffered: usize) -> bool {
+        buffered > 0
+            && self.armed.values().any(|&(since, boundary)| {
+                self.processed < boundary && now.saturating_duration_since(since) >= Self::CAP
+            })
+    }
+}
+
+/// Reverse-fairness bound (P196 round 3, Astra r2 MEDIUM): after `MAX` consecutive timer wins the next pass disables
+/// the timer arms so ACP, task results and input are polled first. A lowest-priority always-ready arm in `run()` then
+/// restores the timers if nothing else was ready, so a due timer is delayed by at most one pass.
+#[derive(Debug, Default)]
+struct TimerStreak {
+    wins: u8,
+}
+
+impl TimerStreak {
+    const MAX: u8 = 8;
+
+    /// Record how the previous pass ended.
+    fn note(&mut self, timer_won: bool) {
+        self.wins = if timer_won { self.wins.saturating_add(1) } else { 0 };
+    }
+
+    fn timers_enabled(&self) -> bool {
+        self.wins < Self::MAX
+    }
+}
+
+/// Wheel-stream fairness (P196 round 3, Astra r2 MEDIUM): continuous input must not keep the scroll clock off forever.
+/// After one input batch has been processed the scroll clock may advance even if more input is already queued.
+#[derive(Debug, Default)]
+struct ScrollGate {
+    batches: u8,
+}
+
+impl ScrollGate {
+    fn note_input_batch(&mut self) {
+        self.batches = self.batches.saturating_add(1);
+    }
+
+    fn note_scroll_advanced(&mut self) {
+        self.batches = 0;
+    }
+
+    /// May the scroll clock run now? True when no input waits, or a batch has been processed since it last ran.
+    fn scroll_ok(&mut self, input_empty: bool) -> bool {
+        if input_empty {
+            self.batches = 0;
+        }
+        input_empty || self.batches >= 1
+    }
+}
+
+/// Whether a cancel-resend or a turn-end reconcile is due: the two handlers that read state a buffered ACP message
+/// (a `prompt_complete`) would change, so both go through the [`StaleStateFence`].
+pub(crate) fn stale_state_due(app: &AppView) -> bool {
+    dispatch::cancel_resend_due(app) || dispatch::turn_end_reconcile_due(app)
+}
+
+/// Smallest animation tick interval: `1000 / fps` is 0 ms for fps > 1000, which would make the timer always due.
+const MIN_TICK_INTERVAL: Duration = Duration::from_millis(1);
+
+/// What the contested head of the main `select!` woke on.
+enum PriorityWake<T> {
+    ScrollTick,
+    DeferredDraw,
+    AnimationTick,
+    ResizeDebounce,
+    StatusLineRefresh,
+    Acp(Option<T>),
+}
+
+/// Which contested arms of the main select may fire this pass.
+#[derive(Clone, Copy)]
+struct WakeGates {
+    /// No terminal input is queued (gates resize and ACP).
+    input_empty: bool,
+    /// The scroll clock may run (see [`ScrollGate`]).
+    scroll_ok: bool,
+    /// The timer arms may run (see [`TimerStreak`]).
+    timers: bool,
+    /// The stale-state fence escalated: ACP is served even though input is queued (see [`StaleStateFence`]).
+    acp_escalated: bool,
+}
+
+/// The contested arms of the main `biased` select, in priority order: scroll clock (input-gated), deferred draw,
+/// animation tick (lost-cancel / lost-response recovery), resize debounce (input-gated), status-line refresh, then ACP
+/// (input-gated). Timers precede ACP so an ACP firehose cannot starve them. Mechanically extracted from `run()` so the
+/// ordering is testable; the arms' bodies stay in `run()`.
+async fn priority_wake_with<T>(
+    scroll_tick: impl std::future::Future<Output = ()>,
+    deferred_draw: impl std::future::Future<Output = ()>,
+    animation_tick: impl std::future::Future<Output = ()>,
+    resize_debounce: impl std::future::Future<Output = ()>,
+    status_line_refresh: impl std::future::Future<Output = ()>,
+    gates: WakeGates,
+    acp: impl std::future::Future<Output = Option<T>>,
+) -> PriorityWake<T> {
+    tokio::select! {
+        biased;
+        _ = scroll_tick, if gates.scroll_ok && gates.timers => PriorityWake::ScrollTick,
+        _ = deferred_draw, if gates.timers => PriorityWake::DeferredDraw,
+        _ = animation_tick, if gates.timers => PriorityWake::AnimationTick,
+        _ = resize_debounce, if gates.input_empty && gates.timers => PriorityWake::ResizeDebounce,
+        _ = status_line_refresh, if gates.timers => PriorityWake::StatusLineRefresh,
+        msg = acp, if gates.input_empty || gates.acp_escalated => PriorityWake::Acp(msg),
+        // Every branch is disabled exactly when `!timers && !input_empty && !acp_escalated`. Without this arm the
+        // select panics; staying pending hands the pass to the outer input arm or the timer-restore arm.
+        else => std::future::pending::<PriorityWake<T>>().await,
+    }
+}
+
+/// [`priority_wake_with`] with the original single input gate and the timers enabled (test convenience).
+#[cfg(test)]
+async fn priority_wake<T>(
+    scroll_tick: impl std::future::Future<Output = ()>,
+    deferred_draw: impl std::future::Future<Output = ()>,
+    animation_tick: impl std::future::Future<Output = ()>,
+    resize_debounce: impl std::future::Future<Output = ()>,
+    status_line_refresh: impl std::future::Future<Output = ()>,
+    input_empty: bool,
+    acp: impl std::future::Future<Output = Option<T>>,
+) -> PriorityWake<T> {
+    priority_wake_with(
+        scroll_tick,
+        deferred_draw,
+        animation_tick,
+        resize_debounce,
+        status_line_refresh,
+        WakeGates { input_empty, scroll_ok: input_empty, timers: true, acp_escalated: false },
+        acp,
+    )
+    .await
+}
+
 /// Run the main event loop until quit.
 ///
 /// Returns a [`RunResult`] with optional exit info (for the resume hint) and a flag for restarting the binary to pick up a downloaded update.
@@ -1918,6 +2124,13 @@ pub(crate) async fn run(
     // Animation tick: only scheduled when there are running entries.
     let mut tick_interval = tick_interval;
     let mut animation_tick_at: Option<Instant> = None;
+    // P196: see `StaleStateFence`; `acp_first_pass` makes the next pass skip the animation arm so the ACP arm runs first.
+    let mut stale_fence = StaleStateFence::default();
+    let mut acp_first_pass = false;
+    // P196 round 3: `TimerStreak` (reverse fairness) and `ScrollGate` (wheel stream under continuous input).
+    let mut timer_streak = TimerStreak::default();
+    let mut timer_won = false;
+    let mut scroll_gate = ScrollGate::default();
 
     // Whether the extra Kitty keyboard layer (WASD release events) is currently pushed for the /gboom game
     // Synced to `gboom_active` each iteration so it is popped on every close path
@@ -2228,9 +2441,18 @@ pub(crate) async fn run(
     let loop_entry = std::time::Instant::now();
 
     loop {
+        timer_streak.note(std::mem::take(&mut timer_won));
+        let timers_enabled = timer_streak.timers_enabled();
+        let input_empty_now = input_rx.is_empty();
+        let scroll_ok = scroll_gate.scroll_ok(input_empty_now);
         if !session_load_barrier.is_empty() && acp_peek.is_none() {
             acp_peek = acp_rx.try_recv().ok();
         }
+        // P196 round 4: past the cap the fence serves ACP ahead of input until its captured boundary is reached.
+        let acp_escalated = stale_fence.escalated(
+            std::time::Instant::now(),
+            acp_rx.len() + usize::from(acp_peek.is_some()),
+        );
         let ready_loads = session_load_barrier.take_ready(
             |id| {
                 app.agents
@@ -2390,7 +2612,11 @@ pub(crate) async fn run(
         }
 
         // Future that sleeps until the next animation tick, or waits forever if none.
+        let hold_pass = std::mem::take(&mut acp_first_pass);
         let animation_tick = async {
+            if hold_pass {
+                std::future::pending::<()>().await;
+            }
             match animation_tick_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
@@ -2548,62 +2774,161 @@ pub(crate) async fn run(
                 presenter.acknowledge(sequence);
             }
 
-            // Biased order: cancellation/quit, writer acks/failures, ACP, task/progress results, updates, input, and render/poll timers
-            // All of them precede the deliberately-last voice STT arm (see its note below)
-
-            // Gated on empty terminal input
-            // A token firehose keeps this arm ready at every biased poll
-            // Without the gate, buffered wheel/key events sat in input_rx until the stream went quiet
-            // Safe: whenever the gate disables this arm, the input arm below is immediately ready
-            // It drains its whole backlog per iteration, so ACP resumes on the next loop (no reverse starve)
-            // Gating, not reordering: moving input above ACP would flip the starvation direction (streaming redraws starving behind held keys)
-            // Cancel/quit must stay above the firehose regardless
-            msg = async {
-                match acp_peek.take() {
-                    Some(msg) => Some(msg),
-                    None => acp_rx.recv().await,
-                }
-            }, if input_rx.is_empty() => {
-                let Some(msg) = msg else { break };
-                let mut state_changed = acp_handler::handle(msg, &mut app);
-                if !app.pending_effects.is_empty() {
-                    let effs = std::mem::take(&mut app.pending_effects);
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                        break;
+            // P196: the contested arms live in `priority_wake`: render/recovery timers first, then ACP.
+            // Its internal biased order is the former arm order, so this stays a single arm at the same position.
+            wake = priority_wake_with(
+                scroll_tick,
+                deferred_draw,
+                animation_tick,
+                resize_debounce,
+                status_line_refresh,
+                WakeGates { input_empty: input_empty_now, scroll_ok, timers: timers_enabled, acp_escalated },
+                async {
+                    match acp_peek.take() {
+                        Some(msg) => Some(msg),
+                        None => acp_rx.recv().await,
                     }
-                }
-
-                // Drain immediately-ready ACP messages before drawing.
-                // During streaming, dozens of messages queue per frame
-                // Batching avoids per-message draws that starve terminal input
-                // Bounded, and cut short the moment input arrives, so wheel/key events wait at most one batch, never a whole token flood
-                // Starts at 1: the recv() above consumed this batch's first message.
-                let mut drained = 1;
-                while drained < ACP_DRAIN_BATCH_MAX && input_rx.is_empty() {
-                    let Ok(msg) = acp_rx.try_recv() else { break };
-                    drained += 1;
-                    state_changed |= acp_handler::handle(msg, &mut app);
-                    if !app.pending_effects.is_empty() {
-                        let effs = std::mem::take(&mut app.pending_effects);
-                        if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                            return Ok(finish_run_with_stall_flush(&mut app, &mut stall_rollup));
+                },
+            ) => {
+                timer_won = !matches!(wake, PriorityWake::Acp(_));
+                match wake {
+                    // P196: these self-limiting timers sit above ACP. During heavy streaming `acp_rx` is ready on
+                    // nearly every `biased` pass and starved everything below it, including lost-cancel and
+                    // lost-response recovery (animation_tick). They never read `acp_rx`/`acp_peek`.
+                    // Gated: an overdue gap tick must not end the scroll stream while a wheel event waits
+                    // Scroll clock: flush residual wheel/trackpad lines and detect the 80ms stream gap
+                    // Runs on the 16ms redraw cadence, not the slower animation fps
+                    // The next deadline is re-derived at loop top from the post-tick scroll state
+                    PriorityWake::ScrollTick => {
+                        scroll_gate.note_scroll_advanced();
+                        if app.tick_scroll() {
+                            presenter.request(false);
+                        }
+                        // Scroll dispatch can start work that animates (e.g. viewport state), so keep the animation arm in sync too.
+                        schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                    }
+                    // Deferred draw: fires when an ACP-triggered draw was throttled.
+                    PriorityWake::DeferredDraw => {
+                        presenter.draw_scheduled_at = None;
+                        presenter.request(false);
+                    }
+                    PriorityWake::AnimationTick => {
+                        animation_tick_at = None;
+                        // Astra r2 HIGH: a due cancel-resend or turn-end reconcile waits until the ACP messages that were
+                        // already buffered when it became due have been processed (`StaleStateFence`: progress, not attempts).
+                        let buffered = acp_rx.len() + usize::from(acp_peek.is_some());
+                        let stale_due = stale_state_due(&app);
+                        let due_keys = if stale_due { dispatch::stale_request_keys(&app) } else { Vec::new() };
+                        if stale_fence.hold_requests(std::time::Instant::now(), &due_keys, buffered) {
+                            animation_tick_at = Some(Instant::now());
+                            acp_first_pass = true;
+                        } else {
+                            // Lost-cancel recovery: re-send cancels for panes still cancelling past the grace (`dispatch::reconcile_overdue_cancels`)
+                            // `needs_animation()` keeps ticks alive while either recovery is armed, so these checks cannot be starved
+                            if let Some(resends) = dispatch::reconcile_overdue_cancels(&mut app)
+                                && process_effects(resends, &mut tasks, &mut app, &progress_tx)
+                            {
+                                break;
+                            }
+                            // Lost-response recovery (see `dispatch::reconcile_overdue_turn_ends`)
+                            // Finish any turn whose `prompt_complete` broadcast outlived the grace window without its `session/prompt` RPC response arriving
+                            let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
+                            if let Some(effs) = reconciled {
+                                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                                    break;
+                                }
+                                presenter.request(false);
+                            } else {
+                                // Wheel stream under continuous input: one processed batch lets the scroll clock advance.
+                                let input_pending = !input_empty_now && scroll_gate.batches == 0;
+                                if !input_pending {
+                                    scroll_gate.note_scroll_advanced();
+                                }
+                                if app.tick_with_input(input_pending) {
+                                    presenter.request(false);
+                                }
+                            }
+                            // Keep ticking as long as there are running animations or pending actions waiting to expire
+                            schedule_tick(&mut animation_tick_at, &app, tick_interval);
                         }
                     }
-                }
-                super::workspace_sync::request(&mut app);
+                    // Gated: an overdue deadline must not paint an intermediate size while a resize event waits
+                    PriorityWake::ResizeDebounce => {
+                        resize_debounce_at = None;
+                        presenter.request(false);
+                        schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                    }
+                    PriorityWake::StatusLineRefresh => {
+                        status_line_refresh_at = None;
+                        // Lands in `pending_effects`, drained below like every arm's
+                        app.note_status_line_refresh_due();
+                        // A run is owed; `status_line_tick_demand` owns the routing
+                        schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                        if app.status_line.take_changed() {
+                            presenter.request(false);
+                        }
+                        // Re-armed at fire time, so the cadence is independent of how long a run takes
+                        // The owed-run rule above is what keeps a slow script from stacking runs behind the timer
+                        if let Some(interval) = status_line_refresh_interval {
+                            status_line_refresh_at = Some(Instant::now() + interval);
+                        }
+                    }
+                    // Biased order: cancellation/quit, writer acks/failures, render/recovery timers (above), ACP, task/progress results, updates, input, and slow polls
+                    // All of them precede the deliberately-last voice STT arm (see its note below)
+                    // Gated on empty terminal input
+                    // A token firehose keeps this arm ready at every biased poll
+                    // Without the gate, buffered wheel/key events sat in input_rx until the stream went quiet
+                    // Safe: whenever the gate disables this arm, the input arm below is immediately ready
+                    // It drains its whole backlog per iteration, so ACP resumes on the next loop (no reverse starve)
+                    // Gating, not reordering: moving input above ACP would flip the starvation direction (streaming redraws starving behind held keys)
+                    // Cancel/quit must stay above the firehose regardless
+                    PriorityWake::Acp(msg) => {
+                        let Some(msg) = msg else { break };
+                        stale_fence.note_processed();
+                        let mut state_changed = acp_handler::handle(msg, &mut app);
+                        if !app.pending_effects.is_empty() {
+                            let effs = std::mem::take(&mut app.pending_effects);
+                            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                                break;
+                            }
+                        }
 
-                // A snapshot inside the refresh floor changes nothing but still owes a run, and the arm below arms the tick only on a state change
-                if app.status_line.force_pending() {
-                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                }
+                        // Drain immediately-ready ACP messages before drawing.
+                        // During streaming, dozens of messages queue per frame
+                        // Batching avoids per-message draws that starve terminal input
+                        // Bounded, and cut short the moment input arrives, so wheel/key events wait at most one batch, never a whole token flood
+                        // Starts at 1: the recv() above consumed this batch's first message.
+                        let mut drained = 1;
+                        while drained < ACP_DRAIN_BATCH_MAX
+                            && (input_rx.is_empty() || stale_fence.escalated(std::time::Instant::now(), acp_rx.len()))
+                        {
+                            let Ok(msg) = acp_rx.try_recv() else { break };
+                            drained += 1;
+                            stale_fence.note_processed();
+                            state_changed |= acp_handler::handle(msg, &mut app);
+                            if !app.pending_effects.is_empty() {
+                                let effs = std::mem::take(&mut app.pending_effects);
+                                if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                                    return Ok(finish_run_with_stall_flush(&mut app, &mut stall_rollup));
+                                }
+                            }
+                        }
+                        super::workspace_sync::request(&mut app);
 
-                if state_changed {
-                    schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                    resize_debounce_at = None;
-                    // Cap paint rate so terminal input isn't starved during heavy ACP streaming
-                    let now = Instant::now();
-                    if presenter.request_throttled(now, min_draw_interval) {
-                        app.update_notifications();
+                        // A snapshot inside the refresh floor changes nothing but still owes a run, and the arm below arms the tick only on a state change
+                        if app.status_line.force_pending() {
+                            schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                        }
+
+                        if state_changed {
+                            schedule_tick(&mut animation_tick_at, &app, tick_interval);
+                            resize_debounce_at = None;
+                            // Cap paint rate so terminal input isn't starved during heavy ACP streaming
+                            let now = Instant::now();
+                            if presenter.request_throttled(now, min_draw_interval) {
+                                app.update_notifications();
+                            }
+                        }
                     }
                 }
             }
@@ -2699,6 +3024,7 @@ pub(crate) async fn run(
             maybe_ev = input_rx.recv() => {
                 // `None` means the dedicated terminal reader thread has ended.
                 let Some(ev) = maybe_ev else { break };
+                scroll_gate.note_input_batch();
                 // P152: a reconnect that already started holds this input's sends (the status arm may still be queued).
                 if let Some(rx) = leader_status_rx.as_ref() {
                     let status = rx.borrow().clone();
@@ -2766,57 +3092,9 @@ pub(crate) async fn run(
 
             _ = stall_flush => {}
 
-            // Debounced resize: draw once the terminal size has stabilized.
-            _ = resize_debounce => {
-                resize_debounce_at = None;
-                presenter.request(false);
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
-            }
-
-            // Deferred draw: fires when an ACP-triggered draw was throttled.
-            _ = deferred_draw => {
-                presenter.draw_scheduled_at = None;
-                presenter.request(false);
-            }
-
             // Only opens the gate; the next loop-top attempt owns the blocking handoff so no select arm performs it inline
             _ = suspend_retry => {
                 suspend_retry_after = None;
-            }
-
-            // Scroll clock: flush residual wheel/trackpad lines and detect the 80ms stream gap
-            // Runs on the 16ms redraw cadence, not the slower animation fps
-            // The next deadline is re-derived at loop top from the post-tick scroll state
-            _ = scroll_tick => {
-                if app.tick_scroll() {
-                    presenter.request(false);
-                }
-                // Scroll dispatch can start work that animates (e.g. viewport state), so keep the animation arm in sync too.
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
-            }
-
-            _ = animation_tick => {
-                animation_tick_at = None;
-                // Lost-cancel recovery: re-send cancels for panes still cancelling past the grace (`dispatch::reconcile_overdue_cancels`)
-                // `needs_animation()` keeps ticks alive while either recovery is armed, so these checks cannot be starved
-                if let Some(resends) = dispatch::reconcile_overdue_cancels(&mut app)
-                    && process_effects(resends, &mut tasks, &mut app, &progress_tx)
-                {
-                    break;
-                }
-                // Lost-response recovery (see `dispatch::reconcile_overdue_turn_ends`)
-                // Finish any turn whose `prompt_complete` broadcast outlived the grace window without its `session/prompt` RPC response arriving
-                let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
-                if let Some(effs) = reconciled {
-                    if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
-                        break;
-                    }
-                    presenter.request(false);
-                } else if app.tick() {
-                    presenter.request(false);
-                }
-                // Keep ticking as long as there are running animations or pending actions waiting to expire
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
             }
 
             _ = billing_poll => {
@@ -2844,22 +3122,6 @@ pub(crate) async fn run(
                 }
                 if !app.has_access() {
                     gate_poll_at = Some(Instant::now() + GATE_POLL_INTERVAL);
-                }
-            }
-
-            _ = status_line_refresh => {
-                status_line_refresh_at = None;
-                // Lands in `pending_effects`, drained below like every arm's
-                app.note_status_line_refresh_due();
-                // A run is owed; `status_line_tick_demand` owns the routing
-                schedule_tick(&mut animation_tick_at, &app, tick_interval);
-                if app.status_line.take_changed() {
-                    presenter.request(false);
-                }
-                // Re-armed at fire time, so the cadence is independent of how long a run takes
-                // The owed-run rule above is what keeps a slow script from stacking runs behind the timer
-                if let Some(interval) = status_line_refresh_interval {
-                    status_line_refresh_at = Some(Instant::now() + interval);
                 }
             }
 
@@ -3267,6 +3529,10 @@ pub(crate) async fn run(
                 presenter.request(false);
             }
 
+            // P196 round 3: lowest-priority always-ready arm, enabled only on the pass after `TimerStreak::MAX` timer
+            // wins. Everything above it (ACP, tasks, input) had its chance; if none was ready the loop restarts with the timers back on.
+            _ = std::future::ready(()), if !timers_enabled => {}
+
             // Voice STT: DELIBERATELY THE LAST (lowest-priority) arm
             // In a biased select, an arm that is ready on most iterations masks every arm below it
             // A hot mic (toggle capture stays open across pauses) streams interim transcripts at ~5-20 Hz
@@ -3480,7 +3746,7 @@ pub(crate) fn schedule_tick(tick_at: &mut Option<Instant>, app: &AppView, interv
                 interval.max(crate::app::app_view::SLOW_TICK_INTERVAL)
             }
         };
-        *tick_at = Some(Instant::now() + interval);
+        *tick_at = Some(Instant::now() + interval.max(MIN_TICK_INTERVAL));
     }
 }
 
@@ -4919,6 +5185,7 @@ mod tests {
             session_id: "other".into(),
             session_cwd: None,
             chat_kind: false,
+            attempt: 0,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&other_load)),
@@ -4950,6 +5217,7 @@ mod tests {
             session_id: "child".into(),
             session_cwd: None,
             chat_kind: false,
+            attempt: 0,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&load)),
@@ -6499,4 +6767,742 @@ mod tests {
             None
         );
     }
-}
+
+    // ── P196: recovery timers sit above the ACP arm in the biased select ──
+
+    /// Byte offset of `needle` (built from parts so this test's own text never matches) inside `hay`.
+    fn at(hay: &str, needle: &str) -> usize {
+        hay.find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` not found"))
+    }
+
+    fn priority_wake_src() -> &'static str {
+        let src = include_str!("event_loop.rs");
+        let from = at(src, &format!("async fn {}<T>(", "priority_wake_with"));
+        let to = from + at(&src[from..], "\n}\n");
+        &src[from..to]
+    }
+
+    /// Second guard (source order): inside `priority_wake` every timer arm precedes the ACP arm, the input gates
+    /// are present, and in `run()` the cancel/quit/writer arms stay above the `priority_wake` arm, which stays above the rest.
+    #[test]
+    fn source_order_timers_then_acp_and_cancel_quit_first() {
+        let f = priority_wake_src();
+        let acp = at(f, "msg = acp");
+        for name in [
+            "_ = scroll_tick",
+            "_ = deferred_draw",
+            "_ = animation_tick",
+            "_ = resize_debounce",
+            "_ = status_line_refresh",
+        ] {
+            assert!(at(f, name) < acp, "timer arm `{name}` sits below the ACP arm");
+        }
+        assert!(f.contains("_ = scroll_tick, if gates.scroll_ok"), "scroll gate lost");
+        assert!(f.contains("_ = resize_debounce, if gates.input_empty"), "resize gate lost");
+        assert!(f.contains("msg = acp, if gates.input_empty"), "ACP gate lost");
+        let src = include_str!("event_loop.rs");
+        let sel = at(src, &format!("tokio::select! {{\n{}biased;", " ".repeat(12)));
+        let region = &src[sel..];
+        let order = [
+            at(region, "_ = connection_cancel"),
+            at(region, "_ = quit_notify"),
+            at(region, "writer_event = writer_event_rx"),
+            at(region, "wake = priority_wake_with("),
+            at(region, "Some(join_result) = tasks.join_next()"),
+            at(region, "maybe_ev = input_rx.recv()"),
+        ];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "order: {order:?}");
+    }
+
+    /// The timer arm bodies in `run()` must not touch the ACP channel or its peek slot.
+    #[test]
+    fn timer_arm_bodies_never_touch_the_acp_channel() {
+        let src = include_str!("event_loop.rs");
+        let sel = at(src, &format!("tokio::select! {{\n{}biased;", " ".repeat(12)));
+        let region = &src[sel..];
+        let from = at(region, "PriorityWake::ScrollTick =>");
+        let to = at(region, "PriorityWake::Acp(msg) =>");
+        assert!(from < to);
+        let moved = &region[from..to];
+        // Read-only peeks (`is_empty`, `is_some`) are the ACP-first hold's; consuming the channel is what must not happen.
+        for forbidden in ["acp_rx.recv", "acp_rx.try_recv", "acp_peek.take", "acp_peek ="] {
+            assert!(!moved.contains(forbidden), "timer arms consume ACP: {forbidden}");
+        }
+    }
+
+    use std::future::{pending, ready};
+
+    /// A due-or-never timer future.
+    async fn timer(due: bool) {
+        if !due {
+            pending::<()>().await;
+        }
+    }
+
+    /// Behavioural: with the ACP future ready on every poll (a flood), a due recovery timer is returned on the very
+    /// next call, not after the flood. ACP messages come back one per call, in order, with none lost or repeated.
+    #[tokio::test]
+    async fn acp_flood_does_not_delay_a_due_recovery_timer_and_keeps_order() {
+        const N: u32 = 2000;
+        const TIMER_DUE_AT: u32 = 700;
+        let mut next = 0u32;
+        let mut seen = Vec::new();
+        let mut fired_at = None;
+        let mut calls = 0u32;
+        while next < N {
+            calls += 1;
+            let due = calls == TIMER_DUE_AT;
+            let acp = async {
+                let m = next;
+                Some(m)
+            };
+            match priority_wake(
+                pending::<()>(),
+                pending::<()>(),
+                timer(due),
+                pending::<()>(),
+                pending::<()>(),
+                true,
+                acp,
+            )
+            .await
+            {
+                PriorityWake::AnimationTick => {
+                    assert!(fired_at.is_none());
+                    fired_at = Some(calls);
+                }
+                PriorityWake::Acp(Some(m)) => {
+                    seen.push(m);
+                    next += 1;
+                }
+                _ => panic!("unexpected wake"),
+            }
+        }
+        assert_eq!(fired_at, Some(TIMER_DUE_AT), "due timer was delayed by the flood");
+        assert_eq!(seen, (0..N).collect::<Vec<_>>(), "ACP messages lost or reordered");
+    }
+
+    /// Behavioural, real channel: an `acp_peek` slot plus an mpsc receiver, the exact ACP future shape `run()` builds.
+    /// A due timer wins without consuming the peeked message; the message is then delivered first, in order.
+    #[tokio::test]
+    async fn timer_wake_leaves_peeked_and_queued_acp_messages_untouched() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        for i in 1..=5 {
+            tx.send(i).unwrap();
+        }
+        let mut peek: Option<u32> = Some(0);
+        let wake = priority_wake(
+            pending::<()>(),
+            pending::<()>(),
+            timer(true),
+            pending::<()>(),
+            pending::<()>(),
+            true,
+            async {
+                match peek.take() {
+                    Some(m) => Some(m),
+                    None => rx.recv().await,
+                }
+            },
+        )
+        .await;
+        assert!(matches!(wake, PriorityWake::AnimationTick));
+        assert_eq!(peek, Some(0), "timer wake consumed the peeked message");
+        drop(tx);
+        let mut seen = Vec::new();
+        loop {
+            let w = priority_wake(
+                pending::<()>(),
+                pending::<()>(),
+                pending::<()>(),
+                pending::<()>(),
+                pending::<()>(),
+                true,
+                async {
+                    match peek.take() {
+                        Some(m) => Some(m),
+                        None => rx.recv().await,
+                    }
+                },
+            )
+            .await;
+            match w {
+                PriorityWake::Acp(Some(m)) => seen.push(m),
+                PriorityWake::Acp(None) => break,
+                _ => panic!("unexpected wake"),
+            }
+        }
+        assert_eq!(seen, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    /// Input-gated arms must not fire (and ACP must not run) while input is waiting.
+    #[tokio::test]
+    async fn gated_arms_stay_quiet_while_input_waits() {
+        let w = priority_wake(
+            timer(true),
+            pending::<()>(),
+            pending::<()>(),
+            timer(true),
+            pending::<()>(),
+            false,
+            ready(Some(1u32)),
+        );
+        let r = tokio::time::timeout(std::time::Duration::from_millis(50), w).await;
+        assert!(r.is_err(), "a gated arm fired while input was waiting");
+    }
+
+    // ── P196 round 3 tests (the round-2 `AcpFirstHold` count tests are superseded by the fence tests below) ──
+
+    /// An overdue animation tick must not finalize a scroll stream while wheel events wait in the input queue.
+    #[test]
+    fn animation_tick_leaves_the_scroll_stream_alone_while_input_waits() {
+        use crate::input::mouse::ScrollDirection;
+        let past = std::time::Instant::now() - std::time::Duration::from_millis(500);
+        let mut waiting = crate::app::app_view::tests::test_app();
+        let cfg = waiting.scroll_config;
+        waiting
+            .scroll_state
+            .on_scroll_event_at(past, ScrollDirection::Up, cfg);
+        assert!(waiting.scroll_state.has_active_stream());
+        for _ in 0..40 {
+            waiting.tick_with_input(true);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            waiting.scroll_state.has_active_stream(),
+            "tick() finalized the scroll stream while input was waiting"
+        );
+
+        // Control: with no input waiting the same tick does finalize it (stream gap long past).
+        let mut quiet = crate::app::app_view::tests::test_app();
+        let cfg = quiet.scroll_config;
+        quiet
+            .scroll_state
+            .on_scroll_event_at(past, ScrollDirection::Up, cfg);
+        for _ in 0..40 {
+            quiet.tick_with_input(false);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !quiet.scroll_state.has_active_stream(),
+            "control: an unhindered tick must finalize the stale stream"
+        );
+    }
+
+    /// The animation arm in `run()` asks the fence before it re-sends a cancel or reconciles a turn end.
+    #[test]
+    fn animation_arm_consults_the_fence_before_the_stale_state_handlers() {
+        let src = include_str!("event_loop.rs");
+        let arm = at(src, "PriorityWake::AnimationTick =>");
+        let body = &src[arm..];
+        let hold = at(body, "stale_fence.hold_requests(");
+        let resend = at(body, "dispatch::reconcile_overdue_cancels(");
+        let turn_end = at(body, "dispatch::reconcile_overdue_turn_ends(");
+        assert!(hold < resend && hold < turn_end, "the fence must run first");
+        assert!(body[..hold].contains("stale_state_due(&app)"), "turn-end is not fenced");
+        assert!(
+            body[hold..resend].contains("acp_first_pass = true"),
+            "a hold must arm the ACP-first pass"
+        );
+    }
+
+    use std::time::{Duration as D, Instant as I};
+
+    /// The restore arm must stay in the main select, after the ACP/input arms and ahead of the voice arm, enabled only
+    /// when the timers were switched off for the pass: without it a pass with every timer disabled and nothing else
+    /// ready would sleep until some unrelated event (a hang). `run()` itself cannot be driven here.
+    #[test]
+    fn timer_restore_arm_is_last_resort_and_only_when_timers_are_off() {
+        let full = include_str!("event_loop.rs");
+        let src = &full[..full.rfind("#[cfg(test)]\nmod tests").unwrap()];
+        let arm = at(src, "_ = std::future::ready(()), if !timers_enabled => {}");
+        assert_eq!(src.matches("if !timers_enabled").count(), 1);
+        let input = at(src, "scroll_gate.note_input_batch();");
+        let voice = at(src, "Voice STT: DELIBERATELY THE LAST");
+        assert!(input < arm && arm < voice, "restore arm is out of place");
+    }
+
+    /// Real-channel simulation of the production loop for the animation arm and the ACP arm: `priority_wake_with`,
+    /// the production peek-then-recv future, the 32-message drain batch, `StaleStateFence` and the ACP-first pass.
+    /// `divert(pass)` says which non-ACP event wins that pass instead (0 none, 1 input, 2 deferred draw).
+    /// Returns (resend sent, completion processed first, pass index, simulated elapsed).
+    async fn sim_resend(
+        backlog: usize,
+        with_completion: bool,
+        divert: impl Fn(usize) -> u8,
+        max_passes: usize,
+    ) -> (bool, bool, usize, D) {
+        const COMPLETE: u32 = u32::MAX;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        for i in 0..backlog as u32 {
+            tx.send(i).unwrap();
+        }
+        if with_completion {
+            tx.send(COMPLETE).unwrap();
+        }
+        let base = I::now();
+        let mut fence = StaleStateFence::default();
+        let mut peek: Option<u32> = None;
+        let mut hold_pass = false;
+        let mut completed = false;
+        for pass in 0..max_passes {
+            let now = base + D::from_millis(10) * pass as u32;
+            let d = divert(pass);
+            let skip = std::mem::take(&mut hold_pass);
+            let wake = if d == 1 {
+                // Input won the select: the gated ACP and the animation arm (held) did not run.
+                if !skip {
+                    PriorityWake::AnimationTick
+                } else {
+                    continue;
+                }
+            } else {
+                priority_wake_with(
+                    pending::<()>(),
+                    timer(d == 2),
+                    timer(!skip),
+                    pending::<()>(),
+                    pending::<()>(),
+                    WakeGates { input_empty: true, scroll_ok: true, timers: true, acp_escalated: false },
+                    async {
+                        match peek.take() {
+                            Some(m) => Some(m),
+                            None => rx.recv().await,
+                        }
+                    },
+                )
+                .await
+            };
+            match wake {
+                PriorityWake::DeferredDraw => {}
+                PriorityWake::AnimationTick => {
+                    let buffered = rx.len() + usize::from(peek.is_some());
+                    // The resend stays due until the completion has been processed (it confirms the cancel).
+                    let due = !completed;
+                    if fence.hold(now, due, buffered) {
+                        hold_pass = true;
+                    } else if due {
+                        return (true, completed, pass, now - base);
+                    }
+                }
+                PriorityWake::Acp(Some(m)) => {
+                    fence.note_processed();
+                    completed |= m == COMPLETE;
+                    let mut drained = 1;
+                    while drained < 32 {
+                        let Ok(m) = rx.try_recv() else { break };
+                        drained += 1;
+                        fence.note_processed();
+                        completed |= m == COMPLETE;
+                    }
+                }
+                _ => panic!("unexpected wake"),
+            }
+            if completed && rx.is_empty() && peek.is_none() {
+                return (false, true, pass, now - base);
+            }
+        }
+        (false, completed, max_passes, D::ZERO)
+    }
+
+    /// (a) A 300-message backlog then `prompt_complete`: no resend before the completion is processed.
+    #[tokio::test]
+    async fn resend_waits_for_a_completion_behind_a_300_message_backlog() {
+        let (resent, completed, _, _) = sim_resend(300, true, |_| 0, 500).await;
+        assert!(!resent, "the resend fired although the completion was still buffered");
+        assert!(completed);
+    }
+
+    /// (b) Passes won by input or another timer do not use up any budget: still no resend before the completion.
+    #[tokio::test]
+    async fn resend_waits_even_when_other_events_win_many_passes() {
+        let (resent, completed, _, _) =
+            sim_resend(300, true, |p| if p < 60 { [1, 2][p % 2] } else { 0 }, 800).await;
+        assert!(!resent, "diverted passes exhausted the hold");
+        assert!(completed);
+    }
+
+    /// (c) Round 4: the ACP arm never gets a pass (stuck) and no completion arrives: the cap does NOT release the
+    /// resend (a timeout cannot prove that a buffered completion is absent); escalation, tested below, is what
+    /// guarantees progress. Before round 4 this test expected the resend at the cap.
+    #[tokio::test]
+    async fn the_cap_alone_never_releases_the_resend() {
+        let (resent, completed, _, _) = sim_resend(300, false, |_| 1, 1000).await;
+        assert!(!resent && !completed, "the cap released the stale handler");
+    }
+
+    /// (c') No completion in the backlog: the resend goes out as soon as the captured backlog is processed.
+    #[tokio::test]
+    async fn resend_goes_out_once_the_captured_backlog_is_processed() {
+        let (resent, completed, _, elapsed) = sim_resend(300, false, |_| 0, 1000).await;
+        assert!(resent && !completed);
+        assert!(elapsed < StaleStateFence::CAP, "waited for the cap instead of the backlog: {elapsed:?}");
+    }
+
+    #[test]
+    fn fence_boundary_ignores_messages_that_arrive_after_it_was_captured() {
+        let t = I::now();
+        let mut f = StaleStateFence::default();
+        assert!(f.hold(t, true, 3), "3 buffered at capture");
+        for _ in 0..3 {
+            f.note_processed();
+        }
+        // New traffic keeps arriving, but the 3 captured messages are done.
+        assert!(!f.hold(t + D::from_millis(10), true, 40));
+        // Nothing due: the fence resets and re-captures next time.
+        assert!(!f.hold(t + D::from_millis(20), false, 40));
+        assert!(f.hold(t + D::from_millis(30), true, 5));
+    }
+
+    /// 3. An always-due animation timer cannot starve a waiting ACP message: delivered within MAX + 1 passes.
+    #[tokio::test]
+    async fn always_due_timer_yields_to_a_waiting_acp_message() {
+        let mut streak = TimerStreak::default();
+        let mut passes = 0u32;
+        loop {
+            passes += 1;
+            assert!(passes <= u32::from(TimerStreak::MAX) + 1, "ACP starved by the timer");
+            let wake = priority_wake_with(
+                pending::<()>(),
+                pending::<()>(),
+                timer(true),
+                pending::<()>(),
+                pending::<()>(),
+                WakeGates { input_empty: true, scroll_ok: true, timers: streak.timers_enabled(), acp_escalated: false },
+                ready(Some(7u32)),
+            )
+            .await;
+            let timer_won = !matches!(wake, PriorityWake::Acp(_));
+            streak.note(timer_won);
+            if let PriorityWake::Acp(Some(7)) = wake {
+                break;
+            }
+        }
+        assert_eq!(passes, u32::from(TimerStreak::MAX) + 1);
+    }
+
+    /// 3b. With nothing else ready the streak ends (the lowest-priority arm in `run()` is what resets it).
+    #[test]
+    fn timer_streak_resets_when_a_non_timer_pass_runs() {
+        let mut s = TimerStreak::default();
+        for _ in 0..TimerStreak::MAX {
+            s.note(true);
+        }
+        assert!(!s.timers_enabled());
+        s.note(false);
+        assert!(s.timers_enabled());
+    }
+
+    /// 4. Continuous input must not hold the scroll clock off: after one processed input batch it runs.
+    #[tokio::test]
+    async fn scroll_clock_runs_after_one_input_batch_under_continuous_input() {
+        let mut gate = ScrollGate::default();
+        let mut woke_at = None;
+        for pass in 0..6u32 {
+            // Input is queued at every pass (continuous keyboard/paste).
+            let scroll_ok = gate.scroll_ok(false);
+            let w = tokio::time::timeout(
+                D::from_millis(20),
+                priority_wake_with(
+                    timer(true),
+                    pending::<()>(),
+                    pending::<()>(),
+                    pending::<()>(),
+                    pending::<()>(),
+                    WakeGates { input_empty: false, scroll_ok, timers: true, acp_escalated: false },
+                    ready(Some(1u32)),
+                ),
+            )
+            .await;
+            match w {
+                Ok(PriorityWake::ScrollTick) => {
+                    gate.note_scroll_advanced();
+                    woke_at = Some(pass);
+                    break;
+                }
+                Ok(_) => panic!("unexpected wake"),
+                // Nothing in priority_wake is ready: the input arm of `run()` processes its batch.
+                Err(_) => gate.note_input_batch(),
+            }
+        }
+        assert_eq!(woke_at, Some(1), "scroll clock stayed off under continuous input");
+        // And it is held again until the next batch (input order is preserved: input first, then the clock).
+        assert!(!gate.scroll_ok(false));
+    }
+
+
+    // ---- P196 round 4 (Astra r3) ----
+
+    /// Item 1: every combination of the inner gates, all futures ready. The first live branch in priority order must
+    /// win; when none is live the call stays pending (it never panics and never resolves).
+    #[tokio::test]
+    async fn every_gate_combination_resolves_to_the_first_live_branch_or_stays_pending() {
+        for bits in 0u8..16 {
+            let (input_empty, scroll_ok, timers, esc) =
+                (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            let expect: Option<&str> = if scroll_ok && timers {
+                Some("scroll")
+            } else if timers {
+                Some("deferred")
+            } else if input_empty || esc {
+                Some("acp")
+            } else {
+                None
+            };
+            let w = tokio::time::timeout(
+                D::from_millis(20),
+                priority_wake_with(
+                    timer(true),
+                    timer(true),
+                    timer(true),
+                    timer(true),
+                    timer(true),
+                    WakeGates { input_empty, scroll_ok, timers, acp_escalated: esc },
+                    ready(Some(1u32)),
+                ),
+            )
+            .await;
+            let got = match w {
+                Err(_) => None,
+                Ok(PriorityWake::ScrollTick) => Some("scroll"),
+                Ok(PriorityWake::DeferredDraw) => Some("deferred"),
+                Ok(PriorityWake::Acp(_)) => Some("acp"),
+                Ok(_) => Some("other"),
+            };
+            assert_eq!(got, expect, "input_empty={input_empty} scroll_ok={scroll_ok} timers={timers} esc={esc}");
+        }
+    }
+
+    /// Item 1 through an outer select shaped like `run()`: the priority arm above, the input arm below.
+    async fn outer_pass(input_empty: bool, timers: bool, esc: bool, acp_ready: bool) -> &'static str {
+        let acp = async {
+            if acp_ready {
+                Some(1u32)
+            } else {
+                pending::<Option<u32>>().await
+            }
+        };
+        tokio::select! {
+            biased;
+            w = priority_wake_with(
+                timer(true), timer(true), timer(true), timer(true), timer(true),
+                WakeGates { input_empty, scroll_ok: false, timers, acp_escalated: esc },
+                acp,
+            ) => match w { PriorityWake::Acp(_) => "acp", _ => "timer" },
+            _ = ready(()) => "input",
+        }
+    }
+
+    #[tokio::test]
+    async fn timers_disabled_with_input_pending_and_acp_empty_serves_input_without_panic() {
+        assert_eq!(outer_pass(false, false, false, false).await, "input");
+    }
+
+    #[tokio::test]
+    async fn timers_disabled_with_input_pending_and_acp_ready_serves_input() {
+        assert_eq!(outer_pass(false, false, false, true).await, "input");
+    }
+
+    #[tokio::test]
+    async fn escalation_serves_acp_ahead_of_pending_input() {
+        assert_eq!(outer_pass(false, false, true, true).await, "acp");
+        assert_eq!(outer_pass(false, true, true, true).await, "timer");
+    }
+
+    const REQ_COMPLETE: u32 = u32::MAX;
+
+    fn req_key(at: I) -> dispatch::StaleRequestKey {
+        dispatch::StaleRequestKey { kind: dispatch::StaleKind::CancelResend, agent: 0, subagent: None, at }
+    }
+
+    struct Esc {
+        resent: bool,
+        resent_before_completion: bool,
+        completed: bool,
+        redraws_during_escalation: u32,
+        escalated_passes: u32,
+        input_passes: u32,
+    }
+
+    /// Production-shaped loop with continuous keyboard input on every pass and a test clock of 100 ms per pass: the
+    /// real `priority_wake_with`, the peek-then-recv future, the 32-message drain, the fence, the streak and the
+    /// ACP-first pass. A redraw (deferred draw) timer is due every 5th pass.
+    async fn sim_escalation(backlog: usize, with_completion: bool, passes: usize) -> Esc {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        for i in 0..backlog as u32 {
+            tx.send(i).unwrap();
+        }
+        if with_completion {
+            tx.send(REQ_COMPLETE).unwrap();
+        }
+        let base = I::now();
+        let key = req_key(base);
+        let mut fence = StaleStateFence::default();
+        let mut streak = TimerStreak::default();
+        let mut peek: Option<u32> = None;
+        let mut hold_pass = false;
+        let mut out = Esc {
+            resent: false,
+            resent_before_completion: false,
+            completed: false,
+            redraws_during_escalation: 0,
+            escalated_passes: 0,
+            input_passes: 0,
+        };
+        for pass in 0..passes {
+            let now = base + D::from_millis(100) * pass as u32;
+            let buffered = rx.len() + usize::from(peek.is_some());
+            let esc = fence.escalated(now, buffered);
+            out.escalated_passes += u32::from(esc);
+            let timers = streak.timers_enabled();
+            let skip = std::mem::take(&mut hold_pass);
+            let redraw_due = pass % 5 == 0;
+            let wake = tokio::select! {
+                biased;
+                w = priority_wake_with(
+                    pending::<()>(),
+                    timer(redraw_due),
+                    timer(!skip),
+                    pending::<()>(),
+                    pending::<()>(),
+                    WakeGates { input_empty: false, scroll_ok: false, timers, acp_escalated: esc },
+                    async {
+                        match peek.take() {
+                            Some(m) => Some(m),
+                            None => rx.recv().await,
+                        }
+                    },
+                ) => Some(w),
+                _ = ready(()) => None,
+            };
+            streak.note(matches!(&wake, Some(w) if !matches!(w, PriorityWake::Acp(_))));
+            match wake {
+                None => out.input_passes += 1,
+                Some(PriorityWake::DeferredDraw) => out.redraws_during_escalation += u32::from(esc),
+                Some(PriorityWake::AnimationTick) => {
+                    let due = !out.completed && !out.resent;
+                    let keys = if due { vec![key.clone()] } else { Vec::new() };
+                    let buffered = rx.len() + usize::from(peek.is_some());
+                    if fence.hold_requests(now, &keys, buffered) {
+                        hold_pass = true;
+                    } else if due {
+                        out.resent = true;
+                        out.resent_before_completion = !out.completed;
+                    }
+                }
+                Some(PriorityWake::Acp(Some(m))) => {
+                    fence.note_processed();
+                    out.completed |= m == REQ_COMPLETE;
+                    let mut drained = 1;
+                    while drained < 32
+                        && fence.escalated(now, rx.len())
+                    {
+                        let Ok(m) = rx.try_recv() else { break };
+                        drained += 1;
+                        fence.note_processed();
+                        out.completed |= m == REQ_COMPLETE;
+                    }
+                }
+                Some(_) => panic!("unexpected wake"),
+            }
+        }
+        out
+    }
+
+    /// (a) Audit interleaving: 300 messages then prompt_complete buffered, input on every pass, well over 2 s elapse.
+    #[tokio::test]
+    async fn escalation_processes_the_buffered_completion_before_any_resend() {
+        let o = sim_escalation(300, true, 400).await;
+        assert!(o.completed, "the buffered completion was never processed");
+        assert!(!o.resent, "the resend fired although the completion was buffered before capture");
+        assert!(o.escalated_passes > 0 && o.input_passes > 0);
+    }
+
+    /// (b) No completion in the backlog: after the boundary is reached the resend goes out, exactly once.
+    #[tokio::test]
+    async fn resend_goes_out_exactly_once_after_the_boundary_without_a_completion() {
+        let o = sim_escalation(300, false, 400).await;
+        assert!(o.resent && !o.completed);
+        assert!(o.escalated_passes > 0, "the cap never escalated");
+    }
+
+    /// (c) Channel closed (nothing buffered) during the hold: released, no matter the boundary.
+    #[test]
+    fn closed_or_drained_channel_releases_the_fence() {
+        let t = I::now();
+        let mut f = StaleStateFence::default();
+        let keys = [req_key(t)];
+        assert!(f.hold_requests(t, &keys, 5));
+        assert!(!f.hold_requests(t + D::from_millis(10), &keys, 0), "nothing can arrive: release");
+        assert!(!f.escalated(t + StaleStateFence::CAP, 0));
+    }
+
+    /// (d) During escalation the redraw timer still fires.
+    #[tokio::test]
+    async fn redraw_timer_still_fires_during_escalation() {
+        let o = sim_escalation(300, true, 400).await;
+        assert!(o.escalated_passes > 0);
+        assert!(o.redraws_during_escalation > 0, "timers were starved by the escalation");
+    }
+
+    /// The cap never releases and never shortens the boundary: before the cap held, at the cap escalated, still held.
+    #[test]
+    fn cap_escalates_instead_of_releasing() {
+        let t = I::now();
+        let mut f = StaleStateFence::default();
+        let keys = [req_key(t)];
+        assert!(f.hold_requests(t, &keys, 301));
+        assert!(!f.escalated(t + D::from_millis(1999), 301));
+        assert!(f.hold_requests(t + StaleStateFence::CAP + D::from_secs(5), &keys, 301));
+        assert!(f.escalated(t + StaleStateFence::CAP, 301));
+    }
+
+    /// Item 3: cancel A captured (301 buffered), A completes, cancel B issued before any pass saw "not due":
+    /// B gets its own fresh boundary instead of inheriting A's spent one.
+    #[test]
+    fn a_new_cancel_request_gets_a_fresh_boundary() {
+        let t = I::now();
+        let mut f = StaleStateFence::default();
+        let a = req_key(t);
+        assert!(f.hold_requests(t, std::slice::from_ref(&a), 301));
+        for _ in 0..301 {
+            f.note_processed();
+        }
+        assert!(!f.hold_requests(t + D::from_millis(5), std::slice::from_ref(&a), 0));
+        // Manual cancel B: new `sent_at`, 40 messages are buffered, no animation pass saw "nothing due" in between.
+        let b = req_key(t + D::from_millis(10));
+        assert!(f.hold_requests(t + D::from_millis(10), std::slice::from_ref(&b), 40), "B reused A's spent boundary");
+        for _ in 0..40 {
+            f.note_processed();
+        }
+        assert!(!f.hold_requests(t + D::from_millis(20), std::slice::from_ref(&b), 9));
+    }
+
+    /// Item 3: two agents overdue at once each keep their own boundary; a resolved request is dropped.
+    #[test]
+    fn overdue_requests_of_two_agents_are_fenced_independently() {
+        let t = I::now();
+        let mut f = StaleStateFence::default();
+        let a = req_key(t);
+        let mut b = req_key(t);
+        b.agent = 1;
+        assert!(f.hold_requests(t, std::slice::from_ref(&a), 2));
+        f.note_processed();
+        f.note_processed();
+        // B appears later with 10 buffered while A is still due (done): B holds, A does not matter.
+        assert!(f.hold_requests(t, &[a.clone(), b.clone()], 10));
+        for _ in 0..10 {
+            f.note_processed();
+        }
+        assert!(!f.hold_requests(t, &[a, b.clone()], 3));
+        assert!(!f.hold_requests(t, &[], 3));
+        assert!(f.armed.is_empty(), "resolved requests must be dropped");
+    }
+
+    #[test]
+    fn production_tick_intervals_cannot_be_zero() {
+        // fps is a u8 (>= 1 after `max(1)`), so 1000 / fps >= 3 ms; the floor covers any other caller.
+        assert!(MIN_TICK_INTERVAL > D::ZERO);
+        assert!(Duration::from_millis(1000 / 255) >= MIN_TICK_INTERVAL);
+    }}

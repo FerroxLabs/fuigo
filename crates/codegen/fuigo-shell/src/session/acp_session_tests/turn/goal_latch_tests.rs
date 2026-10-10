@@ -507,3 +507,135 @@ fn a_goal_whose_budget_is_spent_stays_stopped_and_says_how_to_continue() {
         "the resume message says which limit stopped the goal and how to continue: {message}"
     );
 }
+
+/// P195 (K25): a goal's token budget (`/goal <objective> --budget N`) spent by the answer that completes the turn. In an
+/// interactive session the turn is an ordinary success and the goal harness stops the goal budget-limited at the turn's end.
+/// A headless run (`fuigo -p`) has no later turn to carry that: the run ended at this answer because the budget did, so the
+/// prompt must end as the token budget's typed denial (`fuigo -p` exits 3, B4), not as a success (exit 0). The goal itself is
+/// stopped budget-limited either way.
+fn goal_answer_spends_budget(
+    run: &'static str,
+    token_budget: i64,
+    headless: bool,
+) -> (Result<crate::session::commands::PromptTurnOk, acp::Error>, Option<GoalStatus>) {
+    let cell = Arc::new(std::sync::Mutex::new(None));
+    let sink = cell.clone();
+    block_on_session(move || {
+        current_thread_local(async move {
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
+            server.set_response(RESUMED);
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            spawn_persistence_stub(persistence_rx, || Ok(()));
+            let actor = actor_with_mock_sampler_configured(
+                &server,
+                run,
+                persistence_tx,
+                gateway_tx,
+                None,
+                None,
+                |actor| {
+                    keep_goal_active(actor);
+                    actor.attach_non_interactive.set(headless);
+                },
+            )
+            .await;
+            start_goal(&actor, &format!("{run}-goal"), Some(token_budget));
+
+            let result = run_text(&actor, &format!("{run}-turn"), "work on the goal").await;
+            let status = actor.goal_tracker.lock().status();
+            if let Some(execution) = Execution::current(run) {
+                execution.release(run);
+            }
+            *sink.lock().unwrap() = Some((result, status));
+        });
+    });
+    let taken = cell.lock().unwrap().take();
+    taken.expect("the goal turn produced a result")
+}
+
+#[test]
+fn a_headless_goal_whose_answer_spends_the_token_budget_ends_as_the_token_denial() {
+    let (result, status) = goal_answer_spends_budget("p195-goal-budget-headless", 10, true);
+    let err = match result {
+        Err(err) => err,
+        Ok(ok) => panic!("the budget ended this run, so it is not a success: {:?}", ok.stop_reason),
+    };
+    let wire = serde_json::to_value(&err).expect("serialize");
+    assert_eq!(wire["data"]["code"], EXECUTION_BUDGET_DENIED_CODE, "{wire}");
+    assert_eq!(wire["data"]["rule"], ExecutionBudgetRule::TotalTokensExhausted.id(), "{wire}");
+    assert_eq!(wire["data"]["total_token_limit"], 10, "{wire}");
+    assert!(wire["data"]["total_tokens_used"].as_u64().is_some_and(|used| used >= 10), "{wire}");
+    // K25 (Grok r1): the headless run can tell the answer completed and keep it in its one result document
+    assert_eq!(wire["data"]["answer_completed"], true, "{wire}");
+    assert_eq!(status, Some(GoalStatus::BudgetLimited), "the goal stops budget-limited, not paused");
+}
+
+/// Counter-test: the same answer with budget left, headless, is a success and the goal keeps going.
+#[test]
+fn a_headless_goal_answer_with_budget_left_is_a_success() {
+    let (result, status) = goal_answer_spends_budget("p195-goal-budget-left", 1_000_000, true);
+    let ok = result.unwrap_or_else(|err| panic!("budget left, so the run succeeds: {err:?}"));
+    assert_eq!(ok.stop_reason, acp::StopReason::EndTurn);
+    assert_eq!(status, Some(GoalStatus::Active));
+}
+
+/// Counter-test: an interactive session is unchanged: the turn that spends the budget is still a success, and the goal
+/// harness stops the goal at the turn's end.
+#[test]
+fn an_interactive_goal_answer_that_spends_the_token_budget_is_still_a_success() {
+    let (result, _status) = goal_answer_spends_budget("p195-goal-budget-interactive", 10, false);
+    let ok = result.unwrap_or_else(|err| panic!("interactive turns are unchanged: {err:?}"));
+    assert_eq!(ok.stop_reason, acp::StopReason::EndTurn);
+}
+
+/// P195 (K25): which goals count as "budget spent by this answer": only an ACTIVE goal with a budget the session's spend has
+/// reached. A goal that is complete, paused or without a budget, or whose budget has room, is not.
+#[test]
+fn only_an_active_goal_with_a_spent_token_budget_is_a_headless_denial() {
+    block_on_session(|| {
+        current_thread_local(async {
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            spawn_persistence_stub(persistence_rx, || Ok(()));
+            // The session has spent 100 tokens.
+            let actor = create_test_actor(100, 256_000, 85, gateway_tx, persistence_tx).await;
+
+            // No goal at all.
+            assert!(actor.goal_budget_spent_denial().await.is_none(), "no goal");
+
+            // An active goal with no budget, and one whose budget has room.
+            start_goal(&actor, "p195-goal-none", None);
+            assert!(actor.goal_budget_spent_denial().await.is_none(), "no budget");
+            start_goal(&actor, "p195-goal-room", Some(1_000_000));
+            assert!(actor.goal_budget_spent_denial().await.is_none(), "budget with room");
+            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::Active), "left active");
+
+            // A goal that finished (the model completed it in this very turn) is not budget-limited.
+            start_goal(&actor, "p195-goal-complete", Some(10));
+            assert!(actor.goal_tracker.lock().complete(), "fixture: the goal completes");
+            assert!(actor.goal_budget_spent_denial().await.is_none(), "complete goal");
+            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::Complete), "left complete");
+
+            // An active goal whose budget the spend reached: the denial, and the goal stops budget-limited.
+            start_goal(&actor, "p195-goal-spent", Some(10));
+            let denial = actor
+                .goal_budget_spent_denial()
+                .await
+                .expect("an active goal whose budget is spent");
+            assert_eq!(denial.rule, ExecutionBudgetRule::TotalTokensExhausted);
+            assert_eq!(denial.total_token_limit, Some(10));
+            assert!(denial.total_tokens_used >= 10, "{denial:?}");
+            assert_eq!(actor.goal_tracker.lock().status(), Some(GoalStatus::BudgetLimited));
+            assert!(actor.goal_budget_spent_denial().await.is_none(), "already stopped: not active any more");
+        });
+    });
+}

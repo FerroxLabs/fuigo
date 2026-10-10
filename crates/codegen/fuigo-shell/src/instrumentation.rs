@@ -30,7 +30,7 @@ pub fn finalize_and_exit(code: i32) -> ! {
     );
     let _ = finalize();
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
-        fuigo_tty_utils::cli_eprintln!("span profile written to {}", path.display());
+        fuigo_tty_utils::cli_eprintln!("span profile written to {}", fuigo_tty_utils::untrusted(&path.display()));
     }
     fuigo_telemetry::otel_layer::shutdown_otel();
     // Flush the --debug log stream; exiting via process::exit bypasses main's flush

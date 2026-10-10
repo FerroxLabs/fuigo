@@ -1117,16 +1117,19 @@ impl SessionActor {
             .as_ref()
             .map(|am| am.fuigo_com_config().api_key_auth_disabled())
             .unwrap_or(false);
-        crate::agent::config::resolve_aux_model_sampling_config_for_held(
-            slug,
-            &models,
-            &endpoints,
-            held.as_ref(),
-            disable_api_key_auth,
-            creds.alpha_test_key.clone(),
-            creds.client_version.clone(),
-            choice,
-        )
+        self.models_manager.with_allowlist(|allowlist| {
+            crate::agent::config::resolve_aux_model_sampling_config_for_held(
+                slug,
+                &models,
+                &endpoints,
+                held.as_ref(),
+                disable_api_key_auth,
+                creds.alpha_test_key.clone(),
+                creds.client_version.clone(),
+                choice,
+                allowlist,
+            )
+        })
     }
 
     /// Resolve a dedicated sampler for the Auto-mode classifier model `slug`, stamping session-local auth/attribution like image-describe.

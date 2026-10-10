@@ -152,10 +152,18 @@ impl MessagesReducer {
         Some(self.init_line())
     }
 
+    /// Whether the open block is a thinking block whose own signature has already arrived (its `ReasoningCompleted`).
+    /// The signature is sent at the block's stop, so any further thought text belongs to the NEXT thinking block.
+    fn open_thinking_is_signed(&self) -> bool {
+        self.open_kind == Some(TextKind::Thinking) && self.open_signature.is_some()
+    }
+
     fn append_text(&mut self, kind: TextKind, text: &str) {
-        // Finalize when the kind changes or a signature-only block is pending, so that block keeps its position
+        // Finalize when the kind changes, a signature-only block is pending, or a signed thinking block is followed by
+        // more thought text (a new block), so each block keeps its own text, signature and position
         if self.open_kind.is_some_and(|k| k != kind)
             || (self.open_kind.is_none() && self.open_signature.is_some())
+            || (kind == TextKind::Thinking && self.open_thinking_is_signed())
         {
             self.finalize_open();
         }
@@ -348,6 +356,11 @@ impl MessagesReducer {
                 self.tool_uses.remove(&id);
                 self.discarded_tool_ids.insert(id);
             }
+        }
+        // P201: a deferred hosted `web_search` of the dead attempt goes too; its closing update (`failed`, sent after the
+        // notice) is then ignored like any other late update for a discarded call
+        for (id, _) in std::mem::take(&mut self.backend_web_search_calls) {
+            self.discarded_tool_ids.insert(id);
         }
         self.open_kind = None;
         self.open_text.clear();
@@ -594,7 +607,8 @@ impl Reducer for MessagesReducer {
                 self.flush_boundary(&mut out);
                 self.partial_signature_only_block(&mut out);
                 if self.include_partials()
-                    && self.open_kind.is_some_and(|k| k != TextKind::Thinking)
+                    && (self.open_kind.is_some_and(|k| k != TextKind::Thinking)
+                        || self.open_thinking_is_signed())
                 {
                     self.partial_close_block(&mut out);
                 }
@@ -697,6 +711,22 @@ impl Reducer for MessagesReducer {
                     self.finalize_open();
                 }
                 self.open_signature = signature;
+            }
+            // An empty blob has nothing to replay (the sampler never sends one)
+            StreamEvent::RedactedThinking { data } if data.is_empty() => {}
+            StreamEvent::RedactedThinking { data } => {
+                self.flush_boundary(&mut out);
+                self.partial_signature_only_block(&mut out);
+                if self.include_partials() {
+                    self.partial_close_block(&mut out);
+                }
+                // Whatever block is open (text, or thinking with or without its signature) keeps its position ahead of this one
+                self.finalize_open();
+                let index = self.blocks.len();
+                self.blocks.push(ContentBlock::RedactedThinking { data: data.clone() });
+                if self.include_partials() {
+                    self.partial_redacted_thinking(&mut out, index, &data);
+                }
             }
             StreamEvent::ResponseCompleted {
                 message_id,
@@ -816,7 +846,8 @@ impl Reducer for MessagesReducer {
                     self.last_text.clone()
                 }
             }),
-            stop_reason: Some(end.stop_reason.to_string()),
+            // An empty stop reason is the budget-after-answer denial: null, as on the no-answer denial line.
+            stop_reason: (!end.stop_reason.is_empty()).then(|| end.stop_reason.to_string()),
             total_cost_usd: ru.total_cost_usd,
             usage: ru.usage,
             model_usage: ru.model_usage,

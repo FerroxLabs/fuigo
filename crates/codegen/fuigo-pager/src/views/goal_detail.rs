@@ -201,26 +201,33 @@ pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     out
 }
 
-/// Replace control characters (tab, ESC, BEL, and so on) with spaces.
+/// Replace control characters (tab, ESC, BEL, and so on) and line separators with spaces, and drop tag characters, soft hyphens and other invisible format characters.
 /// The callers pass free-form model or wire text (objective title, event detail, timestamp, pause reason) that must not break a rendered row.
 /// Stripping here does not rely on ratatui's own filter, so a ratatui regression can't leak control bytes.
 /// `keep_newlines` preserves `\n` for the pause-reason wrapper (which splits on it before render); single-row callers pass `false`.
 pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
     s.chars()
-        .map(|c| {
-            if c.is_control() && !(keep_newlines && c == '\n') {
-                ' '
+        .filter_map(|c| {
+            if keep_newlines && c == '\n' {
+                Some(c)
+            } else if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') {
+                Some(' ')
+            } else if fuigo_tty_utils::is_unsafe_display_char(c) {
+                None
             } else {
-                c
+                Some(c)
             }
         })
         .collect()
 }
 
 /// Strip control chars from the objective title, then trim (the title is short and centered).
+/// A title keeps ZWJ emoji and a valid subdivision flag; every other hidden character goes.
 /// A bare `\n` is zero-width to `truncate_to_width` and would otherwise leak into the border row.
 fn sanitize_title(s: &str) -> String {
-    strip_control_chars(s, false).trim().to_owned()
+    fuigo_tty_utils::scrub_unsafe_title_with(s, Some(' '))
+        .trim()
+        .to_owned()
 }
 
 /// Build the wrapped-reason source line for a paused goal's `pause_message`, control-stripped with newlines kept.
@@ -745,7 +752,8 @@ pub fn render_goal_detail(
             // Reserve space for the "  {icon} " prefix (~4 cols) plus content
             // Use display width (not char count) so CJK and emoji measure correctly
             let content_budget = (w as usize).saturating_sub(5);
-            let content_display = truncate_to_width(&item.content, content_budget);
+            let content_display =
+                truncate_to_width(&strip_control_chars(&item.content, false), content_budget);
             let spans = vec![
                 Span::raw("  "),
                 Span::styled(icon, Style::default().fg(icon_color)),
@@ -784,7 +792,7 @@ pub fn render_goal_detail(
         let mut subagent_spans = vec![
             Span::styled("Active Subagent: ", Style::default().fg(theme.gray)),
             Span::styled(
-                role.as_str(),
+                strip_control_chars(role, false),
                 Style::default()
                     .fg(theme.accent_running)
                     .add_modifier(Modifier::BOLD),
@@ -844,7 +852,7 @@ pub fn render_goal_detail(
                 let id_budget = (w as usize)
                     .saturating_sub(4)
                     .saturating_sub(UnicodeWidthStr::width(tokens_str.as_str()));
-                let id = truncate_to_width(model_id, id_budget);
+                let id = truncate_to_width(&strip_control_chars(model_id, false), id_budget);
                 buf.set_line_safe(
                     x,
                     y,
@@ -1025,6 +1033,49 @@ mod tests {
     use super::*;
     use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
     use ratatui::layout::Rect;
+
+    /// P181 (Astra round 1): the todo text, the subagent role and the model id reach a row too.
+    #[test]
+    fn goal_rows_for_todo_role_and_model_carry_no_hidden_characters() {
+        let mut goal = make_goal();
+        goal.current_subagent_role = Some("Wor\u{e0041}ker\u{00ad}".into());
+        // The per-model rows render from two models up
+        goal.live_tokens_by_model = vec![
+            ("mo\u{e0042}del\u{00ad}-x".into(), 12_000),
+            ("other".into(), 1_000),
+        ];
+        let todos = vec![make_todo("do\u{e0043} it\u{00ad}", TodoStatus::Pending)];
+        let screen = Rect::new(0, 0, 100, 40);
+        let mut buf = ratatui::buffer::Buffer::empty(screen);
+        let area = goal_detail_area(screen, &goal, &todos);
+        render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, false);
+        let mut text = String::new();
+        for y in 0..screen.height {
+            for x in 0..screen.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+        }
+        assert!(
+            !text.chars().any(fuigo_tty_utils::is_unsafe_display_char),
+            "a hidden character reached a rendered row"
+        );
+        for shown in ["Worker", "model-x", "do it"] {
+            assert!(text.contains(shown), "{shown} must still show");
+        }
+    }
+
+    /// P181: tag characters, soft hyphens and line separators must not reach a goal row.
+    #[test]
+    fn goal_text_drops_hidden_characters() {
+        let dirty = "a\u{e0041}b\u{00ad}c\u{2028}d";
+        assert_eq!(strip_control_chars(dirty, false), "abc d");
+        assert_eq!(strip_control_chars(dirty, true), "abc d");
+        assert_eq!(sanitize_title(dirty), "abc d");
+        // A title keeps its emoji joiners and a valid flag
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        assert_eq!(sanitize_title(family), family);
+        assert_eq!(strip_control_chars("x\ny", true), "x\ny");
+    }
 
     fn make_goal() -> GoalDisplayState {
         GoalDisplayState {

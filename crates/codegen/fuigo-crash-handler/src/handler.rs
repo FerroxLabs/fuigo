@@ -527,14 +527,33 @@ mod imp {
         unsafe { register_crash_signals(terminal_restore_handler_basic) };
     }
 
+    /// Create `dir` (and missing parents) 0700, then tighten an existing one an older version made wider.
+    /// The tighten runs on a descriptor opened O_NOFOLLOW|O_DIRECTORY and only for a directory owned by this user,
+    /// so a symlinked or foreign directory keeps its mode. Tighten failure is ignored.
+    fn create_crash_dir(dir: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        if let Ok(handle) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+            .open(dir)
+            && let Ok(meta) = handle.metadata()
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.permissions().mode() & 0o777 != 0o700
+        {
+            let _ = handle.set_permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        Ok(())
+    }
+
     /// Install the crash handler. Must be called early in `main()`, before any
     /// terminal initialization or async runtime setup.
     ///
     /// Opens this process's own slot `crash-<pid>-<start token>.bin`, so
     /// concurrent sessions never truncate or read each other's evidence.
     pub fn install(crash_dir: &Path, fuigo_version: &str) -> bool {
-        // Create the crash directory if it doesn't exist.
-        if std::fs::create_dir_all(crash_dir).is_err() {
+        // Create the crash directory if it doesn't exist (0700 on Unix).
+        if create_crash_dir(crash_dir).is_err() {
             return false;
         }
 
@@ -1212,6 +1231,62 @@ mod tests {
             handler_after, handler_before,
             "full install should replace the minimal handler"
         );
+    }
+
+    #[test]
+    fn install_creates_owner_only_crash_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!(
+            "fuigo-crash-handler-test-dir-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("crash");
+        assert!(super::install(&dir, "test-version"));
+        let mode = std::fs::metadata(&dir).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "new crash dir must be owner-only");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_tightens_preexisting_0755_crash_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fuigo-crash-handler-test-dir755-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).expect("755");
+        assert!(super::install(&dir, "test-version"));
+        let mode = std::fs::metadata(&dir).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_does_not_chmod_a_symlinked_crash_dir_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = SIGNAL_STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let base = std::env::temp_dir().join(format!(
+            "fuigo-crash-handler-test-dirlink-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        let target = base.join("target");
+        std::fs::create_dir_all(&target).expect("create");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755)).expect("755");
+        let link = base.join("crash");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let _ = super::install(&link, "test-version");
+        let mode = std::fs::metadata(&target).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o755, "symlink target must be untouched");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

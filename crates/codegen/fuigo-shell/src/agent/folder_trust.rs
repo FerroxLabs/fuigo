@@ -318,18 +318,33 @@ fn compute_from_inputs(
             (true, durable)
         }
         TrustOutcome::Prompt if allow_prompt => {
-            if prompt_for_trust(key) {
-                // Reload the store (the inputs gather dropped its copy) to persist the accepted prompt grant
-                persist_trust(&mut TrustStore::load(), key);
-                (true, true)
-            } else {
-                (false, true)
-            }
+            // Reload the store (the inputs gather dropped its copy) to persist the accepted prompt grant
+            stderr_prompt_decision(prompt_for_trust(key), || persist_trust(&mut TrustStore::load(), key))
         }
         // Untrusted, OR interactive where prompting is unsafe here (TUI owns stdin); the agent-`initialize` path owns the launch-dir prompt
         // Both resolve fail-closed
         TrustOutcome::Untrusted | TrustOutcome::Prompt => (false, true),
     }
+}
+
+/// `(allowed, durable)` for the stderr trust prompt, given whether the user accepted and how to record the grant.
+/// The prompt was on stderr, so a grant that was not saved (or recorded nothing) is reported there too. It fails closed
+/// when nothing was recorded (e.g. an unreadable store): the "yes" did not take effect, so this resolve must not allow
+/// project config (Astra r1). Saved or session-only grants allow. A refusal ("no") never calls `persist`.
+fn stderr_prompt_decision(
+    accepted: bool,
+    persist: impl FnOnce() -> fuigo_workspace::folder_trust::GrantOutcome,
+) -> (bool, bool) {
+    if !accepted {
+        return (false, true);
+    }
+    let outcome = persist();
+    fuigo_workspace::folder_trust::report_cli_trust_grant(&outcome);
+    let allowed = !matches!(
+        outcome.resolution(),
+        fuigo_workspace::folder_trust::GrantResolution::Unrecorded
+    );
+    (allowed, true)
 }
 
 /// PROJECT-scoped MCP server display names for `cwd`: the names dropped from a merged server list when the workspace is untrusted.
@@ -1822,5 +1837,30 @@ mod tests {
         std::fs::write(tmp.path().join(".fuigo").join("lsp.json"), "{}").unwrap();
         let kinds = detected_config_kinds(tmp.path());
         assert_eq!(kinds, vec!["lsp".to_string()]);
+    }
+
+    /// P180 (P167 Astra LOW): the stderr trust prompt fails closed when nothing was saved. An accepted prompt whose
+    /// grant records nothing (unreadable store, no home, moved folder) must not allow project config; a session-only or
+    /// durable grant allows; a refusal never records anything.
+    #[test]
+    fn p180_stderr_prompt_fails_closed_when_nothing_was_saved() {
+        use fuigo_workspace::folder_trust::{GrantOutcome, GrantRefuse, PersistStatus};
+        for reason in [GrantRefuse::Unreadable, GrantRefuse::NoHome, GrantRefuse::KeyMoved] {
+            let decided = stderr_prompt_decision(true, || GrantOutcome::Refused { reason });
+            assert_eq!(decided, (false, true), "an unrecorded grant must not allow project config");
+        }
+        let key = std::path::PathBuf::from("/p180/key");
+        let durable = stderr_prompt_decision(true, || GrantOutcome::Granted {
+            key: key.clone(),
+            persist: PersistStatus::Durable,
+        });
+        assert_eq!(durable, (true, true));
+        let session_only = stderr_prompt_decision(true, || GrantOutcome::Granted {
+            key: key.clone(),
+            persist: PersistStatus::ProcessLocalOnly { error: std::io::Error::other("denied") },
+        });
+        assert_eq!(session_only, (true, true), "a session-only grant still allows this session");
+        let declined = stderr_prompt_decision(false, || panic!("a declined prompt must record nothing"));
+        assert_eq!(declined, (false, true));
     }
 }

@@ -238,15 +238,25 @@ impl SessionActor {
 
     /// Trust the current project via the unified folder-trust store.
     /// Same as `--trust`: also allows repo-local MCP/LSP for this folder.
-    pub(super) fn do_hooks_trust_project(cwd: &str) -> Result<std::path::PathBuf, String> {
+    /// `Ok((root, None))` when saved (or auto-trusted); `Ok((root, Some(note)))` when the write was denied and the grant
+    /// holds for this session only (the note says so); `Err` when nothing was recorded (e.g. an unreadable store).
+    pub(super) fn do_hooks_trust_project(
+        cwd: &str,
+    ) -> Result<(std::path::PathBuf, Option<String>), String> {
         let root =
             fuigo_workspace::session::git::find_git_root_from_path(std::path::Path::new(cwd))
                 .map_err(|_| {
                     "Not in a git repository. Project hooks require a git worktree root."
                         .to_string()
                 })?;
-        fuigo_workspace::folder_trust::grant_folder_trust(&root);
-        Ok(root)
+        // Never claim a save that did not happen: a session-only grant carries its note, a refusal is an error.
+        use fuigo_workspace::folder_trust::GrantResolution;
+        let outcome = fuigo_workspace::folder_trust::grant_folder_trust(&root);
+        match outcome.resolution() {
+            GrantResolution::Trusted => Ok((root, None)),
+            GrantResolution::SessionLocal => Ok((root, Some(outcome.to_string()))),
+            GrantResolution::Unrecorded => Err(outcome.to_string()),
+        }
     }
 
     /// Untrust the current project in the unified folder-trust store.
@@ -320,6 +330,19 @@ impl SessionActor {
             })
     }
 
+    /// P169: under `allow_managed_hooks_only`, enabling or adding anything outside managed policy is refused with the
+    /// policy note, before any write. Managed hooks pass: the pin never blocks them.
+    fn refuse_under_managed_hooks_only<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+    ) -> Option<fuigo_hooks_plugins_types::ActionOutcome> {
+        managed_hooks_only_refusal(
+            fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled(),
+            names,
+            |name| self.is_managed_policy_hook(name),
+        )
+    }
+
     // ── Hooks/plugins action handlers (pager modal) ──────────────────
 
     /// Handle a hooks management action from the pager modal.
@@ -346,13 +369,14 @@ impl SessionActor {
                     requires_reload: false,
                     requires_restart: false,
                 },
-                Ok(root) => {
+                Ok((root, note)) => {
                     let reload_msg = self.reload_hooks_impl().await;
                     // Trusting flips the project-config gate: re-seed the repo MCP output cap so it applies without waiting for a config edit
                     self.reseed_mcp_output_cap().await;
+                    let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
                     ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Trusted: {}.\n{reload_msg}", root.display()),
+                        message: format!("Trusted: {}.\n{note}{reload_msg}", root.display()),
                         requires_reload: false,
                         requires_restart: false,
                     }
@@ -389,6 +413,10 @@ impl SessionActor {
                 }
             },
             HooksAction::Add { path } => {
+                // A new hook path only adds user hooks, which the pin keeps off.
+                if let Some(refused) = self.refuse_under_managed_hooks_only([""]) {
+                    return refused;
+                }
                 if path.is_empty() {
                     return ActionOutcome {
                         status: OutcomeStatus::ValidationError,
@@ -487,6 +515,9 @@ impl SessionActor {
                 }
             }
             HooksAction::Enable { hook_name } => {
+                if let Some(refused) = self.refuse_under_managed_hooks_only([hook_name.as_str()]) {
+                    return refused;
+                }
                 match fuigo_hooks::trust::enable_hook(&hook_name) {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
@@ -512,6 +543,12 @@ impl SessionActor {
                 hook_names,
                 disable,
             } => {
+                if !disable
+                    && let Some(refused) =
+                        self.refuse_under_managed_hooks_only(hook_names.iter().map(String::as_str))
+                {
+                    return refused;
+                }
                 let mut toggled = 0usize;
                 let mut managed_skipped = 0usize;
                 for name in &hook_names {
@@ -585,6 +622,15 @@ impl SessionActor {
                 let cwd = std::path::Path::new(&self.session_info.cwd);
                 let install_source =
                     fuigo_agent::plugins::git_install::parse_install_source(&source, cwd);
+                // P169: refused before anything is fetched or written.
+                if let Some(reason) = crate::plugin::direct_install_block_reason(&install_source) {
+                    return ActionOutcome {
+                        status: OutcomeStatus::ValidationError,
+                        message: reason,
+                        requires_reload: false,
+                        requires_restart: false,
+                    };
+                }
                 let registry = fuigo_agent::plugins::InstallRegistry::load();
                 match fuigo_agent::plugins::git_install::install_from_source(
                     &install_source,
@@ -776,6 +822,21 @@ impl SessionActor {
                     };
                 }
                 let resolved = Self::resolve_path(&self.session_info.cwd, &path);
+                // P169 (Astra r1 #4): a plugin path is a local source; under strictKnownMarketplaces it is refused
+                // before the config write, like a direct install.
+                if let Some(reason) = crate::plugin::direct_install_block_reason(
+                    &fuigo_agent::plugins::git_install::InstallSource::Local {
+                        path: resolved.clone(),
+                        subdir: None,
+                    },
+                ) {
+                    return ActionOutcome {
+                        status: OutcomeStatus::ValidationError,
+                        message: reason,
+                        requires_reload: false,
+                        requires_restart: false,
+                    };
+                }
                 let path_str = resolved.display().to_string();
                 match crate::config::off_reactor({
                     let path_str = path_str.to_string();
@@ -806,10 +867,22 @@ impl SessionActor {
                 }
             }
             PluginsAction::Enable { plugin_id } => {
+                // P169: managed marketplace policy refuses before either config write; under a restriction a bare
+                // name is persisted as the one allowed install's full id (Astra r3).
+                let target = match crate::plugin::plugin_enable_target(&plugin_id) {
+                    Ok(target) => target,
+                    Err(reason) => {
+                        return ActionOutcome {
+                            status: OutcomeStatus::ValidationError,
+                            message: reason,
+                            requires_reload: false,
+                            requires_restart: false,
+                        };
+                    }
+                };
                 // Add to enabled list (for project plugins) and remove from disabled list.
                 let r1 = crate::config::off_reactor({
-                    let plugin_id = plugin_id.to_string();
-                    move || crate::config::add_enabled_plugin(&plugin_id)
+                    move || crate::config::add_enabled_plugin(&target)
                 })
                 .await;
                 let r2 = crate::config::off_reactor({
@@ -1269,6 +1342,27 @@ impl SessionActor {
     }
 }
 
+/// The managed-hooks-only refusal rule (P169), split out so it is testable without a session: `Some` when the pin is
+/// engaged and any of `names` is not a managed-policy hook.
+fn managed_hooks_only_refusal<'a>(
+    pinned: bool,
+    names: impl IntoIterator<Item = &'a str>,
+    is_managed_policy_hook: impl Fn(&str) -> bool,
+) -> Option<fuigo_hooks_plugins_types::ActionOutcome> {
+    if !pinned {
+        return None;
+    }
+    names
+        .into_iter()
+        .any(|name| !is_managed_policy_hook(name))
+        .then(|| fuigo_hooks_plugins_types::ActionOutcome {
+            status: fuigo_hooks_plugins_types::OutcomeStatus::ValidationError,
+            message: fuigo_hooks::trust::MANAGED_HOOKS_ONLY_NOTE.to_owned(),
+            requires_reload: false,
+            requires_restart: false,
+        })
+}
+
 #[cfg(test)]
 mod p07_plugin_hook_tests {
     use super::SessionActor;
@@ -1646,3 +1740,28 @@ mod p07_plugin_hook_tests {
 #[cfg(test)]
 #[path = "hooks_plugins_p141_tests.rs"]
 mod p141_tests;
+
+#[cfg(test)]
+mod p169_managed_hooks_only_tests {
+    use super::managed_hooks_only_refusal;
+
+    /// P169 (S11): enabling or adding anything outside managed policy is refused with the policy note; managed hooks
+    /// pass, and nothing is refused without the pin. Ported from upstream `refuse_enable_under_managed_only`.
+    #[test]
+    fn refusal_rule() {
+        let managed = |name: &str| name.starts_with("requirements/system:");
+        assert!(managed_hooks_only_refusal(false, ["global/x"], managed).is_none());
+        let refused = managed_hooks_only_refusal(true, ["global/x"], managed).unwrap();
+        assert_eq!(refused.message, fuigo_hooks::trust::MANAGED_HOOKS_ONLY_NOTE);
+        assert!(matches!(
+            refused.status,
+            fuigo_hooks_plugins_types::OutcomeStatus::ValidationError
+        ));
+        assert!(managed_hooks_only_refusal(true, ["requirements/system:a[0].hooks[0]"], managed).is_none());
+        assert!(
+            managed_hooks_only_refusal(true, ["requirements/system:a[0].hooks[0]", "plugin/p:h"], managed).is_some(),
+            "one non-managed name in a bulk enable refuses the whole action"
+        );
+        assert!(managed_hooks_only_refusal(true, [""], managed).is_some(), "adding a hook path is refused");
+    }
+}

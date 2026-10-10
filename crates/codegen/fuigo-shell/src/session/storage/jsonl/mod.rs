@@ -33,8 +33,36 @@ fn rewrite_lock_wait() -> std::time::Duration {
     REWRITE_LOCK_WAIT
 }
 mod copy;
+
+/// A lock file that is locked, released explicitly when this is dropped. A `flock` belongs to the open file
+/// description, so a child that another thread forks (`Command::spawn`) between our open and its exec holds a copy of
+/// the descriptor and, if we only closed ours, keeps the lock alive until it execs: a rewind that has finished (or a
+/// reconcile that has) would still look "running" to the next check (R-flake-rewind).
+#[derive(Debug)]
+pub(crate) struct HeldLock(std::fs::File);
+
+impl HeldLock {
+    /// Wrap `file`, on which the caller has just taken a lock.
+    pub(crate) fn new(file: std::fs::File) -> Self {
+        Self(file)
+    }
+}
+
+impl std::ops::Deref for HeldLock {
+    type Target = std::fs::File;
+    fn deref(&self) -> &std::fs::File {
+        &self.0
+    }
+}
+
+impl Drop for HeldLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
 pub(crate) mod compaction_witness;
 pub(crate) mod load_repair;
+pub(crate) mod rewind_reconcile;
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -457,14 +485,27 @@ impl JsonlStorageAdapter {
     }
     fn append_jsonl_line_sync_with(
         path: &Path,
+        line: Vec<u8>,
+        durability: AppendDurability,
+        sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
+        sync_parent: impl FnMut() -> io::Result<()>,
+    ) -> Result<(), AppendLineError> {
+        let lock = Self::lock_append(path).map_err(AppendLineError::NotCommitted)?;
+        let result = Self::append_jsonl_line_locked(path, line, durability, sync_file, sync_parent);
+        drop(lock);
+        result
+    }
+    /// [`Self::append_jsonl_line_sync_with`] for a caller that already holds `path`'s append lock (P164: taken with a
+    /// bounded wait).
+    fn append_jsonl_line_locked(
+        path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
         mut sync_file: impl FnMut(&std::fs::File) -> io::Result<()>,
         mut sync_parent: impl FnMut() -> io::Result<()>,
     ) -> Result<(), AppendLineError> {
         debug_assert!(line.ends_with(b"\n"), "JSONL record must end with \\n");
-        let lock = Self::lock_append(path).map_err(AppendLineError::NotCommitted)?;
-        let result = (|| {
+        (|| {
             let mut file = super::owner_only::open(
                 OpenOptions::new().read(true).create(true).append(true),
                 path,
@@ -499,9 +540,7 @@ impl JsonlStorageAdapter {
                 drop(file);
             }
             Ok(())
-        })();
-        let _ = lock.unlock();
-        result
+        })()
     }
     async fn append_cwd_switch_with_bookkeeping(
         &self,
@@ -625,18 +664,18 @@ impl JsonlStorageAdapter {
             })?;
             Ok(StrictAppendAck::Appended)
         })();
-        let _ = lock.unlock();
+        drop(lock);
         result
     }
     /// Lock tail healing, append, and barriers through `<target>.jsonl.lock`.
     /// Full-file [`Self::write_jsonl`] atomic-rename rewrites bypass this append-only lock.
-    fn lock_append(path: &Path) -> io::Result<std::fs::File> {
+    fn lock_append(path: &Path) -> io::Result<HeldLock> {
         let lock = super::owner_only::open(
             OpenOptions::new().read(true).write(true).create(true).truncate(false),
             &path.with_extension("jsonl.lock"),
         )?;
         lock.lock_exclusive()?;
-        Ok(lock)
+        Ok(HeldLock::new(lock))
     }
     fn sync_file_durable(file: &std::fs::File) -> io::Result<()> {
         super::sync_file_durable(file)
@@ -675,7 +714,8 @@ impl JsonlStorageAdapter {
             let deadline = std::time::Instant::now() + rewrite_lock_wait();
             let _rewrite_lock = Self::lock_rewrite_bounded(&path, deadline)?;
             let lock = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
-            let result = Self::rewrite_rewind_points_locked(&path, lock.is_some(), edit).map(|_| ());
+            let result =
+                Self::rewrite_rewind_points_locked(&path, lock.is_some(), edit, |_, _| Ok(())).map(|_| ());
             if let Some(lock) = lock {
                 let _ = lock.unlock();
             }
@@ -688,13 +728,15 @@ impl JsonlStorageAdapter {
     /// line and renames the result into place. Returns what the file held before (`None`: it did not exist) and what
     /// was written, for a rewind that may have to put it back (P146). A failure leaves the file as it was: when the rename landed but a
     /// later step failed (the directory sync), the previous content is written back, and the error says when even that
-    /// failed.
+    /// failed. `before_write` sees what the file holds and what is about to replace it, and runs before anything is
+    /// replaced; an error from it leaves the file as it was (P164: the rewind's journal and durable copy).
     fn rewrite_rewind_points_locked(
         path: &Path,
         append_locked: bool,
         edit: impl FnOnce(
             Vec<fuigo_workspace::session::file_state::RewindPointsLine>,
         ) -> Vec<fuigo_workspace::session::file_state::RewindPointsLine>,
+        before_write: impl FnOnce(Option<&[u8]>, &[u8]) -> io::Result<()>,
     ) -> io::Result<(Option<Vec<u8>>, Vec<u8>)> {
         let previous = match std::fs::read(path) {
             Ok(bytes) => Some(bytes),
@@ -708,6 +750,7 @@ impl JsonlStorageAdapter {
         };
         let bytes = fuigo_workspace::session::file_state::encode_rewind_points_lines(&edit(lines))
             .map_err(io::Error::other)?;
+        before_write(previous.as_deref(), &bytes)?;
         if let Err(error) = super::write_bytes_atomic(path, &bytes) {
             return Err(match Self::put_back_rewind_points(path, previous.as_deref()) {
                 Ok(()) => error,
@@ -739,7 +782,7 @@ impl JsonlStorageAdapter {
     /// read, edit and rename and the later rename drops the earlier edit (K19). Appenders and readers never take it.
     /// Bounded like the shared append lock the rewrite takes next (SHARED, `lock_bounded`, same deadline): `WouldBlock` after the deadline, `Ok(None)` when the lock
     /// file cannot be opened or locked.
-    fn lock_rewrite_bounded(path: &Path, deadline: std::time::Instant) -> io::Result<Option<std::fs::File>> {
+    fn lock_rewrite_bounded(path: &Path, deadline: std::time::Instant) -> io::Result<Option<HeldLock>> {
         Self::lock_bounded(path, path.with_extension("jsonl.rewrite.lock"), false, deadline)
     }
 
@@ -748,7 +791,7 @@ impl JsonlStorageAdapter {
         lock_path: PathBuf,
         shared: bool,
         deadline: std::time::Instant,
-    ) -> io::Result<Option<std::fs::File>> {
+    ) -> io::Result<Option<HeldLock>> {
         let lock = match super::owner_only::open(
             OpenOptions::new().read(true).write(true).create(true).truncate(false),
             &lock_path,
@@ -768,7 +811,7 @@ impl JsonlStorageAdapter {
                 fs2::FileExt::try_lock_exclusive(&lock)
             };
             match taken {
-                Ok(()) => return Ok(Some(lock)),
+                Ok(()) => return Ok(Some(HeldLock(lock))),
                 Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                     #[cfg(test)]
                     if !shared {
@@ -1961,39 +2004,60 @@ impl StorageAdapter for JsonlStorageAdapter {
         &self,
         info: &Info,
         rewrite: super::RewindPointsRewrite,
+        conversation: Option<super::RewindConversation>,
     ) -> io::Result<super::RewindPointsUndo> {
         let path = self.rewind_points_file(info);
+        let chat_path = self.chat_file(info);
+        let updates_path = self.updates_file(info);
         tokio::task::spawn_blocking(move || -> io::Result<super::RewindPointsUndo> {
             // The caller holds the rewrite lock. Everything below runs under the append lock, so the durable copy, the
             // bytes kept for a put-back and the rewrite all see the same file.
             let deadline = std::time::Instant::now() + rewrite_lock_wait();
             let append = Self::lock_bounded(&path, path.with_extension("jsonl.lock"), true, deadline)?;
             let result = (|| {
-                // What the file holds now goes to a durable copy first, so that a put-back that fails (or a crash
-                // before the rewind is done) never loses it. A copy left by an earlier rewind refuses this one before
-                // it starts (see the rewind handler), so none is overwritten here.
                 let copy = super::rewind_points_pre_rewind_copy(&path);
-                match std::fs::read(&path) {
-                    Ok(bytes) => super::write_bytes_atomic(&copy, &bytes)?,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error),
-                }
-                let (previous, written) =
-                    Self::rewrite_rewind_points_locked(&path, append.is_some(), move |lines| match rewrite {
+                let journal = super::rewind_points_journal(&path);
+                // What the file holds now goes to a durable copy before it is replaced, so that a put-back that fails
+                // (or a crash before the rewind is done) never loses it. A copy left by an earlier rewind refuses this
+                // one before it starts (see the rewind handler), so none is overwritten here. The journal goes first
+                // (P164): a copy is never on disk without the journal that says what the rewind was doing, except a
+                // copy left by a Fuigo older than 1.0.22.
+                let write_copy = |previous: Option<&[u8]>, written: &[u8]| -> io::Result<()> {
+                    let Some(previous) = previous else {
+                        return Ok(());
+                    };
+                    let entry = rewind_reconcile::RewindJournal::new(
+                        rewrite,
+                        previous,
+                        written,
+                        conversation,
+                        &chat_path,
+                        &updates_path,
+                    )?;
+                    super::write_bytes_atomic(&journal, &entry.to_bytes()?)?;
+                    super::write_bytes_atomic(&copy, previous)
+                };
+                let (previous, written) = Self::rewrite_rewind_points_locked(
+                    &path,
+                    append.is_some(),
+                    move |lines| match rewrite {
                         super::RewindPointsRewrite::TruncateFrom(from_index) => {
                             fuigo_workspace::session::file_state::truncate_rewind_points_lines(lines, from_index)
                         }
                         super::RewindPointsRewrite::MergeFrom(target_index) => {
                             fuigo_workspace::session::file_state::merge_rewind_points_lines(lines, target_index)
                         }
-                    })
-                    .inspect_err(|_| {
-                        // The file is as it was (nothing changed, or it was put back): the copy is not needed. When
-                        // it is not, the copy stays.
-                        if std::fs::read(&path).ok() == std::fs::read(&copy).ok() {
-                            let _ = std::fs::remove_file(&copy);
-                        }
-                    })?;
+                    },
+                    write_copy,
+                )
+                .inspect_err(|_| {
+                    // The file is as it was (nothing changed, or it was put back), or the copy was never made: the
+                    // copy and the journal are not needed. When the file is not as it was, both stay.
+                    if copy.symlink_metadata().is_err() || std::fs::read(&path).ok() == std::fs::read(&copy).ok() {
+                        let _ = std::fs::remove_file(&copy);
+                        let _ = std::fs::remove_file(&journal);
+                    }
+                })?;
                 Ok(super::RewindPointsUndo { previous, written })
             })();
             if let Some(append) = append {
@@ -2041,11 +2105,9 @@ impl StorageAdapter for JsonlStorageAdapter {
                 result?;
             }
             // The rewind is done either way; the durable copy is not needed any more. When the put-back failed it
-            // stays (the error above returned first), and the message names it.
-            match std::fs::remove_file(super::rewind_points_pre_rewind_copy(&path)) {
-                Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-                _ => Ok(()),
-            }
+            // stays (the error above returned first), and the message names it. The journal goes after the copy, so a
+            // copy is never left without it (P164).
+            rewind_reconcile::remove_copy_then_journal(&path)
         })
         .await
         .map_err(io::Error::other)?

@@ -48,6 +48,29 @@ pub(crate) fn parse_acp_mcp_servers(meta: Option<&acp::Meta>) -> Vec<AcpServerEn
     servers
 }
 
+/// Keep only the SDK servers managed MCP policy grants (P169, Grok 4.7 #4). An SDK server is known only by its name, so
+/// it runs only when no `serverName` deny matches it, every restricted source grants it through a `serverName` allow
+/// entry (a managed-only lock needs that grant from a layer the lock's owner accepts), and no source is a lockdown.
+pub(crate) fn admit_acp_mcp_servers(
+    servers: Vec<AcpServerEntry>,
+    policy: &fuigo_workspace::permission::resolution::McpServerPolicy,
+) -> Vec<AcpServerEntry> {
+    servers
+        .into_iter()
+        .filter(|server| match policy.name_only_verdict(&server.name) {
+            fuigo_workspace::permission::resolution::McpVerdict::Allowed => true,
+            fuigo_workspace::permission::resolution::McpVerdict::Blocked(reason) => {
+                tracing::warn!(
+                    name = %server.name,
+                    reason = %reason,
+                    "in-process SDK MCP server blocked by managed policy"
+                );
+                false
+            }
+        })
+        .collect()
+}
+
 /// Reverse-RPC invoker for in-process SDK MCP servers.
 ///
 /// Each [`invoke`](AcpReverseInvoker::invoke) sends one `fuigo/mcp/sdk_call` reverse request straight through the gateway.
@@ -116,6 +139,43 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, "harness-tools");
         assert_eq!(servers[0].server_id, "srv_0");
+    }
+
+    /// P169 (Grok 4.7 #4): `_meta["fuigo/mcp/servers"]` SDK servers are filtered by managed MCP policy before they are
+    /// registered: a lockdown drops all of them, a `serverName` allow list keeps only the granted name, a URL-only allow
+    /// list grants none, and no policy keeps all.
+    #[test]
+    fn sdk_servers_pass_through_managed_mcp_policy() {
+        use fuigo_workspace::permission::resolution::{
+            AllowedMcpServer, McpServerAllowlist, McpServerPolicy,
+        };
+        let meta = serde_json::json!({
+            "fuigo/mcp/servers": [
+                { "name": "granted", "serverId": "srv_0" },
+                { "name": "other", "serverId": "srv_1" },
+            ]
+        });
+        let servers = || parse_acp_mcp_servers(meta.as_object());
+        let names = |kept: Vec<AcpServerEntry>| kept.into_iter().map(|s| s.name).collect::<Vec<_>>();
+        let src = Some(std::path::PathBuf::from("/etc/fuigo/managed_config.toml"));
+        assert_eq!(names(admit_acp_mcp_servers(servers(), &McpServerPolicy::default())).len(), 2);
+        let lockdown: McpServerPolicy =
+            McpServerAllowlist::new(vec![], vec![], src.clone()).with_lockdown().into();
+        assert!(admit_acp_mcp_servers(servers(), &lockdown).is_empty());
+        let by_name: McpServerPolicy = McpServerAllowlist::new(
+            vec![AllowedMcpServer::Name { name: "granted".into() }],
+            vec![],
+            src.clone(),
+        )
+        .into();
+        assert_eq!(names(admit_acp_mcp_servers(servers(), &by_name)), vec!["granted"]);
+        let by_url: McpServerPolicy = McpServerAllowlist::new(
+            vec![AllowedMcpServer::Http { url_pattern: "https://ok.example.com/*".into() }],
+            vec![],
+            src,
+        )
+        .into();
+        assert!(admit_acp_mcp_servers(servers(), &by_url).is_empty());
     }
 
     #[test]

@@ -175,23 +175,262 @@ pub fn is_trusted_this_process(key: &Path) -> bool {
     TrustStore::load().is_trusted(key)
 }
 
-/// Persist an explicit `--trust` grant.
-/// Best-effort on disk; a process-local grant is always recorded so this session honors the user decision.
-pub fn grant_folder_trust(cwd: &Path) {
+/// Why a grant was refused before anything was recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantRefuse {
+    /// Local/dev build: folder-trust is inert (auto-trusts everything).
+    InertBuild,
+    /// Home, filesystem root, or non-absolute key: never recorded, and auto-trusted by [`decide`].
+    UnsafeRoot,
+    /// No user home, or a relative store home (that would be a cwd-relative store).
+    NoHome,
+    /// The existing store could not be read or parsed; nothing was recorded and the file is untouched.
+    Unreadable,
+    /// The key no longer resolves to itself (the folder was deleted, moved, or is not canonical).
+    KeyMoved,
+}
+
+impl std::fmt::Display for GrantRefuse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InertBuild => write!(f, "folder trust is off in this build"),
+            Self::UnsafeRoot => write!(f, "folder trust is not recorded for this path"),
+            Self::NoHome => write!(
+                f,
+                "Couldn't save folder trust: no home directory for the trust store. \
+                 Set FUIGO_HOME to an absolute directory (or unset it), then start Fuigo again."
+            ),
+            Self::Unreadable => write!(
+                f,
+                "Couldn't save folder trust: the trust store could not be read. \
+                 Fix or delete trusted_folders.toml in your Fuigo home ($FUIGO_HOME, default ~/.fuigo), \
+                 then start Fuigo again and trust the folder."
+            ),
+            Self::KeyMoved => write!(
+                f,
+                "Couldn't save folder trust: the folder path changed. \
+                 Start Fuigo again from the folder you want to trust."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GrantRefuse {}
+
+/// What happened on disk after a real insert was attempted.
+#[derive(Debug)]
+pub enum PersistStatus {
+    /// Written to `trusted_folders.toml`.
+    Durable,
+    /// The store was read (or is missing) but the lock or write failed (e.g. `--sandbox` denies writes under the home).
+    /// Nothing was published; the grant holds for this process only.
+    ProcessLocalOnly { error: std::io::Error },
+}
+
+/// Result of an explicit grant (`--trust`, the trust question, `/hooks trust`).
+#[derive(Debug)]
+pub enum GrantOutcome {
+    /// A record was inserted; see `persist` for whether it reached disk.
+    Granted { key: PathBuf, persist: PersistStatus },
+    /// The exact key is already durably trusted; the store was not rewritten.
+    AlreadyDurable { key: PathBuf },
+    /// Nothing was recorded, durable or process-local.
+    Refused { reason: GrantRefuse },
+}
+
+impl std::fmt::Display for GrantOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Granted {
+                persist: PersistStatus::ProcessLocalOnly { error },
+                ..
+            } => write!(
+                f,
+                "Couldn't save folder trust ({error}); the folder is trusted for this session only. \
+                 Check that your Fuigo home ($FUIGO_HOME, default ~/.fuigo) is writable, \
+                 then run `fuigo --trust` in this folder."
+            ),
+            Self::Refused { reason } => write!(f, "{reason}"),
+            Self::Granted { .. } | Self::AlreadyDurable { .. } => write!(f, "folder trust was saved"),
+        }
+    }
+}
+
+impl std::error::Error for GrantOutcome {}
+
+/// How a gate should treat a [`GrantOutcome`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantResolution {
+    /// Durable, already durable, or auto-trusted (inert build / unrecordable root): the gate is answered.
+    Trusted,
+    /// Trusted in this process only; the next process will ask again.
+    SessionLocal,
+    /// Nothing recorded: the folder is not trusted.
+    Unrecorded,
+}
+
+impl GrantOutcome {
+    #[must_use]
+    pub fn resolution(&self) -> GrantResolution {
+        match self {
+            Self::Granted {
+                persist: PersistStatus::Durable,
+                ..
+            }
+            | Self::AlreadyDurable { .. } => GrantResolution::Trusted,
+            Self::Granted {
+                persist: PersistStatus::ProcessLocalOnly { .. },
+                ..
+            } => GrantResolution::SessionLocal,
+            Self::Refused { reason } => match reason {
+                GrantRefuse::InertBuild | GrantRefuse::UnsafeRoot => GrantResolution::Trusted,
+                GrantRefuse::NoHome | GrantRefuse::Unreadable | GrantRefuse::KeyMoved => {
+                    GrantResolution::Unrecorded
+                }
+            },
+        }
+    }
+
+    /// True only when the grant answers the gate durably (or the folder is auto-trusted).
+    #[must_use]
+    pub fn dismisses_gate(&self) -> bool {
+        matches!(self.resolution(), GrantResolution::Trusted)
+    }
+}
+
+/// Report a `--trust` result on stderr. Durable and auto-trusted outcomes are silent; a session-only grant or a
+/// refusal prints its reason and next step, so `--trust` never fails silently.
+pub fn report_cli_trust_grant(outcome: &GrantOutcome) {
+    if outcome.dismisses_gate() {
+        return;
+    }
+    tracing::warn!(error = %outcome, "--trust: folder trust was not saved");
+    fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(outcome));
+}
+
+/// Persist an explicit `--trust` grant for `workspace_key(cwd)`.
+/// The key is pre-checked (canonical, not an over-broad root) and the store must read cleanly before anything is
+/// recorded; see [`GrantOutcome`]. A grant whose disk write fails is still honored in this process
+/// ([`PersistStatus::ProcessLocalOnly`]); a refused one records nothing.
+pub fn grant_folder_trust(cwd: &Path) -> GrantOutcome {
     // Local/dev builds never gate, so there is nothing to grant: `--trust` is a no-op and the store is left untouched (the whole feature is inert)
     if folder_trust_inert() {
-        return;
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::InertBuild,
+        };
     }
-    let key = workspace_key(cwd);
-    if crate::trust::is_unsafe_trust_root(&key) {
-        return;
+    grant_folder_trust_key(&workspace_key(cwd))
+}
+
+/// Grant exactly the key the user was shown (the trust question's workspace). Canonicalize-checks it; does not
+/// re-derive [`workspace_key`].
+pub fn grant_folder_trust_key(key: &Path) -> GrantOutcome {
+    checked_grant(TrustStore::default_path(), key)
+}
+
+/// [`grant_folder_trust_key`] against the store at `store_home.join(TRUST_FILE_NAME)` (tests, and callers with an
+/// explicit home). A relative `store_home` is refused as [`GrantRefuse::NoHome`].
+pub fn grant_folder_trust_key_in(store_home: &Path, key: &Path) -> GrantOutcome {
+    let store_path = store_home
+        .is_absolute()
+        .then(|| store_home.join(crate::trust::TRUST_FILE_NAME));
+    checked_grant(store_path, key)
+}
+
+/// The single pre-check owner: inert / canonical / unsafe-root once, then the store write.
+fn checked_grant(store_path: Option<PathBuf>, key: &Path) -> GrantOutcome {
+    if let Some(refused) = precheck_grant(key) {
+        return refused;
     }
-    let mut store = TrustStore::load();
+    let Some(store_path) = store_path else {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+    };
+    let mut store = TrustStore::load_from(store_path);
+    apply_grant_to_store(&mut store, key)
+}
+
+fn precheck_grant(key: &Path) -> Option<GrantOutcome> {
+    if folder_trust_inert() {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::InertBuild,
+        });
+    }
+    // An existing key must be its own canonical form (an alias or a moved folder is not the key that was shown).
+    // A key that does not exist at all is granted as written only when it is absolute and lexically normal: that is
+    // the standalone `fuigo -w` worktree whose recorded source repo was deleted (its `workspace_key` is that recorded
+    // path, see [`crate::trust::workspace_key`]), and such a record can only cover that exact, normal prefix.
+    let canonical = match dunce::canonicalize(key) {
+        Ok(c) => c,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                && key.is_absolute()
+                && key
+                    .components()
+                    .all(|c| !matches!(c, std::path::Component::CurDir | std::path::Component::ParentDir)) =>
+        {
+            key.to_path_buf()
+        }
+        Err(_) => {
+            return Some(GrantOutcome::Refused {
+                reason: GrantRefuse::KeyMoved,
+            });
+        }
+    };
+    if canonical != key {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::KeyMoved,
+        });
+    }
+    if crate::trust::is_unsafe_trust_root(key) {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::UnsafeRoot,
+        });
+    }
+    None
+}
+
+fn apply_grant_to_store(store: &mut TrustStore, key: &Path) -> GrantOutcome {
+    let key = key.to_path_buf();
+    if !store.disk_readable() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        };
+    }
+    if !store.has_store_path() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+    }
+    // Already durable needs a clean read and an exact trusted record (a missing file is not already durable).
     if store.has_decision(&key) && store.is_trusted(&key) {
         record_process_decision(&key, true);
-        return;
+        return GrantOutcome::AlreadyDurable { key };
     }
-    persist_trust(&mut store, &key);
+    match store.record_decision_strict(&key, true) {
+        Ok(crate::trust::Recorded::Durable) => {
+            record_process_decision(&key, true);
+            GrantOutcome::Granted {
+                key,
+                persist: PersistStatus::Durable,
+            }
+        }
+        Ok(crate::trust::Recorded::Skipped) => GrantOutcome::Refused {
+            reason: GrantRefuse::UnsafeRoot,
+        },
+        Err(crate::trust::TrustPersistError::Unreadable(_)) => GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        },
+        Err(crate::trust::TrustPersistError::Publish(error)) => {
+            tracing::debug!(error = %error, "folder trust granted for this process only; durable write denied");
+            record_process_decision(&key, true);
+            GrantOutcome::Granted {
+                key,
+                persist: PersistStatus::ProcessLocalOnly { error },
+            }
+        }
+    }
 }
 
 /// Revoke trust for `cwd`'s workspace in the durable store and this process.
@@ -220,16 +459,40 @@ pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
     was_trusted
 }
 
-pub fn persist_trust(store: &mut TrustStore, key: &Path) {
-    if let Err(e) = store.set_trusted(key) {
-        tracing::warn!(
-            path = %key.display(),
-            error = %e,
-            "folder trust: failed to persist trust decision"
-        );
+/// Persist an accepted interactive (stderr) prompt for `key`. Only a real grant records process-local trust: an
+/// unreadable store is not granted into. Returns the outcome so the caller can report it.
+pub fn persist_trust(store: &mut TrustStore, key: &Path) -> GrantOutcome {
+    let outcome = apply_grant_to_store(store, key);
+    match &outcome {
+        GrantOutcome::Granted {
+            persist: PersistStatus::Durable,
+            ..
+        }
+        | GrantOutcome::AlreadyDurable { .. } => {}
+        GrantOutcome::Granted {
+            persist: PersistStatus::ProcessLocalOnly { error },
+            ..
+        } => {
+            tracing::warn!(
+                path = %key.display(),
+                error = %error,
+                "folder trust: failed to persist trust decision"
+            );
+        }
+        GrantOutcome::Refused { reason } => {
+            tracing::warn!(
+                path = %key.display(),
+                ?reason,
+                "folder trust: grant refused; process-local trust not recorded"
+            );
+        }
     }
-    record_process_decision(key, true);
+    outcome
 }
+
+#[cfg(test)]
+#[path = "folder_trust_grant_tests.rs"]
+mod grant_tests;
 
 /// Whether any repo-local trust-sensitive config is present for `cwd`.
 /// When none are present there is nothing to gate, so we skip the prompt entirely.
@@ -271,7 +534,7 @@ fn config_toml_permission_contributes(permission_value: &TomlValue) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
-fn path_present_or_uncertain(path: &Path) -> bool {
+pub(crate) fn path_present_or_uncertain(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -373,7 +636,7 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // Presence mirrors discovery's "something to gate" check
     let hook_root = chain.git_root.as_deref().unwrap_or(cwd);
     if path_present_or_uncertain(&hook_root.join(".fuigo").join("hooks"))
-        || hook_root.join(".cursor").join("hooks.json").is_file()
+        || path_present_or_uncertain(&hook_root.join(".cursor").join("hooks.json"))
     {
         hit!("hooks");
     }
@@ -446,21 +709,10 @@ fn is_interactive() -> bool {
 /// Defaults to NO on empty input, EOF, or any non-yes answer.
 /// Deliberately minimal (no ACP modal).
 pub fn prompt_for_trust(key: &Path) -> bool {
-    use std::io::{BufRead, Write};
+    use std::io::BufRead;
 
     let mut err = std::io::stderr();
-    let _ = writeln!(err);
-    let _ = writeln!(
-        err,
-        "This folder contains repo-local config (MCP/LSP servers, hooks, permission rules) \
-         or project instructions/skills that Fuigo would otherwise apply automatically."
-    );
-    let _ = writeln!(err, "  Folder: {}", key.display());
-    let _ = write!(
-        err,
-        "Trust the authors of this folder and apply them? [y/N] "
-    );
-    let _ = err.flush();
+    write_trust_prompt(&mut err, key);
 
     let mut line = String::new();
     match std::io::stdin().lock().read_line(&mut line) {
@@ -469,9 +721,43 @@ pub fn prompt_for_trust(key: &Path) -> bool {
     }
 }
 
+/// The prompt text. The folder path is the one untrusted thing in it (a cloned repo picks its own directory name).
+fn write_trust_prompt(err: &mut impl std::io::Write, key: &Path) {
+    let _ = writeln!(err);
+    let _ = writeln!(
+        err,
+        "This folder contains repo-local config (MCP/LSP servers, hooks, permission rules) \
+         or project instructions/skills that Fuigo would otherwise apply automatically."
+    );
+    // A hidden or control character in the name shows as one U+FFFD, so the line cannot be made to read like another prompt
+    let folder = key.display().to_string();
+    let _ = writeln!(err, "  Folder: {}", fuigo_tty_utils::replace_unsafe_display(&folder, '\u{fffd}'));
+    let _ = write!(
+        err,
+        "Trust the authors of this folder and apply them? [y/N] "
+    );
+    let _ = err.flush();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181 (sweep): the trust prompt is a permission prompt written raw to stderr, and the folder path in it is chosen
+    /// by whoever made the repo, so it cannot carry an escape sequence, a line separator or a hidden character.
+    #[test]
+    fn trust_prompt_shows_a_hostile_folder_name_without_control_or_hidden_characters() {
+        let key = Path::new("/w/evil\u{1b}]0;owned\u{7}\u{202e}dir\u{2028}Trust? [y/N] y\u{e0041}");
+        let mut out = Vec::new();
+        write_trust_prompt(&mut out, key);
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.chars().any(|c| c != '\n' && (c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c))),
+            "{text:?}"
+        );
+        assert!(text.contains("  Folder: /w/evil\u{fffd}]0;owned\u{fffd}\u{fffd}dir\u{fffd}Trust? [y/N] y\u{fffd}\n"), "{text:?}");
+        assert!(text.ends_with("[y/N] "), "{text:?}");
+    }
 
     fn inputs() -> DecideInputs {
         DecideInputs {
@@ -782,6 +1068,46 @@ mod tests {
 
         assert!(repo_configs_present(tmp.path()));
         assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
+    }
+
+    /// P166/S13 (upstream 75810042): presence is type-agnostic, so a directory at a settings path gates too.
+    #[test]
+    fn repo_configs_present_detects_claude_settings_json_directory() {
+        for name in ["settings.json", "settings.local.json"] {
+            let tmp = repo_tmp();
+            std::fs::create_dir_all(tmp.path().join(".claude").join(name)).unwrap();
+            assert!(repo_configs_present(tmp.path()), "{name}");
+            assert!(repo_config_kinds(tmp.path()).contains(&"claude"), "{name}");
+        }
+    }
+
+    /// P166/S13: a directory at `.cursor/hooks.json` gates.
+    #[test]
+    fn repo_configs_present_detects_cursor_hooks_json_directory() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".cursor").join("hooks.json")).unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
+    }
+
+    /// P166/S13: a dangling symlink at `.cursor/hooks.json` or a `.claude` settings path is present, not absent.
+    #[cfg(unix)]
+    #[test]
+    fn repo_configs_present_detects_dangling_vendor_settings_symlinks() {
+        let tmp = repo_tmp();
+        let cursor = tmp.path().join(".cursor");
+        std::fs::create_dir_all(&cursor).unwrap();
+        std::os::unix::fs::symlink("missing-hooks.json", cursor.join("hooks.json")).unwrap();
+        assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
+
+        for name in ["settings.json", "settings.local.json"] {
+            let tmp = repo_tmp();
+            let claude = tmp.path().join(".claude");
+            std::fs::create_dir_all(&claude).unwrap();
+            std::os::unix::fs::symlink("missing-settings.json", claude.join(name)).unwrap();
+            assert!(repo_configs_present(tmp.path()), "{name}");
+            assert!(repo_config_kinds(tmp.path()).contains(&"claude"), "{name}");
+        }
     }
 
     #[test]
@@ -1204,7 +1530,10 @@ mod tests {
         // TrustStore writes through user_fuigo_home(), which reads the fuigo_home() OnceLock
         // Bazel rust_test is one process, so the test denies persistence at the cached home
         let store_home = fuigo_config::user_fuigo_home().expect("FUIGO_HOME is set");
-        let deny_path = store_home.join(fuigo_config::TRUSTED_FOLDERS_FILENAME);
+        // P167: deny the WRITE, not the read. A directory squatting on the write lock fails the publish while the
+        // store itself reads cleanly (missing), which is the `--sandbox` shape. A directory at the store path itself
+        // is an unreadable store, and a grant over it records nothing (see `grant_tests`).
+        let deny_path = store_home.join(format!("{}.lock", fuigo_config::TRUSTED_FOLDERS_FILENAME));
         if deny_path.is_file() {
             std::fs::remove_file(&deny_path).unwrap();
         }
@@ -1217,7 +1546,18 @@ mod tests {
         }
         let _restore = Restore(deny_path);
         let tmp = repo_tmp();
-        grant_folder_trust(tmp.path());
+        let outcome = grant_folder_trust(tmp.path());
+        assert!(
+            matches!(
+                outcome,
+                GrantOutcome::Granted {
+                    persist: PersistStatus::ProcessLocalOnly { .. },
+                    ..
+                }
+            ),
+            "a denied write is a session-only grant: {outcome:?}"
+        );
+        assert_eq!(outcome.resolution(), GrantResolution::SessionLocal);
         let key = workspace_key(tmp.path());
         assert!(
             !TrustStore::load().is_trusted(&key),

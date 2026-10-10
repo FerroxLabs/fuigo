@@ -117,6 +117,31 @@ struct CatalogState {
     generation: u64,
 }
 
+/// Minutes to wait before the next background `/v1/models` fetch, after the 1st, 2nd, ... consecutive 401 for the same
+/// credential; the last entry repeats.
+const AUTH_REJECT_BACKOFF_MINUTES: [u64; 6] = [1, 2, 4, 8, 16, 30];
+
+/// The one note shown when the model list is refused with a 401. Fixed text: no outside value goes into it.
+pub(crate) const AUTH_REJECTED_NOTICE: &str = "Fuigo could not load the model list: the API key or sign-in was rejected (401). Sign in again or check your API key. Fuigo will retry less often until then.";
+
+/// What the last 401 on `/v1/models` taught us. Cleared by a 200 or by a different credential.
+#[derive(Default)]
+struct AuthRejectGate {
+    /// Fingerprint (in memory only, never logged) of the credential the server rejected.
+    credential: Option<u64>,
+    rejections: u32,
+    blocked_until: Option<tokio::time::Instant>,
+}
+
+/// In-memory fingerprint of the credential a fetch would use: the env key and the session token, if any.
+fn credential_fingerprint(auth: Option<&FuigoAuth>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    crate::agent::auth_method::read_fuigo_api_key_env().ok().hash(&mut h);
+    auth.map(|a| a.key.as_str()).hash(&mut h);
+    h.finish()
+}
+
 struct Inner {
     catalog: RwLock<CatalogState>,
     current_model_id: RwLock<acp::ModelId>,
@@ -128,6 +153,13 @@ struct Inner {
     gateway: RwLock<Option<fuigo_acp_lib::AcpAgentGatewaySender>>,
     cache: ModelsCacheManager,
     endpoint: Arc<dyn ModelsEndpoint>,
+    /// Throttle for background `/v1/models` fetches after the server answered 401 ([`AuthRejectGate`]).
+    auth_gate: parking_lot::Mutex<AuthRejectGate>,
+    /// Fingerprint of the credential as of the last `on_auth_changed` (or construction): tells a real change of
+    /// credential from an unrelated rewrite of `auth.json`. In memory only.
+    credential_seen: parking_lot::Mutex<Option<u64>>,
+    /// The one "sign in again" note, set when the first 401 of a rejection run lands; sessions subscribe to it.
+    auth_notice: tokio::sync::watch::Sender<Option<String>>,
     /// Guard to prevent overlapping retry loops.
     retry_in_flight: AtomicBool,
     /// Single-flight for the etag-triggered background refresh (`spawn_fetch`).
@@ -269,6 +301,7 @@ impl ModelsManagerBuilder {
         let has_session = self.auth_manager.current_or_expired().is_some();
         let fetch_auth = ModelFetchAuth::resolve(&self.cfg.endpoints, has_session);
         let current_reasoning_effort = self.cfg.models.default_reasoning_effort;
+        let credential_seen = credential_fingerprint(self.auth_manager.current_or_expired().as_ref());
         ModelsManager {
             inner: Arc::new(Inner {
                 catalog: RwLock::new(CatalogState {
@@ -284,6 +317,9 @@ impl ModelsManagerBuilder {
                 gateway: RwLock::new(None),
                 cache: self.cache,
                 endpoint: self.endpoint,
+                auth_gate: parking_lot::Mutex::new(AuthRejectGate::default()),
+                credential_seen: parking_lot::Mutex::new(Some(credential_seen)),
+                auth_notice: tokio::sync::watch::channel(None).0,
                 retry_in_flight: AtomicBool::new(false),
                 refresh_in_flight: AtomicBool::new(false),
                 fetches_in_flight: AtomicUsize::new(0),
@@ -380,6 +416,8 @@ impl ModelsManager {
 
         if has_prefetched {
             validate_selectable(cfg, &catalog)?;
+        } else {
+            validate_fleet_pin_pre_catalog(cfg, &catalog)?;
         }
 
         let (current_model_key, current_model, model_source) =
@@ -400,6 +438,11 @@ impl ModelsManager {
             auth_manager,
             cfg.clone(),
         );
+        // P169: under a fleet pin the bundled catalog's verdict blocks prompts until a real catalog says otherwise.
+        if effective_allowlist(cfg).is_fleet() {
+            let excludes_all = allowlist_matches_nothing(cfg, &mgr.inner.catalog.read().models);
+            mgr.inner.catalog.write().allowlist_excludes_all = excludes_all;
+        }
         if has_prefetched {
             let mut cat = mgr.inner.catalog.write();
             cat.has_fetched_real_catalog = true;
@@ -444,7 +487,7 @@ impl ModelsManager {
         *self.inner.cfg.write() = new_config.clone();
         {
             let mut cat = self.inner.catalog.write();
-            if has_real_catalog {
+            if has_real_catalog || effective_allowlist(&new_config).is_fleet() {
                 cat.allowlist_excludes_all = allowlist_matches_nothing(&new_config, &new_catalog);
             }
             cat.models = new_catalog;
@@ -575,6 +618,26 @@ impl ModelsManager {
             .get(model_id)
             .map(|e| e.info().laziness_detector.clone())
             .unwrap_or_default()
+    }
+
+    /// The wire model and detector config the laziness classifier uses for the session's selected catalog key
+    /// (P169 round 8): `None` when a fleet pin does not admit it.
+    pub(crate) fn laziness_target(
+        &self,
+        catalog_key: &str,
+    ) -> Option<(String, config::LazinessDetectorPerModelConfig)> {
+        self.with_helper_catalog(|allowlist, models| {
+            let wire = selected_wire_model(allowlist, models, catalog_key)?;
+            let cfg = config::find_model_by_id(models, catalog_key)
+                .map(|entry| entry.info().laziness_detector.clone())
+                .unwrap_or_default();
+            Some((wire, cfg))
+        })
+    }
+
+    /// The wire model of the session's selected catalog key under the allowlist in force (see [`selected_wire_model`]).
+    pub(crate) fn selected_wire_model(&self, catalog_key: &str) -> Option<String> {
+        self.with_helper_catalog(|allowlist, models| selected_wire_model(allowlist, models, catalog_key))
     }
 
     #[cfg(test)]
@@ -722,6 +785,28 @@ impl ModelsManager {
         Some((slug, choice))
     }
 
+    /// Run `f` on the allowlist in force for this manager's config (P169: a fleet pin binds helper sampling too).
+    pub(crate) fn with_allowlist<T>(&self, f: impl FnOnce(&EffectiveAllowlist<'_>) -> T) -> T {
+        let cfg = self.inner.cfg.read();
+        f(&effective_allowlist(&cfg))
+    }
+
+    /// Whether a side call (title, image description, classifier, prompt suggestion) may sample `slug`:
+    /// always without a fleet pin; under one, only a catalog entry the pin admits.
+    pub(crate) fn helper_model_admitted(&self, slug: &str) -> bool {
+        let cat = self.inner.catalog.read();
+        self.with_allowlist(|allowlist| helper_model_admitted(allowlist, &cat.models, slug))
+    }
+
+    /// Run `f` on the allowlist in force and the live catalog (P169: how a side call picks its wire model).
+    pub(crate) fn with_helper_catalog<T>(
+        &self,
+        f: impl FnOnce(&EffectiveAllowlist<'_>, &IndexMap<String, ModelEntry>) -> T,
+    ) -> T {
+        let cat = self.inner.catalog.read();
+        self.with_allowlist(|allowlist| f(allowlist, &cat.models))
+    }
+
     /// Whether `model_id` resolves in the current catalog, as a config key or a routing slug.
     pub(crate) fn model_in_catalog(&self, model_id: &str) -> bool {
         let cat = self.inner.catalog.read();
@@ -808,8 +893,31 @@ impl ModelsManager {
         self.spawn_fetch(Some(etag));
     }
 
+    /// An interactive sign-in (or an installed runtime key) just succeeded: forget every remembered model-list
+    /// rejection, in memory and on disk, so the next fetch happens at once. (An auth command merely returning a
+    /// string is not a sign-in and does not call this.)
+    pub(crate) fn note_successful_sign_in(&self) {
+        *self.inner.auth_gate.lock() = AuthRejectGate::default();
+        if let Some(m) = crate::auth::api_key_route_memory::RouteMemory::models_location() {
+            m.clear_all_models_401(crate::auth::api_key_route_memory::unix_now());
+        }
+    }
+
     /// Auth identity changed: invalidate the disk cache and refresh the catalog.
+    ///
+    /// A different credential now present (a `fuigo login` in another window picked up by the auth watcher, a
+    /// re-issued token after a subscription unblock) is a sign-in: the remembered model-list rejections are cleared
+    /// so the next fetch happens at once. The condition is exactly: a session is present AND the credential
+    /// fingerprint (env key plus session token) differs from the one seen at the previous call. The same credential
+    /// (an unrelated rewrite of `auth.json`) and a sign-out clear nothing, so a flapping writer cannot bring the
+    /// fast loop back.
     pub(crate) async fn on_auth_changed(&self) {
+        let session = self.inner.auth_manager.current_or_expired();
+        let fingerprint = credential_fingerprint(session.as_ref());
+        let before = self.inner.credential_seen.lock().replace(fingerprint);
+        if session.is_some() && before.is_some_and(|b| b != fingerprint) {
+            self.note_successful_sign_in();
+        }
         let config = self.inner.cfg.read().clone();
         crate::agent::init::update_telemetry_config(&config, &self.inner.auth_manager);
         self.inner.cache.invalidate();
@@ -869,6 +977,90 @@ impl ModelsManager {
         }
 
         self.notify_models_updated();
+    }
+
+    /// True while a background fetch with this credential must wait because the server rejected it. A different
+    /// credential (new key, new token after a refresh) lifts the block at once.
+    fn auth_gate_blocks(&self, credential: u64) -> bool {
+        let mut gate = self.inner.auth_gate.lock();
+        if gate.credential.is_some_and(|c| c != credential) {
+            *gate = AuthRejectGate::default();
+            return false;
+        }
+        match gate.blocked_until {
+            Some(until) if gate.credential == Some(credential) => tokio::time::Instant::now() < until,
+            _ => false,
+        }
+    }
+
+    /// Record a 401: lengthen the wait (1, 2, 4, 8, 16, then 30 minutes) and raise the note once per rejection run.
+    fn note_auth_rejected(&self, credential: u64) {
+        let first = {
+            let mut gate = self.inner.auth_gate.lock();
+            let first = gate.credential != Some(credential) || gate.rejections == 0;
+            gate.rejections = if gate.credential == Some(credential) { gate.rejections + 1 } else { 1 };
+            gate.credential = Some(credential);
+            let idx = (gate.rejections as usize - 1).min(AUTH_REJECT_BACKOFF_MINUTES.len() - 1);
+            let wait = std::time::Duration::from_secs(AUTH_REJECT_BACKOFF_MINUTES[idx] * 60);
+            gate.blocked_until = Some(tokio::time::Instant::now() + wait);
+            first
+        };
+        tracing::warn!("model catalog: the API key or sign-in was rejected (401); background refresh backs off");
+        if first {
+            self.inner
+                .auth_notice
+                .send_replace(Some(AUTH_REJECTED_NOTICE.to_owned()));
+        }
+    }
+
+    /// A good fetch: back to the normal refresh, and a later rejection is worth a new note.
+    fn note_fetch_succeeded(&self) {
+        *self.inner.auth_gate.lock() = AuthRejectGate::default();
+        self.inner.auth_notice.send_replace(None);
+    }
+
+    /// The pending "sign in again" note, if any. Sessions send it to their user (once each).
+    pub(crate) fn subscribe_auth_notice(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.inner.auth_notice.subscribe()
+    }
+
+    /// One background fetch through the 401 throttle. `None`: skipped, the credential was recently rejected.
+    async fn fetch_throttled(
+        &self,
+        endpoints: config::EndpointsConfig,
+        auth: Option<FuigoAuth>,
+        fetch_auth: ModelFetchAuth,
+    ) -> Option<Option<IndexMap<String, ModelEntry>>> {
+        let credential = credential_fingerprint(auth.as_ref());
+        if self.auth_gate_blocks(credential) {
+            tracing::debug!("model catalog: fetch skipped, the credential was rejected recently");
+            return None;
+        }
+        let outcome = tokio::time::timeout(
+            crate::http::STARTUP_FETCH_TIMEOUT,
+            self.inner.endpoint.fetch_models_outcome(endpoints, auth, fetch_auth),
+        )
+        .await;
+        Some(match outcome {
+            Ok(ModelsFetchOutcome::Fetched(models)) => {
+                self.note_fetch_succeeded();
+                Some(models)
+            }
+            // A fresh disk catalog sent nothing: it neither lifts nor extends a 401 wait.
+            Ok(ModelsFetchOutcome::Cached(models)) => Some(models),
+            Ok(ModelsFetchOutcome::AuthRejected) => {
+                self.note_auth_rejected(credential);
+                None
+            }
+            Ok(ModelsFetchOutcome::Unavailable) => None,
+            Err(_elapsed) => {
+                tracing::warn!(
+                    timeout_secs = crate::http::STARTUP_FETCH_TIMEOUT.as_secs(),
+                    "model catalog fetch timed out"
+                );
+                None
+            }
+        })
     }
 
     fn notify_models_updated(&self) {
@@ -1231,24 +1423,14 @@ impl ModelsManager {
         let endpoints = cfg.endpoints.clone();
         let fetch_auth = *self.inner.fetch_auth.read();
         let auth_manager = self.inner.auth_manager.clone();
-        let endpoint = self.inner.endpoint.clone();
         let mgr = self.clone();
 
         tokio::task::spawn(async move {
             let _attempt = attempt;
             let _refresh_guard = RefreshInFlightGuard(mgr.inner.clone());
             let auth = Self::bounded_startup_auth(&auth_manager).await;
-            let new_prefetched = match tokio::time::timeout(
-                crate::http::STARTUP_FETCH_TIMEOUT,
-                endpoint.fetch_models(endpoints, auth, fetch_auth),
-            )
-            .await
-            {
-                Ok(models) => models,
-                Err(_) => {
-                    tracing::warn!("etag-triggered model refresh timed out");
-                    None
-                }
+            let Some(new_prefetched) = mgr.fetch_throttled(endpoints, auth, fetch_auth).await else {
+                return;
             };
             if !mgr.apply_refresh_result_fenced(&cfg, new_prefetched, new_etag, generation) {
                 return;
@@ -1282,21 +1464,11 @@ impl ModelsManager {
                 "fetch_auth": format!("{fetch_auth:?}"),
             })),
         );
-        let endpoint = self.inner.endpoint.clone();
-        let new_prefetched = match tokio::time::timeout(
-            crate::http::STARTUP_FETCH_TIMEOUT,
-            endpoint.fetch_models(cfg.endpoints.clone(), auth, fetch_auth),
-        )
-        .await
-        {
-            Ok(res) => res,
-            Err(_elapsed) => {
-                tracing::warn!(
-                    timeout_secs = crate::http::STARTUP_FETCH_TIMEOUT.as_secs(),
-                    "model catalog fetch timed out"
-                );
-                None
-            }
+        let Some(new_prefetched) = self
+            .fetch_throttled(cfg.endpoints.clone(), auth, fetch_auth)
+            .await
+        else {
+            return;
         };
         let success = self.apply_refresh_result_fenced(&cfg, new_prefetched, None, generation);
         if success {
@@ -1407,6 +1579,11 @@ impl ModelsManager {
             return false;
         };
         self.apply_catalog_fenced(config, new_prefetched, new_etag, Some(generation))
+    }
+
+    /// Whether this manager's config lets a reasoning-effort route reach model id `routed` (P169 fleet pin).
+    pub(crate) fn effort_route_allowed(&self, routed: &str) -> bool {
+        effort_route_allowed(&self.inner.cfg.read(), routed)
     }
 
     pub fn allowlist_excludes_all(&self) -> bool {

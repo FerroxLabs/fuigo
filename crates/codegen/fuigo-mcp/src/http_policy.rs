@@ -231,6 +231,50 @@ fn record_refusal(message: &str) {
     let _ = TRUSTED_REFUSAL.try_with(|slot| *slot.borrow_mut() = Some(message.to_string()));
 }
 
+/// How many MCP server URLs the process remembers a refusal for; a flood of distinct servers cannot grow it without bound.
+const MAX_REMEMBERED_REFUSALS: usize = 64;
+/// The longest refusal text kept; the texts are built from endpoint keys and fixed wording, so this is only a bound.
+const MAX_REMEMBERED_REFUSAL_CHARS: usize = 600;
+
+/// The latest refusal of a credential-bearing token request, per MCP server URL (K7).
+/// rmcp refreshes an expired token on its own, outside any [`capture_refusal`] scope, and shows only "Request failed".
+/// The adapter sees every such request, so it leaves the reason here for `/mcps` to show beside the server.
+/// Texts are built only from endpoint keys (no query, no userinfo), origins and fixed wording.
+static REMEMBERED_REFUSALS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, String>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn refusal_key(server_url: &str) -> String {
+    reqwest::Url::parse(server_url)
+        .map(|url| endpoint_key(&url))
+        .unwrap_or_else(|_| server_url.to_string())
+}
+
+/// The reason the last credential-bearing token request for the MCP server at `server_url` was refused, if one was
+/// and no later one succeeded.
+pub fn auth_refusal_for_url(server_url: &str) -> Option<String> {
+    REMEMBERED_REFUSALS.lock().get(&refusal_key(server_url)).cloned()
+}
+
+fn remember_refusal(server_url: &str, message: &str) {
+    if server_url.is_empty() {
+        return;
+    }
+    let key = refusal_key(server_url);
+    let text: String = message.chars().take(MAX_REMEMBERED_REFUSAL_CHARS).collect();
+    let mut table = REMEMBERED_REFUSALS.lock();
+    if !table.contains_key(&key) && table.len() >= MAX_REMEMBERED_REFUSALS {
+        table.clear();
+    }
+    table.insert(key, text);
+}
+
+fn forget_refusal(server_url: &str) {
+    if !server_url.is_empty() {
+        REMEMBERED_REFUSALS.lock().remove(&refusal_key(server_url));
+    }
+}
+
 /// The text a user should see: the specific refusal when there was one, else rmcp's own error.
 pub(crate) fn explain_token_error(error: &dyn std::fmt::Display, refusal: Option<&str>) -> String {
     refusal.map_or_else(|| error.to_string(), str::to_string)
@@ -252,11 +296,18 @@ struct CheckedOAuthClient {
     follow: reqwest::Client,
     stop: reqwest::Client,
     bindings: parking_lot::Mutex<TokenEndpointBindings>,
+    /// The MCP server URL this client serves; refusals are remembered against it (empty: not remembered).
+    resource: String,
 }
 
 impl CheckedOAuthClient {
-    #[allow(clippy::disallowed_methods)] // approved MCP 0.13 TLS and redirect construction
+    #[cfg(test)]
     fn new() -> Result<Self, AuthError> {
+        Self::for_resource("")
+    }
+
+    #[allow(clippy::disallowed_methods)] // approved MCP 0.13 TLS and redirect construction
+    fn for_resource(resource: &str) -> Result<Self, AuthError> {
         let build = |policy| {
             configure(reqwest::Client::builder())
                 .timeout(Duration::from_secs(30))
@@ -268,7 +319,23 @@ impl CheckedOAuthClient {
             follow: build(redirect_policy())?,
             stop: build(reqwest::redirect::Policy::none())?,
             bindings: parking_lot::Mutex::new(TokenEndpointBindings::default()),
+            resource: resource.to_string(),
         })
+    }
+
+    /// Record a refusal for the task that is running the request and for `/mcps`.
+    /// `message` must be built only from endpoint keys and origins.
+    fn refuse(&self, message: &str) {
+        record_refusal(message);
+        remember_refusal(&self.resource, message);
+    }
+
+    /// A token endpoint that redirected a credential-bearing request is refused for the rest of this manager's life:
+    /// the next automatic refresh is refused before it sends anything, instead of posting the refresh token again.
+    fn refuse_endpoint_for_good(&self, key: &str, why: &str) {
+        let mut bindings = self.bindings.lock();
+        bindings.allowed.remove(key);
+        bindings.refused.entry(key.to_string()).or_insert_with(|| why.to_string());
     }
 
     /// Refuse to send a credential-bearing request to a token endpoint no validated metadata document named.
@@ -295,7 +362,7 @@ impl CheckedOAuthClient {
             "refusing to send OAuth credentials (authorization code, refresh token or client secret) to {key}: {why}"
         );
         tracing::warn!(endpoint = %key, "{message}");
-        record_refusal(&message);
+        self.refuse(&message);
         Err(OAuthHttpClientError::from(message))
     }
 
@@ -346,6 +413,13 @@ impl CheckedOAuthClient {
                         endpoint_key(request.url())
                     ))
                 });
+                remember_refusal(
+                    &self.resource,
+                    &format!(
+                        "refusing to send OAuth credentials to {}: the network policy blocks this address",
+                        endpoint_key(request.url())
+                    ),
+                );
             }
             return Err(OAuthHttpClientError::from(message));
         }
@@ -368,11 +442,13 @@ impl CheckedOAuthClient {
             Ok(response) => response,
             Err(error) if error.is_redirect() && refused_redirect_key.is_some() => {
                 let key = refused_redirect_key.unwrap_or_default();
+                let why = "refused: the token endpoint redirected the request to another origin, to an address the network policy blocks, or too many times";
                 let message = format!(
-                    "refusing to send OAuth credentials (authorization code, refresh token or client secret) through a redirect from {key}: refused: the token endpoint redirected the request to another origin, to an address the network policy blocks, or too many times"
+                    "refusing to send OAuth credentials (authorization code, refresh token or client secret) through a redirect from {key}: {why}"
                 );
                 tracing::warn!(endpoint = %key, "{message}");
-                record_refusal(&message);
+                self.refuse_endpoint_for_good(&key, why);
+                self.refuse(&message);
                 return Err(OAuthHttpClientError::from(message));
             }
             Err(error) => return Err(OAuthHttpClientError::from(error.without_url().to_string())),
@@ -391,15 +467,23 @@ impl CheckedOAuthClient {
                 .as_ref()
                 .is_some_and(|target| target.origin() == response.url().origin());
             let place = if same_origin { "another address on the same origin" } else { "another origin" };
-            let message = format!(
-                "refusing to send OAuth credentials (authorization code, refresh token or client secret) through a redirect from {key}: refused: the token endpoint answered HTTP {} redirecting the request to {place}; credentials are only sent to the token endpoint the metadata names",
+            let why = format!(
+                "refused: the token endpoint answered HTTP {} redirecting the request to {place}; credentials are only sent to the token endpoint the metadata names",
                 response.status().as_u16()
             );
+            let message = format!(
+                "refusing to send OAuth credentials (authorization code, refresh token or client secret) through a redirect from {key}: {why}"
+            );
             tracing::warn!(endpoint = %key, "{message}");
-            record_refusal(&message);
+            self.refuse_endpoint_for_good(key, &why);
+            self.refuse(&message);
             return Err(OAuthHttpClientError::from(message));
         }
         let succeeded = response.status().is_success();
+        if succeeded && refused_redirect_key.is_some() {
+            // A credential-bearing request went through: whatever was refused before no longer describes this server.
+            forget_refusal(&self.resource);
+        }
         let mut builder = http::Response::builder()
             .status(response.status())
             .version(response.version());
@@ -442,8 +526,11 @@ impl OAuthHttpClient for CheckedOAuthClient {
 
 pub(crate) async fn auth_manager(url: &str) -> Result<AuthorizationManager, AuthError> {
     check_url(url).map_err(AuthError::InternalError)?;
-    AuthorizationManager::new_with_oauth_http_client(url, Arc::new(CheckedOAuthClient::new()?))
-        .await
+    AuthorizationManager::new_with_oauth_http_client(
+        url,
+        Arc::new(CheckedOAuthClient::for_resource(url)?),
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -553,6 +640,7 @@ mod tests {
             follow: client.clone(),
             stop: client.clone(),
             bindings: Default::default(),
+            resource: String::new(),
         };
         for url in ["http://api.x.ai/token", "https://api.x.ai/token"] {
             let request = client.post(url).body("fake-secret").build().unwrap();
@@ -805,6 +893,7 @@ mod tests {
             follow: client.clone(),
             stop: client,
             bindings: Default::default(),
+            resource: String::new(),
         }
     }
 
@@ -1163,6 +1252,7 @@ mod tests {
             follow: client.clone(),
             stop: client,
             bindings: Default::default(),
+            resource: String::new(),
         };
         let mut manager = AuthorizationManager::new_with_oauth_http_client(
             format!("{base}/mcp"),
@@ -1257,14 +1347,21 @@ mod tests {
         .await;
         // rmcp sends token requests with the Stop policy (C1b live): the 307 then comes back as a response, which
         // rmcp reported as "server returned empty error response". It must be a refusal with a reason too.
-        let stop_request = checked
+        // A redirect now refuses that endpoint for good (K7), so the stop-policy path needs a client of its own.
+        let checked_stop = CheckedOAuthClient::new().unwrap();
+        checked_stop.learn_token_endpoint(
+            &served,
+            format!(r#"{{"issuer":"{source_base}","authorization_endpoint":"{source_base}/authorize","token_endpoint":"{source_base}/token-redir"}}"#)
+                .as_bytes(),
+        );
+        let stop_request = checked_stop
             .stop
             .post(format!("{source_base}/token-redir"))
             .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body("grant_type=authorization_code&code=p151-SYNCODE")
             .build()
             .unwrap();
-        let (stop_result, stop_refusal) = capture_refusal(checked.execute_request(
+        let (stop_result, stop_refusal) = capture_refusal(checked_stop.execute_request(
             stop_request,
             OAuthHttpRedirectPolicy::Stop,
             Some(Duration::from_secs(5)),
@@ -1282,5 +1379,136 @@ mod tests {
         assert!(refusal.contains("redirect"), "{refusal}");
         assert!(refusal.contains("another origin"), "{refusal}");
         assert!(!refusal.contains("p151-SYNRT"), "the refusal must not carry the credential: {refusal}");
+    }
+
+    /// A same-origin redirecting token endpoint with a stop-policy client, counting the POSTs that reach it.
+    async fn redirecting_token_endpoint() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        let posts = Arc::new(AtomicUsize::new(0));
+        let sink = posts.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let location = format!("{base}/token-moved");
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new().route(
+                    "/token-redir",
+                    post(move || {
+                        let sink = sink.clone();
+                        let location = location.clone();
+                        async move {
+                            sink.fetch_add(1, Ordering::SeqCst);
+                            (StatusCode::TEMPORARY_REDIRECT, [("location", location)], "redirect")
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        (base, posts, task)
+    }
+
+    fn admit_token_endpoint(checked: &CheckedOAuthClient, base: &str, path: &str) {
+        let served = reqwest::Url::parse(&format!("{base}/.well-known/oauth-authorization-server")).unwrap();
+        checked.learn_token_endpoint(
+            &served,
+            format!(r#"{{"issuer":"{base}","authorization_endpoint":"{base}/authorize","token_endpoint":"{base}{path}"}}"#)
+                .as_bytes(),
+        );
+    }
+
+    /// K7: rmcp refreshes on every 401 and every handshake retry. A token endpoint that redirects the refresh to
+    /// another address of its own origin used to receive the refresh token each time (5 POSTs per session in the RC
+    /// retest). After the first refusal the endpoint is refused for good, so nothing is sent again.
+    #[tokio::test]
+    async fn p193_a_redirecting_token_endpoint_is_posted_to_once_per_manager() {
+        let (base, posts, task) = redirecting_token_endpoint().await;
+        let checked = CheckedOAuthClient::for_resource(&format!("{base}/mcp")).unwrap();
+        admit_token_endpoint(&checked, &base, "/token-redir");
+        let mut reasons = Vec::new();
+        for attempt in 0..5 {
+            let request = checked
+                .stop
+                .post(format!("{base}/token-redir"))
+                .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(format!("grant_type=refresh_token&refresh_token=p193-RT-{attempt}"))
+                .build()
+                .unwrap();
+            let (result, refusal) = capture_refusal(checked.execute_request(
+                request,
+                OAuthHttpRedirectPolicy::Stop,
+                Some(Duration::from_secs(5)),
+            ))
+            .await;
+            assert!(result.is_err(), "attempt {attempt} must be refused");
+            reasons.push(refusal.expect("every attempt carries its reason"));
+        }
+        task.abort();
+        assert_eq!(posts.load(Ordering::SeqCst), 1, "only the first attempt may reach the endpoint");
+        for reason in &reasons {
+            assert!(reason.contains("redirect"), "{reason}");
+            assert!(!reason.contains("p193-RT"), "the reason must not carry the credential: {reason}");
+        }
+    }
+
+    /// K7: the reason for a refused automatic refresh is kept per MCP server URL for `/mcps`, and a request that gets
+    /// through clears it, so a recovered server stops showing a stale refusal.
+    #[tokio::test]
+    async fn p193_a_refused_refresh_is_remembered_for_the_server_until_a_request_succeeds() {
+        let (base, _posts, task) = redirecting_token_endpoint().await;
+        let ok_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ok_base = format!("http://{}", ok_listener.local_addr().unwrap());
+        let ok_task = tokio::spawn(async move {
+            axum::serve(
+                ok_listener,
+                Router::new().route(
+                    "/token",
+                    post(|| async { axum::Json(serde_json::json!({"access_token": "t", "token_type": "Bearer"})) }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let refused_url = format!("{base}/p193-remembered/mcp");
+        let ok_url = format!("{ok_base}/p193-remembered/mcp");
+        assert_eq!(auth_refusal_for_url(&refused_url), None);
+
+        let checked = CheckedOAuthClient::for_resource(&refused_url).unwrap();
+        admit_token_endpoint(&checked, &base, "/token-redir");
+        let request = checked
+            .stop
+            .post(format!("{base}/token-redir"))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body("grant_type=refresh_token&refresh_token=p193-RT")
+            .build()
+            .unwrap();
+        let result = checked
+            .execute_request(request, OAuthHttpRedirectPolicy::Stop, Some(Duration::from_secs(5)))
+            .await;
+        assert!(result.is_err());
+        let remembered = auth_refusal_for_url(&refused_url).expect("the refusal is remembered for the server");
+        assert!(remembered.contains("redirect"), "{remembered}");
+        assert!(!remembered.contains("p193-RT"), "{remembered}");
+        assert_eq!(auth_refusal_for_url(&ok_url), None, "another server is unaffected");
+
+        // A later credential-bearing request that succeeds clears what was remembered for that server.
+        let healthy = CheckedOAuthClient::for_resource(&ok_url).unwrap();
+        remember_refusal(&ok_url, "refusing to send OAuth credentials: stale");
+        admit_token_endpoint(&healthy, &ok_base, "/token");
+        let request = healthy
+            .stop
+            .post(format!("{ok_base}/token"))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body("grant_type=refresh_token&refresh_token=p193-RT2")
+            .build()
+            .unwrap();
+        healthy
+            .execute_request(request, OAuthHttpRedirectPolicy::Stop, Some(Duration::from_secs(5)))
+            .await
+            .expect("the healthy endpoint answers");
+        task.abort();
+        ok_task.abort();
+        assert_eq!(auth_refusal_for_url(&ok_url), None, "a success clears the remembered refusal");
     }
 }

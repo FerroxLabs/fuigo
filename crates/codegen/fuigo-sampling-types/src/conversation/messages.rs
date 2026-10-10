@@ -251,6 +251,15 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
             // `tco_*` blobs carry only `signature`; real reasoning sets `thinking`
             ConversationItem::Reasoning(r) => {
                 flush_tool_results(&mut pending_tool_results, &mut messages);
+                // A redacted item replays as `redacted_thinking`: its opaque blob goes back unchanged
+                if is_redacted_thinking_item(r) {
+                    if let Some(data) = r.encrypted_content.as_deref().filter(|d| !d.is_empty()) {
+                        pending_assistant.push(ContentBlock::RedactedThinking {
+                            data: data.to_owned(),
+                        });
+                    }
+                    continue;
+                }
                 let thinking = reasoning_item_text(r);
                 let signature = r
                     .encrypted_content
@@ -346,50 +355,83 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     }
 }
 
-/// `Thinking` is dropped because this `From` returns a single item; the streaming consumer emits the sibling `Reasoning` item instead.
+/// Every item a non-streaming Messages response carries: one sibling `Reasoning` per thinking / redacted_thinking
+/// block in wire order, then the `Assistant` item.
+/// Replaying a history that kept only the `Assistant` would lose the reasoning (or fail signature checks).
+pub fn messages_response_to_items(resp: crate::messages::MessagesResponse) -> Vec<ConversationItem> {
+    use crate::messages::ContentBlock;
+
+    let mut content = String::new();
+    let mut tool_calls = Vec::new();
+    let mut items = Vec::new();
+
+    for block in resp.content {
+        // `Open`: a content-block type this client does not model contributes nothing here
+        // rather than failing the whole response
+        match block.into_known() {
+            Some(ContentBlock::Text { text, .. }) => {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(&text);
+            }
+            Some(ContentBlock::ToolUse {
+                id, name, input, ..
+            }) => {
+                tool_calls.push(ToolCall {
+                    id: Arc::<str>::from(id),
+                    name,
+                    arguments: Arc::<str>::from(serde_json::to_string(&input).unwrap_or_default()),
+                });
+            }
+            Some(ContentBlock::Thinking {
+                thinking,
+                signature,
+            }) => {
+                if !thinking.is_empty() || !signature.is_empty() {
+                    let mut item = rs::ReasoningItem {
+                        id: String::new(),
+                        summary: Vec::new(),
+                        content: None,
+                        encrypted_content: (!signature.is_empty()).then_some(signature),
+                        status: None,
+                    };
+                    if !thinking.is_empty() {
+                        item.summary = vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                            text: thinking,
+                        })];
+                    }
+                    items.push(ConversationItem::Reasoning(item));
+                }
+            }
+            Some(ContentBlock::RedactedThinking { data }) => {
+                if !data.is_empty() {
+                    items.push(ConversationItem::Reasoning(redacted_thinking_item(data)));
+                }
+            }
+            // Image and ToolResult are not expected in assistant responses; `None` is a block
+            // type this client does not model
+            Some(_) | None => {}
+        }
+    }
+
+    items.push(ConversationItem::Assistant(AssistantItem {
+        content: Arc::<str>::from(content),
+        tool_calls,
+        model_id: Some(resp.model),
+        model_fingerprint: None,
+        reasoning_effort: None,
+        output_order: None,
+    }));
+    items
+}
+
+/// The single-item conversion yields only the `Assistant`; the sibling `Reasoning` items come from
+/// [`messages_response_to_items`] (and, for streams, from the streaming consumer).
 impl From<crate::messages::MessagesResponse> for ConversationItem {
     fn from(resp: crate::messages::MessagesResponse) -> Self {
-        use crate::messages::ContentBlock;
-
-        let mut content = String::new();
-        let mut tool_calls = Vec::new();
-
-        for block in resp.content {
-            // `Open`: a content-block type this client does not model contributes nothing here
-            // rather than failing the whole response
-            match block.into_known() {
-                Some(ContentBlock::Text { text, .. }) => {
-                    if !content.is_empty() {
-                        content.push('\n');
-                    }
-                    content.push_str(&text);
-                }
-                Some(ContentBlock::ToolUse {
-                    id, name, input, ..
-                }) => {
-                    tool_calls.push(ToolCall {
-                        id: Arc::<str>::from(id),
-                        name,
-                        arguments: Arc::<str>::from(
-                            serde_json::to_string(&input).unwrap_or_default(),
-                        ),
-                    });
-                }
-                // Thinking is dropped; see the doc comment above
-                Some(ContentBlock::Thinking { .. }) => {}
-                // Image and ToolResult are not expected in assistant responses; `None` is a block
-                // type this client does not model
-                Some(_) | None => {}
-            }
-        }
-
-        ConversationItem::Assistant(AssistantItem {
-            content: Arc::<str>::from(content),
-            tool_calls,
-            model_id: Some(resp.model),
-            model_fingerprint: None,
-            reasoning_effort: None,
-            output_order: None,
-        })
+        messages_response_to_items(resp)
+            .pop()
+            .expect("messages_response_to_items always ends with the Assistant item")
     }
 }

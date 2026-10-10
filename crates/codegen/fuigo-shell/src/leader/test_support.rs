@@ -47,6 +47,12 @@ pub(crate) enum FakeLeaderBehavior {
     },
     /// Accepts the connection but never sends anything (hung pre-`Registered`).
     SilentAfterAccept,
+    /// Like `Normal`, but every client is served on its own task, so a client that connects, drops and connects again
+    /// (a retry loop) is served every time instead of the second one queueing behind the first.
+    NormalPerClient {
+        versions: FakeVersions,
+        caps: LeaderCapabilities,
+    },
     /// `Registered { ready: false }`, then never sends `LeaderReady`.
     ReadyFalseForever,
     /// Writes only `bytes` (< 4) of the 4-byte length prefix, then stalls.
@@ -55,6 +61,13 @@ pub(crate) enum FakeLeaderBehavior {
     GarbageFrame,
     /// Well-formed `Registered { ready: true }`, then closes the connection.
     CloseAfterRegister,
+    /// P161: a short `Registered { ready: false }`, `LeaderReady` and an ACP frame carrying `payload`, all in ONE write,
+    /// then idle. The client's first buffered read pulls in the start of the later frames during registration, so the
+    /// ACP payload only arrives if the same reader (and its buffer) carries over into the client's read loop.
+    CoalescedRegisterReadyAcp { payload: String },
+    /// A current-version, `control_v1` leader that answers every `GetLeaderInfo` with `claimed_pid` in the payload (a lie or a
+    /// squatter's choice), whatever process really serves the pipe. Each client is served on its own task.
+    ClaimsPid { claimed_pid: u32 },
 }
 /// Handle for a running fake leader; cancelling stops the accept loop and any held-open connections, and removes the socket.
 pub(crate) struct FakeLeaderHandle {
@@ -90,6 +103,24 @@ pub(crate) async fn spawn_fake_leader(
                     let Ok((stream, _)) = accept_result else {
                         break;
                     };
+                    if let FakeLeaderBehavior::ClaimsPid { claimed_pid } = &behavior {
+                        let claimed_pid = *claimed_pid;
+                        let cancel = cancel_clone.clone();
+                        tokio::spawn(async move { serve_claims_pid(stream, claimed_pid, &cancel).await });
+                        continue;
+                    }
+                    if let FakeLeaderBehavior::NormalPerClient { versions, caps } = &behavior {
+                        let as_normal = FakeLeaderBehavior::Normal {
+                            versions: FakeVersions {
+                                protocol_version: versions.protocol_version,
+                                binary_version: versions.binary_version.clone(),
+                            },
+                            caps: caps.clone(),
+                        };
+                        let cancel = cancel_clone.clone();
+                        tokio::spawn(async move { serve_client(stream, &as_normal, &cancel).await });
+                        continue;
+                    }
                     serve_client(stream, &behavior, &cancel_clone).await;
                 }
             }
@@ -145,6 +176,10 @@ async fn serve_client(
             let _ = write_message(&mut writer, &registered(true, versions, caps)).await;
             cancel.cancelled().await;
         }
+        // Reached only through the concurrent path in `spawn_fake_leader`, which serves it as `Normal`.
+        FakeLeaderBehavior::NormalPerClient { .. } => {
+            cancel.cancelled().await;
+        }
         FakeLeaderBehavior::ReadyFalseForever => {
             let register: Result<ClientMessage, _> = read_message(&mut reader).await;
             if register.is_err() {
@@ -157,6 +192,33 @@ async fn serve_client(
             .await;
             cancel.cancelled().await;
         }
+        FakeLeaderBehavior::CoalescedRegisterReadyAcp { payload } => {
+            let register: Result<ClientMessage, _> = read_message(&mut reader).await;
+            if register.is_err() {
+                return;
+            }
+            let mut wire = Vec::new();
+            let bodies = [
+                // Deliberately minimal (the optional metadata defaults), so it is shorter than one buffered read.
+                br#"{"type":"registered","client_id":1,"ready":false}"#.to_vec(),
+                serde_json::to_vec(&ServerMessage::LeaderReady).unwrap(),
+                serde_json::to_vec(&ServerMessage::Acp {
+                    payload: payload.clone(),
+                })
+                .unwrap(),
+            ];
+            for body in bodies {
+                wire.extend_from_slice(&(body.len() as u32).to_be_bytes());
+                wire.extend_from_slice(&body);
+            }
+            let _ = writer.write_all(&wire).await;
+            let _ = writer.flush().await;
+            cancel.cancelled().await;
+        }
+        // Reached only through the concurrent path in `spawn_fake_leader`.
+        FakeLeaderBehavior::ClaimsPid { .. } => {
+            cancel.cancelled().await;
+        }
         FakeLeaderBehavior::CloseAfterRegister => {
             let register: Result<ClientMessage, _> = read_message(&mut reader).await;
             if register.is_err() {
@@ -167,6 +229,57 @@ async fn serve_client(
                 &registered(true, &FakeVersions::current(), &fake_caps(true, false)),
             )
             .await;
+        }
+    }
+}
+
+/// Serve one client of [`FakeLeaderBehavior::ClaimsPid`]: register, then answer `GetLeaderInfo` with `claimed_pid`.
+async fn serve_claims_pid(
+    stream: super::transport::LeaderStream,
+    claimed_pid: u32,
+    cancel: &CancellationToken,
+) {
+    use super::protocol::{ControlCommand, ControlPayload};
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let register: Result<ClientMessage, _> = read_message(&mut reader).await;
+    if register.is_err() {
+        return;
+    }
+    let registered = ServerMessage::Registered {
+        client_id: 1,
+        ready: true,
+        leader_protocol_version: Some(LEADER_PROTOCOL_VERSION),
+        leader_binary_version: Some(fuigo_version::VERSION.to_string()),
+        leader_capabilities: Some(fake_caps(true, false)),
+    };
+    if write_message(&mut writer, &registered).await.is_err() {
+        return;
+    }
+    loop {
+        let message: Result<ClientMessage, _> = tokio::select! {
+            _ = cancel.cancelled() => return,
+            message = read_message(&mut reader) => message,
+        };
+        let Ok(message) = message else { return };
+        if let ClientMessage::Control { request_id, command: ControlCommand::GetLeaderInfo } = message {
+            let info = ControlPayload::LeaderInfo {
+                pid: claimed_pid,
+                socket_path: PathBuf::new(),
+                lock_path: PathBuf::new(),
+                ws_url_suffix: String::new(),
+                leader_protocol_version: LEADER_PROTOCOL_VERSION,
+                leader_binary_version: fuigo_version::VERSION.to_string(),
+                profiling_supported: false,
+                profiling_compiled_in: false,
+                cpu_profile_active: false,
+                cpu_profile_stopping: false,
+                profile_started_at: None,
+                profile_formats: Vec::new(),
+            };
+            let reply = ServerMessage::ControlResult { request_id, result: Ok(info) };
+            if write_message(&mut writer, &reply).await.is_err() {
+                return;
+            }
         }
     }
 }
