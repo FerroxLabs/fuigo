@@ -28,6 +28,9 @@ pub enum QueueEntryKind {
     BashCommand,
     /// Scheduled (cron) prompt, injected by the scheduler via ACP notification.
     Cron,
+    /// A `/btw` side question typed while the session was still opening. It is never a turn or a compact:
+    /// once the session is open it is sent as a side question, in queue order.
+    SideQuestion,
 }
 impl QueueEntryKind {
     /// Short, stable label for telemetry and profiling logs.
@@ -37,6 +40,7 @@ impl QueueEntryKind {
             Self::Command => "command",
             Self::BashCommand => "bash_command",
             Self::Cron => "cron",
+            Self::SideQuestion => "side_question",
         }
     }
 }
@@ -73,6 +77,8 @@ pub struct QueuedPrompt {
     pub chip_elements: Vec<ChipElement>,
     /// Combined-turn display segments (always at least two); drain paints one bubble each.
     pub combined_texts: Vec<String>,
+    /// Only for `SideQuestion` rows: whether the answer paints in minimal mode, captured when the question was held.
+    pub side_question_minimal: bool,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default.
@@ -91,6 +97,7 @@ impl QueuedPrompt {
             human_schedule: None,
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
+            side_question_minimal: false,
         }
     }
     /// Whether the wire payload is exactly the display text.
@@ -961,6 +968,25 @@ impl AgentSession {
     /// Push a slash command onto the back of the queue. Returns the assigned ID.
     pub fn enqueue_command(&mut self, text: String) -> u64 {
         self.enqueue_entry(text, QueueEntryKind::Command)
+    }
+    /// Hold a `/btw` side question (with its images) behind the other rows while the session opens.
+    /// The row text keeps the typed `/btw ...` form, so giving it back restores what the user typed.
+    pub fn enqueue_side_question(
+        &mut self,
+        question: &str,
+        images: Vec<crate::prompt_images::PastedImage>,
+        chip_elements: Vec<ChipElement>,
+        minimal: bool,
+    ) -> u64 {
+        let id = self.next_queue_id;
+        self.next_queue_id += 1;
+        self.pending_prompts.push_back(QueuedPrompt {
+            images,
+            chip_elements,
+            side_question_minimal: minimal,
+            ..QueuedPrompt::plain(id, format!("/btw {question}"), QueueEntryKind::SideQuestion)
+        });
+        id
     }
     /// Push a direct bash command onto the back of the queue. Returns the assigned ID.
     pub fn enqueue_bash_command(&mut self, text: String) -> u64 {

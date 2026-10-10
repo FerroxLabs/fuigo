@@ -460,9 +460,11 @@ impl HeuristicPermissionClassifier {
             // Edits never reach here in practice: the fast path Allows ALL edits before classify (the accept-all-edits product decision)
             // If one ever does (a fast-path bypass), Block fails closed so the user is prompted instead of silently auto-approved
             // Non-allowlisted MCP tools land here too
-            AccessKind::Edit(_) | AccessKind::MCPTool { .. } | AccessKind::AgentMessage { .. } => {
-                ClassifierVerdict::Block
-            }
+            // Side-effecting tools (P165) have no heuristic allow either
+            AccessKind::Edit(_)
+            | AccessKind::MCPTool { .. }
+            | AccessKind::AgentMessage { .. }
+            | AccessKind::Tool(_) => ClassifierVerdict::Block,
             AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => {
                 ClassifierVerdict::Allow
             }
@@ -1305,6 +1307,7 @@ pub fn build_classifier_messages(
         AccessKind::WebFetch(_) => "web_fetch",
         AccessKind::WebSearch(_) => "web_search",
         AccessKind::AgentMessage { .. } => "agent_message",
+        AccessKind::Tool(_) => "tool",
     };
     let proposed_action =
         format!("tool: {tool_name}\naccess_kind: {access_kind}\ndetail: {detail}");

@@ -469,6 +469,11 @@ pub(crate) mod chat_rebuild {
         /// carried. A discard naming a stream cuts exactly that attempt's text.
         text_streams: Vec<(i64, usize)>,
         agent_tool_calls: Vec<ToolCall>,
+        /// P201: the attempt (`_meta.streamStartMs`) that showed each hosted-tool row (`_meta.backend`), by call id. A
+        /// discard naming an attempt drops its rows with its text.
+        hosted_streams: HashMap<String, i64>,
+        /// P201: hosted rows a discard dropped. Their closing update (`failed`) arrives after the notice and commits nothing.
+        discarded_hosted: HashSet<String>,
 
         in_user_turn: bool,
         has_agent_content: bool,
@@ -497,6 +502,8 @@ pub(crate) mod chat_rebuild {
                 accepted_text_len: 0,
                 text_streams: Vec::new(),
                 agent_tool_calls: Vec::new(),
+                hosted_streams: HashMap::new(),
+                discarded_hosted: HashSet::new(),
                 in_user_turn: false,
                 has_agent_content: false,
                 needs_truncate: false,
@@ -523,6 +530,16 @@ pub(crate) mod chat_rebuild {
                         && self.text_streams.last().is_none_or(|(last, _)| *last != stream)
                     {
                         self.text_streams.push((stream, self.agent_text.len()));
+                    }
+                    if let (acp::SessionUpdate::ToolCall(tc), Some(stream)) = (&n.update, stream)
+                        && tc
+                            .meta
+                            .as_ref()
+                            .and_then(|m| m.get("backend"))
+                            .and_then(serde_json::Value::as_bool)
+                            == Some(true)
+                    {
+                        self.hosted_streams.insert(tc.tool_call_id.0.to_string(), stream);
                     }
                     self.handle_acp(&n.update)
                 }
@@ -582,6 +599,21 @@ pub(crate) mod chat_rebuild {
                         None => self.accepted_text_len,
                     };
                     self.agent_text.truncate(cut);
+                    // P201: the attempt's hosted rows go with its text; their closing updates then commit nothing
+                    if let Some(stream) = stream_start_ms {
+                        let dead: Vec<String> = self
+                            .hosted_streams
+                            .iter()
+                            .filter(|(_, s)| *s == stream)
+                            .map(|(id, _)| id.clone())
+                            .collect();
+                        for id in dead {
+                            self.hosted_streams.remove(&id);
+                            self.agent_tool_calls.retain(|c| c.id.as_ref() != id);
+                            self.tool_args.remove(&id);
+                            self.discarded_hosted.insert(id);
+                        }
+                    }
                     if self.agent_text.is_empty() && self.agent_tool_calls.is_empty() {
                         self.has_agent_content = false;
                     }
@@ -702,6 +734,9 @@ pub(crate) mod chat_rebuild {
 
         fn on_tool_call_update(&mut self, tc: &acp::ToolCallUpdate) -> Vec<ConversationItem> {
             let id = tc.tool_call_id.0.to_string();
+            if self.discarded_hosted.contains(&id) {
+                return Vec::new();
+            }
             self.maybe_backfill_args(&id, &tc.fields);
 
             if Self::is_completed(&tc.fields) && self.emitted_tool_results.insert(id.clone()) {
@@ -804,6 +839,8 @@ pub(crate) mod chat_rebuild {
             self.accepted_text_len = 0;
             self.text_streams.clear();
             self.agent_tool_calls.clear();
+            self.hosted_streams.clear();
+            self.discarded_hosted.clear();
             self.tool_args.clear();
             self.emitted_tool_results.clear();
             self.in_user_turn = false;
@@ -1565,7 +1602,7 @@ fn open_leaf_windows(path: &Path) -> Result<std::fs::File, BeneathRefusal> {
 /// units, where the object really lives, whatever path it was opened through. Never turned into text: a name may hold
 /// an isolated surrogate, and a lossy conversion would make two different folders compare equal.
 #[cfg(windows)]
-fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
+pub(crate) fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
     use std::os::windows::io::AsRawHandle as _;
     // kernel32 is linked by std.
     #[link(name = "kernel32")]
@@ -1593,7 +1630,7 @@ fn final_path_windows(file: &std::fs::File) -> io::Result<Vec<u16>> {
 /// would turn into the same U+FFFD as another name. Only the last name is compared without regard to case, as the
 /// volume itself may be case-insensitive.
 #[cfg(windows)]
-fn is_direct_child_windows(parent: &[u16], child: &[u16], name: &std::ffi::OsStr) -> bool {
+pub(crate) fn is_direct_child_windows(parent: &[u16], child: &[u16], name: &std::ffi::OsStr) -> bool {
     use std::os::windows::ffi::OsStrExt as _;
     let backslash = u16::from(b'\\');
     let mut parent = parent;
@@ -1613,7 +1650,25 @@ fn is_direct_child_windows(parent: &[u16], child: &[u16], name: &std::ffi::OsStr
         return false;
     }
     let wanted: Vec<u16> = name.encode_wide().collect();
-    last == wanted.as_slice() || String::from_utf16_lossy(last).to_lowercase() == String::from_utf16_lossy(&wanted).to_lowercase()
+    last == wanted.as_slice() || equal_ignoring_case_windows(last, &wanted)
+}
+
+/// Windows: two names are equal without regard to case, by the rule the OS itself uses for names
+/// (`CompareStringOrdinal`, ignore-case). It works on the UTF-16 units, so an isolated surrogate is never turned
+/// into U+FFFD: two different broken names stay different.
+#[cfg(windows)]
+fn equal_ignoring_case_windows(a: &[u16], b: &[u16]) -> bool {
+    // kernel32 is linked by std.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CompareStringOrdinal(a: *const u16, a_len: i32, b: *const u16, b_len: i32, ignore_case: i32) -> i32;
+    }
+    const CSTR_EQUAL: i32 = 2;
+    let (Ok(a_len), Ok(b_len)) = (i32::try_from(a.len()), i32::try_from(b.len())) else {
+        return false;
+    };
+    // SAFETY: two valid buffers with the lengths passed (explicit lengths, no terminator needed).
+    unsafe { CompareStringOrdinal(a.as_ptr(), a_len, b.as_ptr(), b_len, 1) == CSTR_EQUAL }
 }
 
 /// Windows: open `dir/leaf` (the folders `held` are still open) and refuse anything but a regular file that really
@@ -1730,7 +1785,7 @@ pub(crate) fn rewind_points_pre_rewind_copy(rewind_points: &Path) -> PathBuf {
 #[derive(Debug, Default)]
 pub struct RewindPointsRewriteLock {
     /// `rewind_points.jsonl.rewrite.lock`, exclusive.
-    pub(crate) rewrite: Option<std::fs::File>,
+    pub(crate) rewrite: Option<jsonl::HeldLock>,
 }
 
 /// What `rewind_points.jsonl` held before a rewind rewrote it (`None`: it did not exist), to put it back when the
@@ -1742,8 +1797,114 @@ pub struct RewindPointsUndo {
     pub(crate) written: Vec<u8>,
 }
 
+/// The journal a rewind writes just before its durable copy (P164, K19): what the rewind rewrites
+/// `rewind_points.jsonl` to and which conversation it saves, so that a load finding the copy left behind by a rewind
+/// that was killed can tell whether that rewind went through. Removed with the copy (after it).
+pub(crate) fn rewind_points_journal(rewind_points: &Path) -> PathBuf {
+    rewind_points.with_extension("jsonl.pre-rewind.journal")
+}
+
+/// Test seam (P164): stop a rewind of one session at a named step, as if Fuigo were killed there. The rewind returns at
+/// once and leaves the session's files as they are at that point (no put-back, no cleanup); a test then loads the
+/// session again the way a restarted Fuigo does. Armed for one rewind of one session; process-global.
+#[cfg(any(test, feature = "test-support"))]
+pub mod rewind_crash_seam {
+    /// Where the rewind stops.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Stage {
+        /// `rewind_points.jsonl` was rewritten (its journal and durable copy are on disk); the conversation is not saved.
+        AfterPointsRewrite,
+        /// The rewound conversation is saved; nothing after it ran (no `RewindMarker`, no cleanup).
+        AfterConversationSaved,
+        /// Everything ran except removing the durable copy and the journal.
+        BeforeCleanup,
+    }
+
+    static ARMED: std::sync::Mutex<Option<(String, Stage)>> = std::sync::Mutex::new(None);
+
+    /// Stop the next rewind of `session_id` at `stage`.
+    pub fn arm(session_id: &str, stage: Stage) {
+        *ARMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((session_id.to_owned(), stage));
+    }
+
+    static HISTORY_READS: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+    /// A load read the session's history; `copy_present`: a rewind's durable copy was still there (Astra r3: the
+    /// history a load returns must be read after the reconcile, never before it).
+    pub(crate) fn note_history_read(session_id: &str, copy_present: bool) {
+        HISTORY_READS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((session_id.to_owned(), copy_present));
+    }
+
+    /// Whether a rewind's durable copy was there when the last load of `session_id` read its history.
+    pub fn copy_was_present_at_history_read(session_id: &str) -> Option<bool> {
+        HISTORY_READS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .rev()
+            .find(|(id, _)| id == session_id)
+            .map(|(_, present)| *present)
+    }
+
+    /// Whether a rewind of `session_id` reaching `stage` stops there (disarms the seam when it does).
+    pub(crate) fn fires(session_id: &str, stage: Stage) -> bool {
+        let mut armed = ARMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hit = armed.as_ref().is_some_and(|(id, at)| id == session_id && *at == stage);
+        if hit {
+            *armed = None;
+        }
+        hit
+    }
+}
+
+/// Length and SHA-256 of some bytes, to recognise a file's content (or its start) later without keeping a copy.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentFingerprint {
+    pub(crate) len: u64,
+    pub(crate) sha256: String,
+}
+
+impl ContentFingerprint {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
+        use sha2::Digest;
+        Self { len: bytes.len() as u64, sha256: format!("{:x}", sha2::Sha256::digest(bytes)) }
+    }
+
+    /// The fingerprint of `items` written as a JSONL file, exactly as a whole rewrite of the file writes them.
+    pub(crate) fn of_jsonl<T: serde::Serialize>(items: &[T]) -> io::Result<Self> {
+        Ok(Self::of(&to_jsonl_bytes(items)?))
+    }
+
+    /// Whether `bytes` are exactly the fingerprinted bytes.
+    pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() as u64 == self.len && *self == Self::of(bytes)
+    }
+
+    /// Whether `bytes` start with the fingerprinted bytes (they are those bytes, or those with more after them).
+    pub(crate) fn is_prefix_of(&self, bytes: &[u8]) -> bool {
+        usize::try_from(self.len)
+            .ok()
+            .and_then(|len| bytes.get(..len))
+            .is_some_and(|start| self.matches(start))
+    }
+}
+
+/// What a rewind of the conversation commits, named in the rewind's journal (P164): the load that finds the rewind
+/// cut short tells from these whether it went through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindConversation {
+    /// The conversation the rewind saves as `chat_history.jsonl`, as that save writes it.
+    pub(crate) after: ContentFingerprint,
+    /// The `created_at` of the `RewindMarker` the rewind appends to `updates.jsonl` once the conversation is saved:
+    /// that marker, and no other, is evidence that this rewind went through.
+    pub(crate) marker_created_at: String,
+}
+
 /// The rewrite of `rewind_points.jsonl` a rewind makes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RewindPointsRewrite {
     /// A file rewind (All, FilesOnly): drop the points of prompts `from_index` and later.
     TruncateFrom(usize),
@@ -1982,7 +2143,15 @@ pub trait StorageAdapter: Send + Sync {
     /// lock (from [`Self::lock_rewind_points_rewrite`]) until it is done. First keeps a durable copy of the file
     /// (`rewind_points.jsonl.pre-rewind`); returns what it held and what was written, for
     /// [`Self::end_rewind_points_rewrite`]. A failed rewrite leaves the file as it was and removes the copy.
-    async fn rewrite_rewind_points_holding(&self, info: &Info, rewrite: RewindPointsRewrite) -> io::Result<RewindPointsUndo>;
+    /// Before the copy it writes the rewind's journal (P164): `conversation` is what the rewind then commits, `None`
+    /// for a rewind that leaves the conversation as it is (FilesOnly). A load that finds the copy left behind uses it to
+    /// finish or undo that rewind.
+    async fn rewrite_rewind_points_holding(
+        &self,
+        info: &Info,
+        rewrite: RewindPointsRewrite,
+        conversation: Option<RewindConversation>,
+    ) -> io::Result<RewindPointsUndo>;
 
     /// The rewind [`Self::rewrite_rewind_points_holding`] was made for is done, its rewrite lock still held.
     /// `put_back`: it did not go through, so `rewind_points.jsonl` gets back what it held, followed by any row appended
@@ -2920,11 +3089,13 @@ mod tests {
             let converted = convert_in_place(&tmp.path().join("a").join("b"), outside.path());
             eprintln!("P154 in-place conversion succeeded: {converted}");
             // Whether or not the conversion got through, the outside file must not be read.
-            if let Ok(mut file) = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt")) {
-                let mut text = String::new();
-                io::Read::read_to_string(&mut file, &mut text).unwrap();
-                assert_ne!(text, "secret", "the leaf was read through a junction made after the check");
+            // The folder holds no file of its own, so the open fails either way; when the conversion got through,
+            // the only way to get a file is through the junction, and that must be refused.
+            let opened = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt"));
+            if !converted {
+                eprintln!("P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked");
             }
+            assert!(opened.is_err(), "the leaf opened (junction made: {converted})");
         }
 
         #[test]
@@ -2969,6 +3140,41 @@ mod tests {
         }
 
         #[test]
+        fn leaf_names_differing_only_in_an_isolated_surrogate_are_different() {
+            use std::os::windows::ffi::OsStringExt as _;
+            let parent = wide(r"\\?\C:\s\ck");
+            let child_with = |unit: u16| {
+                let mut child = wide(r"\\?\C:\s\ck\f");
+                child.push(unit);
+                child.extend(wide(".txt"));
+                child
+            };
+            let asked = |unit: u16| {
+                let mut name = wide("f");
+                name.push(unit);
+                name.extend(wide(".txt"));
+                std::ffi::OsString::from_wide(&name)
+            };
+            // Same broken name: equal. A different broken name (lone D801 vs lone D800): different.
+            assert!(is_direct_child_windows(&parent, &child_with(0xD800), &asked(0xD800)));
+            assert!(!is_direct_child_windows(&parent, &child_with(0xD800), &asked(0xD801)));
+            // And a lone surrogate is not the replacement character either.
+            assert!(!is_direct_child_windows(&parent, &child_with(0xD800), std::ffi::OsStr::new("f\u{FFFD}.txt")));
+        }
+
+        #[test]
+        fn leaf_names_compare_without_regard_to_case_the_way_windows_does() {
+            let parent = wide(r"\\?\C:\s\ck");
+            let ok = |on_disk: &str, asked: &str| {
+                is_direct_child_windows(&parent, &wide(&format!(r"\\?\C:\s\ck\{on_disk}")), std::ffi::OsStr::new(asked))
+            };
+            assert!(ok("F.TXT", "f.txt"));
+            assert!(ok("caf\u{e9}.txt", "caf\u{e9}.txt"));
+            assert!(ok("\u{c9}t\u{e9}.txt", "\u{e9}t\u{c9}.txt"), "non-ASCII names in another case are the same file");
+            assert!(!ok("caf\u{e9}.txt", "cafe.txt"));
+        }
+
+        #[test]
         fn folders_whose_names_differ_only_in_an_isolated_surrogate_are_not_the_same() {
             let name = std::ffi::OsStr::new("f.txt");
             let mut with_lone = wide(r"\\?\C:\s\");
@@ -2995,11 +3201,13 @@ mod tests {
             let (held, dir) = hold_folders_beneath_windows(&replacement, &parts).expect("holds");
             let converted = convert_in_place(&replacement.join("ck"), &lone.join("ck"));
             eprintln!("P154 lookalike conversion succeeded: {converted}");
-            if let Ok(mut file) = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt")) {
-                let mut text = String::new();
-                io::Read::read_to_string(&mut file, &mut text).unwrap();
-                assert_ne!(text, "secret", "the leaf was read from a lookalike folder");
+            let opened = open_leaf_beneath_windows(&held, &dir, std::ffi::OsStr::new("f.txt"));
+            if !converted {
+                eprintln!("P154 SKIPPED-JUNCTION: this lane could not convert the folder; only the plain refusal was checked");
             }
+            // `<U+FFFD>/id/ck` has no f.txt: any success is a read from the lookalike folder `<D800>/id/ck`.
+            assert!(opened.is_err(), "the leaf was read from a lookalike folder (junction made: {converted})");
+            eprintln!("P154 lookalike open refused: {}", match opened { Err(BeneathRefusal::Refused(why)) => why.to_string(), Err(BeneathRefusal::Io(e)) => e.to_string(), Ok(_) => unreachable!() });
         }
 
         #[test]
@@ -3327,6 +3535,122 @@ mod tests {
                     _ => None,
                 })
                 .collect()
+        }
+
+        /// P201 r2: `streamStartMs` stamped on a persisted notification, as the shell does for every update.
+        fn in_stream(update: SessionUpdate, stream: i64) -> SessionUpdate {
+            let SessionUpdate::Acp(mut n) = update else { unreachable!() };
+            let mut meta = serde_json::Map::new();
+            meta.insert("streamStartMs".into(), serde_json::json!(stream));
+            n.meta = Some(meta);
+            SessionUpdate::Acp(n)
+        }
+
+        /// A hosted-tool row as the shell sends it: `tool_call` `in_progress`, `_meta.backend`.
+        fn hosted_row(id: &str, stream: i64) -> SessionUpdate {
+            in_stream(
+                acp_update(acp::SessionUpdate::ToolCall(
+                    acp::ToolCall::new(acp::ToolCallId::new(id), "Searching")
+                        .status(acp::ToolCallStatus::InProgress)
+                        .meta(serde_json::json!({"backend": true}).as_object().cloned()),
+                )),
+                stream,
+            )
+        }
+
+        /// The update that closes a hosted row of a failed attempt: `failed`, title only, no output.
+        fn hosted_row_closed(id: &str, stream: i64) -> SessionUpdate {
+            in_stream(
+                acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(id),
+                    acp::ToolCallUpdateFields::new()
+                        .status(Some(acp::ToolCallStatus::Failed))
+                        .title(Some("Searching".into())),
+                ))),
+                stream,
+            )
+        }
+
+        /// A hosted tool that itself failed (the backend reported it): `failed` with its payload.
+        fn hosted_row_failed_for_real(id: &str, stream: i64) -> SessionUpdate {
+            in_stream(
+                acp_update(acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(id),
+                    acp::ToolCallUpdateFields::new()
+                        .status(Some(acp::ToolCallStatus::Failed))
+                        .raw_output(Some(serde_json::json!({"status": "failed", "error": "boom"}))),
+                ))),
+                stream,
+            )
+        }
+
+        /// The rebuilt `chat.jsonl` as (kind, text/id) pairs.
+        fn rebuilt(updates: Vec<SessionUpdate>) -> Vec<String> {
+            let dir = tempfile::tempdir().unwrap();
+            let envelopes: Vec<SessionUpdateEnvelope> = updates
+                .iter()
+                .map(|u| SessionUpdateEnvelope::from_update(u).unwrap())
+                .collect();
+            write_jsonl_atomic(&dir.path().join(UPDATES_FILE), &envelopes).unwrap();
+            chat_rebuild::rebuild_chat_history(dir.path()).unwrap();
+            std::fs::read_to_string(dir.path().join(CHAT_HISTORY_FILE))
+                .unwrap()
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(|l| match serde_json::from_str::<ConversationItem>(l).unwrap() {
+                    ConversationItem::Assistant(a) => Some(format!(
+                        "assistant:{}:calls={}",
+                        a.content,
+                        a.tool_calls.iter().map(|c| c.id.to_string()).collect::<Vec<_>>().join(",")
+                    )),
+                    ConversationItem::ToolResult(r) => Some(format!("tool_result:{}", r.tool_call_id)),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// P201 r2 (Grok r1 HIGH): a hosted row of a failed attempt is closed (`failed`, no output) AFTER the notice
+        /// that voids the attempt. The rebuilt history holds the accepted attempt only: no text, tool call or tool
+        /// result of the dead one, and the late closing update commits nothing.
+        #[test]
+        fn p201_a_failed_attempts_hosted_row_never_enters_rebuilt_history() {
+            assert_eq!(
+                rebuilt(vec![
+                    user("hi"),
+                    agent_in("A1", 1),
+                    hosted_row("h1", 1),
+                    retry_of(1),
+                    hosted_row_closed("h1", 1),
+                    agent_in("A2", 2),
+                ]),
+                ["assistant:A2:calls="]
+            );
+            // The same when the dead attempt wrote no text at all
+            assert_eq!(
+                rebuilt(vec![
+                    user("hi"),
+                    hosted_row("h1", 1),
+                    retry_of(1),
+                    hosted_row_closed("h1", 1),
+                    agent_in("A2", 2),
+                ]),
+                ["assistant:A2:calls="]
+            );
+        }
+
+        /// Guard: a hosted tool that really failed inside an ACCEPTED attempt is committed as before.
+        #[test]
+        fn p201_a_genuine_hosted_failure_in_an_accepted_attempt_is_still_committed() {
+            assert_eq!(
+                rebuilt(vec![
+                    user("hi"),
+                    agent_in("A", 1),
+                    hosted_row("h1", 1),
+                    hosted_row_failed_for_real("h1", 1),
+                    agent_in("B", 1),
+                ]),
+                ["assistant:A:calls=h1", "tool_result:h1", "assistant:B:calls="]
+            );
         }
 
         #[test]

@@ -1948,6 +1948,42 @@ fn read_chat_history_is_idempotent_on_post_pr_sessions() {
         .collect();
     assert_eq!(kinds, vec!["system", "user", "reasoning", "assistant"]);
 }
+/// A resumed Anthropic-protocol session replays every thinking and redacted_thinking block of a message unchanged:
+/// the loader must keep each sibling, in order, with its own signature.
+#[test]
+fn read_chat_history_keeps_every_thinking_and_redacted_block_in_order() {
+    use fuigo_sampling_types::{redacted_thinking_item, synthesized_reasoning_item};
+    let mut first = synthesized_reasoning_item("first");
+    first.encrypted_content = Some("sig-1".to_owned());
+    let mut second = synthesized_reasoning_item("second");
+    second.encrypted_content = Some("sig-2".to_owned());
+    let stored = [
+        ConversationItem::user("go"),
+        ConversationItem::Reasoning(first),
+        ConversationItem::Reasoning(redacted_thinking_item("opaque-blob")),
+        ConversationItem::Reasoning(second),
+        ConversationItem::assistant("done"),
+    ];
+    let lines: Vec<String> = stored
+        .iter()
+        .map(|i| serde_json::to_string(i).unwrap())
+        .collect();
+    let line_refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+    let items = load_lines(&line_refs);
+    assert_eq!(items.len(), 5, "{items:#?}");
+    let sigs: Vec<Option<&str>> = items
+        .iter()
+        .filter_map(|i| match i {
+            ConversationItem::Reasoning(r) => Some(r.encrypted_content.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sigs, vec![Some("sig-1"), Some("opaque-blob"), Some("sig-2")]);
+    let ConversationItem::Reasoning(mid) = &items[2] else {
+        panic!("item 2 must be Reasoning");
+    };
+    assert!(fuigo_sampling_types::is_redacted_thinking_item(mid));
+}
 /// Set up a session dir with a raw `chat_history.jsonl` and return (adapter, chat path, loaded items).
 fn load_raw_chat(
     temp_dir: &TempDir,
@@ -3079,7 +3115,7 @@ async fn a_rewind_holds_the_rewrite_lock_from_before_it_starts_until_it_is_done(
     // The rewind's own rewrite runs while it holds the lock (it does not wait for it); the lock is still held after.
     let before = std::fs::read(&path).unwrap();
     let undo = adapter
-        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(2))
+        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(2), None)
         .await
         .expect("the rewind's rewrite runs under its own lock");
     assert_eq!(undo.previous.as_deref(), Some(&before[..]), "what the file held before is kept");
@@ -3111,7 +3147,7 @@ async fn a_rewind_holds_the_rewrite_lock_from_before_it_starts_until_it_is_done(
     let after = other.lock_rewind_points_rewrite(&info).await.expect("released once the rewind is done");
     drop(after);
     let undo = adapter
-        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::MergeFrom(1))
+        .rewrite_rewind_points_holding(&info, RewindPointsRewrite::MergeFrom(1), None)
         .await
         .expect("the rewrite works once the lock is free");
     adapter.end_rewind_points_rewrite(&info, undo, false).await.expect("done");
@@ -3137,7 +3173,7 @@ async fn a_put_back_does_not_join_an_unterminated_last_row_and_an_appended_row()
     assert_eq!(unterminated.pop(), Some(b'\n'));
     std::fs::write(&path, &unterminated).unwrap();
     let lock = adapter.lock_rewind_points_rewrite(&info).await.unwrap();
-    let undo = adapter.rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(1)).await.unwrap();
+    let undo = adapter.rewrite_rewind_points_holding(&info, RewindPointsRewrite::TruncateFrom(1), None).await.unwrap();
     adapter.append_rewind_point(&info, &RewindPoint::new(7)).await.unwrap();
     adapter.end_rewind_points_rewrite(&info, undo, true).await.expect("put back");
     drop(lock);

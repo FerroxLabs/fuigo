@@ -963,7 +963,7 @@ pub(crate) fn format_fix_success(outcome: &FixOutcome) -> String {
     };
     let backup = outcome
         .backup_path()
-        .map(|path| format!("\nBackup: {}", path.display()))
+        .map(|path| format!("\nBackup: {}", fuigo_tty_utils::untrusted(path.display())))
         .unwrap_or_default();
     let activation = match (kind, outcome.activation) {
         (FixKind::SshWrap, FixActivation::SatisfiedNow) => {
@@ -990,14 +990,15 @@ pub fn verify_persistent_fix(outcome: &FixOutcome) -> bool {
 
 fn preview_path(path: &Path) -> String {
     path.to_str()
-        .filter(|value| !value.chars().any(char::is_control))
+        .filter(|value| !value.chars().any(fuigo_tty_utils::is_unsafe_display_char))
         .map(commonmark_code_span)
         .unwrap_or_else(|| "[path cannot be rendered safely]".to_owned())
 }
 
 fn markdown_code_path(path: &Path) -> String {
+    // The path comes from the file system and is printed to the terminal: strict scrub before it is quoted (P181 S3)
     path.to_str()
-        .map(commonmark_code_span)
+        .map(|value| commonmark_code_span(&fuigo_tty_utils::scrub_unsafe_display(value, Some(' '))))
         .unwrap_or_else(|| "the configured tmux file".to_owned())
 }
 
@@ -1016,7 +1017,7 @@ fn shell_quote_path(path: &Path) -> Option<String> {
     let value = path.to_str()?;
     if value
         .chars()
-        .any(|character| matches!(character, '\n' | '\r' | '\0'))
+        .any(|character| matches!(character, '\n' | '\r' | '\0') || fuigo_tty_utils::is_unsafe_display_char(character))
     {
         return None;
     }

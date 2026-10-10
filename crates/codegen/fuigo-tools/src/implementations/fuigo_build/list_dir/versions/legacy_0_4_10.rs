@@ -309,14 +309,25 @@ fn render_with_fallback(root: &Path, collected: &Collected, cfg: &RenderConfig) 
 /// Render a directory listing using the legacy (0.4.10) depth-threshold algorithm.
 ///
 /// Returns the body text (without the root path header line).
-pub(crate) fn render_legacy(root: &Path, max_output_bytes: usize) -> String {
+pub(crate) fn render_legacy(
+    root: &Path,
+    max_output_bytes: usize,
+    deny: Option<crate::util::read_deny::ReadDenyFilter>,
+) -> String {
     let cfg = RenderConfig {
         max_output_bytes,
         ..Default::default()
     };
-    let walker = ignore::WalkBuilder::new(root)
-        .standard_filters(true)
-        .build();
+    let mut builder = ignore::WalkBuilder::new(root);
+    builder.standard_filters(true);
+    // P198: Read-denied names are left out of the listing.
+    if let Some(deny) = deny {
+        let deny = deny.rooted(root);
+        builder.filter_entry(move |entry| {
+            !deny.denies(entry.path(), entry.file_type().is_some_and(|t| t.is_dir()))
+        });
+    }
+    let walker = builder.build();
     let collected = collect(root, walker, &cfg);
     let output_lines = render_with_fallback(root, &collected, &cfg);
     // Skip the first line (root dir name) — the caller prepends its own.
@@ -373,7 +384,7 @@ mod tests {
     fn legacy_renders_small_tree_exact_fixture() {
         let tmp = TempDir::new().unwrap();
         create_fixture_tree(tmp.path());
-        let body = render_legacy(tmp.path(), 40_000);
+        let body = render_legacy(tmp.path(), 40_000, None);
 
         // Exact archived output from the depth-threshold algorithm.
         // Root files listed alphabetically, src/ expanded (< 15 children),
@@ -392,7 +403,7 @@ mod tests {
     #[test]
     fn legacy_empty_directory_returns_empty_string() {
         let tmp = TempDir::new().unwrap();
-        let body = render_legacy(tmp.path(), 40_000);
+        let body = render_legacy(tmp.path(), 40_000, None);
         assert!(
             body.is_empty(),
             "empty dir should produce empty body, got: {body}"
@@ -411,7 +422,7 @@ mod tests {
         for i in 0..20 {
             std::fs::write(large_dir.join(format!("file_{i}.rs")), "").unwrap();
         }
-        let body = render_legacy(tmp.path(), 40_000);
+        let body = render_legacy(tmp.path(), 40_000, None);
 
         // Should show a summary line with file count and extension breakdown.
         assert!(
@@ -431,7 +442,7 @@ mod tests {
     fn legacy_indentation_matches_historical_pattern() {
         let tmp = TempDir::new().unwrap();
         create_fixture_tree(tmp.path());
-        let body = render_legacy(tmp.path(), 40_000);
+        let body = render_legacy(tmp.path(), 40_000, None);
 
         // Every line should start with some number of "  " pairs followed by "- "
         // or be a summary line (starts with spaces + "[").

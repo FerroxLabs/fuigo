@@ -147,6 +147,9 @@ impl fuigo_tool_runtime::Tool for GrepTool {
 
         let cwd = crate::types::tool_metadata::resolve_cwd(&ctx, &resources).await?;
 
+        // The read-rule filter below is built against this cwd (a copy: the base code below consumes `cwd`).
+        let search_cwd = cwd.clone();
+
         // Resolve search path.
         let search_path = match &input.path {
             Some(p) if !p.is_empty() => {
@@ -159,6 +162,26 @@ impl fuigo_tool_runtime::Tool for GrepTool {
             }
             _ => cwd,
         };
+
+        // P166 Grok r5 MEDIUM 3 sweep: ripgrep searches a path it is given even when that path is gitignored, so an
+        // ignored search path (logical or physical) is refused like `read_file` refuses it.
+        if let Some(path) = input.path.as_deref().filter(|path| !path.is_empty())
+            && crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
+                &resources,
+                &search_path,
+                false,
+            )
+            .await
+        {
+            return Ok(GrepSearchOutput {
+                stdout: format!("Error: {path} is ignored by .gitignore and cannot be searched.")
+                    .into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            });
+        }
 
         // Build rg command.
         let rg_exec = rg_path()?;
@@ -177,6 +200,39 @@ impl fuigo_tool_runtime::Tool for GrepTool {
             && !include.is_empty()
         {
             cmd.arg("--glob").arg(include);
+        }
+        // Managed Read-deny globs become excludes, after the caller's include so they win (as in the fuigo-build grep).
+        let deny_read_globs =
+            crate::types::resources::deny_read_globs_for_call(&ctx, &*resources.lock().await);
+        // P198: ripgrep reads an explicit file despite an exclude, so a denied search path is refused before it runs.
+        if input.path.as_deref().is_some_and(|p| !p.is_empty())
+            && crate::util::read_deny::explicit_search_path_denied(&search_cwd, &deny_read_globs, &search_path).await
+        {
+            return Ok(GrepSearchOutput {
+                stdout: format!("Error: {} is excluded by a read rule and cannot be searched.", search_path.display())
+                    .into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            });
+        }
+        // P198 round 3: no excludes. With rules, ripgrep prints `--null` records and every denied file is dropped
+        // below (one matcher: the policy's). Cost: ripgrep still reads denied files.
+        let mut result_filter = crate::util::rg_json::RgJsonStream::new(
+            crate::util::rg_json::RgJsonMode::Pipe,
+            crate::util::read_deny::ResultFilter::new(&search_cwd, &deny_read_globs),
+        );
+        // The gate, evaluated once: a read rule applies (the deny list is non-empty) and the search path is a directory.
+        // An explicit FILE is searched by the text form (a denied one was refused above), so its binary-file notice and
+        // every other byte are ripgrep's own.
+        let filtering = result_filter.is_active() && !search_path.is_file();
+        if filtering {
+            cmd.arg("--json");
+        } else {
+            for deny in &deny_read_globs {
+                cmd.arg("--glob").arg(format!("!{deny}"));
+            }
         }
 
         cmd.arg(search_path.to_string_lossy().as_ref());
@@ -208,8 +264,33 @@ impl fuigo_tool_runtime::Tool for GrepTool {
             let _ = pipe.read_to_end(&mut stderr_buf).await;
         }
 
+        if filtering {
+            let mut kept = result_filter.feed(&stdout_buf);
+            kept.extend(result_filter.finish());
+            stdout_buf = kept;
+        }
+
         let status = child.wait().await.ok();
         let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
+
+        // Read rules only (P198 round 4, Part G): ripgrep's stderr names files and is never returned, EXCEPT its OWN
+        // pattern or flag error (`is_own_error`: exit 2, empty stdout, regex/flag diagnostic), which names no file and is
+        // returned as without rules. No allowed output at all is "No files found" whatever the exit code.
+        if filtering {
+            let nothing = String::from_utf8_lossy(&stdout_buf).trim().is_empty();
+            if !crate::util::rg_json::is_own_error(exit_code, nothing, &stderr_buf) {
+                stderr_buf.clear();
+            }
+            if nothing {
+                return Ok(GrepSearchOutput {
+                    stdout: "No files found".to_string().into_bytes(),
+                    stderr: stderr_buf,
+                    exit_code,
+                    match_count: 0,
+                    file_matches: Vec::new(),
+                });
+            }
+        }
 
         // Exit code 1 = no matches, exit code 2 with no output = errors only.
         let stdout_str = String::from_utf8_lossy(&stdout_buf);
@@ -372,6 +453,25 @@ impl fuigo_tool_runtime::Tool for GrepTool {
 
 #[cfg(test)]
 mod tests {
+
+    /// P198 part G reopened: the `path|line|text` form this tool parses, for interleaved records of two files.
+    #[test]
+    fn interleaved_json_records_render_pipe_lines_for_each_allowed_file_once() {
+        let f = crate::util::rg_json_tests::fx();
+        let out = crate::util::rg_json_tests::run(&f, crate::util::rg_json::RgJsonMode::Pipe, &crate::util::rg_json_tests::interleaved_allowed());
+        let mut got: Vec<(&str, &str, &str)> = out
+            .lines()
+            .map(|l| {
+                let mut p = l.splitn(3, '|');
+                (p.next().unwrap(), p.next().unwrap(), p.next().unwrap())
+            })
+            .collect();
+        got.sort();
+        assert_eq!(got, vec![("src/a.rs", "1", "A1"), ("src/a.rs", "2", "A2"), ("src/b.rs", "5", "B5")]);
+        let out = crate::util::rg_json_tests::run(&f, crate::util::rg_json::RgJsonMode::Pipe, &crate::util::rg_json_tests::interleaved_with_denied());
+        assert_eq!(out.lines().count(), 2, "{out:?}");
+        assert!(out.lines().all(|l| l.starts_with("src/a.rs|")), "{out:?}");
+    }
     use super::*;
     use crate::types::tool_metadata::test_ctx;
 
@@ -1029,4 +1129,128 @@ mod tests {
     // only, no matches) is impractical in a unit test with real `rg`.
     // The code path (line 189) returns "No files found" and is simple
     // enough to verify by inspection. Documented as a known gap.
+
+    /// P166 Grok r5 MEDIUM 3 sweep: ripgrep searches an explicitly named path even when it is gitignored, so with
+    /// `RespectGitignore` on, an ignored search path (logical or physical) is refused like `read_file` refuses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opencode_grep_refuses_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let mut resources = test_resources(repo.path());
+        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::RespectGitignore(true));
+        let output = fuigo_tool_runtime::Tool::run(
+            &GrepTool,
+            test_ctx(resources.into_shared()),
+            GrepInput {
+                pattern: "SECRET".to_string(),
+                path: Some("secret/key.txt".to_string()),
+                include: None,
+            },
+        )
+        .await
+        .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(!text.contains("TOP SECRET"), "{text}");
+        assert!(text.contains("ignored by .gitignore"), "{text}");
+        assert_eq!(output.match_count, 0);
+    }
+
+
+    /// What the OpenCode `grep` tool prints for `FAKE`.
+    async fn oc_grep_text(cwd: std::path::PathBuf, path: Option<String>, deny: Option<Vec<String>>) -> String {
+        let mut resources = test_resources(&cwd);
+        if let Some(deny) = deny {
+            resources.insert(crate::types::resources::DenyReadGlobs(deny));
+        }
+        let out = fuigo_tool_runtime::Tool::run(
+            &GrepTool,
+            test_ctx(resources.into_shared()),
+            GrepInput { pattern: "FAKE".to_string(), path, include: None },
+        )
+        .await
+        .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// P198 r2: absolute rule (also outside the cwd and through a symlinked cwd), bare name and siblings.
+    #[tokio::test]
+    async fn read_rules_follow_the_policy_matcher() {
+        crate::util::read_deny::fixture::check_grep(|cwd, path, deny| async move {
+            oc_grep_text(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 round 4: binary notices, odd names, a failing ripgrep and "nothing denied" through the `--json` records.
+    #[tokio::test]
+    async fn json_records_hide_denied_files() {
+        crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move {
+            oc_grep_text(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rules_that_are_not_total_do_not_hide_a_directory() {
+        crate::util::read_deny::fixture::check_round4_rules(|cwd, path, deny| async move {
+            oc_grep_text(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 r2: a denied explicit file, also through a symlink, is refused (the tool has one output mode).
+    #[tokio::test]
+    async fn a_denied_explicit_file_is_refused() {
+        crate::util::read_deny::fixture::check_explicit_file(|cwd, path, deny| async move {
+            oc_grep_text(cwd, Some(path), Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 r2: an empty rule list prints the same bytes as no rule object.
+    #[tokio::test]
+    async fn an_empty_rule_list_changes_nothing() {
+        let t = crate::util::read_deny::fixture::tree();
+        let none = oc_grep_text(t.proj.clone(), None, None).await;
+        assert!(none.contains("key_material.txt"), "{none}");
+        let empty = oc_grep_text(t.proj.clone(), None, Some(Vec::new())).await;
+        // Same bytes up to ripgrep's parallel line order.
+        assert_eq!(
+            crate::util::read_deny::fixture::sorted_lines(&none),
+            crate::util::read_deny::fixture::sorted_lines(&empty)
+        );
+    }
+
+    /// P198 round 3: results are post-filtered by the policy matcher.
+    #[tokio::test]
+    async fn results_are_post_filtered_by_the_policy_matcher() {
+        crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move {
+            oc_grep_text(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 round 3: when every match is denied the tool says so, and a denied file is not in the match count.
+    #[tokio::test]
+    async fn denied_matches_are_not_counted() {
+        let t = crate::util::read_deny::fixture::tree();
+        let mut resources = test_resources(&t.proj);
+        resources.insert(crate::types::resources::DenyReadGlobs(vec!["**/*.txt".to_string()]));
+        let out = fuigo_tool_runtime::Tool::run(
+            &GrepTool,
+            test_ctx(resources.into_shared()),
+            GrepInput { pattern: "FAKE".to_string(), path: Some("secrets".to_string()), include: None },
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.match_count, 0, "{}", String::from_utf8_lossy(&out.stdout));
+        assert!(String::from_utf8_lossy(&out.stdout).contains("No files found"));
+    }
 }

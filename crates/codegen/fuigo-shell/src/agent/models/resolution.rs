@@ -105,12 +105,7 @@ pub(crate) fn resolve_default_model(
         tracing::warn!("no selectable models; falling back to bundled default (pre-catalog)");
         let default_id = crate::models::default_model().to_string();
         let mut entry = ModelEntry::fallback(&default_id, &cfg.endpoints);
-        entry.info.user_selectable = match ModelGlobSet::compile(cfg.models.allowed_models.as_ref())
-        {
-            Ok(None) => true,
-            Ok(Some(set)) => set.matches(&default_id, &default_id),
-            Err(_) => false,
-        };
+        entry.info.user_selectable = effective_allowlist(cfg).is_selected(&default_id, &default_id);
         (default_id, entry)
     };
 
@@ -214,6 +209,229 @@ impl ModelGlobSet {
     fn matches(&self, key: &str, model: &str) -> bool {
         self.0.is_match(key) || self.0.is_match(model)
     }
+
+    fn matches_model(&self, model: &str) -> bool {
+        self.0.is_match(model)
+    }
+}
+
+/// The allowlist in force (P169): the fleet pin from `requirements.toml` replaces the user/project list.
+pub(crate) enum EffectiveAllowlist<'a> {
+    Unrestricted,
+    /// The pin is present but unreadable (or its requirements file is): nothing is selectable.
+    Invalid,
+    User(&'a Vec<String>),
+    Fleet(&'a Vec<String>),
+}
+
+pub(crate) fn effective_allowlist(cfg: &config::Config) -> EffectiveAllowlist<'_> {
+    use crate::agent::config::AllowlistPin;
+    match cfg.requirements.allowed_models.pin_ref() {
+        Some(AllowlistPin::FailClosed) => EffectiveAllowlist::Invalid,
+        Some(AllowlistPin::List(patterns)) if patterns.is_empty() => {
+            EffectiveAllowlist::Unrestricted
+        }
+        Some(AllowlistPin::List(patterns)) => EffectiveAllowlist::Fleet(patterns),
+        None => match cfg.models.allowed_models.as_ref() {
+            Some(patterns) if !patterns.is_empty() => EffectiveAllowlist::User(patterns),
+            _ => EffectiveAllowlist::Unrestricted,
+        },
+    }
+}
+
+impl EffectiveAllowlist<'_> {
+    pub(crate) fn is_unrestricted(&self) -> bool {
+        matches!(self, Self::Unrestricted)
+    }
+
+    /// Set by policy (a fleet list or an unreadable pin), not by the user.
+    pub(crate) fn is_fleet(&self) -> bool {
+        matches!(self, Self::Fleet(_) | Self::Invalid)
+    }
+
+    /// Whether a catalog entry is selectable. A fleet pin matches the model id only, so a user `[model.<key>]` whose
+    /// key happens to match a fleet pattern cannot satisfy it; a user list matches the key or the model id.
+    pub(crate) fn is_selected(&self, key: &str, model: &str) -> bool {
+        self.selector()(key, model)
+    }
+
+    /// [`Self::is_selected`] with the glob set compiled once, for a pass over the whole catalog.
+    pub(crate) fn selector(&self) -> impl Fn(&str, &str) -> bool + '_ {
+        enum Compiled {
+            All,
+            None,
+            Fleet(ModelGlobSet),
+            User(ModelGlobSet),
+        }
+        let compiled = match self {
+            Self::Unrestricted => Compiled::All,
+            Self::Invalid => Compiled::None,
+            Self::Fleet(patterns) | Self::User(patterns) => {
+                match ModelGlobSet::compile(Some(*patterns)) {
+                    Ok(None) => Compiled::All,
+                    Ok(Some(set)) if matches!(self, Self::Fleet(_)) => Compiled::Fleet(set),
+                    Ok(Some(set)) => Compiled::User(set),
+                    Err(bad) => {
+                        tracing::error!(patterns = ?bad, "allowed_models: invalid glob(s); marking nothing selectable");
+                        Compiled::None
+                    }
+                }
+            }
+        };
+        move |key, model| match &compiled {
+            Compiled::All => true,
+            Compiled::None => false,
+            Compiled::Fleet(set) => set.matches_model(model),
+            Compiled::User(set) => set.matches(key, model),
+        }
+    }
+}
+
+/// Whether a side call (title, image description, web search, classifier, prompt suggestion) may sample `slug`.
+/// Only a fleet pin binds it (the user's own list is the user's choice to widen or narrow for helpers): then the slug
+/// must be a catalog entry whose model id the pin admits. An id off the catalog is refused, never synthesized onto
+/// the inference route. Callers fall back to the admitted session model, or skip the call.
+pub(crate) fn helper_model_admitted(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    slug: &str,
+) -> bool {
+    if !allowlist.is_fleet() {
+        return true;
+    }
+    config::find_model_by_id(models, slug)
+        .is_some_and(|entry| allowlist.is_selected(slug, &entry.model))
+}
+
+/// The model id a side call puts on the wire (P169 round 7). Admission alone is not enough: the request must carry
+/// the `model` of the catalog entry the pin admitted, never the slug that located it (a user `[model.<key>]` can map
+/// any key onto a pinned model id). Without a fleet pin: `preferred`, else `unpinned_default`, else the session model
+/// (behaviour unchanged). Under one: the admitted entry's model id for `preferred`, else the session model; `None`
+/// when there is neither, and the caller skips the call.
+pub(crate) fn helper_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    preferred: Option<&str>,
+    unpinned_default: Option<&str>,
+    session_model: Option<&str>,
+) -> Option<String> {
+    let preferred = preferred.map(str::trim).filter(|s| !s.is_empty());
+    if !allowlist.is_fleet() {
+        return preferred
+            .or(unpinned_default)
+            .or(session_model)
+            .map(str::to_owned);
+    }
+    let admitted = preferred.and_then(|slug| {
+        config::find_model_by_id(models, slug)
+            .filter(|entry| allowlist.is_selected(slug, &entry.model))
+            .map(|entry| entry.model.clone())
+    });
+    // The session model is a wire id: it is re-judged, because the pin can have changed (or failed closed) since it was set.
+    admitted.or_else(|| {
+        session_model
+            .filter(|model| helper_model_admitted(allowlist, models, model))
+            .map(str::to_owned)
+    })
+}
+
+/// The model id a helper puts on the wire for the session's selected catalog key (P169 round 8). Without a fleet pin the
+/// key is returned unchanged (behaviour unchanged). Under one: the `model` of the entry the pin admits, `None` otherwise.
+pub(crate) fn selected_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    catalog_key: &str,
+) -> Option<String> {
+    if !allowlist.is_fleet() {
+        return Some(catalog_key.to_owned());
+    }
+    config::find_model_by_id(models, catalog_key)
+        .filter(|entry| allowlist.is_selected(catalog_key, &entry.model))
+        .map(|entry| entry.model.clone())
+}
+
+/// Shell AI suggest (`handle_ai_suggest`): the client's `aiModel` hint, else `grok-4.6`.
+pub(crate) fn ai_suggest_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    model_override: Option<&str>,
+    session_model: Option<&str>,
+) -> Option<String> {
+    helper_wire_model(allowlist, models, model_override, Some("grok-4.6"), session_model)
+}
+
+/// Memory-note rewrite (`handle_rewrite_memory_note`): `grok-4.6`.
+pub(crate) fn rewrite_note_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    session_model: Option<&str>,
+) -> Option<String> {
+    helper_wire_model(allowlist, models, None, Some("grok-4.6"), session_model)
+}
+
+/// Memory flush (`run_memory_flush`): `[compaction.memory_flush] flush_model`, else the session model.
+pub(crate) fn flush_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    flush_model: Option<&str>,
+    session_model: Option<&str>,
+) -> Option<String> {
+    helper_wire_model(allowlist, models, flush_model, None, session_model)
+        // No pin and nothing configured: the request goes out with an empty model, as it always did (P169 round 8).
+        .or_else(|| (!allowlist.is_fleet()).then(String::new))
+}
+
+/// Prompt suggestion (`handle_suggest_prompt`): the slug already chosen by `effective_suggest_model`.
+pub(crate) fn suggest_prompt_wire_model(
+    allowlist: &EffectiveAllowlist<'_>,
+    models: &IndexMap<String, ModelEntry>,
+    slug: &str,
+    session_model: Option<&str>,
+) -> Option<String> {
+    helper_wire_model(allowlist, models, Some(slug), None, session_model)
+}
+
+/// Whether a reasoning-effort route to model id `routed` is allowed: only a fleet pin judges it (by model id).
+pub(crate) fn effort_route_allowed(cfg: &config::Config, routed: &str) -> bool {
+    let allowlist = effective_allowlist(cfg);
+    !allowlist.is_fleet() || allowlist.is_selected(routed, routed)
+}
+
+/// The refusal for choosing a model the allowlist excludes.
+pub(crate) fn allowlist_denied_message(cfg: &config::Config) -> &'static str {
+    if effective_allowlist(cfg).is_fleet() {
+        "This model isn't allowed by your organization's policy (requirements.toml allowed_models)."
+    } else {
+        "This model isn't allowed by your allowed_models setting."
+    }
+}
+
+/// The message when the allowlist leaves no selectable model.
+pub(crate) fn allowlist_excludes_all_message(cfg: &config::Config) -> String {
+    match effective_allowlist(cfg) {
+        EffectiveAllowlist::Invalid => format!(
+            "The organization model policy (requirements.toml allowed_models) is invalid or unreadable{}, so no model \
+             can be selected. Fix the file or contact your administrator.",
+            pin_source_suffix(cfg)
+        ),
+        EffectiveAllowlist::Fleet(_) => format!(
+            "None of your models are allowed by your organization's policy (requirements.toml allowed_models{}). \
+             Contact your administrator.",
+            pin_source_suffix(cfg)
+        ),
+        _ => "None of your models are allowed by allowed_models. \
+              Broaden it or remove it from your config, then restart."
+            .to_owned(),
+    }
+}
+
+fn pin_source_suffix(cfg: &config::Config) -> String {
+    cfg.requirements
+        .allowed_models
+        .source()
+        .and_then(|s| s.path())
+        .map(|p| format!(" in {}", p.display()))
+        .unwrap_or_default()
 }
 
 /// Single source of truth for the catalog: applies `disabled_models`, then `allowed_models`, then `hidden_models`.
@@ -232,23 +450,10 @@ pub(crate) fn resolve_model_catalog(
         }
     }
 
-    match ModelGlobSet::compile(cfg.models.allowed_models.as_ref()) {
-        Ok(None) => {
-            for entry in catalog.values_mut() {
-                entry.info.user_selectable = true;
-            }
-        }
-        Ok(Some(allowed)) => {
-            for (key, entry) in catalog.iter_mut() {
-                entry.info.user_selectable = allowed.matches(key, &entry.model);
-            }
-        }
-        Err(bad) => {
-            tracing::error!(patterns = ?bad, "allowed_models: invalid glob(s); marking nothing selectable");
-            for entry in catalog.values_mut() {
-                entry.info.user_selectable = false;
-            }
-        }
+    let allowlist = effective_allowlist(cfg);
+    let selected = allowlist.selector();
+    for (key, entry) in catalog.iter_mut() {
+        entry.info.user_selectable = selected(key, &entry.model);
     }
 
     if let Ok(Some(hidden)) = ModelGlobSet::compile(cfg.models.hidden_models.as_ref()) {
@@ -306,43 +511,88 @@ pub(crate) fn allowlist_matches_nothing(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
 ) -> bool {
-    cfg.models
-        .allowed_models
-        .as_ref()
-        .is_some_and(|a| !a.is_empty())
-        && !catalog.values().any(|e| e.info.user_selectable)
+    !effective_allowlist(cfg).is_unrestricted() && !catalog.values().any(|e| e.info.user_selectable)
 }
 
 /// Reject an `allowed_models` allowlist that leaves no selectable model, or excludes an explicitly configured default.
 /// Run only against a real catalog.
+/// Before a real catalog is fetched (P169, Astra r1 #7): a fail-closed pin refuses outright, and under a fleet pin an
+/// explicit default or `-m` whose model id the pin does not allow is refused instead of falling back. A user list keeps
+/// its old behaviour (checked once the catalog arrives).
+pub(crate) fn validate_fleet_pin_pre_catalog(
+    cfg: &config::Config,
+    catalog: &IndexMap<String, ModelEntry>,
+) -> Result<(), String> {
+    let allowlist = effective_allowlist(cfg);
+    let patterns = match &allowlist {
+        EffectiveAllowlist::Invalid => return Err(allowlist_excludes_all_message(cfg)),
+        EffectiveAllowlist::Fleet(p) => p.join(", "),
+        EffectiveAllowlist::Unrestricted | EffectiveAllowlist::User(_) => return Ok(()),
+    };
+    for (src, id) in [
+        ("default", cfg.models.default.as_deref()),
+        ("-m flag", cfg.default_model_override.as_deref()),
+    ] {
+        let Some(id) = id else { continue };
+        let model = catalog
+            .get(id)
+            .or_else(|| catalog.values().find(|e| e.has_model_id(id)))
+            .map_or(id, |entry| entry.model.as_str());
+        if !allowlist.is_selected(id, model) {
+            return Err(format!(
+                "\"{id}\" (your {src}) isn't allowed by your organization's policy \
+                 (requirements.toml allowed_models: {patterns}). Choose an allowed model."
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_selectable(
     cfg: &config::Config,
     catalog: &IndexMap<String, ModelEntry>,
 ) -> Result<(), String> {
-    let Some(allowed) = cfg.models.allowed_models.as_ref().filter(|a| !a.is_empty()) else {
-        return Ok(());
+    let allowlist = effective_allowlist(cfg);
+    let patterns = match &allowlist {
+        EffectiveAllowlist::Unrestricted => return Ok(()),
+        EffectiveAllowlist::Invalid => return Err(allowlist_excludes_all_message(cfg)),
+        EffectiveAllowlist::Fleet(p) | EffectiveAllowlist::User(p) => p.join(", "),
     };
-    let patterns = allowed.join(", ");
     if !catalog.values().any(|e| e.info.user_selectable) {
-        return Err(format!(
-            "None of your available models match allowed_models ({patterns}). \
-             Broaden the patterns or remove allowed_models, then try again."
-        ));
+        return Err(if allowlist.is_fleet() {
+            allowlist_excludes_all_message(cfg)
+        } else {
+            format!(
+                "None of your available models match allowed_models ({patterns}). \
+                 Broaden the patterns or remove allowed_models, then try again."
+            )
+        });
     }
     for (src, id) in [
         ("default", cfg.models.default.as_deref()),
         ("-m flag", cfg.default_model_override.as_deref()),
     ] {
-        if let Some(id) = id
-            && let Some(entry) = catalog
-                .get(id)
-                .or_else(|| catalog.values().find(|e| e.has_model_id(id)))
-            && !entry.info.user_selectable
-        {
-            return Err(format!(
-                "\"{id}\" (your {src}) isn't allowed by allowed_models ({patterns}). \
-                 Add it to allowed_models, or set a different model."
-            ));
+        let Some(id) = id else { continue };
+        let entry = catalog
+            .get(id)
+            .or_else(|| catalog.values().find(|e| e.has_model_id(id)));
+        // P169 (Astra r2): under a fleet pin a choice the catalog does not know is judged by its id, not dropped.
+        let refused = match entry {
+            Some(entry) => !entry.info.user_selectable,
+            None => allowlist.is_fleet() && !allowlist.is_selected(id, id),
+        };
+        if refused {
+            return Err(if allowlist.is_fleet() {
+                format!(
+                    "\"{id}\" (your {src}) isn't allowed by your organization's policy \
+                     (requirements.toml allowed_models: {patterns}). Choose an allowed model."
+                )
+            } else {
+                format!(
+                    "\"{id}\" (your {src}) isn't allowed by allowed_models ({patterns}). \
+                     Add it to allowed_models, or set a different model."
+                )
+            });
         }
     }
     Ok(())

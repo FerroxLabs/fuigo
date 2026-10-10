@@ -205,6 +205,31 @@ fn session_info_for(session_id: &acp::SessionId, cwd: &AbsPathBuf) -> SessionInf
         cwd: cwd.as_str().to_owned(),
     }
 }
+/// P172 (D1): the session-folder TTL sweep runs once per process, from the first `session/new` or attach, so it always
+/// knows which session folder is this process's live one. The liveness bump runs on every call, before the sweep and
+/// before this session is loaded: another process's sweep may be judging the folder right now, and it only sees mtimes.
+/// Fails when another process's sweep has held the session past the limit (it is stuck mid-removal), or when nothing in
+/// an idle session can be marked (P178: a sweep could then remove it while it loads).
+///
+/// P176: the caller holds the returned mark until the session's actor holds `turn_owner.lock`
+/// (`spawn_and_register_session` returns only after that), so no sweep can remove the session while it loads, however
+/// long the load is suspended.
+async fn spawn_session_sweep(
+    session_info: &SessionInfo,
+) -> Result<crate::session::persistence::LiveMark, acp::Error> {
+    use crate::session::persistence;
+    let live_session_dir = persistence::session_dir(session_info);
+    let mark = persistence::mark_session_live(&live_session_dir)
+        .await
+        .map_err(persistence::MarkLiveError::into_acp_error)?;
+    if persistence::session_sweep_done() {
+        return Ok(mark);
+    }
+    tokio::task::spawn_blocking(move || {
+        persistence::cleanup_stale_sessions(&live_session_dir);
+    });
+    Ok(mark)
+}
 fn log_session_started(
     session_id: &acp::SessionId,
     kind: SessionStartKind,
@@ -398,6 +423,7 @@ impl MvpAgent {
                     .map(|s| s.to_string())
             });
         let session_info = session_info_for(&session_id, &cwd);
+        let _live_mark = spawn_session_sweep(&session_info).await?;
         let mut model_agent_type: Option<String> = None;
         let mut model_agent_type_inferred = false;
         let mut session_sampling_override: Option<SamplingConfig> = None;
@@ -667,8 +693,13 @@ impl MvpAgent {
         );
         if let Some(requested) = disallowed_custom {
             let current = self.models_manager.current_model_id();
+            let by = if crate::agent::models::effective_allowlist(&self.cfg.borrow()).is_fleet() {
+                "your organization's policy (requirements.toml allowed_models)"
+            } else {
+                "your allowed_models setting"
+            };
             let reason = format!(
-                "\"{requested}\" isn't allowed by your allowed_models setting, so this session is using \"{}\".",
+                "\"{requested}\" isn't allowed by {by}, so this session is using \"{}\".",
                 current.0
             );
             self.send_model_auto_switched(
@@ -855,10 +886,7 @@ impl MvpAgent {
             });
         }
         let session_info = session_info_for(&session_id, &cwd);
-        let current_session_dir = crate::session::persistence::session_dir(&session_info);
-        tokio::task::spawn_blocking(move || {
-            crate::session::persistence::cleanup_stale_sessions(Some(&current_session_dir));
-        });
+        let _live_mark = spawn_session_sweep(&session_info).await?;
         let session_exists = self.is_resident(&session_id);
         let no_replay = policy.no_replay;
         if session_exists {

@@ -228,7 +228,7 @@ fn wedged_child_handle() -> (
             std::sync::atomic::AtomicU64::new(0),
         ),
         tool_context: crate::tools::ToolContext::new_local_context(
-            fuigo_paths::AbsPathBuf::new(PathBuf::from("/tmp")).unwrap(),
+            fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap(),
             std::sync::Arc::new(
                 fuigo_workspace::file_system::LocalFs::new(PathBuf::from("/tmp")),
             ),

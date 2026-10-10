@@ -425,8 +425,9 @@ fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
     // eprintln rather than tracing::warn: this runs before pager TUI tracing is initialised, so tracing output would be silently dropped
     for flag in unsupported_leader_flags(flags) {
         fuigo_tty_utils::cli_eprintln!(
-            "warning: {flag} has no effect in leader mode \
-             (agent config is set at leader startup)"
+            "warning: {} has no effect in leader mode \
+             (agent config is set at leader startup)",
+            fuigo_tty_utils::untrusted(flag)
         );
     }
 }

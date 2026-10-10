@@ -270,6 +270,25 @@ fn headless_reasoning_completed_parses_signature() {
     assert_eq!(signature.as_deref(), Some("sig-xyz"));
 }
 
+/// P195 (U17): a `redacted_thinking` block reaches the reducer as its own event, carrying the opaque blob.
+#[test]
+fn headless_redacted_thinking_parses_data() {
+    let notif = make_ext_notif(
+        "fuigo/session_notification",
+        serde_json::json!({
+            "sessionUpdate": "redacted_thinking",
+            "data": "opaque-blob",
+        }),
+    );
+    let ExtEvent::Stream(event) = handle_ext_notification(&notif) else {
+        panic!("expected Stream event");
+    };
+    let StreamEvent::RedactedThinking { data } = *event else {
+        panic!("expected RedactedThinking");
+    };
+    assert_eq!(data, "opaque-blob");
+}
+
 #[test]
 fn headless_undecodable_known_background_task_errors_not_silent() {
     let notif = make_ext_notif(
@@ -732,4 +751,51 @@ fn p188_retry_state_with_discard_decodes_to_response_discarded() {
         handle_ext_notification(&make_ext_notif("fuigo/session_notification", off)),
         ExtEvent::None
     ));
+}
+
+/// P181 (Astra round 1): a compaction error is untrusted text printed to the terminal, so hidden characters go.
+#[test]
+fn headless_compact_failed_line_drops_hidden_characters() {
+    use crate::headless::reducer::Lifecycle;
+
+    let failed = Lifecycle::CompactFailed {
+        error: "bad\u{e0041} \u{00ad}thing\u{2028}\x1b[31m happened".to_string(),
+    };
+    assert_eq!(failed.plain_message(), "Auto-compact failed - bad thing [31m happened");
+}
+
+/// P181 (Grok round): a config key from a project file is untrusted text; an OSC 0 title in it must not reach stderr.
+#[test]
+fn headless_config_notice_scrubs_a_key_carrying_an_osc_title() {
+    use crate::headless::reducer::Lifecycle;
+
+    let notice = Lifecycle::ConfigNotice {
+        message: "/w/repo/.mcp.json: `mcp_servers.x.env.\u{1b}]0;owned\u{7}\u{2028}k` names FUIGO_API_KEY, the saved API key, and was ignored."
+            .to_string(),
+    };
+    let line = notice.plain_message();
+    assert_eq!(
+        line,
+        "warning: /w/repo/.mcp.json: `mcp_servers.x.env. ]0;owned  k` names FUIGO_API_KEY, the saved API key, and was ignored."
+    );
+}
+
+/// P181 (Grok round): a memory flush that failed carries the API error message and a path, both untrusted.
+#[test]
+fn headless_memory_flush_line_scrubs_the_error_and_path() {
+    use crate::headless::reducer::Lifecycle;
+
+    let failed = Lifecycle::MemoryFlushCompleted {
+        result: "skipped: API error (status 400): \u{1b}]0;owned\u{7}\u{e0041}.".to_string(),
+        path: Some("/w/\u{1b}]0;x\u{7}a\u{2029}b".to_string()),
+    };
+    assert_eq!(
+        failed.plain_message(),
+        "Memory flush skipped: API error (status 400):  ]0;owned .: /w/ ]0;x a b"
+    );
+    let no_path = Lifecycle::MemoryFlushCompleted {
+        result: "skipped: \u{1b}[31mred\u{202e}".to_string(),
+        path: None,
+    };
+    assert_eq!(no_path.plain_message(), "Memory flush skipped:  [31mred.");
 }

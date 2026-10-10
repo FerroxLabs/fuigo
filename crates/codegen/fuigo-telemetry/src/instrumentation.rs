@@ -233,9 +233,9 @@ fn build_writer(path: Option<PathBuf>) -> BoxMakeWriter {
         && let Err(err) = std::fs::create_dir_all(parent)
     {
         fuigo_tty_utils::cli_eprintln!(
-            "Failed to create instrumentation log directory {:?}: {}",
-            parent,
-            err
+            "Failed to create instrumentation log directory {}: {}",
+            fuigo_tty_utils::untrusted(parent.display()),
+            fuigo_tty_utils::untrusted(err)
         );
         return BoxMakeWriter::new(std::io::sink);
     }
@@ -248,8 +248,8 @@ fn build_writer(path: Option<PathBuf>) -> BoxMakeWriter {
         Ok(file) => file,
         Err(err) => {
             fuigo_tty_utils::cli_eprintln!(
-                "Failed to open instrumentation log file {:?}: {}",
-                path,
+                "Failed to open instrumentation log file {}: {}",
+                fuigo_tty_utils::untrusted(path.display()),
                 err
             );
             return BoxMakeWriter::new(std::io::sink);
@@ -300,9 +300,9 @@ where
         && let Err(err) = std::fs::create_dir_all(parent)
     {
         fuigo_tty_utils::cli_eprintln!(
-            "Failed to create chrome trace directory {:?}: {}",
-            parent,
-            err
+            "Failed to create chrome trace directory {}: {}",
+            fuigo_tty_utils::untrusted(parent.display()),
+            fuigo_tty_utils::untrusted(err)
         );
         return build_log_layer(InstrumentationMode::Disabled);
     }
@@ -315,7 +315,7 @@ where
     {
         Ok(file) => file,
         Err(err) => {
-            fuigo_tty_utils::cli_eprintln!("Failed to open chrome trace file {:?}: {}", path, err);
+            fuigo_tty_utils::cli_eprintln!("Failed to open chrome trace file {}: {}", fuigo_tty_utils::untrusted(path.display()), fuigo_tty_utils::untrusted(err));
             return build_log_layer(InstrumentationMode::Disabled);
         }
     };
@@ -388,8 +388,29 @@ pub fn install_panic_hook() {
             panic.location = ?location,
             "Process panicked"
         );
-        default_hook(info);
+        // The default hook writes the payload raw. On a terminal, a payload the line filter would change is printed
+        // through the filter instead (message and location kept); a clean one keeps the default hook's full output.
+        use std::io::IsTerminal;
+        let thread = std::thread::current();
+        match scrubbed_panic_line(thread.name(), location.as_deref(), &message) {
+            Some(line) if std::io::stderr().is_terminal() => fuigo_tty_utils::best_effort_stderr::eprint_line(&line),
+            _ => default_hook(info),
+        }
     }));
+}
+
+/// The panic line with the message passed through the terminal line filter, or `None` when the filter changes nothing
+/// (the default hook can then print it as it always did).
+fn scrubbed_panic_line(thread: Option<&str>, location: Option<&str>, message: &str) -> Option<String> {
+    let shown = fuigo_tty_utils::scrub_terminal_text(message);
+    if shown == message {
+        return None;
+    }
+    Some(format!(
+        "thread '{}' panicked at {}:\n{shown}",
+        fuigo_tty_utils::scrub_unsafe_display(thread.unwrap_or("<unnamed>"), Some(' ')),
+        location.unwrap_or("<unknown>"),
+    ))
 }
 
 fn resolve_input_path(input: Option<PathBuf>) -> Result<PathBuf> {
@@ -758,5 +779,26 @@ mod best_effort_file_tests {
             "the worker must attempt every queued line; fewer means it died on a failed write"
         );
         drop(guard);
+    }
+}
+
+#[cfg(test)]
+mod panic_line_tests {
+    use super::scrubbed_panic_line;
+
+    /// P181 (Grok r3, L8): a panic payload with terminal escapes is printed through the line filter with the message
+    /// and the location kept; a clean payload is left to the default hook.
+    #[test]
+    fn a_hostile_panic_payload_is_filtered_and_a_clean_one_is_left_alone() {
+        let line = scrubbed_panic_line(Some("main"), Some("src/a.rs:1:2"), "bad \x1b]0;owned\x07 \x1b[2J\nsecond").unwrap();
+        assert_eq!(line, "thread 'main' panicked at src/a.rs:1:2:\nbad  ]0;owned   [2J\nsecond");
+        assert!(scrubbed_panic_line(Some("main"), None, "plain message").is_none());
+    }
+
+    /// P181 (S5, M4): a payload that is only a colour sequence changes under the filter, so it never reaches the default hook.
+    #[test]
+    fn a_colour_only_panic_payload_is_filtered() {
+        let line = scrubbed_panic_line(Some("main"), None, "\x1b[30mhidden\x1b[0m").unwrap();
+        assert_eq!(line, "thread 'main' panicked at <unknown>:\n [30mhidden [0m");
     }
 }

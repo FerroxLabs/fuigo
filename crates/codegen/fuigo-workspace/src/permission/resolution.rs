@@ -93,6 +93,11 @@ fn parse_default_mode_claiming_scope(
 
 /// Parse `[permission]` from TOML.
 /// Tries compact (`deny = ["Read(...)"]`) first, falls back to verbose (`[[permission.rules]]`).
+#[cfg(test)]
+pub(crate) fn parse_toml_permission_section_for_test(permission_value: &toml::Value) -> Vec<PermissionRule> {
+    parse_toml_permission_section(permission_value).expect("valid [permission]")
+}
+
 fn parse_toml_permission_section(
     permission_value: &toml::Value,
 ) -> Result<Vec<PermissionRule>, String> {
@@ -130,7 +135,16 @@ fn parse_toml_permission_section(
         }
     }
 
+    // P183 round 7 (sweep): a layer that writes both forms keeps both; before, `[[permission.rules]]` was ignored next to
+    // `deny = [...]`
     if found_compact {
+        if let Some(verbose) = permission_value.get("rules") {
+            // A bad `rules` list must not take the compact rules down with it (startup refuses it in an admin layer)
+            match verbose.clone().try_into::<Vec<PermissionRule>>() {
+                Ok(verbose) => rules.extend(verbose),
+                Err(e) => warn!("permission.rules: {e} -- ignored"),
+            }
+        }
         return Ok(rules);
     }
 
@@ -752,38 +766,98 @@ fn resolve_claude_settings_inner(
 // managed-settings.json
 // ═════════════════════════════════════════════════════════════════════════════
 
-use std::sync::OnceLock;
 
-/// Claude `managed-settings.json` subset we load.
-/// Loads one file, [`fuigo_config::claude_managed_settings_path`] (e.g. `/Library/Application Support/ClaudeCode/managed-settings.json`).
-/// Claude's `managed-settings.d/` drop-ins, MDM plist, and Windows registry delivery are not merged yet.
+pub use fuigo_config::policy_sources::{PolicyLayerOwnership, PolicyPin};
+
+#[path = "managed_policy.rs"]
+mod managed_policy;
+pub use managed_policy::{
+    MarketplacePolicy, McpBlockReason, McpServerPolicy, McpVerdict, user_facing_policy_source,
+};
+
+/// Managed MCP, marketplace and hooks policy from every policy layer (P169): the Claude `managed-settings.json` plus
+/// every `managed_config.toml` / `requirements.toml` layer ([`fuigo_config::policy_sources`]), strictest wins.
+/// The Claude file also supplies `env` feature flags, permission rules and `permissions.defaultMode`.
+/// Claude's `managed-settings.d/` drop-ins and Windows registry delivery are not merged.
 #[derive(Debug, Default)]
 pub struct ManagedSettings {
     pub features: ManagedSettingsFeatures,
     pub permissions: Vec<Sourced<PermissionRule>>,
     /// Parsed `permissions.defaultMode` (highest mode precedence over user files).
     default_mode: Option<DefaultPermissionMode>,
-    pub mcp_allowlist: McpServerAllowlist,
-    pub marketplace_allowlist: MarketplaceAllowlist,
+    pub mcp_allowlist: McpServerPolicy,
+    pub marketplace_allowlist: MarketplacePolicy,
+    /// `enable_all_project_mcp_servers = false`: project MCP servers are dropped unless an allow entry grants them.
+    pub project_mcp: PolicyPin,
+    /// `allow_managed_hooks_only = true`: hooks that are not managed policy do not run.
+    pub non_managed_hooks: PolicyPin,
 }
 
-static MANAGED_SETTINGS: OnceLock<ManagedSettings> = OnceLock::new();
-
+/// The managed settings as the policy files are NOW. P183 round 9 (Grok r5 H2): read for every call (a session start), not
+/// once per process: a file that breaks after a good first read locks down without a restart, and a repair is picked up.
+/// The result is cached by the sources it was built from; a changed source builds (and leaks, once per change) a new value.
 pub fn managed_settings() -> &'static ManagedSettings {
-    MANAGED_SETTINGS.get_or_init(load_managed_settings)
+    static CACHE: std::sync::Mutex<Option<(String, &'static ManagedSettings)>> =
+        std::sync::Mutex::new(None);
+    let sources = fuigo_config::policy_sources::policy_sources();
+    // P183 round 10 (Grok r6 H): the value also depends on whether a validated copy of each admin file exists (it decides
+    // "enforce the copy" against "deny every tool"), which the sources' text alone does not show. A copy that appears or is
+    // forgotten changes the key, so a stale "a copy exists" answer is never served.
+    let key = managed_settings_cache_key(&sources, fuigo_config::admin_requirements_copy_id);
+    let mut guard = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((k, ms)) = guard.as_ref()
+        && *k == key
+    {
+        return ms;
+    }
+    let ms: &'static ManagedSettings =
+        Box::leak(Box::new(managed_policy::load_managed_settings_from(sources)));
+    *guard = Some((key, ms));
+    ms
 }
 
-fn load_managed_settings() -> ManagedSettings {
-    let Some(path) = fuigo_config::claude_managed_settings_path() else {
-        return ManagedSettings::default();
-    };
-    let Some(json) = read_managed_settings_json(&path) else {
-        return ManagedSettings::default();
-    };
-    parse_managed_settings_json(&json, &path)
+/// The cache key of [`managed_settings`]: the sources (which carry their content or error) AND whether a validated copy of
+/// each exists. P183 round 10 (Grok r6 H): the second part decides "enforce the copy" against "deny every tool", and the
+/// first alone left a stale answer after the copy was dropped or first appeared.
+pub(super) fn managed_settings_cache_key(
+    sources: &[fuigo_config::policy_sources::PolicySource],
+    copy_id: impl Fn(&Path) -> Option<u64>,
+) -> String {
+    // P183 round 11 (Grok r7 H1): the identity (a hash of the text) of each validated copy, not just whether one exists
+    let copies: Vec<Option<u64>> = sources.iter().map(|s| copy_id(&s.path)).collect();
+    format!("{sources:?}{copies:?}")
 }
 
-fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> ManagedSettings {
+/// P183 round 9 (Grok r5 H2): the Claude file is present but cannot be trusted and this process never validated a copy:
+/// every tool call is denied (the rule the P183 engine used before the P169 merge), always-approve and telemetry are off.
+/// MCP, marketplaces, hooks and project MCP are locked by the policy engine's handling of the same `Err` source.
+fn locked_down_base(path: &Path) -> ManagedSettings {
+    warn!(path = %path.display(), "managed policy file is broken and was never validated; denying every tool call");
+    ManagedSettings {
+        features: ManagedSettingsFeatures {
+            disable_telemetry: Some(true),
+            disable_feedback: Some(true),
+            disable_yolo: Some(true),
+            source_path: Some(path.to_path_buf()),
+        },
+        permissions: vec![Sourced {
+            value: PermissionRule {
+                action: RuleAction::Deny,
+                tool: ToolFilter::Any,
+                pattern: None,
+                pattern_mode: PatternMode::default(),
+            },
+            source: RequirementSource::ManagedSettings {
+                path: path.to_path_buf(),
+            },
+        }],
+        ..ManagedSettings::default()
+    }
+}
+
+/// The Claude file's non-policy settings: `env` feature flags, permission rules and `defaultMode`. Its MCP and
+/// marketplace keys are applied by the policy engine with every other layer.
+fn parse_managed_settings_base(json: &serde_json::Value, path: &Path) -> ManagedSettings {
     let env = json.get("env");
     let features = ManagedSettingsFeatures {
         disable_telemetry: json_env_flag(env, "DISABLE_TELEMETRY"),
@@ -791,48 +865,6 @@ fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> Managed
         disable_yolo: parse_disable_bypass_permissions(json),
         source_path: Some(path.to_path_buf()),
     };
-
-    let mcp_allow_entries = parse_mcp_entries(json, ALLOWED_MCP_SERVERS_KEY);
-    let mcp_deny_entries = parse_mcp_entries(json, DENIED_MCP_SERVERS_KEY);
-
-    if !mcp_allow_entries.is_empty() {
-        info!(
-            path = %path.display(),
-            count = mcp_allow_entries.len(),
-            "Loaded MCP server allowlist"
-        );
-    }
-    if !mcp_deny_entries.is_empty() {
-        info!(
-            path = %path.display(),
-            count = mcp_deny_entries.len(),
-            "Loaded MCP server denylist"
-        );
-    }
-
-    let marketplace_urls: Vec<String> = json
-        .get("strictKnownMarketplaces")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| {
-                    let source = entry.get("source")?.as_str()?;
-                    if source != "git" {
-                        return None;
-                    }
-                    entry.get("url").and_then(|u| u.as_str()).map(String::from)
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if !marketplace_urls.is_empty() {
-        info!(
-            path = %path.display(),
-            count = marketplace_urls.len(),
-            "Loaded marketplace allowlist"
-        );
-    }
 
     let permissions = parse_managed_settings_permissions(json, path);
     let mut skipped = Vec::new();
@@ -853,55 +885,28 @@ fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> Managed
         features,
         permissions,
         default_mode,
-        mcp_allowlist: McpServerAllowlist::new(
-            mcp_allow_entries,
-            mcp_deny_entries,
-            Some(path.to_path_buf()),
-        ),
-        marketplace_allowlist: MarketplaceAllowlist {
-            allowed_urls: marketplace_urls,
-            source_path: Some(path.to_path_buf()),
-        },
+        ..ManagedSettings::default()
     }
 }
 
-const ALLOWED_MCP_SERVERS_KEY: &str = "allowedMcpServers";
-const DENIED_MCP_SERVERS_KEY: &str = "deniedMcpServers";
+/// The Claude file alone, as the runtime applies it (base settings plus its policy keys). Tests only; the runtime path
+/// is [`managed_policy::resolve_managed_settings`] over every layer.
+#[cfg(test)]
+fn parse_managed_settings_json(json: &serde_json::Value, path: &Path) -> ManagedSettings {
+    let mut ms = parse_managed_settings_base(json, path);
+    managed_policy::apply_policy_source(
+        &mut ms,
+        json,
+        path,
+        fuigo_config::policy_sources::PolicyLayerOwnership::Admin,
+    );
+    ms
+}
 
-/// Parse `serverUrl` into Http, `command` into Stdio, and `serverName` into Name (the keys Claude's MCP policy supports).
-/// Dropping a deny entry silently enforces nothing, so unsupported `deniedMcpServers` keys `warn!`.
-/// The allow side stays silent (an ungranted entry is fail-closed).
+/// One MCP policy list's usable entries (tests; a malformed list yields none and fails closed at the engine).
+#[cfg(test)]
 fn parse_mcp_entries(json: &serde_json::Value, key: &str) -> Vec<AllowedMcpServer> {
-    let Some(arr) = json.get(key).and_then(|v| v.as_array()) else {
-        return Vec::new();
-    };
-    let mut entries = Vec::new();
-    for entry in arr {
-        if let Some(url) = entry.get("serverUrl").and_then(|u| u.as_str()) {
-            if key == ALLOWED_MCP_SERVERS_KEY {
-                warn_on_unmatchable_allow_url(url);
-            } else {
-                warn_on_unmatchable_deny_url(url);
-            }
-            entries.push(AllowedMcpServer::Http {
-                url_pattern: url.to_string(),
-            });
-        } else if let Some(cmd) = entry.get("command").and_then(|c| c.as_str()) {
-            entries.push(AllowedMcpServer::Stdio {
-                command: cmd.to_string(),
-            });
-        } else if let Some(name) = entry.get("serverName").and_then(|n| n.as_str()) {
-            entries.push(AllowedMcpServer::Name {
-                name: name.to_string(),
-            });
-        } else if key == DENIED_MCP_SERVERS_KEY {
-            warn!(
-                entry = %entry,
-                "ignoring unsupported deniedMcpServers entry; only serverUrl, command, and serverName are honored"
-            );
-        }
-    }
-    entries
+    managed_policy::parse_mcp_entries_for_key(json, key).entries()
 }
 
 /// Allow matching compares schemes literally ([`url_allow_matches`]).
@@ -1003,36 +1008,40 @@ fn warn_on_unmatchable_allow_url(pattern: &str) {
 
 /// A deny entry that can never match silently enforces nothing; tell the admin.
 /// Covers a host-less pattern, a host glob that doesn't compile (no parseable runtime host contains `[`), and a label mixing Unicode with glob chars.
-fn warn_on_unmatchable_deny_url(pattern: &str) {
+/// Returns whether the entry can never match (P169: the managed-policy parser then fails the deny key closed).
+fn warn_on_unmatchable_deny_url(pattern: &str) -> bool {
     let (host, _) = split_host_path(pattern);
-    match host {
-        None => warn!(
+    let Some(host) = host else {
+        warn!(
             pattern,
             "deniedMcpServers serverUrl has no host; this entry can never match"
-        ),
-        Some(host) => {
-            if glob::Pattern::new(&canonicalize_pattern_host(&host)).is_err() {
-                warn!(
-                    pattern,
-                    "deniedMcpServers serverUrl host glob does not compile; the entry matches nothing"
-                );
-            }
-            warn_on_dead_unicode_glob_label(pattern, &host, "deniedMcpServers");
-        }
+        );
+        return true;
+    };
+    let broken_glob = glob::Pattern::new(&canonicalize_pattern_host(&host)).is_err();
+    if broken_glob {
+        warn!(
+            pattern,
+            "deniedMcpServers serverUrl host glob does not compile; the entry matches nothing"
+        );
     }
+    // Not short-circuited: every defect in the pattern gets reported.
+    broken_glob | warn_on_dead_unicode_glob_label(pattern, &host, "deniedMcpServers")
 }
 
 /// A host label mixing non-ASCII with glob metacharacters can never match: runtime hosts are punycoded, and a partial label can't be.
-fn warn_on_dead_unicode_glob_label(pattern: &str, host: &str, key: &str) {
-    if host
+/// Returns whether it warned.
+fn warn_on_dead_unicode_glob_label(pattern: &str, host: &str, key: &str) -> bool {
+    let dead = host
         .split('.')
-        .any(|label| !label.is_ascii() && label.contains(['*', '?', '[']))
-    {
+        .any(|label| !label.is_ascii() && label.contains(['*', '?', '[']));
+    if dead {
         warn!(
             pattern,
             "{key} serverUrl mixes Unicode and glob characters in one host label; runtime hosts are punycoded, so this entry can never match"
         );
     }
+    dead
 }
 
 fn parse_managed_settings_permissions(
@@ -1044,7 +1053,11 @@ fn parse_managed_settings_permissions(
     };
     let permissions: ParsedPermissions = match serde_json::from_value(perms_value.clone()) {
         Ok(p) => p,
-        Err(_) => return Vec::new(),
+        // Unreachable for a validated file (`managed_settings_policy_errors` checks these types); loud if it ever is reached
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "managed-settings.json permissions could not be decoded");
+            return Vec::new();
+        }
     };
     let (config, warnings) = permissions.into_permission_config();
     for w in &warnings {
@@ -1068,23 +1081,6 @@ fn parse_managed_settings_permissions(
             source: source.clone(),
         })
         .collect()
-}
-
-fn read_managed_settings_json(path: &Path) -> Option<serde_json::Value> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to read managed-settings.json");
-            return None;
-        }
-    };
-    match serde_json::from_str(&content) {
-        Ok(v) => Some(v),
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to parse managed-settings.json");
-            None
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -1194,7 +1190,7 @@ fn resolve_yolo_policy_block<'a>(
     None
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllowedMcpServer {
     Http {
         url_pattern: String,
@@ -1202,72 +1198,155 @@ pub enum AllowedMcpServer {
     Stdio {
         command: String,
     },
+    /// Claude `serverCommand`: exact argv match on `[command, args...]`.
+    StdioArgv {
+        argv: Vec<String>,
+    },
     /// Match by config name (any transport); see [`mcp_name_matches`].
     Name {
         name: String,
     },
 }
 
-/// MCP server policy from managed-settings.json: `allowedMcpServers` plus `deniedMcpServers`.
-/// Deny takes precedence over allow.
-#[derive(Debug, Clone, Default)]
+/// MCP server policy from ONE policy source: `allowedMcpServers` plus `deniedMcpServers`. Deny takes precedence over
+/// allow. [`McpServerPolicy`] combines the sources (strictest wins).
+#[derive(Debug, Clone)]
 pub struct McpServerAllowlist {
     pub entries: Vec<AllowedMcpServer>,
     pub deny_entries: Vec<AllowedMcpServer>,
     url_patterns: Vec<String>,
     commands: Vec<String>,
+    argvs: Vec<Vec<String>>,
     names: Vec<String>,
     deny_url_patterns: Vec<String>,
     deny_commands: Vec<String>,
+    deny_argvs: Vec<Vec<String>>,
     deny_names: Vec<String>,
+    /// `allow_managed_mcp_servers_only`: a positive allow-entry match (from a layer this source's owner accepts) is
+    /// required.
+    managed_only: bool,
+    /// Present-but-empty allow list, a malformed key, or an unreadable policy file: every server is blocked.
+    lockdown: bool,
+    /// Who can write the layer this source came from.
+    ownership: PolicyLayerOwnership,
     pub source_path: Option<std::path::PathBuf>,
 }
 
-fn split_mcp_entries(entries: &[AllowedMcpServer]) -> (Vec<String>, Vec<String>, Vec<String>) {
-    let mut url_patterns = Vec::new();
-    let mut commands = Vec::new();
-    let mut names = Vec::new();
+struct SplitEntries {
+    url_patterns: Vec<String>,
+    commands: Vec<String>,
+    argvs: Vec<Vec<String>>,
+    names: Vec<String>,
+}
+
+fn split_mcp_entries(entries: &[AllowedMcpServer]) -> SplitEntries {
+    let mut out = SplitEntries {
+        url_patterns: Vec::new(),
+        commands: Vec::new(),
+        argvs: Vec::new(),
+        names: Vec::new(),
+    };
     for entry in entries {
         match entry {
-            AllowedMcpServer::Http { url_pattern } => url_patterns.push(url_pattern.clone()),
-            AllowedMcpServer::Stdio { command } => commands.push(command.clone()),
-            AllowedMcpServer::Name { name } => names.push(name.clone()),
+            AllowedMcpServer::Http { url_pattern } => out.url_patterns.push(url_pattern.clone()),
+            AllowedMcpServer::Stdio { command } => out.commands.push(command.clone()),
+            AllowedMcpServer::StdioArgv { argv } => out.argvs.push(argv.clone()),
+            AllowedMcpServer::Name { name } => out.names.push(name.clone()),
         }
     }
-    (url_patterns, commands, names)
+    out
+}
+
+/// Exact `argv == [command, args...]` (Claude semantics, no partial match).
+fn argv_matches(argv: &[String], command: &std::path::Path, args: &[String]) -> bool {
+    let Some((first, rest)) = argv.split_first() else {
+        return false;
+    };
+    *first == command.to_string_lossy() && rest == args
+}
+
+/// Http, Sse and Stdio are the only transports this build can inspect; anything else fails closed.
+fn mcp_transport_known(server: &agent_client_protocol::McpServer) -> bool {
+    matches!(
+        server,
+        agent_client_protocol::McpServer::Http(_)
+            | agent_client_protocol::McpServer::Sse(_)
+            | agent_client_protocol::McpServer::Stdio(_)
+    )
 }
 
 impl McpServerAllowlist {
-    /// Build a policy from raw allow/deny entries.
-    /// Public so tests can exercise this enforcement path without a managed-settings.json on disk.
-    /// The runtime path goes through [`parse_managed_settings_json`].
+    /// Build a policy source from raw allow/deny entries (tests build one without a file on disk). Ownership starts
+    /// `User`: its managed-only lockdown accepts any grant.
     pub fn new(
         entries: Vec<AllowedMcpServer>,
         deny_entries: Vec<AllowedMcpServer>,
         source_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let (url_patterns, commands, names) = split_mcp_entries(&entries);
-        let (deny_url_patterns, deny_commands, deny_names) = split_mcp_entries(&deny_entries);
+        let allow = split_mcp_entries(&entries);
+        let deny = split_mcp_entries(&deny_entries);
         Self {
             entries,
             deny_entries,
-            url_patterns,
-            commands,
-            names,
-            deny_url_patterns,
-            deny_commands,
-            deny_names,
+            url_patterns: allow.url_patterns,
+            commands: allow.commands,
+            argvs: allow.argvs,
+            names: allow.names,
+            deny_url_patterns: deny.url_patterns,
+            deny_commands: deny.commands,
+            deny_argvs: deny.argvs,
+            deny_names: deny.names,
+            managed_only: false,
+            lockdown: false,
+            ownership: PolicyLayerOwnership::User,
             source_path,
         }
     }
 
+    /// `allow_managed_mcp_servers_only`: only positively granted servers run.
+    pub fn with_managed_only(mut self) -> Self {
+        self.managed_only = true;
+        self
+    }
+
+    /// Mark this source a full lockdown: nothing runs.
+    pub fn with_lockdown(mut self) -> Self {
+        self.lockdown = true;
+        self
+    }
+
+    /// Set who can write this source's layer.
+    pub fn with_ownership(mut self, ownership: PolicyLayerOwnership) -> Self {
+        self.ownership = ownership;
+        self
+    }
+
+    pub fn managed_only(&self) -> bool {
+        self.managed_only
+    }
+
+    /// Full lockdown; reporting must not render it unrestricted just because it has no entries.
+    pub fn is_lockdown(&self) -> bool {
+        self.lockdown
+    }
+
+    pub fn ownership(&self) -> PolicyLayerOwnership {
+        self.ownership
+    }
+
     pub fn is_restricted(&self) -> bool {
-        !self.entries.is_empty() || !self.deny_entries.is_empty()
+        self.lockdown
+            || self.managed_only
+            || !self.entries.is_empty()
+            || !self.deny_entries.is_empty()
     }
 
     /// URL-only (no name-deny check); use `is_server_allowed` for policy. Test-only.
     #[cfg(test)]
     fn is_http_allowed(&self, url: &str) -> bool {
+        if self.lockdown {
+            return false;
+        }
         if self
             .deny_url_patterns
             .iter()
@@ -1286,6 +1365,9 @@ impl McpServerAllowlist {
     /// Command-only (no name-deny check); use `is_server_allowed` for policy. Test-only.
     #[cfg(test)]
     fn is_stdio_allowed(&self, command: &str) -> bool {
+        if self.lockdown {
+            return false;
+        }
         if self.deny_commands.iter().any(|c| c == command) {
             return false;
         }
@@ -1295,11 +1377,8 @@ impl McpServerAllowlist {
         self.commands.iter().any(|c| c == command)
     }
 
-    /// Check whether an MCP server is allowed by this policy.
-    ///
-    /// Deny beats allow.
-    /// `serverName` is a transport-agnostic dimension enforced here at the server level.
-    /// Allow is a union across dimensions (match any applicable URL/command/name), and a deny-only policy allows the rest.
+    /// This source alone: not denied, and allowed by its allow lists and managed-only rule (a managed-only source
+    /// accepts any of its own grants here; [`McpServerPolicy`] applies the cross-source ownership rule).
     pub fn is_server_allowed(&self, server: &agent_client_protocol::McpServer) -> bool {
         if !self.is_restricted() {
             return true;
@@ -1307,23 +1386,46 @@ impl McpServerAllowlist {
         if self.is_server_denied(server) {
             return false;
         }
-
-        // `restricted` stays false for a deny-only policy, allowing the rest.
-        let mut restricted = false;
-        let mut matched = false;
-
-        // Name and URL/command allows are a union: a serverName allow grants any URL (more permissive than a strict URL-precedence scheme)
-        if !self.names.is_empty() {
-            restricted = true;
-            matched |= self
-                .names
-                .iter()
-                .any(|pat| mcp_name_matches(pat, mcp_server_name(server)));
+        if self.managed_only && !self.matches_allow_entry(server) {
+            return false;
         }
+        self.allows_ignoring_managed_only(server)
+    }
 
-        // Emptiness checks live INSIDE the arms: a match guard that fails would fall through to `_`
-        // The `_` arm's fail-closed gate must catch only genuinely unknown transports
-        // A command-only allowlist restricts stdio, never HTTP (per-dimension union)
+    /// Per-dimension allow check without the deny or managed-only checks. A lockdown allows nothing.
+    ///
+    /// Allow is a union across dimensions (match any applicable URL/command/argv/name), and a deny-only source allows
+    /// the rest. A command-only allow list restricts stdio, never HTTP. A transport this build cannot inspect is
+    /// restricted by every allow entry (fail closed).
+    pub(crate) fn allows_ignoring_managed_only(
+        &self,
+        server: &agent_client_protocol::McpServer,
+    ) -> bool {
+        if self.lockdown {
+            return false;
+        }
+        let restricted = if !mcp_transport_known(server) {
+            !self.entries.is_empty()
+        } else {
+            !self.names.is_empty()
+                || match server {
+                    agent_client_protocol::McpServer::Http(_)
+                    | agent_client_protocol::McpServer::Sse(_) => !self.url_patterns.is_empty(),
+                    _ => !self.commands.is_empty() || !self.argvs.is_empty(),
+                }
+        };
+        !restricted || self.matches_allow_entry(server)
+    }
+
+    /// Positive grant: the server matches at least one allow entry.
+    pub(crate) fn matches_allow_entry(&self, server: &agent_client_protocol::McpServer) -> bool {
+        if self
+            .names
+            .iter()
+            .any(|pat| mcp_name_matches(pat, mcp_server_name(server)))
+        {
+            return true;
+        }
         match server {
             agent_client_protocol::McpServer::Http(agent_client_protocol::McpServerHttp {
                 url,
@@ -1332,39 +1434,46 @@ impl McpServerAllowlist {
             | agent_client_protocol::McpServer::Sse(agent_client_protocol::McpServerSse {
                 url,
                 ..
-            }) => {
-                if !self.url_patterns.is_empty() {
-                    restricted = true;
-                    matched |= self
-                        .url_patterns
-                        .iter()
-                        .any(|pat| url_allow_matches(pat, url));
-                }
-            }
+            }) => self
+                .url_patterns
+                .iter()
+                .any(|pat| url_allow_matches(pat, url)),
             agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
                 command,
+                args,
                 ..
             }) => {
-                if !self.commands.is_empty() {
-                    restricted = true;
-                    let command = command.to_string_lossy();
-                    matched |= self.commands.iter().any(|c| *c == command);
-                }
+                let lossy = command.to_string_lossy();
+                self.commands.iter().any(|c| *c == lossy)
+                    || self.argvs.iter().any(|argv| argv_matches(argv, command, args))
             }
-            // `McpServer` is #[non_exhaustive] as of acp 0.10
-            // A transport we can't inspect must not slip a URL/command lockdown (fail closed); name allows were already checked above
-            _ => {
-                restricted =
-                    restricted || !self.url_patterns.is_empty() || !self.commands.is_empty();
-            }
+            _ => false,
         }
-
-        !restricted || matched
     }
 
-    /// True when the server matches a `deniedMcpServers` entry (vs merely missing from the allowlist); lets callers report the right reason.
-    /// Includes a transport-agnostic `serverName` deny match.
+    /// A server known only by its name (an in-process ACP SDK server, P169 Grok 4.7 #4) matches a `serverName` deny.
+    pub(crate) fn is_name_denied(&self, name: &str) -> bool {
+        self.deny_names.iter().any(|pat| mcp_name_matches(pat, name))
+    }
+
+    /// A name-only server is positively granted only by a `serverName` allow entry.
+    pub(crate) fn matches_name_allow_entry(&self, name: &str) -> bool {
+        self.names.iter().any(|pat| mcp_name_matches(pat, name))
+    }
+
+    /// [`Self::allows_ignoring_managed_only`] for a name-only server: a lockdown allows nothing, a source with any allow
+    /// entry allows it only through a `serverName` entry, a deny-only source allows it.
+    pub(crate) fn allows_name_ignoring_managed_only(&self, name: &str) -> bool {
+        !self.lockdown && (self.entries.is_empty() || self.matches_name_allow_entry(name))
+    }
+
+    /// True when the server matches a `deniedMcpServers` entry (vs merely missing from the allowlist).
+    /// Includes a transport-agnostic `serverName` deny match. A transport this build cannot inspect is denied when
+    /// this source has any deny entry (fail closed).
     pub fn is_server_denied(&self, server: &agent_client_protocol::McpServer) -> bool {
+        if !mcp_transport_known(server) {
+            return !self.deny_entries.is_empty();
+        }
         if self
             .deny_names
             .iter()
@@ -1386,12 +1495,16 @@ impl McpServerAllowlist {
                 .any(|pat| url_deny_matches(pat, url)),
             agent_client_protocol::McpServer::Stdio(agent_client_protocol::McpServerStdio {
                 command,
+                args,
                 ..
             }) => {
-                let command = command.to_string_lossy();
-                self.deny_commands.iter().any(|c| *c == command)
+                let lossy = command.to_string_lossy();
+                self.deny_commands.iter().any(|c| *c == lossy)
+                    || self
+                        .deny_argvs
+                        .iter()
+                        .any(|argv| argv_matches(argv, command, args))
             }
-            // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
             _ => false,
         }
     }
@@ -1899,22 +2012,18 @@ fn split_host_path(s: &str) -> (Option<String>, String) {
     }
 }
 
-/// When non-empty, only git marketplace sources matching an allowed URL are permitted.
-#[derive(Debug, Clone, Default)]
+/// Marketplace allowlist from ONE policy source. It exists only when the source's `strictKnownMarketplaces` key was
+/// present, so an empty `allowed_urls` is a lockdown (P169; previously an empty list meant "unrestricted").
+/// [`MarketplacePolicy`] combines the sources.
+#[derive(Debug, Clone)]
 pub struct MarketplaceAllowlist {
     pub allowed_urls: Vec<String>,
     pub source_path: Option<std::path::PathBuf>,
 }
 
 impl MarketplaceAllowlist {
-    pub fn is_restricted(&self) -> bool {
-        !self.allowed_urls.is_empty()
-    }
-
+    /// Membership check; an empty list allows nothing.
     pub fn is_url_allowed(&self, url: &str) -> bool {
-        if self.allowed_urls.is_empty() {
-            return true;
-        }
         let normalized = normalize_git_url(url);
         self.allowed_urls
             .iter()
@@ -1929,9 +2038,7 @@ impl MarketplaceAllowlist {
     }
 }
 
-fn normalize_git_url(url: &str) -> String {
-    url.to_lowercase().trim_end_matches(".git").to_string()
-}
+use fuigo_agent::plugins::install_registry::normalize_git_url;
 
 #[cfg(test)]
 #[path = "resolution_tests.rs"]

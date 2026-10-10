@@ -171,7 +171,81 @@ pub fn print_bytes(bytes: &[u8]) -> Outcome {
 /// process flags. `std::io::Stdout` is line-buffered; text without a trailing newline (a
 /// completion script) is flushed here so a later write cannot reorder it.
 pub fn print_fmt(args: std::fmt::Arguments<'_>) -> Outcome {
-    stdout_outcome(args.to_string().as_bytes())
+    use std::io::IsTerminal;
+    let text = args.to_string();
+    stdout_outcome(stdout_text(&text, std::io::stdout().is_terminal()).as_bytes())
+}
+
+/// What [`print_fmt`] writes for `text`. On a terminal it is display text and goes through the shared filter; on a pipe
+/// or a file it may be data (a JSON document, a script) and stays exact.
+fn stdout_text(text: &str, terminal: bool) -> std::borrow::Cow<'_, str> {
+    if terminal {
+        crate::scrub_terminal_text(text)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// A [`Write`] for CLI subcommands that print human output through a writer parameter (tables, reports, a transcript).
+/// On a terminal it holds the text until [`Write::flush`] or drop and writes it through the shared terminal filter, so a
+/// path, branch or server name carrying an escape sequence cannot reach the screen; whole-text filtering also keeps a
+/// sequence split across two `write` calls from slipping through. On a pipe or a file it passes every write straight
+/// through, since there the text may be data.
+pub struct DisplayWriter<W: Write> {
+    inner: W,
+    terminal: bool,
+    pending: Vec<u8>,
+}
+
+impl<W: Write> DisplayWriter<W> {
+    pub fn new(inner: W, terminal: bool) -> Self {
+        Self {
+            inner,
+            terminal,
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// The process stdout as a [`DisplayWriter`]; filtered when it is a terminal.
+pub fn display_stdout() -> DisplayWriter<std::io::StdoutLock<'static>> {
+    use std::io::IsTerminal;
+    let stdout = std::io::stdout();
+    let terminal = stdout.is_terminal();
+    DisplayWriter::new(stdout.lock(), terminal)
+}
+
+impl<W: Write> Write for DisplayWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.terminal {
+            self.pending.extend_from_slice(buf);
+            Ok(buf.len())
+        } else {
+            self.inner.write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.pending.is_empty() {
+            // Keep an incomplete UTF-8 tail for the next flush; anything else invalid shows as U+FFFD
+            let split = match std::str::from_utf8(&self.pending) {
+                Ok(_) => self.pending.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => self.pending.len(),
+            };
+            let tail = self.pending.split_off(split);
+            let text = String::from_utf8_lossy(&self.pending).into_owned();
+            self.pending = tail;
+            self.inner.write_all(crate::scrub_terminal_text(&text).as_bytes())?;
+        }
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for DisplayWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
 }
 
 /// `println!` that never panics on a dead or non-blocking stdout; the outcome is recorded in
@@ -202,6 +276,33 @@ macro_rules! cli_print {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181 (Grok round): on a terminal, stdout text is display text; on a pipe it stays exact (it may be data).
+    #[test]
+    fn terminal_text_is_scrubbed_and_piped_text_is_not() {
+        assert_eq!(stdout_text("plug\x1b]0;t\x07in\u{2028}\n", true), "plug ]0;t in \n");
+        assert_eq!(stdout_text("a\x1bb\u{2028}\n", false), "a\x1bb\u{2028}\n");
+    }
+
+    /// P181 (Grok round): human output written through a writer is scrubbed as a whole on a terminal, even when a
+    /// sequence arrives split across writes, and is exact on a pipe.
+    #[test]
+    fn display_writer_scrubs_on_a_terminal_and_is_exact_on_a_pipe() {
+        let mut shown = Vec::new();
+        {
+            let mut w = DisplayWriter::new(&mut shown, true);
+            w.write_all(b"branch \x1b").unwrap();
+            w.write_all(b"]0;owned\x07 \xe2\x80").unwrap();
+            w.write_all(b"\xa8end\n").unwrap();
+        }
+        assert_eq!(String::from_utf8(shown).unwrap(), "branch  ]0;owned   end\n");
+        let mut piped = Vec::new();
+        {
+            let mut w = DisplayWriter::new(&mut piped, false);
+            w.write_all(b"a\x1b]0;t\x07b\n").unwrap();
+        }
+        assert_eq!(piped, b"a\x1b]0;t\x07b\n");
+    }
 
     #[test]
     fn write_line_appends_a_newline_and_reports_success() {

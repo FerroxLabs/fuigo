@@ -63,6 +63,10 @@ pub(crate) enum StreamEvent {
     ReasoningCompleted {
         signature: Option<String>,
     },
+    /// One `redacted_thinking` block (Messages backend); `data` is the opaque blob, kept verbatim and in order.
+    RedactedThinking {
+        data: String,
+    },
     /// P188: the model request streaming the current response failed after output and is being resent
     /// (`retry_state` with `discardEmitted`). Everything the current response streamed is void; the resend streams
     /// the reply again. `message_id` is the discarded response's id when the backend gave one.
@@ -163,18 +167,30 @@ impl Lifecycle {
             Lifecycle::CompactFailed { error } => {
                 // Plain output is line-oriented, so the two-line error message collapses to one; JSON carries the raw string
                 // The hyphen matches the TUI
-                let single_line = error.split_whitespace().collect::<Vec<_>>().join(" ");
+                // The error is untrusted text printed to a terminal: hidden characters and controls go before the join
+                let clean = fuigo_tty_utils::scrub_unsafe_display(error, Some(' '));
+                let single_line = clean.split_whitespace().collect::<Vec<_>>().join(" ");
                 format!("Auto-compact failed - {single_line}")
             }
             Lifecycle::CompactCancelled => "Auto-compact cancelled.".to_string(),
             Lifecycle::AutoContinue { .. } => "Resumed after compaction.".to_string(),
             Lifecycle::ImageCompressed { message } => message.clone(),
-            Lifecycle::ConfigNotice { message } => format!("warning: {message}"),
+            // Config keys, paths and server names come from project files, so the notice is untrusted text on stderr
+            Lifecycle::ConfigNotice { message } => {
+                format!("warning: {}", fuigo_tty_utils::scrub_unsafe_display(message, Some(' ')))
+            }
             Lifecycle::MemoryFlushStarted => "Memory flush started.".to_string(),
-            Lifecycle::MemoryFlushCompleted { result, path } => match path {
-                Some(path) => format!("Memory flush {result}: {path}"),
-                None => format!("Memory flush {result}."),
-            },
+            // `result` can hold an API error message and `path` a project path: both are untrusted text on stderr
+            Lifecycle::MemoryFlushCompleted { result, path } => {
+                let result = fuigo_tty_utils::scrub_unsafe_display(result, Some(' '));
+                match path {
+                    Some(path) => {
+                        let path = fuigo_tty_utils::scrub_unsafe_display(path, Some(' '));
+                        format!("Memory flush {result}: {path}")
+                    }
+                    None => format!("Memory flush {result}."),
+                }
+            }
         }
     }
 }

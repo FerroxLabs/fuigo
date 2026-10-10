@@ -1,0 +1,45 @@
+# Astra round 2 verdict (final message; full transcript sha256 6f6651c44571c431be255afb90333388c18620b35453d9ab6f584a27f942833b, kept off-repo)
+Audited **`61008ae37`** read-only. No Cargo, compilation, or repository edits. HEAD advanced to rustfmt commit `51e7143` during review; line references below refer to **`61008ae37`**.
+
+| Round-1 finding | Result | Evidence |
+|---|---|---|
+| HIGH: Git `--output-directory` bypass | **FIXED** | Recognized at `shell_access.rs:1152`; attached, separated, and abbreviated cases covered at `:2181`. |
+| HIGH: Go’s `=` stripping applied to Git | **FIXED** | `:1237` strips `=` only for Go. Alias `-o=blocked` correctly retains `=blocked`. |
+| MEDIUM: Git verb selected from any word | **FIXED** | `git_verb` at `:1171` consumes globals before selecting the verb. Original negative cases pass the source model. |
+| MEDIUM: Missing `--` / option-value consumption | **NOT FIXED** | Original examples are corrected, but consumption remains incomplete and introduces the failures below. |
+
+**S6 — NOT FIXED.** Two new HIGH write-detection regressions remain.
+
+**S14 — FIXED.** Both [prompt.md:3](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-agent/templates/prompt.md:3) and [apply_patch_prompt.md:113](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-agent/templates/apply_patch_prompt.md:113) contain the block. Identity lines are unchanged; neither template contains Grok/xAI branding. In-memory regeneration matches the entire encrypted file. Subagent template unchanged; apply-patch size **21,307 / 21,473 bytes**.
+
+The following regressions are **NEW versus both `532e913` and v1.0.21 (`de6ca7dd`)**:
+
+1. **HIGH — Optional Git arguments swallow subsequent output flags.**  
+   [shell_access.rs:1192](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1192), `:1249`:  
+   `git format-patch -M -o protected -1 HEAD` previously reported `protected`; now reports **no writes** because `-M` consumes `-o`. The same problem affects `-C`, `-B`, `-U`, and `-X`: Git defines their arguments as optional, without consuming the next word. [Git parser definitions](https://github.com/git/git/blob/v2.50.1/diff.c#L5718).  
+   **Fix:** distinguish mandatory arguments from optional attached arguments; preserve the next token for optional flags. Add extraction, Edit deny/ask, and auto-mode regression cases.
+
+2. **HIGH — A Git global-option value of `--` terminates scanning prematurely.**  
+   [shell_access.rs:1209](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1209), `:1214`:  
+   `git --namespace -- archive -o .env HEAD` previously reported `.env`; now reports **no writes**. `git_verb` consumes the namespace value correctly, but the output scanner starts again at word 1 and mistakes that value for the option terminator. Git accepts it as the namespace argument. [Git global-option parser](https://github.com/git/git/blob/v2.50.1/git.c#L211).  
+   **Fix:** share global-option consumption and begin subcommand scanning after the resolved verb. Add this case to both consumers’ regression coverage.
+
+3. **MEDIUM — Read-only Git option values still become output flags.**  
+   [shell_access.rs:1194](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1194), `:1241`:  
+   `git log -1 -S --out Cargo.toml` is valid and read-only, but now reports a write to `Cargo.toml`; both baselines report none. This can trigger an unrelated Edit denial. Native Git accepted the command.  
+   **Fix:** model argument consumption independently of whether output clustering is enabled; consume Git’s `-S`/`-G` values for query verbs too.
+
+4. **MEDIUM — The new rustc emit scan ignores consumed arguments.**  
+   [shell_access.rs:1264](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1264):  
+   `rustc --remap-path-prefix --emit=link=.env --print=cfg` only prints configuration: `--emit=link=.env` is the remapping value. The new scan incorrectly reports `.env` as written; both baselines report none. Native rustc confirmed this read-only behavior.  
+   **Fix:** recognize `--emit` within the same consumption-aware argument walk, with a negative regression test for this command.
+
+I accept the stated unresolved-alias limit. These findings affect built-in commands and do not depend on alias resolution.
+
+Evidence: pinned source review, a Python model matching all **51** helper-test vectors, native Git parser probes, and a read-only rustc query. Rust tests were **not executed**. Independent permission gates may still prompt; the HIGH findings concern the required write/path detectors.
+
+**0 BLOCKER, 2 HIGH, 2 MEDIUM.**
+
+**NOT LAND-OK**
+
+[exited with code 0]

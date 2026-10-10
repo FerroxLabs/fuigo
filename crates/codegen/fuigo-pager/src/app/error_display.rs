@@ -427,7 +427,7 @@ fn compose_detail(why: Option<&str>, action: Option<&str>) -> String {
         (None, Some(one)) | (Some(one), None) => one.to_string(),
         (Some(why), Some(action)) => {
             let (w, a) = (normalize_phrase(why), normalize_phrase(action));
-            if w.contains(&a) {
+            if w.contains(&a) || retry_action_repeats_detail(&a, why) {
                 why.to_string()
             } else if a.contains(&w) {
                 action.to_string()
@@ -450,6 +450,46 @@ fn is_headline_echo(detail: &str, headline: &str) -> bool {
     let detail = normalize_phrase(detail);
     let headline = normalize_phrase(headline);
     detail.is_empty() || headline.starts_with(&detail) || detail.starts_with(&headline)
+}
+
+/// The retry sentences Fuigo's own messages use, normalised. Only these count as plain retry advice.
+const RETRY_PHRASES: &[&str] = &[
+    "try again",
+    "try sending again",
+    "please try again",
+    "try again in a moment",
+    "try sending again in a moment",
+    "try again later",
+    "try again shortly",
+];
+
+/// True when a whole phrase is exactly one of [`RETRY_PHRASES`] (so an action with an extra step is not).
+fn is_retry_phrase(normalized: &str) -> bool {
+    RETRY_PHRASES.contains(&normalized)
+}
+
+/// True when the normalised retry `action` only repeats the detail's closing retry sentence: the two phrases are equal, or the
+/// action is the generic "try sending again" and the detail ends in any plain retry sentence. A longer action ("Try again
+/// later.") after a plain "Try again." is kept, so its "later" is not lost.
+fn retry_action_repeats_detail(action: &str, detail: &str) -> bool {
+    if !is_retry_phrase(action) {
+        return false;
+    }
+    action == "try sending again" && ends_with_retry_sentence(detail)
+        || last_sentence_normalized(detail) == action
+}
+
+fn last_sentence_normalized(detail: &str) -> String {
+    let trimmed = detail.trim_end().trim_end_matches(['.', '!', '?']);
+    normalize_phrase(trimmed.rsplit(['.', '!', '?', '\n']).next().unwrap_or(trimmed))
+}
+
+/// True when the last sentence of `detail` is plain retry advice, so the generic retry action would repeat it.
+/// A detail that merely mentions the words ("do not try again; upgrade your plan") does not count.
+fn ends_with_retry_sentence(detail: &str) -> bool {
+    let trimmed = detail.trim_end().trim_end_matches(['.', '!', '?']);
+    let last = trimmed.rsplit(['.', '!', '?', '\n']).next().unwrap_or(trimmed);
+    is_retry_phrase(&normalize_phrase(last))
 }
 
 /// Lowercase, alphanumeric words joined by single spaces.
@@ -650,6 +690,56 @@ fn is_noise_detail(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W3B item 1: a bridge message that already ends in "Try again." must not get "Try sending again." after it.
+    fn sentences_starting_with_try(text: &str) -> usize {
+        text.split(". ")
+            .filter(|sentence| sentence.trim_start().starts_with("Try"))
+            .count()
+    }
+
+    #[test]
+    fn leader_restart_messages_carry_retry_advice_once() {
+        use crate::acp::leader_bridge::{LOST_REQUEST_ERROR_MESSAGE, STALE_REQUEST_ERROR_MESSAGE};
+        for raw in [STALE_REQUEST_ERROR_MESSAGE, LOST_REQUEST_ERROR_MESSAGE] {
+            let formatted = format_request_failure(None, None, raw);
+            let text = formatted.message();
+            assert_eq!(sentences_starting_with_try(&text), 1, "{text}");
+            assert!(!text.contains("Try sending again"), "{text}");
+        }
+    }
+
+    #[test]
+    fn compose_detail_keeps_the_action_unless_both_are_plain_retry_advice() {
+        // A provider detail that merely mentions the words keeps Fuigo's own action.
+        let t = compose_detail(Some("do not try again; upgrade your plan."), Some("Try sending again."));
+        assert!(t.contains("Try sending again."), "{t}");
+        let t = compose_detail(Some("try a smaller file, then run again"), Some("Try sending again."));
+        assert!(t.contains("Try sending again."), "{t}");
+        // An action with an extra step is kept after a detail ending in a retry sentence.
+        let t = compose_detail(Some("Something broke. Try again."), Some("Check your network and try again."));
+        assert!(t.contains("Check your network and try again."), "{t}");
+        // Plain retry on both sides: shown once.
+        let t = compose_detail(Some("Something broke. Try again."), Some("Try sending again."));
+        assert_eq!(t, "Something broke. Try again.");
+    }
+
+    #[test]
+    fn a_longer_retry_action_is_not_dropped_for_a_plain_try_again_followups2() {
+        let t = compose_detail(Some("Something broke. Try again."), Some("Try again later."));
+        assert_eq!(t, "Something broke. Try again. Try again later.");
+        // the same phrase on both sides is still shown once
+        let t = compose_detail(Some("Something broke. Try again later."), Some("Try again later."));
+        assert_eq!(t, "Something broke. Try again later.");
+    }
+
+    #[test]
+    fn detail_without_retry_advice_still_gets_try_sending_again() {
+        let formatted = format_request_failure(None, None, "connection reset by peer");
+        let text = formatted.message();
+        assert_eq!(sentences_starting_with_try(&text), 1, "{text}");
+        assert!(text.contains("Try sending again."), "{text}");
+    }
 
     /// A status-less error never proves a server fault, so a readable detail is always shown.
     /// A 403 content-safety block reaches the pager as `api` with no status; its reason is the useful part,

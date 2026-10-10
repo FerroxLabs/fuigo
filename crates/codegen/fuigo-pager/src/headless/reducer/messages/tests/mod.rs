@@ -200,5 +200,6 @@ mod content;
 mod init;
 mod partial;
 mod result_usage;
+mod thinking;
 mod tool_calls;
 mod web_search;

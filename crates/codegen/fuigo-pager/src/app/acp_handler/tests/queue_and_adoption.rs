@@ -1079,6 +1079,7 @@
 
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
@@ -1196,6 +1197,7 @@
 
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
@@ -1236,6 +1238,7 @@
 
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
@@ -1273,6 +1276,7 @@
             .apply_follow_ups("resp-1".into(), vec!["a".into()]);
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
@@ -1306,6 +1310,7 @@
         }
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
@@ -2491,6 +2496,7 @@
 
         dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,

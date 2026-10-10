@@ -204,6 +204,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
             &app.trust_state,
             app.has_access(),
             app.is_zdr_blocked(),
+            app.trust_error.as_deref(),
         );
         let needed = super::auth::auth_hint_rows(&hint, width);
         return needed.max(base).min(ceiling);
@@ -392,6 +393,8 @@ pub fn render(
 pub enum Modal {
     Permission,
     Question,
+    /// An MCP server's elicitation card. The shared router sends it every key.
+    Elicitation,
     Rewind,
     /// The "Subagents are still running. Stop them?" confirm shown when cancelling a turn with running subagents (`AgentView::cancel_turn_view`).
     Cancel,
@@ -399,7 +402,7 @@ pub enum Modal {
     Plan,
 }
 
-/// The active prompt-replacing modal, in the full-TUI render precedence (cancel-confirm > plan > permission > question > rewind), or `None`.
+/// The active prompt-replacing modal, in the full-TUI render precedence (cancel-confirm > plan > permission > question > elicitation > rewind), or `None`.
 pub fn active_modal(agent: &AgentView) -> Option<Modal> {
     // The cancel-turn confirm is checked first to match the input router
     // The router intercepts keys for `cancel_turn_view` ahead of the question view (`AgentView::handle_input`)
@@ -415,6 +418,9 @@ pub fn active_modal(agent: &AgentView) -> Option<Modal> {
     }
     if minimal_api::question_view(agent).is_some() {
         return Some(Modal::Question);
+    }
+    if minimal_api::elicitation_view(agent).is_some() {
+        return Some(Modal::Elicitation);
     }
     if minimal_api::rewind_state(agent).is_some() {
         return Some(Modal::Rewind);
@@ -459,6 +465,13 @@ pub fn modal_height(modal: Modal, agent: &mut AgentView, screen_h: u16, content_
                 })
                 .unwrap_or(0)
         }
+        Modal::Elicitation => minimal_api::elicitation_view(agent)
+            .map(|ev| {
+                fuigo_pager::views::elicitation_view::elicitation_view_height(
+                    ev, screen_h, content_w,
+                )
+            })
+            .unwrap_or(0),
         Modal::Rewind => minimal_api::rewind_state(agent)
             .map(|rw| fuigo_pager::views::rewind::rewind_overlay_height(&rw.phase, screen_h))
             .unwrap_or(0),
@@ -487,6 +500,15 @@ pub fn render_modal(
     match modal {
         Modal::Permission => render_permission(buf, area, agent, theme),
         Modal::Question => render_question(buf, area, agent, theme, screen_h),
+        Modal::Elicitation => {
+            // Minimal never captures the mouse and has no click targets to record
+            if let Some(ev) = minimal_api::elicitation_view_mut(agent) {
+                fuigo_pager::views::elicitation_view::render_elicitation_view(
+                    buf, area, ev, theme, /* focused */ true, None,
+                );
+            }
+            None
+        }
         Modal::Rewind => {
             if let Some(rw) = minimal_api::rewind_state(agent) {
                 fuigo_pager::views::rewind::render_rewind_overlay(buf, area, &rw.phase, true);
@@ -1108,6 +1130,51 @@ mod tests {
         // Floored at 2 (status + prompt) and capped at the screen ceiling.
         assert_eq!(content_target(0, 0, 0, 0, 0, 0, 40), 2);
         assert_eq!(content_target(50, 0, 0, 0, 0, 0, 20), 20);
+    }
+
+    #[test]
+    fn elicitation_card_replaces_the_prompt_and_paints() {
+        let screen_h = 40u16;
+        let content_w = 80usize;
+        let mut agent = minimal_api::test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        assert_eq!(active_modal(&agent), None);
+        minimal_api::open_test_elicitation(&mut agent, "airlock", "Create the ticket?");
+        assert_eq!(active_modal(&agent), Some(Modal::Elicitation));
+        assert!(minimal_api::is_awaiting_user_answer(&agent));
+
+        let modal_h = modal_height(Modal::Elicitation, &mut agent, screen_h, content_w);
+        assert!(modal_h >= 8, "the card reserves its rows, got {modal_h}");
+        let area = Rect::new(0, 0, content_w as u16, modal_h);
+        let mut buf = Buffer::empty(area);
+        let cursor = render_modal(
+            &mut buf,
+            area,
+            Modal::Elicitation,
+            &mut agent,
+            &Theme::terminal_default(),
+            screen_h,
+        );
+        assert_eq!(cursor, None);
+        let painted: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or_default())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in [
+            "airlock",
+            "Create the ticket?",
+            "Ticket title",
+            "Accept",
+            "Decline",
+        ] {
+            assert!(
+                painted.contains(needle),
+                "{needle:?} must paint:\n{painted}"
+            );
+        }
     }
 
     #[test]

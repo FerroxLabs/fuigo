@@ -209,6 +209,9 @@ pub(crate) struct SubagentSpawnContext {
     pub parent_max_turns: Option<usize>,
     /// All available models for resolving model IDs from overrides.
     pub available_models: indexmap::IndexMap<String, crate::agent::config::ModelEntry>,
+    /// A fleet `[models] allowed_models` pin from `requirements.toml` is in force (P169, Grok 4.7 #2): every subagent
+    /// model override must then be a catalog entry the pin left `user_selectable`.
+    pub fleet_model_pin: bool,
     /// Per-subagent model ID overrides from config.toml `[subagents.models]`.
     pub subagent_model_overrides: std::collections::HashMap<String, String>,
     /// Per-subagent enable/disable toggles from config.toml `[subagents.toggle]`.
@@ -839,11 +842,31 @@ fn subagent_auth_type(
         fuigo_chat_state::AuthType::ApiKey
     }
 }
+/// Why managed policy refuses `model_id` as a subagent model (P169, Grok 4.7 #2): under a fleet `[models]
+/// allowed_models` pin a catalog entry the pin did not leave `user_selectable` (looked up by key, model id or alias) is
+/// refused on every subagent path: `[subagents.models]`, `AgentDefinition.model`, goal/persona overrides and resume.
+fn subagent_model_policy_refusal(model_id: &str, ctx: &SubagentSpawnContext) -> Option<String> {
+    if !ctx.fleet_model_pin {
+        return None;
+    }
+    let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id)?;
+    (!entry.info.user_selectable).then(|| {
+        format!(
+            "model '{model_id}' is not allowed by the organization model policy (requirements.toml [models] allowed_models)"
+        )
+    })
+}
+
 /// Resolve a model override string (config key or model ID) to a `(SamplerConfig, ModelId)` pair.
+/// `None` for an unknown model, or one managed policy refuses ([`subagent_model_policy_refusal`]); callers then inherit.
 fn resolve_model_override_to_config(
     model_id: &str,
     ctx: &SubagentSpawnContext,
 ) -> Option<(fuigo_sampler::SamplerConfig, acp::ModelId)> {
+    if let Some(refusal) = subagent_model_policy_refusal(model_id, ctx) {
+        tracing::warn!(model_id, "subagent model override refused: {refusal}");
+        return None;
+    }
     let entry = crate::agent::config::find_model_by_id(&ctx.available_models, model_id).cloned()?;
     let canonical_model_id = if ctx.available_models.contains_key(model_id) {
         acp::ModelId::new(model_id)

@@ -106,15 +106,28 @@ pub struct CodexListDirTool;
 
 // ─── Core BFS logic ─────────────────────────────────────────────────
 
+/// The Read-deny filter of this call (P198); `None` when the call has no resources or no deny globs.
+async fn read_deny_for(
+    ctx: &fuigo_tool_runtime::ToolCallContext,
+) -> Option<crate::util::read_deny::ReadDenyFilter> {
+    let resources = crate::types::tool_metadata::shared_resources(ctx).ok()?;
+    let cwd = crate::types::tool_metadata::resolve_cwd(ctx, &resources).await.ok()?;
+    let res = resources.lock().await;
+    crate::util::read_deny::ReadDenyFilter::new(&cwd, &crate::types::resources::deny_read_globs_for_call(ctx, &res))
+}
+
 /// Orchestrator: collect entries via BFS → sort → paginate → format.
 async fn list_dir_slice(
     dir_path: &Path,
     offset: usize,
     limit: usize,
     depth: usize,
+    deny: Option<&crate::util::read_deny::ReadDenyFilter>,
 ) -> Result<Vec<String>, String> {
     let mut entries = Vec::new();
-    collect_entries(dir_path, Path::new(""), 0, depth, &mut entries)
+    // A root that is a symlink into a denied tree is judged by its canonical place too (P198 round 2).
+    let rooted = deny.map(|d| d.clone().rooted(dir_path));
+    collect_entries(dir_path, Path::new(""), 0, depth, &mut entries, rooted.as_ref())
         .await
         .map_err(|e| format!("Failed to read directory: {e}"))?;
 
@@ -165,6 +178,7 @@ async fn collect_entries(
     current_depth: usize,
     max_depth: usize,
     entries: &mut Vec<DirEntry>,
+    deny: Option<&crate::util::read_deny::ReadDenyFilter>,
 ) -> Result<(), std::io::Error> {
     // Queue items: (absolute path, raw relative prefix, depth)
     let mut queue: VecDeque<(PathBuf, PathBuf, usize)> = VecDeque::new();
@@ -183,6 +197,10 @@ async fn collect_entries(
         while let Some(entry) = read_dir.next_entry().await? {
             let file_type = entry.file_type().await?;
             let kind = DirEntryKind::from(&file_type);
+            // P198: a Read-denied name is not listed, and a denied directory is not entered.
+            if deny.is_some_and(|d| d.denies(&entry.path(), file_type.is_dir())) {
+                continue;
+            }
 
             let raw_name = entry.file_name();
             let display_name = format_entry_component(&raw_name);
@@ -306,7 +324,7 @@ impl fuigo_tool_runtime::Tool for CodexListDirTool {
     )]
     async fn run(
         &self,
-        _ctx: fuigo_tool_runtime::ToolCallContext,
+        ctx: fuigo_tool_runtime::ToolCallContext,
         input: CodexListDirInput,
     ) -> Result<ListDirOutput, fuigo_tool_runtime::ToolError> {
         let CodexListDirInput {
@@ -338,7 +356,8 @@ impl fuigo_tool_runtime::Tool for CodexListDirTool {
             ));
         }
 
-        let entries = match list_dir_slice(&path, offset, limit, depth).await {
+        let deny = read_deny_for(&ctx).await;
+        let entries = match list_dir_slice(&path, offset, limit, depth, deny.as_ref()).await {
             Ok(entries) => entries,
             Err(msg) => return Ok(ListDirOutput::Error(msg)),
         };
@@ -371,7 +390,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(tmp.path().join("file.txt"), tmp.path().join("link")).unwrap();
 
-        let result = list_dir_slice(tmp.path(), 1, 25, 2).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, 25, 2, None).await.unwrap();
 
         // Should contain file.txt, subdir/, and on unix: link@
         let joined = result.join("\n");
@@ -386,7 +405,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
 
-        let err = list_dir_slice(tmp.path(), 100, 25, 2).await.unwrap_err();
+        let err = list_dir_slice(tmp.path(), 100, 25, 2, None).await.unwrap_err();
         assert_eq!(err, "offset exceeds directory entry count");
     }
 
@@ -399,7 +418,7 @@ mod tests {
         std::fs::write(subsub.join("deep.txt"), "").unwrap();
 
         // depth=1: only top-level entries (the dir "a" but not its children)
-        let depth1 = list_dir_slice(tmp.path(), 1, 100, 1).await.unwrap();
+        let depth1 = list_dir_slice(tmp.path(), 1, 100, 1, None).await.unwrap();
         let joined1 = depth1.join("\n");
         assert!(joined1.contains("a/"), "should see dir a/");
         assert!(!joined1.contains("b/"), "should NOT see b/ at depth 1");
@@ -409,7 +428,7 @@ mod tests {
         );
 
         // depth=2: top-level + children of a
-        let depth2 = list_dir_slice(tmp.path(), 1, 100, 2).await.unwrap();
+        let depth2 = list_dir_slice(tmp.path(), 1, 100, 2, None).await.unwrap();
         let joined2 = depth2.join("\n");
         assert!(joined2.contains("a/"), "should see dir a/");
         assert!(joined2.contains("b/"), "should see b/ at depth 2");
@@ -419,7 +438,7 @@ mod tests {
         );
 
         // depth=3: everything
-        let depth3 = list_dir_slice(tmp.path(), 1, 100, 3).await.unwrap();
+        let depth3 = list_dir_slice(tmp.path(), 1, 100, 3, None).await.unwrap();
         let joined3 = depth3.join("\n");
         assert!(joined3.contains("a/"), "should see dir a/");
         assert!(joined3.contains("b/"), "should see b/ at depth 3");
@@ -437,7 +456,7 @@ mod tests {
         std::fs::write(tmp.path().join("b.txt"), "").unwrap();
 
         // First page: limit=2, should get a.txt, b.txt + overflow message
-        let page1 = list_dir_slice(tmp.path(), 1, 2, 1).await.unwrap();
+        let page1 = list_dir_slice(tmp.path(), 1, 2, 1, None).await.unwrap();
         assert!(page1[0].contains("a.txt"), "first entry should be a.txt");
         assert!(page1[1].contains("b.txt"), "second entry should be b.txt");
         assert!(
@@ -446,7 +465,7 @@ mod tests {
         );
 
         // Second page: offset=3 → c.txt only, no overflow
-        let page2 = list_dir_slice(tmp.path(), 3, 2, 1).await.unwrap();
+        let page2 = list_dir_slice(tmp.path(), 3, 2, 1, None).await.unwrap();
         assert_eq!(page2.len(), 1, "second page should have 1 entry");
         assert!(page2[0].contains("c.txt"), "should be c.txt");
     }
@@ -457,7 +476,7 @@ mod tests {
         std::fs::write(tmp.path().join("only.txt"), "").unwrap();
 
         // usize::MAX as limit should not panic
-        let result = list_dir_slice(tmp.path(), 1, usize::MAX, 1).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, usize::MAX, 1, None).await.unwrap();
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("only.txt"));
     }
@@ -470,7 +489,7 @@ mod tests {
             std::fs::write(tmp.path().join(format!("file_{:03}.txt", i)), "").unwrap();
         }
 
-        let result = list_dir_slice(tmp.path(), 1, 25, 1).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, 25, 1, None).await.unwrap();
         assert!(
             result
                 .last()
@@ -488,7 +507,7 @@ mod tests {
         std::fs::write(tmp.path().join("m.txt"), "").unwrap();
 
         // limit=2, offset=2 → should get m.txt (2nd sorted entry)
-        let result = list_dir_slice(tmp.path(), 2, 1, 1).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 2, 1, 1, None).await.unwrap();
         assert!(result[0].contains("m.txt"), "offset=2 should land on m.txt");
     }
 
@@ -653,7 +672,7 @@ mod tests {
     async fn empty_directory_returns_success() {
         let tmp = TempDir::new().unwrap();
 
-        let result = list_dir_slice(tmp.path(), 1, 25, 2).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, 25, 2, None).await.unwrap();
         assert!(result.is_empty(), "empty dir should return empty vec");
 
         // Also verify the tool-level wrapper returns Content, not Error.
@@ -688,7 +707,7 @@ mod tests {
         std::os::unix::fs::symlink(tmp.path().join("real_dir"), tmp.path().join("link_to_dir"))
             .unwrap();
 
-        let result = list_dir_slice(tmp.path(), 1, 25, 1).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, 25, 1, None).await.unwrap();
         let joined = result.join("\n");
 
         assert!(
@@ -708,7 +727,7 @@ mod tests {
             std::fs::write(tmp.path().join(format!("f_{:03}.txt", i)), "").unwrap();
         }
 
-        let result = list_dir_slice(tmp.path(), 1, 10, 1).await.unwrap();
+        let result = list_dir_slice(tmp.path(), 1, 10, 1, None).await.unwrap();
         let last = result.last().unwrap();
         assert!(
             last.contains("More than 10 entries found"),
@@ -724,5 +743,76 @@ mod tests {
         assert_eq!(input.depth, 2);
         assert_eq!(input.offset, 1);
         assert!(DESCRIPTION.contains("200 entries"));
+    }
+
+    /// P198: names under a Read-denied path are not listed by the codex `list_dir`; with no deny globs nothing changes.
+    #[tokio::test]
+    async fn read_denied_names_are_not_listed() {
+        use crate::types::resources::{Cwd, DenyReadGlobs, Resources};
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets/key_material.txt"), "k").unwrap();
+        std::fs::write(tmp.path().join("a_public.txt"), "p").unwrap();
+        std::fs::write(tmp.path().join("server_token.pem"), "t").unwrap();
+        let list = |dir: std::path::PathBuf, deny: Option<Vec<String>>| {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(tmp.path().to_path_buf()));
+            if let Some(deny) = deny {
+                resources.insert(DenyReadGlobs(deny));
+            }
+            let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+            async move {
+                match fuigo_tool_runtime::Tool::run(
+                    &CodexListDirTool,
+                    ctx,
+                    CodexListDirInput { dir_path: dir.to_string_lossy().into_owned(), offset: 1, limit: 100, depth: 3 },
+                )
+                .await
+                .unwrap()
+                {
+                    ListDirOutput::Content(c) => c.content,
+                    other => panic!("unexpected: {other:?}"),
+                }
+            }
+        };
+        let deny = Some(vec!["secrets/**".to_string(), "**/*.pem".to_string()]);
+        let root = list(tmp.path().to_path_buf(), deny.clone()).await;
+        assert!(root.contains("a_public.txt"), "{root}");
+        assert!(!root.contains("key_material.txt"), "{root}");
+        assert!(!root.contains("server_token.pem"), "{root}");
+        let inside = list(tmp.path().join("secrets"), deny).await;
+        assert!(!inside.contains("key_material.txt"), "{inside}");
+        let none = list(tmp.path().to_path_buf(), None).await;
+        assert!(none.contains("key_material.txt") && none.contains("server_token.pem"), "{none}");
+        assert_eq!(none, list(tmp.path().to_path_buf(), Some(Vec::new())).await);
+    }
+
+    /// P198 r2: the codex `list_dir` walker against the shared contract (absolute rule, outside rule, symlinked cwd,
+    /// bare name, symlink root, siblings).
+    #[tokio::test]
+    async fn read_rules_follow_the_policy_matcher() {
+        use crate::types::resources::{Cwd, DenyReadGlobs, Resources};
+        let list = |cwd: std::path::PathBuf, dir: String, deny: Vec<String>| async move {
+            let dir_path = if dir == "." { cwd.to_string_lossy().into_owned() } else { cwd.join(&dir).to_string_lossy().into_owned() };
+            let mut resources = Resources::new();
+            resources.insert(Cwd(cwd));
+            if !deny.is_empty() {
+                resources.insert(DenyReadGlobs(deny));
+            }
+            let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+            match fuigo_tool_runtime::Tool::run(
+                &CodexListDirTool,
+                ctx,
+                CodexListDirInput { dir_path, offset: 1, limit: 100, depth: 3 },
+            )
+            .await
+            .unwrap()
+            {
+                ListDirOutput::Content(c) => c.content,
+                other => panic!("unexpected: {other:?}"),
+            }
+        };
+        crate::util::read_deny::fixture::check_list(&list).await;
+        crate::util::read_deny::fixture::check_list_round4(&list).await;
     }
 }

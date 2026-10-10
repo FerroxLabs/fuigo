@@ -110,7 +110,7 @@ fn send_query() {
 
 /// Strip controls and trim; `None` for an empty payload.
 fn sanitize_payload(payload: &str) -> Option<String> {
-    let cleaned: String = payload.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = fuigo_tty_utils::scrub_unsafe_display(payload, None);
     let cleaned = cleaned.trim().to_owned();
     if cleaned.is_empty() {
         None
@@ -122,6 +122,15 @@ fn sanitize_payload(payload: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181: a terminal's version reply must not carry hidden characters either.
+    #[test]
+    fn sanitize_payload_drops_hidden_characters() {
+        assert_eq!(
+            sanitize_payload("Wez\u{e0041}\u{00ad}Term\u{2028}2.0").as_deref(),
+            Some("WezTerm2.0")
+        );
+    }
 
     #[test]
     fn sanitize_plain_payload() {

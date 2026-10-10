@@ -838,6 +838,38 @@ mod p149_upload_scrub_tests {
         assert_eq!(super::workspace_upload_scrub(binary.clone()), binary);
     }
 
+    /// P163 (1.0.21 K24): the upload filter (`payload_filter`) replaces a sent credential that was re-encoded
+    /// before it reached the file: inside HTTP `Basic`, a base64 JSON blob, percent-encoded.
+    #[test]
+    fn workspace_upload_scrub_redacts_a_re_encoded_sent_credential() {
+        const SENT: &str = "p163-SYNTH-workspace-sent-0003";
+        // base64("alice:" + SENT), URL-safe base64 of {"k":"SENT"}, and SENT with every byte percent-encoded.
+        const BASIC: &str = "YWxpY2U6cDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAz";
+        const BLOB: &str = "eyJrIjoicDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAzIn0=";
+        const PCT: &str =
+            "%70%31%36%33%2D%53%59%4E%54%48%2D%77%6F%72%6B%73%70%61%63%65%2D%73%65%6E%74%2D%30%30%30%33";
+        fuigo_secrets::sent_credentials::record(SENT);
+        let leaks = ["cDE2My1TWU5USC13b3Jrc3BhY2Utc2VudC0wMDAz", "%70%31%36%33%2D"];
+        let state = serde_json::json!({"scheduler": [
+            {"prompt": format!("curl -H 'Authorization: Basic {BASIC}'")},
+            {"prompt": format!("token={BLOB}&k={PCT}")},
+        ]});
+        let text = String::from_utf8(super::workspace_upload_scrub(
+            serde_json::to_vec(&state).unwrap(),
+        ))
+        .unwrap();
+        for leak in leaks {
+            assert!(!text.contains(leak), "{leak}: {text}");
+        }
+        serde_json::from_str::<serde_json::Value>(&text).expect("still JSON");
+        let log = format!("GET /x?k={PCT} Basic {BASIC} {BLOB}\n");
+        let text = String::from_utf8(super::workspace_upload_scrub(log.into_bytes())).unwrap();
+        for leak in leaks {
+            assert!(!text.contains(leak), "{leak}: {text}");
+        }
+        assert!(text.starts_with("GET /x?k=<redacted> Basic "), "{text}");
+    }
+
     /// P149 (Astra r3 #2): the structural cases `/feedback` covers: a PEM block split over separate strings, a credential
     /// in a property NAME, and a credential or key held as an array of byte values.
     #[test]

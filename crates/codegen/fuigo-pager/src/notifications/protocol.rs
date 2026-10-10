@@ -62,9 +62,9 @@ pub fn select_protocol(ctx: &TerminalContext) -> NotificationProtocol {
 const BEL_BYTE: &[u8] = b"\x07";
 
 /// Strip C0/C1 controls (including BEL and C1 ST) so model-derived titles cannot terminate OSC/DCS early.
-/// Same filter as tab-title construction.
+/// Tag characters, soft hyphens and other invisible format characters go too: a notification shows them as nothing, so they hide text.
 fn sanitize_osc_text(s: &str) -> String {
-    s.chars().filter(|c| !c.is_control()).collect()
+    fuigo_tty_utils::scrub_unsafe_display(s, None).into_owned()
 }
 
 /// Build the OSC/BEL payload. `None` means emit nothing.
@@ -73,7 +73,8 @@ fn notification_sequence(
     title: &str,
     body: &str,
 ) -> Option<Cow<'static, str>> {
-    let title = sanitize_osc_text(title);
+    // The title is a session name, so it keeps ZWJ emoji and a valid flag; the body is strict
+    let title = fuigo_tty_utils::scrub_unsafe_title(title);
     let body = sanitize_osc_text(body);
     Some(match protocol {
         // Body-only protocols fold the title (session name) into the body.
@@ -124,6 +125,27 @@ pub fn emit_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181: tag characters, soft hyphens and line separators must not reach an OSC notification.
+    #[test]
+    fn notification_text_drops_hidden_characters() {
+        assert_eq!(sanitize_osc_text("a\u{e0041}b\u{00ad}c\u{2028}d\x07"), "abcd");
+        let seq = notification_sequence(
+            NotificationProtocol::Osc777,
+            "t\u{e0041}",
+            "b\u{00ad}o\u{2028}dy",
+        )
+        .expect("a sequence");
+        assert_eq!(seq.as_ref(), "\x1b]777;notify;Fuigo;body\x1b\\");
+        // The title is a session name: its emoji joiners stay, its hidden characters go
+        let seq = notification_sequence(
+            NotificationProtocol::Osc9,
+            "\u{1f468}\u{200d}\u{1f469}\u{e0041}\u{00ad}",
+            "body",
+        )
+        .expect("a sequence");
+        assert_eq!(seq.as_ref(), "\x1b]9;body \u{b7} \u{1f468}\u{200d}\u{1f469}\x07");
+    }
     use crate::terminal::{MultiplexerKind, TerminalContext, TerminalName};
 
     fn ctx_with_brand(brand: TerminalName) -> TerminalContext {

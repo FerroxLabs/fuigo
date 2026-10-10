@@ -546,6 +546,10 @@ pub enum SessionCommand {
     NotifyConfigNoticeIfNew {
         notice: String,
     },
+    /// The condition behind a config notice cleared (the model list loaded again): a later recurrence may be shown again.
+    ForgetConfigNotice {
+        notice: String,
+    },
     /// Flush pending writes and copy the current session directory contents to memory.
     /// The caller can then tar.gz and upload to GCS (or similar).
     CopyFile {

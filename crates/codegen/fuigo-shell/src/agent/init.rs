@@ -83,7 +83,7 @@ pub fn bootstrap(
 /// Prints the error to the user's real stderr (undoing any TUI redirect) and exits.
 pub(crate) fn exit_on_config_error<T>(e: BootstrapError) -> T {
     fuigo_tty_utils::restore_native_stderr();
-    fuigo_tty_utils::cli_eprintln!("\nConfiguration error:\n\n    {e}\n");
+    fuigo_tty_utils::cli_eprintln!("\nConfiguration error:\n\n    {}\n", fuigo_tty_utils::untrusted(&e));
     std::process::exit(1);
 }
 

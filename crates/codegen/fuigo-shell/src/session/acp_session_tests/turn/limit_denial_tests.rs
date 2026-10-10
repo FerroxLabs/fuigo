@@ -419,3 +419,83 @@ fn a_stop_hook_continuation_after_the_reserved_answer_is_the_call_limit_denial()
     assert_eq!(wire["data"]["partial"], true, "the receipt is kept: {wire}");
     assert_denial_wire(err, ExecutionBudgetRule::ModelCallLimit);
 }
+
+/// P195 (K25): the model-call limit reserved the turn's last call for the final answer and the model answered, but the
+/// agent's completion requirement (a tool that was never called) retries the turn. Each retry finds the execution
+/// finalized and ends there. The FIRST such retry was already the call limit's typed denial (P144); a later one found the
+/// record already terminal and ended as an untyped receipt, so a `maxRetries` of 2 or more turned `fuigo -p`'s exit 3
+/// into exit 1. The turn must end with the typed denial however many retries the requirement allows, and never retry
+/// once a budget has ended the run.
+fn run_completion_requirement_retries(run: &'static str, max_retries: u32) -> LimitedRun {
+    let cell = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let sink = cell.clone();
+    block_on_session(move || {
+        current_thread_local(async move {
+            let server = MockInferenceServer::start()
+                .await
+                .expect("mock inference server");
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(responses_api_script_exact(ANSWER, "test")),
+            );
+            let (gateway_tx, gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            drain_gateway(gateway_rx);
+            let (persistence_tx, persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            spawn_persistence_stub(persistence_rx, || Ok(()));
+            let actor =
+                actor_with_mock_sampler(&server, run, persistence_tx, gateway_tx, Some(4), None).await;
+            *actor.agent.borrow_mut() =
+                test_agent_with_completion_requirement("never_called_tool", max_retries).await;
+            // One model call: the turn loop reserves it for the final answer from the start.
+            let execution = Execution::open(
+                &actor.notifications.persistence_tx,
+                run,
+                run,
+                run,
+                1,
+                None,
+                Some(4),
+                TokenLimits::default(),
+                None,
+            )
+            .await
+            .expect("execution is durable");
+            let before = server.request_count();
+
+            let result = run_prompt(&actor, run).await;
+
+            let model_requests = server.request_count() - before;
+            execution.release(run);
+            *sink.lock().unwrap() = Some(LimitedRun {
+                result,
+                model_requests,
+            });
+        });
+    });
+    let taken = cell.lock().unwrap().take();
+    taken.expect("a result")
+}
+
+fn assert_call_limit_denial_with_receipt(run: &LimitedRun) {
+    assert_eq!(run.model_requests, 1, "the reserved call answered; no retry sent anything");
+    let err = match &run.result {
+        Err(err) => err,
+        Ok(ok) => panic!("the call limit ended this turn: {:?}", ok.stop_reason),
+    };
+    let wire = serde_json::to_value(err).expect("serialize");
+    assert_eq!(wire["data"]["partial"], true, "the receipt is kept: {wire}");
+    assert_denial_wire(err, ExecutionBudgetRule::ModelCallLimit);
+}
+
+/// Control: one retry was already typed before P195.
+#[test]
+fn a_completion_requirement_with_one_retry_ends_as_the_call_limit_denial() {
+    assert_call_limit_denial_with_receipt(&run_completion_requirement_retries("p195-retry-one", 1));
+}
+
+#[test]
+fn a_completion_requirement_with_three_retries_ends_as_the_call_limit_denial() {
+    assert_call_limit_denial_with_receipt(&run_completion_requirement_retries("p195-retry-three", 3));
+}

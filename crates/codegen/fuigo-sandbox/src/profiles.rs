@@ -12,8 +12,11 @@ use crate::allow_path::normalize_allow_path;
 #[cfg(all(feature = "enforce", unix))]
 use crate::deny::{
     apply_deny_globs_to_capability_set, apply_deny_paths_to_capability_set,
-    apply_write_deny_paths_to_capability_set, effective_deny_paths, partition_deny_entries,
+    apply_git_write_deny_to_capability_set, apply_write_deny_paths_to_capability_set,
+    effective_deny_paths, partition_deny_entries,
 };
+use crate::git_write_deny::{GitProtectedPath, resolve_git_write_deny};
+use crate::home_write_deny::resolve_home_write_deny;
 use crate::hook_write_deny::profile_hook_write_deny;
 use crate::paths::fuigo_home;
 #[cfg(all(feature = "enforce", unix))]
@@ -36,6 +39,11 @@ pub struct SandboxProfile {
     pub deny: Vec<PathBuf>,
     /// Typed direct global hook sources (write-denied, still readable).
     pub write_deny: Vec<GlobalHookSource>,
+    /// Files that run or reconfigure code outside the sandbox later (write-denied, still
+    /// readable): the git files of [`crate::git_write_deny`] and the home startup files of
+    /// [`crate::home_write_deny`]. Resolved last, against the final `read_write`, for every
+    /// profile that enforces the hook write-deny.
+    pub git_write_deny: Vec<GitProtectedPath>,
     /// Whether to grant read access to the entire filesystem by default
     pub default_read: bool,
     /// Whether child processes should have network blocked
@@ -201,6 +209,22 @@ fn device_file_openable(path: &Path) -> bool {
     }
 }
 
+/// The deny list reads `*`, `?` and `[` as a glob, so a socket path holding one (an env-named
+/// bus, `unix:path=/tmp/bus%5B1%5D`) would mask other paths, not itself: refuse instead.
+pub(crate) fn refuse_glob_socket_paths(policy: &[PathBuf]) -> anyhow::Result<()> {
+    if let Some(path) = policy
+        .iter()
+        .find(|path| crate::deny::is_glob(&path.to_string_lossy()))
+    {
+        anyhow::bail!(
+            "socket deny path {} holds a glob metacharacter and cannot be masked exactly; \
+             refusing to start with it reachable",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 impl ProfileName {
     /// Convert this profile into a nono `CapabilitySet` for the given workspace.
     #[cfg(all(feature = "enforce", unix))]
@@ -348,6 +372,16 @@ impl ProfileName {
             apply_write_deny_paths_to_capability_set(&mut caps, &pairs, &profile.read_write)?;
         }
 
+        // Git hooks and configs, and the home write-deny (macOS Seatbelt; Linux via the bwrap hook
+        // plan). A link node is denied as the link itself, never the tree it leads to.
+        if !profile.git_write_deny.is_empty() {
+            apply_git_write_deny_to_capability_set(
+                &mut caps,
+                &profile.git_write_deny,
+                &profile.read_write,
+            )?;
+        }
+
         // Kernel deny (read and write): macOS Seatbelt rules; Linux via bwrap bind-over
         // Key on an empty deny set, not profile type, so nothing unintentional is enforced.
         //
@@ -382,15 +416,67 @@ impl ProfileName {
         config: &SandboxConfig,
     ) -> anyhow::Result<(SandboxProfile, Vec<PathBuf>)> {
         let mut profile = self.resolve(workspace, config)?;
-        let mut runtime_socket_denies = Vec::new();
-        if profile.restrict_network {
-            crate::runtime_sockets::append_runtime_socket_denies(
-                &mut profile.deny,
-                &mut runtime_socket_denies,
-            )
-            .map_err(|error| anyhow::anyhow!("runtime-socket deny resolution failed: {error}"))?;
+        // Same gate as the hook write-deny: `write_deny` is empty exactly for `off` and
+        // devbox-based profiles (it always carries the trust-boundary files otherwise)
+        if !profile.write_deny.is_empty() {
+            let mut entries = resolve_git_write_deny(workspace, &profile.read_write)?;
+            entries.extend(resolve_home_write_deny(
+                workspace,
+                &profile.read_write,
+                &self.configured_write_roots(workspace, config),
+            )?);
+            entries.sort();
+            entries.dedup();
+            profile.git_write_deny = entries;
         }
+        let mut runtime_socket_denies = Vec::new();
+        // Devbox keeps host D-Bus/systemd; container-runtime masks still follow `restrict_network`
+        let skip_dbus = match self {
+            Self::Devbox => true,
+            Self::Custom(name) => {
+                config.profiles.get(name).and_then(|p| p.extends.as_deref()) == Some("devbox")
+            }
+            _ => false,
+        };
+        let mut policy = if skip_dbus {
+            Vec::new()
+        } else {
+            crate::runtime_sockets::dbus_socket_deny_paths()
+        };
+        if profile.restrict_network {
+            for path in crate::runtime_sockets::runtime_socket_deny_paths() {
+                if !policy.contains(&path) {
+                    policy.push(path);
+                }
+            }
+        }
+        refuse_glob_socket_paths(&policy)?;
+        crate::runtime_sockets::append_socket_denies(
+            &mut profile.deny,
+            &mut runtime_socket_denies,
+            &policy,
+        )
+        .map_err(|error| anyhow::anyhow!("socket deny resolution failed: {error}"))?;
+        // Materializing resolves parent links, which can bring a metacharacter in
+        refuse_glob_socket_paths(&runtime_socket_denies)?;
         Ok((profile, runtime_socket_denies))
+    }
+
+    /// The writable roots the user chose: the workspace and a custom profile's `read_write`
+    /// grants (the home write-deny refuses what it cannot protect beneath them, P177).
+    fn configured_write_roots(&self, workspace: &Path, config: &SandboxConfig) -> Vec<PathBuf> {
+        let mut roots = vec![workspace.to_path_buf()];
+        if let Self::Custom(name) = self
+            && let Some(profile) = config.profiles.get(name)
+        {
+            roots.extend(
+                profile
+                    .read_write
+                    .iter()
+                    .filter_map(|path| normalize_allow_path(path)),
+            );
+        }
+        roots
     }
 
     fn resolve(&self, workspace: &Path, config: &SandboxConfig) -> anyhow::Result<SandboxProfile> {
@@ -408,6 +494,7 @@ impl ProfileName {
                 read_write: essential_writable_paths(workspace),
                 deny: vec![],
                 write_deny: resolve_write_deny(self)?,
+                git_write_deny: vec![],
                 default_read: true,
                 restrict_network: false,
             }),
@@ -443,6 +530,7 @@ impl ProfileName {
                     read_write,
                     deny: vec![],
                     write_deny: vec![],
+                    git_write_deny: vec![],
                     default_read: true,
                     restrict_network: false,
                 })
@@ -454,6 +542,7 @@ impl ProfileName {
                 read_write: essential_writable_paths_minimal(),
                 deny: vec![],
                 write_deny: resolve_write_deny(self)?,
+                git_write_deny: vec![],
                 default_read: true,
                 restrict_network: true,
             }),
@@ -491,6 +580,7 @@ impl ProfileName {
                     read_write: essential_writable_paths_strict(workspace),
                     deny: vec![],
                     write_deny: resolve_write_deny(self)?,
+                    git_write_deny: vec![],
                     default_read: false,
                     restrict_network: true,
                 })
@@ -928,10 +1018,20 @@ read_write = ["/tmp/ci-artifacts"]
             ]
         );
         assert_eq!(resolved.read_only, [PathBuf::from("/opt/tooling")]);
-        assert_eq!(
-            resolved.deny,
-            [PathBuf::from("**/.env"), PathBuf::from("/secrets/**")]
-        );
+        let mut expected = vec![PathBuf::from("**/.env"), PathBuf::from("/secrets/**")];
+        for socket in crate::runtime_sockets::materialize_runtime_socket_deny_paths_from(
+            crate::runtime_sockets::dbus_socket_deny_paths(),
+        )
+        .expect("dbus sockets materialize")
+        {
+            if !expected.contains(&socket) {
+                expected.push(socket);
+            }
+        }
+        let mut actual = resolved.deny.clone();
+        expected.sort();
+        actual.sort();
+        assert_eq!(expected, actual, "deny must be globs plus the materialized dbus sockets");
     }
 
     /// Building the capability set pre-creates missing `read_write` dirs.

@@ -4,6 +4,8 @@ mod history_provider;
 mod path_provider;
 mod shell_token;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +144,27 @@ impl From<RankedSuggestion> for CompletionItem {
             token_text: s.token_text,
             truncated: s.truncated,
         }
+    }
+}
+
+/// Holds a provider's cache-refresh flag and clears it on drop.
+/// A caller that drops a completion mid-scan must not leave the flag set, or every later refresh
+/// is skipped and the stale cache is served until the process exits.
+#[must_use]
+pub(crate) struct RefreshGuard(&'static AtomicBool);
+
+impl RefreshGuard {
+    /// `None` while another refresh holds `flag`.
+    pub(crate) fn try_acquire(flag: &'static AtomicBool) -> Option<RefreshGuard> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+            .ok()
+            .map(|_| RefreshGuard(flag))
+    }
+}
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -655,5 +678,33 @@ mod tests {
         assert_eq!(completions[0].priority, 10);
         assert_eq!(completions[1].priority, 5);
         assert_eq!(completions[1].source, "file");
+    }
+
+    #[tokio::test]
+    async fn refresh_dropped_mid_scan_frees_its_flag() {
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        let (_scan_done, scan) = tokio::sync::oneshot::channel::<()>();
+        let refresh = async {
+            let _refreshing = RefreshGuard::try_acquire(&REFRESHING).expect("the flag is free");
+            let _ = scan.await;
+        };
+
+        // The refresh parks on its scan, then loses the race and is dropped, as on a session cancel
+        tokio::select! {
+            biased;
+            () = refresh => panic!("the scan never finishes"),
+            () = std::future::ready(()) => {}
+        }
+
+        assert!(RefreshGuard::try_acquire(&REFRESHING).is_some());
+    }
+
+    #[test]
+    fn failed_acquire_leaves_the_holders_flag_set() {
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        let _holder = RefreshGuard::try_acquire(&REFRESHING).expect("the flag is free");
+
+        assert!(RefreshGuard::try_acquire(&REFRESHING).is_none());
+        assert!(RefreshGuard::try_acquire(&REFRESHING).is_none());
     }
 }

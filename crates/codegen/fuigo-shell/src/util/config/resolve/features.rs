@@ -95,6 +95,11 @@ fn compose_repo_status_in_system_prompt(
 /// Remote settings are exactly what is unreachable when this knob is needed (firewalled / air-gapped deployments).
 /// An env var would be one more way to re-enable the fetches.
 pub fn resolve_remote_fetch_enabled() -> bool {
+    // P183 round 8: an admin policy file that is broken with no validated copy could have disabled the fetches; they are off
+    // (the old `.ok()` read the broken file as "no policy" and left the default on)
+    if !fuigo_config::broken_admin_files().is_empty() {
+        return false;
+    }
     match crate::config::ConfigLayers::load() {
         Ok(layers) => remote_fetch_enabled_from_layers(&layers),
         // A corrupt user-writable config.toml must not drop a requirements or managed-layer pin
@@ -409,5 +414,20 @@ mod repo_status_in_system_prompt_tests {
             Some(&remote(true)),
             Some(true)
         ));
+    }
+}
+
+#[cfg(test)]
+mod admin_source_tests_p183r10 {
+    use super::*;
+    use crate::util::config::admin_seam_test_support as seam;
+
+    /// A broken admin file or MDM payload with no validated copy turns the remote fetches off (they were left on).
+    #[test]
+    fn broken_admin_source_turns_remote_fetch_off_p183r10() {
+        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+            let _seam = make();
+            assert!(!resolve_remote_fetch_enabled());
+        }
     }
 }

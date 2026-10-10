@@ -32,9 +32,11 @@ pub fn is_ignored(gitignore: &Gitignore, path: &Path, git_root: Option<&Path>) -
         }
     };
     // matched_path_or_any_parents checks parent dirs too, so
-    // `build/AGENTS.md` correctly matches a `build/` pattern.
+    // `build/AGENTS.md` correctly matches a `build/` pattern. The directory test uses the path as given: the
+    // repo-relative `check_path` would be resolved against the process cwd, so a directory such as `secret`
+    // never matched a `secret/` pattern (P166 Grok r5: a grep of an ignored directory).
     gitignore
-        .matched_path_or_any_parents(check_path, check_path.is_dir())
+        .matched_path_or_any_parents(check_path, path.is_dir())
         .is_ignore()
 }
 

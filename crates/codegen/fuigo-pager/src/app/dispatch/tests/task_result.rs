@@ -1505,6 +1505,7 @@ fn session_success_arms_finish_startup_obligation() {
             scheduler_background_loops: None,
         },
         TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: "resumed-session".into(),
             models: None,

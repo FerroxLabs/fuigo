@@ -46,9 +46,155 @@ pub(crate) fn install_source_is_local(source: &str, cwd: &Path) -> bool {
     )
 }
 
+// ── Managed marketplace policy for direct installs and enables (P169) ──
+
+/// The source identity `strictKnownMarketplaces` judges: the git URL, or the local path (which never matches).
+fn install_source_identity(source: &git_install::InstallSource) -> String {
+    match source {
+        git_install::InstallSource::Git { url, .. } => url.clone(),
+        git_install::InstallSource::Local { path, .. } => path.display().to_string(),
+    }
+}
+
+/// A direct install (git URL or local path) must not bypass `strictKnownMarketplaces`: plugin hooks and MCP servers
+/// execute, so the same fail-closed rule as adding a marketplace applies. Checked before anything is fetched or written.
+pub fn direct_install_block_reason(source: &git_install::InstallSource) -> Option<String> {
+    direct_install_block_reason_with(
+        &fuigo_workspace::permission::resolution::managed_settings().marketplace_allowlist,
+        source,
+    )
+}
+
+fn direct_install_block_reason_with(
+    policy: &fuigo_workspace::permission::resolution::MarketplacePolicy,
+    source: &git_install::InstallSource,
+) -> Option<String> {
+    policy
+        .add_block_reason(&install_source_identity(source))
+        .map(|reason| format!("Plugin install blocked by managed policy: {reason}"))
+}
+
+/// Enabling a plugin is refused, before any config write, when managed policy restricts marketplaces and the plugin
+/// was not acquired from an allowed source (a plugin with no recorded source, such as a path plugin, is refused too).
+fn plugin_enable_block_reason_with(
+    policy: &fuigo_workspace::permission::resolution::MarketplacePolicy,
+    registry: &InstallRegistry,
+    plugin_id: &str,
+) -> Option<String> {
+    if !policy.is_restricted() {
+        return None;
+    }
+    let mut segments = plugin_id.rsplitn(3, '/');
+    let name = segments.next().unwrap_or(plugin_id);
+    let hex8 = segments.next();
+    // Every install of that name; with a full `scope/hex8/name` id, only the one whose root hashes to `hex8`
+    // (Astra r1 N1: a same-named plugin in another repo must neither authorize nor refuse this one).
+    let candidates: Vec<&InstalledRepo> = registry
+        .list()
+        .into_iter()
+        .filter(|(_, repo)| repo.plugins.contains_key(name))
+        .map(|(_, repo)| repo)
+        .collect();
+    let matching: Vec<&InstalledRepo> = match hex8 {
+        Some(hex8) => candidates
+            .iter()
+            .copied()
+            .filter(|repo| {
+                repo.plugin_root(name)
+                    .is_some_and(|root| plugin_root_hex8(&root) == hex8)
+            })
+            .collect(),
+        None => candidates.clone(),
+    };
+    // An id whose root matches no install record cannot be tied to an allowed source: refuse (fail closed). When
+    // several installs share the name and no hash narrows them, every one must come from an allowed source.
+    if matching.is_empty() {
+        let reason = policy
+            .add_block_reason("")
+            .unwrap_or_else(|| "source not in strictKnownMarketplaces".to_string());
+        return Some(format!(
+            "Plugin enable blocked by managed policy: {reason} (no install record ties this plugin to an allowed source)"
+        ));
+    }
+    matching.into_iter().find_map(|repo| {
+        installed_repo_block_reason(policy, registry, repo)
+            .map(|reason| format!("Plugin enable blocked by managed policy: {reason}"))
+    })
+}
+
+/// Why managed policy refuses `repo`'s source: the verified identity (the origin of a checkout the record matches), the
+/// same one the load gate allowlists. A record that cannot be tied to a checkout is refused.
+fn installed_repo_block_reason(
+    policy: &fuigo_workspace::permission::resolution::MarketplacePolicy,
+    registry: &InstallRegistry,
+    repo: &InstalledRepo,
+) -> Option<String> {
+    if !policy.is_restricted() {
+        return None;
+    }
+    // The identity the load gate judges: an unverifiable record has none, and `""` is never allowed.
+    let identity = registry.verified_source_identity(repo).unwrap_or_default();
+    policy.add_block_reason(&identity)
+}
+
+/// What `fuigo plugin enable <name>` persists (P169, Astra r2). Unrestricted: the name, as before. Under
+/// strictKnownMarketplaces the name is resolved to the one recorded install it means and that install's full id is
+/// persisted, so a same-named plugin from another source (a project plugin, say) is not enabled by the name; an
+/// ambiguous or unrecorded name, or a blocked source, is refused before any write.
+pub fn plugin_enable_target(name: &str) -> Result<String, String> {
+    let policy = &fuigo_workspace::permission::resolution::managed_settings().marketplace_allowlist;
+    plugin_enable_target_with(policy, &InstallRegistry::load(), name)
+}
+
+fn plugin_enable_target_with(
+    policy: &fuigo_workspace::permission::resolution::MarketplacePolicy,
+    registry: &InstallRegistry,
+    name: &str,
+) -> Result<String, String> {
+    if !policy.is_restricted() || name.contains('/') {
+        return match plugin_enable_block_reason_with(policy, registry, name) {
+            Some(reason) => Err(reason),
+            None => Ok(name.to_string()),
+        };
+    }
+    if let Some(reason) = plugin_enable_block_reason_with(policy, registry, name) {
+        return Err(reason);
+    }
+    let ids: Vec<String> = registry
+        .list()
+        .into_iter()
+        .filter_map(|(_, repo)| installed_plugin_id(repo, name))
+        .collect();
+    match ids.as_slice() {
+        [id] => Ok(id.clone()),
+        _ => Err(format!(
+            "Plugin enable blocked by managed policy: \"{name}\" names more than one install; enable it by its id"
+        )),
+    }
+}
+
+/// The full plugin id discovery gives install `name` of `repo` (user scope, canonical root), or `None` when `repo` has
+/// no plugin of that name. Persisting it (instead of the bare name) enables exactly this install (P169, Astra r3).
+pub(crate) fn installed_plugin_id(repo: &InstalledRepo, name: &str) -> Option<String> {
+    repo.plugin_id(name)
+}
+
+/// The `<hex8>` segment of a [`fuigo_agent::plugins::discovery::PluginId`] for `canonical_root`.
+fn plugin_root_hex8(canonical_root: &Path) -> String {
+    let id = fuigo_agent::plugins::discovery::PluginId::new(
+        fuigo_agent::plugins::discovery::PluginScope::User,
+        canonical_root,
+        "x",
+    );
+    id.0.split('/').nth(1).unwrap_or_default().to_string()
+}
+
 /// Parse, clone/symlink, register, and enable a plugin. Does not emit telemetry.
 pub fn install_plugin(source: &str, cwd: &Path) -> Result<InstallOutcome, InstallError> {
     let install_source = git_install::parse_install_source(source, cwd);
+    if let Some(reason) = direct_install_block_reason(&install_source) {
+        return Err(InstallError::InstallFailed { detail: reason });
+    }
     let is_local = matches!(install_source, git_install::InstallSource::Local { .. });
     let mut registry = InstallRegistry::load();
 
@@ -378,7 +524,16 @@ pub(crate) fn update_plugins_by_selector(
     let mut outcomes = Vec::with_capacity(repos_to_update.len());
     let mut source_cache = std::collections::HashMap::new();
 
+    let policy = &fuigo_workspace::permission::resolution::managed_settings().marketplace_allowlist;
     for (repo_key, repo) in &repos_to_update {
+        // P169 (Astra r1 #4): never fetch new code for a plugin whose source managed policy no longer allows.
+        if let Some(reason) = installed_repo_block_reason(policy, &registry, repo) {
+            outcomes.push(RepoUpdateOutcome::Failed {
+                repo_key: repo_key.clone(),
+                error: format!("update blocked by managed policy: {reason}"),
+            });
+            continue;
+        }
         let outcome = if repo.marketplace.is_some() {
             match update_marketplace_repo(&mut registry, repo, &mut source_cache) {
                 Ok(result) => {
@@ -731,7 +886,7 @@ pub(crate) fn load_filtered_marketplace_sources() -> Vec<MarketplaceSource> {
 
 fn filter_sources_by_allowlist(
     mut sources: Vec<MarketplaceSource>,
-    allowlist: &fuigo_workspace::permission::resolution::MarketplaceAllowlist,
+    allowlist: &fuigo_workspace::permission::resolution::MarketplacePolicy,
 ) -> Vec<MarketplaceSource> {
     if allowlist.is_restricted() {
         sources.retain(|source| match &source.kind {
@@ -742,13 +897,21 @@ fn filter_sources_by_allowlist(
                     tracing::warn!(
                         name = %source.name,
                         url,
-                        reason = %allowlist.block_reason(),
+                        reason = %allowlist.block_reason(url),
                         "Marketplace source blocked by allowlist"
                     );
                     false
                 }
             }
-            SourceKind::Local { .. } => true,
+            // P169 (Astra r1 #4): a local path never matches the git allowlist, so under a restriction it is
+            // dropped like an unlisted git source (the same rule as adding one).
+            SourceKind::Local { .. } => {
+                tracing::warn!(
+                    name = %source.name,
+                    "Local marketplace source blocked: strictKnownMarketplaces allows git sources only"
+                );
+                false
+            }
         });
     }
     sources
@@ -2077,15 +2240,17 @@ mod tests {
 
     fn marketplace_allowlist(
         urls: &[&str],
-    ) -> fuigo_workspace::permission::resolution::MarketplaceAllowlist {
-        fuigo_workspace::permission::resolution::MarketplaceAllowlist {
-            allowed_urls: urls.iter().map(|u| u.to_string()).collect(),
-            source_path: None,
-        }
+    ) -> fuigo_workspace::permission::resolution::MarketplacePolicy {
+        fuigo_workspace::permission::resolution::MarketplacePolicy::single(
+            fuigo_workspace::permission::resolution::MarketplaceAllowlist {
+                allowed_urls: urls.iter().map(|u| u.to_string()).collect(),
+                source_path: None,
+            },
+        )
     }
 
     #[test]
-    fn filter_sources_by_allowlist_drops_blocked_git_keeps_allowed_and_local() {
+    fn filter_sources_by_allowlist_drops_blocked_git_and_local() {
         let allowlist = marketplace_allowlist(&["https://github.com/ok/repo.git"]);
         let sources = vec![
             git_source("Allowed", "https://github.com/ok/repo.git"),
@@ -2094,12 +2259,226 @@ mod tests {
         ];
         let filtered = filter_sources_by_allowlist(sources, &allowlist);
         let names: Vec<&str> = filtered.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["Allowed", "Local"]);
+        // P169: a local source cannot match a git allowlist, so it is dropped under a restriction.
+        assert_eq!(names, vec!["Allowed"]);
+    }
+
+    /// P169: a direct install (git URL or local path) is refused under strictKnownMarketplaces exactly like adding a
+    /// marketplace, before anything is fetched or written.
+    #[test]
+    fn direct_install_respects_strict_marketplaces() {
+        let restricted = marketplace_allowlist(&["https://github.com/ok/repo.git"]);
+        let git = |url: &str| git_install::InstallSource::Git {
+            url: url.to_string(),
+            git_ref: None,
+            git_sha: None,
+            subdir: None,
+        };
+        assert_eq!(
+            direct_install_block_reason_with(&restricted, &git("https://github.com/ok/repo")),
+            None
+        );
+        let blocked =
+            direct_install_block_reason_with(&restricted, &git("https://github.com/evil/repo.git"))
+                .unwrap();
+        assert!(blocked.starts_with("Plugin install blocked by managed policy:"), "{blocked}");
+        let local = git_install::InstallSource::Local {
+            path: std::path::PathBuf::from("/tmp/plugin"),
+            subdir: None,
+        };
+        assert!(direct_install_block_reason_with(&restricted, &local).is_some());
+        let open = fuigo_workspace::permission::resolution::MarketplacePolicy::default();
+        assert_eq!(direct_install_block_reason_with(&open, &local), None);
+    }
+
+    /// P169: enabling a plugin is refused under strictKnownMarketplaces unless it came from an allowed source.
+    #[test]
+    fn plugin_enable_respects_strict_marketplaces() {
+        let restricted = marketplace_allowlist(&["https://github.com/ok/repo.git"]);
+        // Round 7: the gates judge the verified identity, so these are real checkouts under a real install dir.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = dunce::canonicalize(tmp.path()).unwrap();
+        let mut registry = InstallRegistry::empty(root.join("installed-plugins"));
+        let checkout = |dir: &std::path::Path, origin: Option<&str>| {
+            std::fs::create_dir_all(dir.join(".git")).unwrap();
+            if let Some(url) = origin {
+                std::fs::write(
+                    dir.join(".git").join("config"),
+                    format!("[remote \"origin\"]\n\turl = {url}\n"),
+                )
+                .unwrap();
+            }
+            dir.to_path_buf()
+        };
+        let install = |key: &str, origin: Option<&str>| checkout(&root.join("installed-plugins").join(key), origin);
+        let repo = |kind: InstallKind,
+                    marketplace: Option<MarketplaceProvenance>,
+                    plugin: &str,
+                    path: std::path::PathBuf| {
+            let mut plugins = std::collections::HashMap::new();
+            plugins.insert(
+                plugin.to_string(),
+                fuigo_agent::plugins::install_registry::RepoPlugin {
+                    subdir: None,
+                    version: None,
+                },
+            );
+            InstalledRepo {
+                kind,
+                installed_at: String::new(),
+                updated_at: String::new(),
+                path,
+                plugins,
+                marketplace,
+            }
+        };
+        let git = |url: &str| InstallKind::Git {
+            url: url.to_string(),
+            git_ref: None,
+            commit: "0".repeat(40),
+            subdir: None,
+        };
+        let good_path = install("good", Some("https://github.com/ok/repo.git"));
+        registry.insert(
+            "good".into(),
+            repo(git("https://github.com/ok/repo.git"), None, "good-plugin", good_path.clone()),
+        );
+        let bad_path = install("bad", Some("https://github.com/evil/repo.git"));
+        registry.insert(
+            "bad".into(),
+            repo(git("https://github.com/evil/repo.git"), None, "bad-plugin", bad_path),
+        );
+        // A marketplace copy: bound to the checkout it was copied from, whose origin is the marketplace source.
+        let market_src = checkout(&root.join("cache").join("ok"), Some("https://github.com/ok/repo.git"));
+        let market_path = install("market", None);
+        registry.insert(
+            "via-market".into(),
+            repo(
+                InstallKind::Local {
+                    source_path: market_src.join("plugins").join("m"),
+                    subdir: None,
+                },
+                Some(MarketplaceProvenance {
+                    source_url_or_path: "https://github.com/ok/repo.git".into(),
+                    source_display_name: "ok".into(),
+                    plugin_subdir: "plugins/m".into(),
+                }),
+                "market-plugin",
+                market_path.clone(),
+            ),
+        );
+        assert_eq!(plugin_enable_block_reason_with(&restricted, &registry, "good-plugin"), None);
+        assert_eq!(
+            plugin_enable_block_reason_with(
+                &restricted,
+                &registry,
+                &format!("user/{}/market-plugin", plugin_root_hex8(&market_path))
+            ),
+            None,
+            "marketplace provenance is the identity"
+        );
+        assert!(plugin_enable_block_reason_with(&restricted, &registry, "bad-plugin").is_some());
+        assert!(
+            plugin_enable_block_reason_with(&restricted, &registry, "unknown-path-plugin").is_some(),
+            "no recorded source fails closed"
+        );
+        let open = fuigo_workspace::permission::resolution::MarketplacePolicy::default();
+        assert_eq!(plugin_enable_block_reason_with(&open, &registry, "bad-plugin"), None);
+
+        // Astra r2: the CLI's bare name is persisted as the one allowed install's full id under a restriction.
+        assert_eq!(
+            plugin_enable_target_with(&restricted, &registry, "good-plugin"),
+            Ok(format!(
+                "user/{}/good-plugin",
+                plugin_root_hex8(&good_path)
+            ))
+        );
+        assert!(plugin_enable_target_with(&restricted, &registry, "bad-plugin").is_err());
+        // Astra r3: the post-install auto-enable and ACP enable share this id.
+        assert_eq!(
+            installed_plugin_id(registry.get_repo("good").unwrap(), "good-plugin"),
+            plugin_enable_target_with(&restricted, &registry, "good-plugin").ok()
+        );
+        assert_eq!(installed_plugin_id(registry.get_repo("good").unwrap(), "nope"), None);
+        assert_eq!(
+            plugin_enable_target_with(&open, &registry, "bad-plugin"),
+            Ok("bad-plugin".to_string()),
+            "unrestricted keeps the old bare-name behaviour"
+        );
+
+        // Astra r1 N1: two installs named `demo`, one allowed, one not. The full id picks the right one.
+        let ok_path = install("ok-demo", Some("https://github.com/ok/repo.git"));
+        let ok_repo = repo(git("https://github.com/ok/repo.git"), None, "demo", ok_path.clone());
+        let bad_path = install("bad-demo", Some("https://github.com/evil/repo.git"));
+        let bad_repo = repo(git("https://github.com/evil/repo.git"), None, "demo", bad_path.clone());
+        registry.insert("ok-demo".into(), ok_repo);
+        registry.insert("bad-demo".into(), bad_repo);
+        let id_for = |dir: &std::path::Path| format!("user/{}/demo", plugin_root_hex8(dir));
+        assert_eq!(
+            plugin_enable_block_reason_with(&restricted, &registry, &id_for(&ok_path)),
+            None,
+            "the allowed install is not refused because of a same-named blocked one"
+        );
+        assert!(
+            plugin_enable_block_reason_with(&restricted, &registry, &id_for(&bad_path)).is_some(),
+            "the blocked install is not authorized by a same-named allowed one"
+        );
+        assert!(
+            plugin_enable_block_reason_with(&restricted, &registry, "demo").is_some(),
+            "an ambiguous bare name needs every install allowed"
+        );
+        assert!(
+            plugin_enable_block_reason_with(&restricted, &registry, &id_for(std::path::Path::new("/p169/elsewhere"))).is_some(),
+            "an id matching no install record fails closed"
+        );
+    }
+
+    /// Round 7 (grok-p169-r6.md MEDIUM 3): enable and update judge the verified identity, not the record's string. A
+    /// `Local` record inside the install dir that names an allowed marketplace URL, with no checkout origin, is refused.
+    #[test]
+    fn enable_and_update_gates_use_the_verified_source_identity() {
+        let restricted = marketplace_allowlist(&["https://github.com/a/b.git"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let install_dir = tmp.path().join("installed-plugins");
+        let path = install_dir.join("pwn");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut registry = InstallRegistry::empty(install_dir);
+        let repo = InstalledRepo {
+            kind: InstallKind::Local {
+                source_path: tmp.path().join("my-own-dir"),
+                subdir: None,
+            },
+            installed_at: String::new(),
+            updated_at: String::new(),
+            path,
+            plugins: HashMap::from([(
+                "pwn".to_string(),
+                fuigo_agent::plugins::install_registry::RepoPlugin {
+                    subdir: None,
+                    version: None,
+                },
+            )]),
+            marketplace: Some(MarketplaceProvenance {
+                source_url_or_path: "https://github.com/a/b.git".into(),
+                source_display_name: "m".into(),
+                plugin_subdir: "plugins/pwn".into(),
+            }),
+        };
+        let id = installed_plugin_id(&repo, "pwn").unwrap();
+        registry.insert("pwn".into(), repo.clone());
+        assert!(
+            plugin_enable_block_reason_with(&restricted, &registry, &id).is_some(),
+            "enable must refuse a record whose provenance was never checked against a checkout"
+        );
+        assert!(
+            installed_repo_block_reason(&restricted, &registry, &repo).is_some(),
+            "update must not fetch for such a record"
+        );
     }
 
     #[test]
     fn filter_sources_by_allowlist_unrestricted_passes_everything() {
-        let allowlist = fuigo_workspace::permission::resolution::MarketplaceAllowlist::default();
+        let allowlist = fuigo_workspace::permission::resolution::MarketplacePolicy::default();
         let sources = vec![
             git_source("Any Git", "https://github.com/bad/repo.git"),
             local_source("Local", "/tmp/p"),

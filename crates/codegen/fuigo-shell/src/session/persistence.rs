@@ -67,6 +67,11 @@ pub fn is_forbidden_title_char(c: char) -> bool {
         || matches!(
             c,
             '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            // The classes `fuigo_tty_utils::is_unsafe_display_char` added; ZWJ and ZWNJ stay legal in titles.
+            // The tag block U+E0020..E007F is left out on purpose: `strip_loose_tags` keeps a valid flag's tags and drops the rest.
+            | '\u{00AD}' | '\u{180E}' | '\u{2028}' | '\u{2029}' | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
         )
 }
 
@@ -76,8 +81,15 @@ pub fn is_forbidden_title_char(c: char) -> bool {
 ///
 /// Already-clean input is borrowed (trim is a subslice); only a title that actually contains forbidden chars allocates.
 pub fn sanitize_rename_title(title: &str) -> Cow<'_, str> {
-    if title.chars().any(is_forbidden_title_char) {
-        let mut cleaned: String = title
+    let has_tag = title.chars().any(is_tag_char);
+    if has_tag || title.chars().any(is_forbidden_title_char) {
+        // Tags first: only a valid subdivision flag keeps its tags
+        let tagged: Cow<'_, str> = if has_tag {
+            Cow::Owned(fuigo_tty_utils::strip_loose_tags(title))
+        } else {
+            Cow::Borrowed(title)
+        };
+        let mut cleaned: String = tagged
             .chars()
             .filter(|c| !is_forbidden_title_char(*c))
             .collect();
@@ -91,6 +103,12 @@ pub fn sanitize_rename_title(title: &str) -> Cow<'_, str> {
     }
 }
 
+/// The Unicode tag block, which only a valid subdivision flag may use
+#[inline]
+pub fn is_tag_char(c: char) -> bool {
+    matches!(c, '\u{E0020}'..='\u{E007F}')
+}
+
 /// Sanitize then cap. `None` when the result is blank.
 /// Overlong titles are truncated (ingest/pull defense); the ext rename path rejects instead.
 pub fn sanitize_and_cap_title(title: &str) -> Option<String> {
@@ -101,7 +119,9 @@ pub fn sanitize_and_cap_title(title: &str) -> Option<String> {
     if cleaned.chars().count() <= MAX_TITLE_SCALARS {
         Some(cleaned.into_owned())
     } else {
-        Some(cleaned.chars().take(MAX_TITLE_SCALARS).collect())
+        let head: String = cleaned.chars().take(MAX_TITLE_SCALARS).collect();
+        // The cut can leave half a subdivision flag, whose loose tags would hide text
+        Some(fuigo_tty_utils::strip_loose_tags(&head))
     }
 }
 
@@ -367,6 +387,8 @@ pub enum PersistenceMsg {
     /// held and what was written. The lock never travels in a message: one given up on cannot keep it.
     RewriteRewindPointsAndAck {
         rewrite: crate::session::storage::RewindPointsRewrite,
+        /// What the rewind commits next, for its journal (P164); `None`: the rewind leaves the conversation as it is.
+        conversation: Option<crate::session::storage::RewindConversation>,
         gate: AckGate,
         respond_to: tokio::sync::oneshot::Sender<io::Result<crate::session::storage::RewindPointsUndo>>,
     },
@@ -2566,9 +2588,12 @@ impl SessionPersistence {
                         let _ = respond_to.send(result);
                     }
                 }
-                PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to } => {
+                PersistenceMsg::RewriteRewindPointsAndAck { rewrite, conversation, gate, respond_to } => {
                     if gate.start() {
-                        let result = self.storage.rewrite_rewind_points_holding(&self.info, rewrite).await;
+                        let result = self
+                            .storage
+                            .rewrite_rewind_points_holding(&self.info, rewrite, conversation)
+                            .await;
                         if let Err(e) = &result {
                             tracing::warn!(?e, ?rewrite, "failed to rewrite rewind points for a rewind");
                         }
@@ -2824,23 +2849,40 @@ impl SessionPersistence {
     }
 }
 
+#[path = "persistence_archive_logs.rs"]
+mod archive_logs;
+
 /// Collect MCP server stderr logs from `~/.fuigo/logs/mcp/` for inclusion in the session archive.
+/// Each log is capped at [`archive_logs::MAX_ARCHIVED_LOG_BYTES`] (first and last half around a marker).
 fn collect_mcp_stderr_logs(files: &mut Vec<CopiedSessionFile>) {
     let mcp_log_dir = fuigo_config::fuigo_home().join("logs").join("mcp");
     let Ok(entries) = std::fs::read_dir(&mcp_log_dir) else {
         return;
     };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file()
-            && path.extension().is_some_and(|ext| ext == "log")
-            && let Ok(data) = std::fs::read(&path)
+    let mut paths: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+    for path in paths {
+        if path.extension().is_none_or(|ext| ext != "log") {
+            continue;
+        }
+        let Some(file_name) = path.file_name() else {
+            continue;
+        };
+        // Same open as the terminal logs: no link followed, never blocks on a FIFO, regular files only.
+        let file = match crate::session::storage::open_beneath_nofollow(
+            &mcp_log_dir,
+            std::path::Path::new(file_name),
+        ) {
+            Ok(file) => file,
+            Err(_) => {
+                tracing::debug!(path = %path.display(), "session copy: MCP stderr log skipped");
+                continue;
+            }
+        };
+        if let Ok(data) = archive_logs::read_log_for_archive(file)
             && !data.is_empty()
         {
-            let name = format!(
-                "mcp_stderr/{}",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
+            let name = format!("mcp_stderr/{}", file_name.to_string_lossy());
             files.push(CopiedSessionFile { name, data });
         }
     }
@@ -2849,6 +2891,29 @@ fn collect_mcp_stderr_logs(files: &mut Vec<CopiedSessionFile>) {
 /// Recursively collect all files from `dir` into `files`, using paths relative to `base`.
 /// This captures subdirectories like `prompts/` which contain large-prompt files referenced by truncated chat history entries.
 fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<CopiedSessionFile>) {
+    collect_session_files_walk(base, dir, files);
+    archive_logs::collect_terminal_logs(base, files);
+}
+
+/// The name a copied file carries: the path relative to the session folder with `/` between components on every OS (the
+/// archive and the server use `/`). On unix a backslash can be part of a file name, so the path is used as it is; on
+/// Windows the components are joined with `/`. `None` for a non-UTF-8 name (the file is skipped, as before).
+pub(super) fn copied_file_name(rel_path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let mut parts = Vec::new();
+        for component in rel_path.components() {
+            parts.push(component.as_os_str().to_str()?);
+        }
+        Some(parts.join("/"))
+    }
+    #[cfg(not(windows))]
+    {
+        rel_path.to_str().map(str::to_owned)
+    }
+}
+
+fn collect_session_files_walk(base: &Path, dir: &Path, files: &mut Vec<CopiedSessionFile>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -2871,7 +2936,7 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let Some(name) = rel_path.to_str() else {
+            let Some(name) = copied_file_name(rel_path) else {
                 continue;
             };
             let opened = match crate::session::storage::open_beneath_nofollow(base, rel_path) {
@@ -2893,11 +2958,12 @@ fn collect_session_files_recursive(base: &Path, dir: &Path, files: &mut Vec<Copi
                 }
             };
             files.push(CopiedSessionFile {
-                name: name.to_string(),
+                name,
                 data,
             });
-        } else if file_type.is_dir() {
-            collect_session_files_recursive(base, &path, files);
+        } else if file_type.is_dir() && path != base.join(archive_logs::TERMINAL_DIR) {
+            // `terminal/` is bounded separately (newest first, per-log cap) by `collect_terminal_logs`.
+            collect_session_files_walk(base, &path, files);
         }
     }
 }
@@ -3349,6 +3415,13 @@ pub(crate) async fn load_light(
     let jsonl_storage = JsonlStorageAdapter::with_root(root_dir.clone());
     let storage: Box<dyn StorageAdapter> = Box::new(jsonl_storage.clone());
 
+    // A rewind Fuigo was killed in the middle of left its durable copy of rewind_points.jsonl behind: undone or
+    // finished here, under the rewind's own lock, before anything of the session is read (P164, K19). The history
+    // this load returns is read after it (Astra r3): read before, it could be the conversation a rewind that went
+    // through had already replaced, which startup would then write back. It also runs before the repair below, which
+    // may rewrite chat_history.jsonl, the file that tells whether the rewind went through. A session only on the
+    // backend has no leftover here.
+    let rewind_notice = jsonl_storage.reconcile_interrupted_rewind(info).await;
     let (mut persisted, loaded_info) = match storage.load_session_without_updates(info).await {
         Ok(p) => (p, info.clone()),
         Err(e) => match backend {
@@ -3360,6 +3433,13 @@ pub(crate) async fn load_light(
             None => return Err(e),
         },
     };
+    #[cfg(any(test, feature = "test-support"))]
+    crate::session::storage::rewind_crash_seam::note_history_read(
+        &loaded_info.id.0,
+        crate::session::storage::rewind_points_pre_rewind_copy(&session_dir(&loaded_info).join("rewind_points.jsonl"))
+            .symlink_metadata()
+            .is_ok(),
+    );
     // A torn line the reader skipped can leave a tool result without its call, which strict providers reject on every
     // request. Repair that here, behind a backup of the file as found (P96). The same holds when an earlier load
     // skipped the line and left its `.corrupt` copy (a session that broke before P96). The repair does nothing for a
@@ -3368,10 +3448,14 @@ pub(crate) async fn load_light(
     // landed left the history from before it in the file, followed by everything written since. The load already took
     // the checkpoint's projection and those later items instead (P111, DI-03; `load_session_without_updates`), and
     // counts their unreadable lines, so the repair below covers the recovered history too; spawn persists it.
-    let history_repair_notice = jsonl_storage
+    let repair_notice = jsonl_storage
         .repair_after_corrupt_load(&loaded_info, &mut persisted)
         .await
         .map(|repair| repair.notice());
+    let history_repair_notice = match (rewind_notice, repair_notice) {
+        (Some(rewind), Some(repair)) => Some(format!("{rewind}\n{repair}")),
+        (rewind, repair) => rewind.or(repair),
+    };
     // Touch on load too: resuming must reset the worktree's gc expiry clock.
     touch_worktree_for_session(&loaded_info).await;
 
@@ -3611,14 +3695,24 @@ static CLEANUP_SESSIONS_ONCE: std::sync::Once = std::sync::Once::new();
 
 const DEFAULT_CLEANUP_TTL_DAYS: u32 = 30;
 
-/// Walk `~/.fuigo/sessions/` and delete files with mtime older than `ttl_days`.
-/// Removes empty session directories after file cleanup.
-/// Skips `skip_session_dir` if provided (current session).
+/// P172 (D1): the only folders swept inside a session that is still in use. Everything else in a session folder
+/// (compaction checkpoints, prompt offloads, rewind points, chat and update history, subagent transcripts) is a
+/// write-once artifact a resume or rewind still reads, so its own age says nothing about whether it is needed.
+const SWEPT_BLOB_DIRS: [&str; 4] = ["images", "videos", "downloads", archive_logs::TERMINAL_DIR];
+
+/// Walk `~/.fuigo/sessions/` once per process and age out what is older than `[storage] cleanup_ttl_days` (30 days
+/// by default), judging each session folder as a unit:
+/// - a session whose newest file (in the folder or its subfolders) is older than the TTL (nobody has used it for that
+///   long) is removed whole;
+/// - any other session keeps everything except stale files in its disposable caches ([`SWEPT_BLOB_DIRS`]);
+/// - `live_session_dir` (the session this process is attaching) is never removed, only its caches are pruned.
+///
+/// Callers [`mark_session_live`] first, so other processes' sweeps see the attach. Symlinks are never followed.
 ///
 /// This is a **synchronous** function intended to be called via `tokio::task::spawn_blocking`.
 /// It then runs on the thread pool and never competes with the agent's single-threaded `LocalSet`.
 #[tracing::instrument(skip_all)]
-pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
+pub(crate) fn cleanup_stale_sessions(live_session_dir: &Path) {
     CLEANUP_SESSIONS_ONCE.call_once(|| {
         let ttl_days = resolve_cleanup_ttl_days();
         let sessions_root = fuigo_home().join("sessions");
@@ -3627,14 +3721,14 @@ pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
             target: "fuigo_shell::session::persistence",
             sessions_root = %sessions_root.display(),
             ttl_days,
-            skip = ?skip_session_dir.map(|p| p.display().to_string()),
-            "SESSION_CLEANUP_START: scanning for stale session files"
+            live = %live_session_dir.display(),
+            "SESSION_CLEANUP_START: scanning for stale sessions"
         );
 
         let stats = cleanup_stale_sessions_inner(
             &sessions_root,
             ttl_days,
-            skip_session_dir,
+            Some(live_session_dir),
             CleanupLevel::SessionsRoot,
         );
 
@@ -3643,10 +3737,267 @@ pub(crate) fn cleanup_stale_sessions(skip_session_dir: Option<&Path>) {
             sessions_root = %sessions_root.display(),
             files_deleted = stats.files_deleted,
             dirs_removed = stats.dirs_removed,
+            sessions_removed = stats.sessions_removed,
             errors = stats.errors,
             "SESSION_CLEANUP_DONE"
         );
     });
+}
+
+pub(crate) fn session_sweep_done() -> bool {
+    CLEANUP_SESSIONS_ONCE.is_completed()
+}
+
+/// Prefix of the lock an attach holds shared while it marks its session live, and the sweep holds exclusively from
+/// before its last look at an idle session until that session has left its path: `<cwd folder>/<prefix><session>`.
+/// Separate from `turn_owner.lock`, whose exclusive holder can also be an interrupted-turn recovery (seconds long): an
+/// attach must never wait for that here. P178: it lives NEXT TO the session folder, not in it, because Windows (NTFS)
+/// refuses to rename a folder while any handle beneath it is open, so a lock held inside the folder would block the
+/// very rename it protects. A dot name is never listed as a session.
+pub(crate) const SWEEP_LOCK_PREFIX: &str = ".fuigo-sweep-lock-";
+
+/// A session used this recently cannot be removed by any sweep, whatever its TTL (`cleanup_ttl_days` is at least 1),
+/// for at least the next hour. It is the timestamp side of an unbumpable mark; the load's guard is the sweep lock its
+/// [`LiveMark`] holds until the actor holds `turn_owner.lock` (P176).
+const UNMARKED_SAFE_AGE: std::time::Duration = std::time::Duration::from_secs(23 * 3600);
+
+/// Prefix of the name an idle session is renamed to (next to it, in its cwd folder) before it is deleted. A dot name
+/// is never listed as a session; a leftover (an interrupted delete) is removed by the next sweep.
+const REMOVING_PREFIX: &str = ".fuigo-sweep-removing-";
+
+/// Prefix of the name a session is kept under when the sweep had to put it back (something marked it while it was
+/// being removed) and its path had been taken meanwhile. A dot name, never listed and never removed by a sweep.
+const KEPT_PREFIX: &str = ".fuigo-sweep-kept-";
+
+#[path = "persistence_sweep_pin.rs"]
+mod sweep_pin;
+
+/// How long an attach waits for a sweep that is removing its session right now. The sweep holds its sweep lock only
+/// for its last look and one rename, so reaching this means that process is stuck.
+const MARK_LIVE_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Why an attach could not mark its session live, and so must not load it.
+#[derive(Debug)]
+pub(crate) enum MarkLiveError {
+    /// A sweep in another process held this session's sweep lock past [`MARK_LIVE_WAIT_LIMIT`].
+    SweepBusy,
+    /// Nothing in a session idle for a day or more could be bumped (read-only files, a Windows sharing violation): a
+    /// concurrent sweep could remove it while it loads.
+    Unmarkable { dir: PathBuf, error: io::Error },
+}
+
+impl MarkLiveError {
+    pub(crate) fn into_acp_error(self) -> agent_client_protocol::Error {
+        match self {
+            Self::SweepBusy => crate::acp_error::session_unavailable(
+                "This session is being cleaned up by another Fuigo process. Retry loading it in a moment; if this \
+                 persists, that process may be stuck and restarting it releases the session.",
+            ),
+            Self::Unmarkable { dir, error } => crate::acp_error::session_unavailable(format!(
+                "This session was not loaded: Fuigo could not record that it is in use, because neither summary.json \
+                 nor updates.jsonl in {} could be updated ({error}). Without that record the 30-day session cleanup \
+                 of another Fuigo process could remove the session while it loads. Make those files writable (or \
+                 close the program holding them) and retry.",
+                dir.display()
+            )),
+        }
+    }
+}
+
+/// Bumps `summary.json`'s mtime so a sweep (this process's or another's) sees the attach that is about to read this
+/// session folder. Runs before the session is read and before this process's sweep is spawned: the sweep's live-dir
+/// exclusion only covers one folder in one process, and neither loading nor initialising a session rewrites the
+/// summary. A folder without a regular `summary.json` (a fresh `session/new`, a stub, a session just removed) has
+/// nothing to bump.
+///
+/// The mark holds the session's sweep lock ([`SWEEP_LOCK_PREFIX`]) shared, so it cannot fall between a sweep's last
+/// look at this session and the rename that takes the session off its path: either the sweep looks after the mark and
+/// keeps the session, or the mark waits (asynchronously) until the session is gone and finds nothing to mark, and the
+/// load then finds no session, never a half one. Nothing is written, and no link is followed (`O_NOFOLLOW`, a FIFO
+/// cannot block the open; `FILE_FLAG_OPEN_REPARSE_POINT` on Windows).
+///
+/// P178: when `summary.json` cannot be bumped, `updates.jsonl` is (the sweep counts both); when neither can, the load
+/// fails ([`MarkLiveError::Unmarkable`]) unless the session was used within [`UNMARKED_SAFE_AGE`], which no sweep can
+/// remove during a load.
+pub(crate) async fn mark_session_live(session_dir: &Path) -> Result<LiveMark, MarkLiveError> {
+    mark_session_live_waiting(session_dir, MARK_LIVE_WAIT_LIMIT).await
+}
+
+/// What an attach holds from its mark until its actor holds `turn_owner.lock` shared (P176): the session's sweep lock,
+/// shared. No sweep can take it exclusively meanwhile, so the session cannot be removed while it loads, however long
+/// the load takes or is suspended (before P176 only the mark's timestamp protected it, which a load suspended past the
+/// TTL outlived). Dropping it releases the lock; the actor's `turn_owner.lock` protects the session from then on.
+#[must_use = "hold the mark until the session's actor holds turn_owner.lock"]
+#[derive(Debug)]
+pub(crate) struct LiveMark {
+    _sweep_lock: Option<crate::session::storage::jsonl::HeldLock>,
+}
+
+async fn mark_session_live_waiting(
+    session_dir: &Path,
+    wait_limit: std::time::Duration,
+) -> Result<LiveMark, MarkLiveError> {
+    mark_session_live_with(session_dir, wait_limit, &touch_nofollow).await
+}
+
+/// `touch` bumps one file's mtime (tests inject one that fails, as a read-only file or a Windows sharing violation
+/// does).
+async fn mark_session_live_with(
+    session_dir: &Path,
+    wait_limit: std::time::Duration,
+    touch: &dyn Fn(&Path) -> io::Result<()>,
+) -> Result<LiveMark, MarkLiveError> {
+    let summary = session_dir.join("summary.json");
+    let is_regular_summary =
+        || std::fs::symlink_metadata(&summary).is_ok_and(|metadata| metadata.file_type().is_file());
+    if !is_regular_summary() {
+        return Ok(LiveMark { _sweep_lock: None });
+    }
+    // Without the lock (a filesystem without advisory locks, a planted link) the mark goes ahead unguarded: loads keep
+    // working there. A sweep that cannot lock either keeps the session; one that can (a lock failure in this process
+    // only) still keeps it, because it looks at the session again after taking it off its path and puts back one
+    // that anything marked in between (`cleanup_pinned_session`, P176)
+    let shared = match open_sweep_lock(session_dir) {
+        Some(lock) => {
+            if take_lock_waiting(&lock, false, wait_limit).await == LockWait::Busy {
+                tracing::warn!(
+                    dir = %session_dir.display(),
+                    "a session sweep held this session past the limit; failing the load"
+                );
+                return Err(MarkLiveError::SweepBusy);
+            }
+            Some(crate::session::storage::jsonl::HeldLock::new(lock))
+        }
+        None => None,
+    };
+    let mark = LiveMark { _sweep_lock: shared };
+    if !is_regular_summary() {
+        return Ok(mark);
+    }
+    // P178 (Astra r1): a worktree identity repair (`summary_write::repair_worktree_identity`, run by session listing)
+    // records summary.json's mtime, rewrites the file and restores that older mtime, all under `summary.json.lock`. A
+    // bump in between would be erased and the sweep would then see an idle session this attach is loading. So the
+    // summary is bumped under the same lock; when it cannot be taken (a writer holds it past the limit, a planted
+    // link) the transcript is bumped instead, which the repair never touches.
+    // Only a lock actually taken excludes a repair (Astra r2); it is held to the end of the mark.
+    let summary_lock = match open_lock_nofollow(session_dir, SUMMARY_LOCK_FILE) {
+        Some(lock) if take_lock_waiting(&lock, true, wait_limit).await == LockWait::Taken => Some(crate::session::storage::jsonl::HeldLock::new(lock)),
+        _ => None,
+    };
+    let summary_held = summary_lock.is_some();
+    let error = if summary_held {
+        match touch(&summary) {
+            Ok(()) => return Ok(mark),
+            Err(error) => error,
+        }
+    } else {
+        io::Error::other("summary.json.lock could not be taken")
+    };
+    // The transcript is the other file the sweep's activity rule always sees
+    let updates = session_dir.join("updates.jsonl");
+    if touch(&updates).is_ok() {
+        tracing::debug!(
+            target: "fuigo_shell::session::persistence",
+            file = %summary.display(),
+            %error,
+            "SESSION_MARK_LIVE_ERROR: marked updates.jsonl instead"
+        );
+        return Ok(mark);
+    }
+    // Recent use is trusted only under the summary lock: without it, an identity repair may have published a fresh
+    // summary that it is about to backdate (Astra r2). The summary lock this mark may just have created is not use.
+    let recently_used = summary_held
+        && session_activity_scan(
+            session_dir,
+            ACTIVITY_SCAN_MAX_ENTRIES,
+            &[crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE, SUMMARY_LOCK_FILE],
+        )
+        .is_ok_and(|newest| {
+            newest.is_some_and(|mtime| mtime.elapsed().map_or(true, |age| age < UNMARKED_SAFE_AGE))
+        });
+    tracing::warn!(
+        target: "fuigo_shell::session::persistence",
+        dir = %session_dir.display(),
+        %error,
+        recently_used,
+        "SESSION_MARK_LIVE_ERROR: neither summary.json nor updates.jsonl could be marked"
+    );
+    if recently_used {
+        return Ok(mark);
+    }
+    Err(MarkLiveError::Unmarkable { dir: session_dir.to_path_buf(), error })
+}
+
+/// The sidecar lock every `summary.json` writer holds (`storage::summary_write`).
+const SUMMARY_LOCK_FILE: &str = "summary.json.lock";
+
+/// How [`take_lock_waiting`] ended.
+#[derive(Debug, PartialEq, Eq)]
+enum LockWait {
+    Taken,
+    /// Another holder kept it past the limit.
+    Busy,
+    /// A lock error that is not contention (a filesystem without advisory locks): no other party can hold it there
+    /// either, but it is not held.
+    Unsupported,
+}
+
+/// Waits (asynchronously) until `lock` is taken, shared or exclusive.
+async fn take_lock_waiting(lock: &std::fs::File, exclusive: bool, wait_limit: std::time::Duration) -> LockWait {
+    let started = tokio::time::Instant::now();
+    loop {
+        // UFCS: std's inherent `File::try_lock*` (Rust 1.89+) return a different error type.
+        let attempt =
+            if exclusive { fs2::FileExt::try_lock_exclusive(lock) } else { fs2::FileExt::try_lock_shared(lock) };
+        match attempt {
+            Err(error) if fuigo_workspace::util::is_lock_contended(&error) => {
+                if started.elapsed() >= wait_limit {
+                    return LockWait::Busy;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(_) => return LockWait::Unsupported,
+            Ok(()) => return LockWait::Taken,
+        }
+    }
+}
+
+/// Sets `path`'s mtime to now without following a link at that path and without writing anything. Fails on a missing,
+/// non-regular or unwritable file.
+fn touch_nofollow(path: &Path) -> io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    // Write access is required for `set_modified` on Windows; nothing is written
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        // Open the entry itself, never the target of a link swapped in after the caller's check; a link opened this
+        // way is not a regular file and is refused below
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("not a regular file"));
+    }
+    file.set_modified(std::time::SystemTime::now())
+}
+
+/// Where `session_dir`'s sweep lock lives: next to it, never inside it (see [`SWEEP_LOCK_PREFIX`]).
+fn sweep_lock_path(session_dir: &Path) -> Option<PathBuf> {
+    let name = session_dir.file_name()?.to_string_lossy();
+    Some(session_dir.parent()?.join(format!("{SWEEP_LOCK_PREFIX}{name}")))
+}
+
+/// The lock an attach holds shared while it marks `session_dir` live (see [`SWEEP_LOCK_PREFIX`]).
+fn open_sweep_lock(session_dir: &Path) -> Option<std::fs::File> {
+    let path = sweep_lock_path(session_dir)?;
+    open_lock_nofollow(path.parent()?, &path.file_name()?.to_string_lossy())
 }
 
 /// Resolve TTL from config.toml `[storage] cleanup_ttl_days`, falling back to 30.
@@ -3664,139 +4015,183 @@ fn resolve_cleanup_ttl_days() -> u32 {
     DEFAULT_CLEANUP_TTL_DAYS
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq)]
 struct CleanupStats {
     files_deleted: u32,
     dirs_removed: u32,
+    sessions_removed: u32,
     errors: u32,
 }
 
+impl CleanupStats {
+    fn absorb(&mut self, other: CleanupStats) {
+        self.files_deleted += other.files_deleted;
+        self.dirs_removed += other.dirs_removed;
+        self.sessions_removed += other.sessions_removed;
+        self.errors += other.errors;
+    }
+}
+
+/// `sessions/` holds one folder per encoded cwd, each holding session folders.
 #[derive(Clone, Copy)]
 enum CleanupLevel {
     SessionsRoot,
     Cwd,
-    Session,
 }
 
-/// Recursive cleanup: delete stale files, then rmdir empty dirs (post-order).
+/// Stray files at these two levels (`session_search.sqlite`, `prompt_history.jsonl`) keep the per-file mtime rule;
+/// dot entries (the `.cwd` markers, hidden indexes) and symlinks are skipped. P176: `root` is pinned and every folder
+/// below it is opened relative to its pinned parent, never through a link ([`sweep_pin::PinnedDir`]).
 fn cleanup_stale_sessions_inner(
     root: &Path,
     ttl_days: u32,
-    skip: Option<&Path>,
+    live_session_dir: Option<&Path>,
     level: CleanupLevel,
 ) -> CleanupStats {
+    match sweep_pin::PinnedDir::open_root(root) {
+        Ok(root) => cleanup_pinned_level(&[], &root, ttl_days, live_session_dir, level),
+        Err(_) => CleanupStats::default(),
+    }
+}
+
+fn cleanup_pinned_level(
+    ancestors: &[&sweep_pin::PinnedDir],
+    dir: &sweep_pin::PinnedDir,
+    ttl_days: u32,
+    live_session_dir: Option<&Path>,
+    level: CleanupLevel,
+) -> CleanupStats {
+    use sweep_pin::EntryKind;
+
     let mut stats = CleanupStats::default();
-
-    if root
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-    {
-        return stats;
-    }
-    if let Some(skip_dir) = skip
-        && root == skip_dir
-    {
-        return stats;
-    }
-
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return stats;
+    let names = match dir.entry_names() {
+        Ok(names) => names,
+        Err(error) => {
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                dir = %dir.path().display(),
+                %error,
+                "SESSION_CLEANUP_READ_ERROR"
+            );
+            stats.errors += 1;
+            return stats;
+        }
     };
+    let chain: Vec<&sweep_pin::PinnedDir> = ancestors.iter().copied().chain(std::iter::once(dir)).collect();
 
-    for entry_result in entries {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!(
-                    target: "fuigo_shell::session::persistence",
-                    error = %e,
-                    "SESSION_CLEANUP_READ_ERROR"
-                );
-                stats.errors += 1;
-                continue;
+    for name in names {
+        let name_text = name.to_string_lossy().into_owned();
+        if name_text.starts_with(REMOVING_PREFIX) && matches!(level, CleanupLevel::Cwd) {
+            // An idle session whose removal was decided and started (it was renamed off its path) but not finished.
+            // P176: only under its session's sweep lock, held exclusively: the sweep that moved it holds that lock
+            // until it has either committed to the removal or put the session back (Astra r1 HIGH: another sweep
+            // deleted a folder the first one was putting back). One with activity newer than the TTL is kept (a
+            // removal that had to be put back and could not be). A name that does not parse is kept.
+            if let Some(session_name) = removing_session_name(&name_text)
+                && dir.child_info(&name).is_ok_and(|info| info.kind == EntryKind::Dir)
+            {
+                let lock_name = format!("{SWEEP_LOCK_PREFIX}{session_name}");
+                if let Some(held) = try_lock_exclusive_pinned(&dir.child_path(&name), dir, &lock_name)
+                    && session_last_activity(&dir.child_path(&name))
+                        .is_ok_and(|newest| newest.is_none_or(|mtime| is_stale(mtime, ttl_days)))
+                    && dir.remove_child_tree(&name).is_ok()
+                {
+                    stats.dirs_removed += 1;
+                    // A lock file this created for a session that no longer exists is removed while held, as the
+                    // removal itself does; one whose session exists stays (an attach may hold it)
+                    if dir
+                        .child_info(std::ffi::OsStr::new(session_name))
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                    {
+                        let _ = dir.remove_child_file(std::ffi::OsStr::new(&lock_name));
+                    }
+                    drop(held);
+                }
             }
-        };
-        let path = entry.path();
-
-        if let Some(skip_dir) = skip
-            && path == skip_dir
+            continue;
+        }
+        if let Some(session_name) = name_text.strip_prefix(SWEEP_LOCK_PREFIX)
+            && matches!(level, CleanupLevel::Cwd)
         {
+            // A sweep lock whose session is gone (deleted by hand, or a mark that lost the race with a removal). One
+            // whose session exists, or whose session cannot be looked up, stays: an attach may hold it, and a new file
+            // at the same path would let a sweep and that attach lock different files. It is removed only while held
+            // exclusively, so no attach or sweep is using it.
+            let session_is_gone = || {
+                dir.child_info(std::ffi::OsStr::new(session_name))
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            };
+            if session_is_gone()
+                && let Ok(info) = dir.child_info(&name)
+                && info.kind == EntryKind::File
+                && info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days))
+                && let Some(held) = try_lock_exclusive_pinned(&dir.child_path(std::ffi::OsStr::new(session_name)), dir, &name_text)
+                && session_is_gone()
+            {
+                remove_pinned_file(dir, &name, &mut stats);
+                drop(held);
+            }
+            continue;
+        }
+        if name_text.starts_with('.') {
             continue;
         }
 
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        let info = match dir.child_info(&name) {
+            Ok(info) => info,
             Err(_) => {
                 stats.errors += 1;
                 continue;
             }
         };
-        if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
-            if matches!(level, CleanupLevel::Cwd) {
-                let summary = path.join("summary.json");
-                match std::fs::symlink_metadata(&summary) {
-                    Ok(metadata)
-                        if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-                    }
-                    Ok(_) => continue,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                        let child_stats = cleanup_stale_sessions_inner(
-                            &path,
-                            ttl_days,
-                            skip,
-                            CleanupLevel::Session,
-                        );
-                        stats.files_deleted += child_stats.files_deleted;
-                        stats.dirs_removed += child_stats.dirs_removed;
-                        stats.errors += child_stats.errors;
-                        if child_stats.files_deleted > 0 && std::fs::remove_dir(&path).is_ok() {
-                            stats.dirs_removed += 1;
+        match info.kind {
+            // A symlink (or anything else) is never followed
+            EntryKind::Other => {}
+            EntryKind::Dir => match level {
+                CleanupLevel::SessionsRoot => {
+                    let child = match dir.open_child(&name) {
+                        Ok(child) => child,
+                        Err(error) => {
+                            // Swapped for a link since the look above: never entered
+                            stats.errors += 1;
+                            tracing::debug!(
+                                target: "fuigo_shell::session::persistence",
+                                dir = %dir.child_path(&name).display(),
+                                %error,
+                                "SESSION_CLEANUP_DIR_SKIPPED"
+                            );
+                            continue;
                         }
-                        continue;
-                    }
-                    Err(error) => {
-                        stats.errors += 1;
+                    };
+                    let child_stats = cleanup_pinned_level(&chain, &child, ttl_days, live_session_dir, CleanupLevel::Cwd);
+                    let removed_session = child_stats.sessions_removed > 0;
+                    stats.absorb(child_stats);
+                    // Released first: on Windows the pin itself would refuse the removal
+                    drop(child);
+                    // A cwd folder we did not empty may belong to a session being created right now
+                    if removed_session && dir.remove_child_empty_dir(&name).is_ok() {
+                        stats.dirs_removed += 1;
                         tracing::debug!(
                             target: "fuigo_shell::session::persistence",
-                            path = %summary.display(),
-                            %error,
-                            "SESSION_CLEANUP_METADATA_ERROR"
+                            dir = %dir.child_path(&name).display(),
+                            "SESSION_CLEANUP_RMDIR"
                         );
-                        continue;
                     }
                 }
-            }
-            let next = match level {
-                CleanupLevel::SessionsRoot => CleanupLevel::Cwd,
-                CleanupLevel::Cwd | CleanupLevel::Session => CleanupLevel::Session,
-            };
-            let child_stats = cleanup_stale_sessions_inner(&path, ttl_days, skip, next);
-            stats.files_deleted += child_stats.files_deleted;
-            stats.dirs_removed += child_stats.dirs_removed;
-            stats.errors += child_stats.errors;
-
-            // Only attempt remove_dir if this subtree actually had stale files deleted in this pass
-            // Otherwise we risk removing dirs that were deliberately created for use by concurrent sessions
-            if child_stats.files_deleted > 0 && std::fs::remove_dir(&path).is_ok() {
-                stats.dirs_removed += 1;
-                tracing::debug!(
-                    target: "fuigo_shell::session::persistence",
-                    dir = %path.display(),
-                    "SESSION_CLEANUP_RMDIR"
-                );
-            }
-        } else if let Ok(mtime) = metadata.modified()
-            && is_stale(mtime, ttl_days)
-        {
-            if std::fs::remove_file(&path).is_ok() {
-                stats.files_deleted += 1;
-                tracing::debug!(
-                    target: "fuigo_shell::session::persistence",
-                    file = %path.display(),
-                    "SESSION_CLEANUP_DELETE"
-                );
-            } else {
-                stats.errors += 1;
+                CleanupLevel::Cwd => {
+                    if live_session_dir.is_some_and(|live| dir.child_path(&name) == live) {
+                        // Interactive fuigo usually has one session and it is this one, so skipping the prune here
+                        // would mean its caches never age out
+                        prune_pinned_session_caches(dir, &name, ttl_days, &mut stats);
+                    } else {
+                        stats.absorb(cleanup_pinned_session(&chain, &name, ttl_days, &SweepHooks::none()));
+                    }
+                }
+            },
+            EntryKind::File => {
+                if info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days)) {
+                    remove_pinned_file(dir, &name, &mut stats);
+                }
             }
         }
     }
@@ -3804,10 +4199,525 @@ fn cleanup_stale_sessions_inner(
     stats
 }
 
+fn cleanup_session_dir(session_dir: &Path, ttl_days: u32) -> CleanupStats {
+    cleanup_session_dir_with(session_dir, ttl_days, &StdRename, || {}, || {}, |_| {})
+}
+
+/// How the sweep takes an idle session off its path. Production is [`StdRename`]; the tests add a double that refuses
+/// when a handle of this process is open beneath the folder, as NTFS does, so the handle-lifetime part of the Windows
+/// rule is tested on Linux (not Windows itself: foreign handles, sharing modes, delete-pending names).
+trait SessionDirRename {
+    /// Renames `from` to `to`, both in the pinned folder `dir`.
+    fn rename(&self, dir: &sweep_pin::PinnedDir, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()>;
+}
+
+struct StdRename;
+
+impl SessionDirRename for StdRename {
+    fn rename(&self, dir: &sweep_pin::PinnedDir, from: &std::ffi::OsStr, to: &std::ffi::OsStr) -> io::Result<()> {
+        dir.rename_child(from, to)
+    }
+}
+
+/// A test window that runs at most once.
+type SweepHook<'a> = std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>;
+type AfterRenameHook<'a> = std::cell::RefCell<Option<Box<dyn FnOnce(&Path) + 'a>>>;
+
+/// Test windows inside the removal of one idle session (production runs none).
+struct SweepHooks<'a> {
+    renamer: &'a dyn SessionDirRename,
+    /// Between the first look and the locks.
+    before_lock: SweepHook<'a>,
+    /// Between the last look and the rename.
+    before_rename: SweepHook<'a>,
+    /// Once the session has left its path and the locks are released.
+    after_rename: AfterRenameHook<'a>,
+}
+
+impl SweepHooks<'static> {
+    fn none() -> Self {
+        SweepHooks {
+            renamer: &StdRename,
+            before_lock: std::cell::RefCell::new(None),
+            before_rename: std::cell::RefCell::new(None),
+            after_rename: std::cell::RefCell::new(None),
+        }
+    }
+}
+
+impl SweepHooks<'_> {
+    fn before_lock(&self) {
+        if let Some(hook) = self.before_lock.borrow_mut().take() {
+            hook();
+        }
+    }
+
+    fn before_rename(&self) {
+        if let Some(hook) = self.before_rename.borrow_mut().take() {
+            hook();
+        }
+    }
+
+    fn after_rename(&self, removing: &Path) {
+        if let Some(hook) = self.after_rename.borrow_mut().take() {
+            hook(removing);
+        }
+    }
+}
+
+/// `before_lock` runs between the first look and the locks, `before_rename` between the last look and the rename,
+/// `after_rename` once the session has left its path and the locks are released (tests attach the session in those
+/// windows). The session's cwd folder is pinned when this starts.
+fn cleanup_session_dir_with<'a>(
+    session_dir: &Path,
+    ttl_days: u32,
+    renamer: &'a dyn SessionDirRename,
+    before_lock: impl FnOnce() + 'a,
+    before_rename: impl FnOnce() + 'a,
+    after_rename: impl FnOnce(&Path) + 'a,
+) -> CleanupStats {
+    let hooks = SweepHooks {
+        renamer,
+        before_lock: std::cell::RefCell::new(Some(Box::new(before_lock))),
+        before_rename: std::cell::RefCell::new(Some(Box::new(before_rename))),
+        after_rename: std::cell::RefCell::new(Some(Box::new(after_rename))),
+    };
+    let (Some(parent), Some(name)) = (session_dir.parent(), session_dir.file_name()) else {
+        return CleanupStats { errors: 1, ..CleanupStats::default() };
+    };
+    match sweep_pin::PinnedDir::open_root(parent) {
+        Ok(cwd) => cleanup_pinned_session(&[&cwd], name, ttl_days, &hooks),
+        Err(_) => CleanupStats { errors: 1, ..CleanupStats::default() },
+    }
+}
+
+/// Judges the session `name` in the last folder of `chain` (its cwd folder; the folders above it come first), all
+/// pinned.
+fn cleanup_pinned_session(
+    chain: &[&sweep_pin::PinnedDir],
+    name: &std::ffi::OsStr,
+    ttl_days: u32,
+    hooks: &SweepHooks<'_>,
+) -> CleanupStats {
+    let mut stats = CleanupStats::default();
+    let Some(cwd) = chain.last().copied() else {
+        stats.errors += 1;
+        return stats;
+    };
+    let session_dir = cwd.child_path(name);
+    let session_dir = session_dir.as_path();
+    let first_look = session_last_activity(session_dir).and_then(|newest_file| match newest_file {
+        Some(mtime) => Ok(mtime),
+        // A folder without files of its own (a stub) is judged by its own mtime, read before the sweep's lock files
+        // are created in it (which changes that mtime)
+        None => cwd.child_info(name)?.modified.ok_or_else(|| io::Error::other("no mtime")),
+    });
+    let last_activity = match first_look {
+        Ok(t) => t,
+        Err(error) => {
+            stats.errors += 1;
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                dir = %session_dir.display(),
+                %error,
+                "SESSION_CLEANUP_METADATA_ERROR"
+            );
+            return stats;
+        }
+    };
+    if !is_stale(last_activity, ttl_days) {
+        prune_pinned_session_caches(cwd, name, ttl_days, &mut stats);
+        return stats;
+    }
+
+    // Another process may be attaching or running this session right now. A live actor holds `turn_owner.lock`
+    // shared for its whole life (and takes it before writing anything); an attach holds the session's sweep lock
+    // shared from its mark until its actor holds `turn_owner.lock` (`mark_session_live`, P176). So:
+    // 1. this sweep takes the sweep lock exclusively and holds it until the session has left its path: from here no
+    //    attach can complete a mark, and no attach is between its mark and its actor;
+    // 2. it takes `turn_owner.lock` exclusively (no live actor anywhere) and CLOSES it again at once (P178): Windows
+    //    refuses to rename a folder with any handle open beneath it, and the sweep lock lives outside the folder for
+    //    the same reason. Closing it reopens no window: an actor only starts while its attach holds the sweep lock;
+    // 3. it looks again; the session goes only if it still looks unused, and only if every pinned folder above it is
+    //    still the one its path names (P176), so what it read through paths is what it acts on;
+    // 4. the rename is atomic and relative to the pinned cwd folder: from then on nobody can open anything at the
+    //    session's path, so no attach or actor can start on a half-deleted session or put a file into the tree being
+    //    deleted. On Windows a handle another process holds inside the folder refuses the rename and the session is
+    //    kept;
+    // 5. P176: it looks a last time at the moved folder. An attach whose lock failed (a filesystem whose locks fail
+    //    for it but not for this sweep) marks without waiting; a mark that landed before the rename shows here, and
+    //    the session is put back;
+    // 6. the sweep lock file is removed while still held, then released.
+    hooks.before_lock();
+    let sweep_lock_name = format!("{SWEEP_LOCK_PREFIX}{}", name.to_string_lossy());
+    let Some(sweep_lock) = try_lock_exclusive_pinned(session_dir, cwd, &sweep_lock_name) else {
+        return stats;
+    };
+    let session_pin = match cwd.open_child(name) {
+        Ok(pin) => pin,
+        Err(_) => {
+            stats.errors += 1;
+            return stats;
+        }
+    };
+    let Some(turn_owner) = try_lock_exclusive_pinned(
+        session_dir,
+        &session_pin,
+        crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE,
+    ) else {
+        return stats;
+    };
+    drop(turn_owner);
+    // Released before the rename: on Windows it would refuse it
+    drop(session_pin);
+    match session_last_activity(session_dir) {
+        Ok(None) => {}
+        Ok(Some(t)) if is_stale(t, ttl_days) => {}
+        Ok(Some(_)) => return stats,
+        Err(_) => {
+            stats.errors += 1;
+            return stats;
+        }
+    }
+    let Some(removing_name) = removing_name(name) else {
+        stats.errors += 1;
+        return stats;
+    };
+    let removing = cwd.child_path(&removing_name);
+    hooks.before_rename();
+    if !chain.iter().all(|pinned| pinned.still_at_path())
+        || !cwd.child_info(name).is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir)
+    {
+        stats.errors += 1;
+        tracing::warn!(
+            target: "fuigo_shell::session::persistence",
+            dir = %session_dir.display(),
+            "SESSION_CLEANUP_RM_SESSION_ERROR: a folder on the session's path changed during the sweep; session kept"
+        );
+        return stats;
+    }
+    if let Err(error) = hooks.renamer.rename(cwd, name, &removing_name) {
+        stats.errors += 1;
+        // Not debug: on Windows this is how a session another program holds open is kept, and a rename that keeps
+        // failing would otherwise hide that idle sessions are never removed
+        tracing::warn!(
+            target: "fuigo_shell::session::persistence",
+            dir = %session_dir.display(),
+            %error,
+            "SESSION_CLEANUP_RM_SESSION_ERROR: session kept"
+        );
+        return stats;
+    }
+    let marked_meanwhile = match session_last_activity(&removing) {
+        Ok(Some(t)) => !is_stale(t, ttl_days),
+        Ok(None) => false,
+        Err(_) => true,
+    };
+    if marked_meanwhile || !cwd.child_info(&removing_name).is_ok_and(|info| info.kind == sweep_pin::EntryKind::Dir) {
+        stats.errors += 1;
+        put_back(cwd, &removing_name, name, session_dir);
+        return stats;
+    }
+    // A waiting attach holds the unlinked file and then finds no session; Windows deletes it once the last handle
+    // closes. A failure only leaves a 0-byte dot file that the orphan rule clears after the TTL.
+    let _ = cwd.remove_child_file(std::ffi::OsStr::new(&sweep_lock_name));
+    drop(sweep_lock);
+    hooks.after_rename(&removing);
+    // Nothing in the tree is followed: a link inside the folder is removed, never its target. A leftover (Windows
+    // keeps a file a waiting attach still has open) is finished by the next sweep.
+    match cwd.remove_child_tree(&removing_name) {
+        Ok(()) => {
+            stats.sessions_removed += 1;
+            tracing::info!(
+                target: "fuigo_shell::session::persistence",
+                dir = %session_dir.display(),
+                "SESSION_CLEANUP_RM_SESSION"
+            );
+        }
+        Err(error) => {
+            // The session is already gone from its path; only its leftover bytes remain, under a dot name
+            stats.sessions_removed += 1;
+            stats.errors += 1;
+            tracing::warn!(
+                target: "fuigo_shell::session::persistence",
+                dir = %removing.display(),
+                %error,
+                "SESSION_CLEANUP_RM_SESSION_ERROR: leftover removed by the next sweep"
+            );
+        }
+    }
+    stats
+}
+
+/// Puts a session the sweep moved off its path back, because something marked it in between. If its path has been
+/// taken meanwhile, or the filesystem has no atomic no-replace rename, the folder is kept under a name no sweep
+/// removes and that is logged (nothing restores it by itself; the warning names both paths).
+fn put_back(cwd: &sweep_pin::PinnedDir, removing_name: &std::ffi::OsStr, name: &std::ffi::OsStr, session_dir: &Path) {
+    // Never over anything at the path, not even an empty folder a creator is about to fill (Astra r3)
+    match cwd.rename_child_noreplace_strict(removing_name, name) {
+        Ok(()) => tracing::info!(
+            target: "fuigo_shell::session::persistence",
+            dir = %session_dir.display(),
+            "SESSION_CLEANUP_PUT_BACK: the session was marked while it was being removed; kept"
+        ),
+        Err(error) => {
+            let kept = std::ffi::OsString::from(format!(
+                "{KEPT_PREFIX}{}-{}",
+                name.to_string_lossy(),
+                std::process::id()
+            ));
+            let kept_ok = cwd.rename_child_noreplace(removing_name, &kept).is_ok();
+            tracing::warn!(
+                target: "fuigo_shell::session::persistence",
+                dir = %session_dir.display(),
+                kept = %cwd.child_path(if kept_ok { &kept } else { removing_name }).display(),
+                %error,
+                "SESSION_CLEANUP_PUT_BACK_ERROR: the session was marked while it was being removed, and it could not be \
+                 put back safely (its path is taken, or this filesystem has no atomic no-replace rename); its files \
+                 are kept under this name"
+            );
+        }
+    }
+}
+
+/// The session a removal folder ([`removing_name`]) was named after.
+fn removing_session_name(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix(REMOVING_PREFIX)?;
+    let mut parts = rest.rsplitn(3, '-');
+    let (nanos, pid, session) = (parts.next()?, parts.next()?, parts.next()?);
+    let numeric = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    (numeric(nanos) && numeric(pid) && !session.is_empty()).then_some(session)
+}
+
+/// `.fuigo-sweep-removing-<session>-<pid>-<nanos>`: next to the session, so the rename stays in one folder, and
+/// unique per attempt.
+fn removing_name(name: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let name = name.to_str()?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    Some(format!("{REMOVING_PREFIX}{name}-{}-{nanos}", std::process::id()).into())
+}
+
+/// Deletes regular files older than `ttl_days` from the [`SWEPT_BLOB_DIRS`] of the session `name` in the pinned `cwd`.
+/// Never rmdir: a writer may sit between its `create_dir_all` and its write. The session folder and each cache folder
+/// are opened relative to their pinned parent and are refused when they are a link or a reparse point (P176: on
+/// Windows the check and the open are one step, see [`sweep_pin`]); any entry in a cache folder that is not a regular
+/// file is left alone, and what is stat'ed and removed is resolved against the pinned cache folder.
+fn prune_pinned_session_caches(
+    cwd: &sweep_pin::PinnedDir,
+    name: &std::ffi::OsStr,
+    ttl_days: u32,
+    stats: &mut CleanupStats,
+) {
+    let session = match cwd.open_child(name) {
+        Ok(session) => session,
+        Err(error) => {
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                dir = %cwd.child_path(name).display(),
+                %error,
+                "SESSION_CLEANUP_BLOB_DIR_SKIPPED"
+            );
+            return;
+        }
+    };
+    for dir_name in SWEPT_BLOB_DIRS {
+        prune_pinned_blob_dir(&session, dir_name, ttl_days, stats);
+    }
+}
+
+fn prune_pinned_blob_dir(session: &sweep_pin::PinnedDir, dir_name: &str, ttl_days: u32, stats: &mut CleanupStats) {
+    let dir = match session.open_child(std::ffi::OsStr::new(dir_name)) {
+        Ok(dir) => dir,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+        Err(error) => {
+            // A symlink, a reparse point, or a file where the cache folder should be; never followed
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                dir = %session.child_path(std::ffi::OsStr::new(dir_name)).display(),
+                %error,
+                "SESSION_CLEANUP_BLOB_DIR_SKIPPED"
+            );
+            return;
+        }
+    };
+    let Ok(names) = dir.entry_names() else {
+        stats.errors += 1;
+        return;
+    };
+    for name in names {
+        let Ok(info) = dir.child_info(&name) else {
+            stats.errors += 1;
+            continue;
+        };
+        if info.kind == sweep_pin::EntryKind::File && info.modified.is_some_and(|mtime| is_stale(mtime, ttl_days)) {
+            remove_pinned_file(&dir, &name, stats);
+        }
+    }
+}
+
+/// Opens (creating, owner-only) the lock file `name` in `session_dir` without ever following a link at that path:
+/// `O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT` on Windows (a link is then opened itself and refused as not a
+/// regular file). `None` when it cannot be opened that way (a missing folder, a planted link).
+fn open_lock_nofollow(session_dir: &Path, name: &str) -> Option<std::fs::File> {
+    let path = session_dir.join(name);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    // Owner-only like every other session file (P145), including the Windows ACL, which is applied by path and so
+    // only once the opened entry is known to be a regular file (not a link)
+    use crate::session::storage::owner_only;
+    match owner_only::owner_only(&mut options).open(&path) {
+        Ok(file) if file.metadata().is_ok_and(|metadata| metadata.is_file()) => {
+            owner_only::tighten(&file, &path).ok()?;
+            Some(file)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                file = %path.display(),
+                %error,
+                "SESSION_LOCK_UNAVAILABLE"
+            );
+            None
+        }
+    }
+}
+
+/// The lock file `name` in the pinned `dir`, held exclusively for the sweep of `session_dir`. `None` when it is held or
+/// cannot be taken at all (a planted link, a filesystem without advisory locks): the session is then kept.
+fn try_lock_exclusive_pinned(session_dir: &Path, dir: &sweep_pin::PinnedDir, name: &str) -> Option<crate::session::storage::jsonl::HeldLock> {
+    let file = dir.open_lock(name)?;
+    // UFCS: std's inherent `File::try_lock` (Rust 1.89+) returns a different error type.
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Some(crate::session::storage::jsonl::HeldLock::new(file)),
+        Err(error) => {
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                dir = %session_dir.display(),
+                lock = name,
+                %error,
+                "SESSION_CLEANUP_SESSION_HELD: session kept"
+            );
+            None
+        }
+    }
+}
+
+/// How many entries the activity scan of one session may look at, and how deep below the session folder it goes
+/// (`subagents/<id>/subagents/<id>/prompts/` is 5). Past either bound the scan fails and the session is kept: it is
+/// never judged idle on a partial look.
+const ACTIVITY_SCAN_MAX_ENTRIES: usize = 20_000;
+const ACTIVITY_SCAN_MAX_DEPTH: usize = 8;
+
+/// Newest mtime among the session's regular files, in the folder and in its subfolders (`None` if it has none).
+/// `updates.jsonl` grows with every persisted update and [`mark_session_live`] bumps `summary.json` on every attach;
+/// loading alone rewrites neither. P178: files a live session writes only into a subfolder (`compaction_checkpoints/`,
+/// `prompts/`, `subagents/`, `terminal/`, ...) count too, so no such writer can see its session judged idle. Symlinks
+/// are never followed, and folder mtimes are not activity (the cache prune changes them). The top-level
+/// `turn_owner.lock` is not activity: the sweep itself creates it to lock the session.
+fn session_last_activity(session_dir: &Path) -> io::Result<Option<std::time::SystemTime>> {
+    session_last_activity_within(session_dir, ACTIVITY_SCAN_MAX_ENTRIES)
+}
+
+/// [`session_last_activity`] with an explicit bound on the entries it may look at (tests use a small one).
+fn session_last_activity_within(
+    session_dir: &Path,
+    max_entries: usize,
+) -> io::Result<Option<std::time::SystemTime>> {
+    session_activity_scan(session_dir, max_entries, &[crate::session::turn_owner_lock::TURN_OWNER_LOCK_FILE])
+}
+
+/// The activity scan, skipping the named top-level files.
+fn session_activity_scan(
+    session_dir: &Path,
+    max_entries: usize,
+    ignored_top_level: &[&str],
+) -> io::Result<Option<std::time::SystemTime>> {
+    let mut newest: Option<std::time::SystemTime> = None;
+    let mut budget = max_entries;
+    let mut pending = vec![(session_dir.to_path_buf(), 0_usize)];
+    while let Some((dir, depth)) = pending.pop() {
+        // A subfolder removed while we look (a writer's cleanup, a cache prune) holds no activity any more
+        let vanished = |error: &io::Error| depth > 0 && error.kind() == io::ErrorKind::NotFound;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if vanished(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            budget = budget.checked_sub(1).ok_or_else(|| {
+                io::Error::other(format!("more than {max_entries} entries; session kept without judging it"))
+            })?;
+            if depth == 0 && ignored_top_level.iter().any(|name| entry.file_name() == *name) {
+                continue;
+            }
+            let metadata = match std::fs::symlink_metadata(entry.path()) {
+                Ok(metadata) => metadata,
+                Err(error) if vanished(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            let file_type = metadata.file_type();
+            if file_type.is_file() {
+                if let Ok(mtime) = metadata.modified() {
+                    newest = Some(newest.map_or(mtime, |n| n.max(mtime)));
+                }
+            } else if file_type.is_dir() {
+                if depth >= ACTIVITY_SCAN_MAX_DEPTH {
+                    return Err(io::Error::other(format!(
+                        "folders nested deeper than {ACTIVITY_SCAN_MAX_DEPTH}; session kept without judging it"
+                    )));
+                }
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    Ok(newest)
+}
+
+fn remove_pinned_file(dir: &sweep_pin::PinnedDir, name: &std::ffi::OsStr, stats: &mut CleanupStats) {
+    match dir.remove_child_file(name) {
+        Ok(()) => {
+            stats.files_deleted += 1;
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                file = %dir.child_path(name).display(),
+                "SESSION_CLEANUP_DELETE"
+            );
+        }
+        Err(error) => {
+            stats.errors += 1;
+            tracing::debug!(
+                target: "fuigo_shell::session::persistence",
+                file = %dir.child_path(name).display(),
+                %error,
+                "SESSION_CLEANUP_DELETE_ERROR"
+            );
+        }
+    }
+}
+
 fn is_stale(mtime: std::time::SystemTime, ttl_days: u32) -> bool {
     let ttl = std::time::Duration::from_secs(u64::from(ttl_days) * 86400);
     mtime.elapsed().is_ok_and(|age| age > ttl)
 }
+
+#[cfg(test)]
+#[path = "persistence_cleanup_stale_sessions_tests.rs"]
+mod cleanup_stale_sessions_tests;
 
 #[cfg(test)]
 #[path = "persistence_agent_name_persistence_tests.rs"]
@@ -3870,6 +4780,35 @@ pub(crate) mod test_seam {
     static FINISHED: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
     /// Per session: how many more chat history replacements fail (P111).
     static FAILING_REPLACEMENTS: Mutex<Option<HashMap<String, usize>>> = Mutex::new(None);
+
+    type BeforeTurnOwnerLock = Box<dyn FnOnce(&std::path::Path) + Send>;
+    /// Per session: runs once, in the load, right before the actor takes `turn_owner.lock` (P176).
+    static BEFORE_TURN_OWNER_LOCK: Mutex<Option<HashMap<String, BeforeTurnOwnerLock>>> = Mutex::new(None);
+
+    /// Runs `hook` (with the session folder) the next time `session_id`'s actor is about to take `turn_owner.lock`.
+    pub(crate) fn before_turn_owner_lock(session_id: &str, hook: impl FnOnce(&std::path::Path) + Send + 'static) {
+        BEFORE_TURN_OWNER_LOCK
+            .lock()
+            .expect("before turn owner lock")
+            .get_or_insert_with(HashMap::new)
+            .insert(session_id.to_owned(), Box::new(hook));
+    }
+
+    pub(crate) fn run_before_turn_owner_lock(session_id: &str, session_dir: &std::path::Path) {
+        let hook = BEFORE_TURN_OWNER_LOCK
+            .lock()
+            .expect("before turn owner lock")
+            .as_mut()
+            .and_then(|hooks| hooks.remove(session_id));
+        if let Some(hook) = hook {
+            hook(session_dir);
+        }
+    }
+
+    /// One real sweep of one session folder (as another process's sweep would judge it); how many sessions it removed.
+    pub(crate) fn sweep_session_dir(session_dir: &std::path::Path, ttl_days: u32) -> u32 {
+        super::cleanup_session_dir(session_dir, ttl_days).sessions_removed
+    }
 
     /// The next `count` chat history replacements of `session_id` fail before touching the disk (`0` disarms).
     pub(crate) fn fail_history_replacements(session_id: &str, count: usize) {

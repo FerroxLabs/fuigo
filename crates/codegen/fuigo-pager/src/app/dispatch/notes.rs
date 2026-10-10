@@ -692,11 +692,24 @@ pub(super) fn dispatch_send_btw(
         return vec![];
     };
     let minimal = app.screen_mode.is_minimal();
+    let Some(agent) = app.agents.get_mut(&id) else {
+        crate::prompt_images::drain_and_cleanup(&mut images);
+        return vec![];
+    };
+    start_side_question(agent, id, minimal, question, images)
+}
+
+/// Start a side question on `agent`: paints the loading state and returns the `SendBtw` effect.
+/// A tab with no session toasts and drops the images, as the typed path always did.
+/// The drain of a question held during a load calls this too, so both paths share one wire shape.
+pub(super) fn start_side_question(
+    agent: &mut crate::app::agent_view::AgentView,
+    id: AgentId,
+    minimal: bool,
+    question: String,
+    mut images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
     let (session_id, minimal_request_id, blocks) = {
-        let Some(agent) = app.agents.get_mut(&id) else {
-            crate::prompt_images::drain_and_cleanup(&mut images);
-            return vec![];
-        };
         let Some(session_id) = agent.session.session_id.clone() else {
             if minimal {
                 agent

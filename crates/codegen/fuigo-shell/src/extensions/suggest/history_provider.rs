@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
-use super::{RankedSuggestion, SuggestContext, SuggestionSource, stamp_whole_line_range};
+use super::{
+    RankedSuggestion, RefreshGuard, SuggestContext, SuggestionSource, stamp_whole_line_range,
+};
 use crate::session::prompt_history;
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -111,14 +113,11 @@ async fn get_or_refresh_cross_cwd_cache() -> Arc<CrossCwdCache> {
         return current;
     }
 
-    if CROSS_CWD_REFRESHING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_refreshing) = RefreshGuard::try_acquire(&CROSS_CWD_REFRESHING) else {
         return current;
-    }
+    };
 
-    let result = match tokio::task::spawn_blocking(scan_cross_cwd_prompts).await {
+    match tokio::task::spawn_blocking(scan_cross_cwd_prompts).await {
         Ok(prompts) => {
             let new = Arc::new(CrossCwdCache {
                 prompts,
@@ -128,10 +127,7 @@ async fn get_or_refresh_cross_cwd_cache() -> Arc<CrossCwdCache> {
             new
         }
         Err(_) => current,
-    };
-
-    CROSS_CWD_REFRESHING.store(false, Ordering::Release);
-    result
+    }
 }
 
 fn scan_cross_cwd_prompts() -> Vec<String> {
@@ -198,14 +194,11 @@ async fn get_or_refresh_shell_history_cache() -> Arc<ShellHistoryCache> {
         return current;
     }
 
-    if SHELL_HISTORY_REFRESHING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_refreshing) = RefreshGuard::try_acquire(&SHELL_HISTORY_REFRESHING) else {
         return current;
-    }
+    };
 
-    let result = match tokio::task::spawn_blocking(load_shell_history).await {
+    match tokio::task::spawn_blocking(load_shell_history).await {
         Ok(commands) => {
             let new = Arc::new(ShellHistoryCache {
                 commands,
@@ -215,10 +208,7 @@ async fn get_or_refresh_shell_history_cache() -> Arc<ShellHistoryCache> {
             new
         }
         Err(_) => current,
-    };
-
-    SHELL_HISTORY_REFRESHING.store(false, Ordering::Release);
-    result
+    }
 }
 
 /// Detect the user's shell and load history from the appropriate file.
@@ -718,5 +708,58 @@ mod tests {
         writeln!(f, "- cmd: ls").unwrap();
         let commands = load_fish_history(f.path());
         assert_eq!(commands, &["ls"]);
+    }
+
+    /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+    #[tokio::test]
+    async fn cross_cwd_refresh_dropped_mid_scan_frees_its_flag() {
+        for _ in 0..200 {
+            // Make the cache stale so the call takes the refresh path
+            let stale = || CrossCwdCache {
+                prompts: Vec::new(),
+                updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+            };
+            CROSS_CWD_CACHE
+                .get_or_init(|| ArcSwap::from_pointee(stale()))
+                .store(Arc::new(stale()));
+            // Poll once: parked on its blocking scan, the refresh times out and is dropped
+            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_cross_cwd_cache()).await;
+            if outcome.is_err() {
+                assert!(
+                    !CROSS_CWD_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
+                    "a dropped refresh left CROSS_CWD_REFRESHING set"
+                );
+                return;
+            }
+            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("never caught the refresh mid-scan");
+    }
+    /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+    #[tokio::test]
+    async fn shell_history_refresh_dropped_mid_scan_frees_its_flag() {
+        for _ in 0..200 {
+            // Make the cache stale so the call takes the refresh path
+            let stale = || ShellHistoryCache {
+                commands: Vec::new(),
+                updated_at: Instant::now() - SHELL_HISTORY_CACHE_TTL - Duration::from_secs(1),
+            };
+            SHELL_HISTORY_CACHE
+                .get_or_init(|| ArcSwap::from_pointee(stale()))
+                .store(Arc::new(stale()));
+            // Poll once: parked on its blocking scan, the refresh times out and is dropped
+            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_shell_history_cache()).await;
+            if outcome.is_err() {
+                assert!(
+                    !SHELL_HISTORY_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
+                    "a dropped refresh left SHELL_HISTORY_REFRESHING set"
+                );
+                return;
+            }
+            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("never caught the refresh mid-scan");
     }
 }

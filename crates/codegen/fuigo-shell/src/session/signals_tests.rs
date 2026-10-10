@@ -1174,7 +1174,9 @@ async fn test_gcs_queue_snapshot() {
     actor_handle.await.unwrap();
 }
 
+// cfg(unix): sample_rss_bytes is getrusage-based, unix only.
 #[test]
+#[cfg(unix)]
 fn test_sample_rss_bytes_returns_nonzero() {
     let rss = sample_rss_bytes();
     // Any running process has RSS > 0 on macOS and Linux
@@ -1186,7 +1188,9 @@ fn test_sample_rss_bytes_returns_nonzero() {
     );
 }
 
+// cfg(unix): sample_rss_bytes is getrusage-based, unix only.
 #[test]
+#[cfg(unix)]
 fn test_sample_rss_bytes_is_stable() {
     // Two consecutive calls should return similar values (no wild swings)
     let rss1 = sample_rss_bytes();
@@ -1200,7 +1204,9 @@ fn test_sample_rss_bytes_is_stable() {
     );
 }
 
+// cfg(unix): sample_rss_bytes is implemented with getrusage on unix only and returns 0 elsewhere (product behaviour, see report).
 #[tokio::test]
+#[cfg(unix)]
 async fn test_peak_rss_recorded_at_turn_end() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());

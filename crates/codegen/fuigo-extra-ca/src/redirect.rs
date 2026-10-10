@@ -25,11 +25,10 @@ pub(crate) fn credential_policy() -> reqwest::redirect::Policy {
         {
             return attempt.error("fuigo refuses a credential-bearing redirect to another origin");
         }
-        if crate::egress::guard_enabled()
-            && attempt
-                .url()
-                .host_str()
-                .is_some_and(crate::egress::is_blocked_host)
+        if attempt
+            .url()
+            .host_str()
+            .is_some_and(crate::egress::is_refused_host)
         {
             return attempt.error("fuigo refuses a redirect to an upstream vendor host");
         }

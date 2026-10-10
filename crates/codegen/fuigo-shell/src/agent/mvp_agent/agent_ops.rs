@@ -207,6 +207,7 @@ impl MvpAgent {
                 alpha_test_key,
                 client_version,
                 choice,
+                &crate::agent::models::effective_allowlist(&self.cfg.borrow()),
             ),
             self.models_manager.model_in_catalog(&slug),
             primary,
@@ -1764,6 +1765,7 @@ impl MvpAgent {
             alpha_test_key.clone(),
             client_version,
             &self.cfg.borrow().endpoints,
+            &crate::agent::models::effective_allowlist(&self.cfg.borrow()),
         )?;
         inject_proxy_headers(
             &mut cfg.extra_headers,
@@ -2225,6 +2227,19 @@ impl MvpAgent {
                 .cmd_tx
                 .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
         }
+        self.forward_models_auth_notice(handle.cmd_tx.clone());
+    }
+
+    /// Tell this session's user, once, when the model list is refused with a 401 ("sign in again"). The note may
+    /// already be pending or may land later, so the session listens until it is sent or the session ends.
+    fn forward_models_auth_notice(
+        &self,
+        cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+    ) {
+        tokio::spawn(forward_auth_notice(
+            self.models_manager.subscribe_auth_notice(),
+            cmd_tx,
+        ));
     }
     pub(crate) async fn session_handle_waiting_for_load(
         &self,
@@ -3489,8 +3504,8 @@ impl MvpAgent {
                     );
                     fuigo_tty_utils::cli_eprintln!(
                         "error: failed to load agent profile '{}': {}",
-                        path.display(),
-                        e
+                        fuigo_tty_utils::untrusted(&path.display()),
+                        fuigo_tty_utils::untrusted(&e)
                     );
                     crate::instrumentation::finalize_and_exit(1);
                 }
@@ -4034,6 +4049,19 @@ impl MvpAgent {
             fuigo_agent::config::ModelOverride::Override(id) => {
                 let mid = acp::ModelId::new(Arc::from(id.as_str()));
                 match self.resolve_model_id(&mid) {
+                    // P169 (Astra r1 #5): a fleet `allowed_models` pin binds agent profiles too.
+                    Ok(entry)
+                        if !entry.info.user_selectable
+                            && crate::agent::models::effective_allowlist(&self.cfg.borrow())
+                                .is_fleet() =>
+                    {
+                        tracing::warn!(
+                            agent = %agent_definition.name,
+                            model = %id,
+                            "agent profile model not allowed by the organization's allowed_models policy, keeping session default"
+                        );
+                        None
+                    }
                     Ok(entry) => Some((mid, entry)),
                     Err(_) => {
                         tracing::warn!(
@@ -4631,4 +4659,66 @@ struct SessionConfigInputs {
  model_id: acp::ModelId,
  effort_options: Vec<ReasoningEffortOption>,
  current_effort: Option<fuigo_sampling_types::ReasoningEffort>,
+}
+
+/// Sends each note the model catalog raises to one session, as a config notice that session shows once.
+async fn forward_auth_notice(
+    mut rx: tokio::sync::watch::Receiver<Option<String>>,
+    cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
+) {
+    let mut last_sent: Option<String> = None;
+    loop {
+        let pending = rx.borrow_and_update().clone();
+        match pending {
+            Some(notice) => {
+                last_sent = Some(notice.clone());
+                if cmd_tx
+                    .send(crate::session::SessionCommand::NotifyConfigNoticeIfNew { notice })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // The rejection ended (a 200): let the session show the note again if a later episode starts.
+            None => {
+                if let Some(notice) = last_sent.take()
+                    && cmd_tx.send(crate::session::SessionCommand::ForgetConfigNotice { notice }).is_err()
+                {
+                    return;
+                }
+            }
+        }
+        tokio::select! {
+            changed = rx.changed() => if changed.is_err() { return },
+            _ = cmd_tx.closed() => return,
+        }
+    }
+}
+
+#[cfg(test)]
+mod auth_notice_forward_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_pending_note_and_a_later_note_both_reach_the_session() {
+        let (tx, rx) = tokio::sync::watch::channel(Some("pending".to_owned()));
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(forward_auth_notice(rx, cmd_tx));
+        let got = |c: Option<crate::session::SessionCommand>| match c {
+            Some(crate::session::SessionCommand::NotifyConfigNoticeIfNew { notice }) => notice,
+            _ => panic!("expected a config notice"),
+        };
+        assert_eq!(got(cmd_rx.recv().await), "pending");
+        tx.send_replace(Some("later".to_owned()));
+        assert_eq!(got(cmd_rx.recv().await), "later");
+        tx.send_replace(None);
+        match cmd_rx.recv().await {
+            Some(crate::session::SessionCommand::ForgetConfigNotice { notice }) => assert_eq!(notice, "later"),
+            _ => panic!("expected the notice to be forgotten when the rejection ends"),
+        }
+        tx.send_replace(Some("later".to_owned()));
+        assert_eq!(got(cmd_rx.recv().await), "later", "a later episode shows the note again");
+        drop(cmd_rx);
+        task.await.unwrap();
+    }
 }

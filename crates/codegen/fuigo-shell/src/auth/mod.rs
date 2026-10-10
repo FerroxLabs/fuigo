@@ -1,4 +1,5 @@
 pub(crate) mod api_key_probe;
+pub(crate) mod api_key_route_memory;
 pub(crate) mod attribution;
 mod auth_provider;
 pub(crate) mod backend;
@@ -65,7 +66,7 @@ pub use meta::{AuthMeta, GateInfo};
 pub use model::{AuthMode, FuigoAuth, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, UserInfo, default_coding_data_retention_opt_out, is_expired};
 pub(crate) use refresh::DiagnosticUploader;
-pub use storage::{clear_api_key, read_api_key, read_auth_json, store_api_key};
+pub use storage::{auth_json_path, clear_api_key, read_api_key, read_auth_json, store_api_key};
 pub(crate) use storage::{clear_api_key_async, store_api_key_async};
 
 /// Provider-scoped subscription auth, separate from first-party authority.

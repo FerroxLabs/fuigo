@@ -637,6 +637,8 @@ pub(crate) async fn generate_session_compact(
             let mut message =
                 ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
                     .with_temperature(1.0);
+            // The session's effort, as on a turn request, so the prompt-cache prefix matches (P194, U15).
+            message.reasoning_effort = sampling_config.reasoning_effort;
             // Prefix-cache alignment (see doc comment)
             // `tool_choice` is set only when tools are present; Chat Completions rejects it otherwise
             if !tools.is_empty() {
@@ -748,6 +750,7 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
+                reasoning_effort: sampling_config.reasoning_effort,
                 x_fuigo_conv_id: Some(session_id.to_string()),
                 x_fuigo_req_id: Some(format!("fuigo-compact-{}", uuid::Uuid::new_v4())),
                 x_fuigo_session_id: Some(session_id.to_string()),
@@ -872,6 +875,7 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
+                reasoning_effort: sampling_config.reasoning_effort,
                 x_fuigo_conv_id: Some(session_id.to_string()),
                 x_fuigo_req_id: Some(format!("fuigo-compact-{}", uuid::Uuid::new_v4())),
                 x_fuigo_session_id: Some(session_id.to_string()),
@@ -1012,6 +1016,11 @@ mod large_body_tests;
 #[cfg(test)]
 #[path = "session_compact_reasoning_compaction_regression_tests.rs"]
 mod reasoning_compaction_regression_tests;
+
+/// P194 (U15): compaction requests carry the session `reasoning_effort` on every backend.
+#[cfg(test)]
+#[path = "session_compact_reasoning_effort_tests.rs"]
+mod reasoning_effort_tests;
 
 #[cfg(test)]
 #[path = "session_compact_retain_session_asset_files_tests.rs"]

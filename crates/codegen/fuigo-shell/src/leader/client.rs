@@ -13,8 +13,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use super::protocol::{
-    ClientCapabilities, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    LeaderCapabilities, ProtocolError, ServerMessage, read_message, write_message,
+    ClientCapabilities, ClientMessage, ClientMode, ControlCommand, ControlPayload, FrameReader,
+    LeaderCapabilities, ProtocolError, ServerMessage, write_message,
 };
 use crate::cpu_profile::ControlError;
 
@@ -92,12 +92,24 @@ pub struct LeaderClient {
     /// Last `ShuttingDown` reason received from the server.
     /// `None` means no `ShuttingDown` message has arrived yet (unplanned disconnect or still connected).
     shutting_down_rx: watch::Receiver<Option<super::protocol::ShutdownReason>>,
+    /// Windows: the OS-reported pid of the process serving the pipe this client connected to, read once from the very
+    /// connection used for everything else. A pid inside a message is never a substitute for it.
+    #[cfg(windows)]
+    os_server_pid: Option<u32>,
+    /// Windows: a duplicate of the client pipe handle, to ask the OS for the serving pid again just before acting on it.
+    #[cfg(windows)]
+    pipe_probe: Option<super::peer_auth::win::DupHandle>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("Connection failed after {0} attempts: {1}")]
     Connect(u32, std::io::Error),
+    /// The other end could not be confirmed as this user's own Fuigo (another account, an unreadable peer, or on
+    /// Windows an older leader started as administrator). Nothing was sent to it. One variant for the Windows pipe
+    /// check (`peer_auth`) and the unix socket check (`peer_check`).
+    #[error("{}", crate::leader::peer_auth::PEER_REFUSED_MESSAGE)]
+    PeerRefused,
     #[error("Protocol error: {0}")]
     Protocol(#[from] ProtocolError),
     #[error("Registration failed: {0}")]
@@ -119,7 +131,24 @@ impl LeaderClient {
         mode: ClientMode,
         capabilities: ClientCapabilities,
     ) -> Result<Self, ClientError> {
+        Self::connect_checked(socket_path, client_type, mode, capabilities, super::peer_auth::verify_connected).await
+    }
+
+    /// `connect` with the pre-registration peer check as a parameter (tests inject facts here). The check runs on the
+    /// connected stream BEFORE anything is written to it; a refusal drops the connection.
+    pub(super) async fn connect_checked(
+        socket_path: PathBuf,
+        client_type: &str,
+        mode: ClientMode,
+        capabilities: ClientCapabilities,
+        check: impl FnOnce(&LeaderStream) -> Result<(), ClientError>,
+    ) -> Result<Self, ClientError> {
         let stream = connect_with_retry(&socket_path).await?;
+        check(&stream)?;
+        #[cfg(windows)]
+        let os_server_pid = stream.os_server_pid();
+        #[cfg(windows)]
+        let pipe_probe = stream.client_raw_handle().and_then(super::peer_auth::win::DupHandle::of);
         let (reader, writer) = tokio::io::split(stream);
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
@@ -159,7 +188,23 @@ impl LeaderClient {
             cancel,
             disconnect_rx,
             shutting_down_rx,
+            #[cfg(windows)]
+            os_server_pid,
+            #[cfg(windows)]
+            pipe_probe,
         })
+    }
+
+    /// Windows: the OS-reported pid of the server end of this connection's pipe (`None` if the OS call failed).
+    #[cfg(windows)]
+    pub fn os_server_pid(&self) -> Option<u32> {
+        self.os_server_pid
+    }
+
+    /// Windows: ask the OS NOW which process serves this connection's pipe (`None` if the call fails).
+    #[cfg(windows)]
+    pub fn os_server_pid_now(&self) -> Option<u32> {
+        self.pipe_probe.as_ref().and_then(|p| p.server_pid_now())
     }
 
     /// Returns a receiver for the most recent `ShuttingDown` reason sent by the server.
@@ -306,7 +351,13 @@ async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LeaderStre
         match tokio::time::timeout(CONNECT_TIMEOUT, LeaderStream::connect(socket_path.as_ref()))
             .await
         {
-            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Ok(stream)) => {
+                // Before anything is sent: the peer must be our own user account.
+                if !super::peer_check::client_accepts(&stream, socket_path.as_ref()) {
+                    return Err(ClientError::PeerRefused);
+                }
+                return Ok(stream);
+            }
             Ok(Err(_)) if attempts < MAX_RECONNECT_ATTEMPTS => {
                 attempts += 1;
                 debug!(
@@ -326,7 +377,7 @@ async fn connect_with_retry<P: AsRef<Path>>(socket_path: P) -> Result<LeaderStre
 
 async fn register(
     mut writer: WriteHalf<LeaderStream>,
-    mut reader: ReadHalf<LeaderStream>,
+    reader: ReadHalf<LeaderStream>,
     client_type: &str,
     mode: ClientMode,
     capabilities: ClientCapabilities,
@@ -337,6 +388,9 @@ async fn register(
     disconnect_tx: watch::Sender<DisconnectReason>,
     shutting_down_tx: watch::Sender<Option<super::protocol::ShutdownReason>>,
 ) -> Result<(LeaderRegistration, bool), ClientError> {
+    // P161: one cancel-safe reader for the whole connection, moved into the read task below. Its buffer can already
+    // hold frames that arrived with `Registered`/`LeaderReady`, and the read loop's `select!` can cancel a read mid-frame.
+    let mut reader = FrameReader::new(reader);
     write_message(
         &mut writer,
         &ClientMessage::Register {
@@ -350,7 +404,7 @@ async fn register(
     // Wait for confirmation with timeout to prevent indefinite hangs
     let response: ServerMessage = match tokio::time::timeout(
         REGISTRATION_RESPONSE_TIMEOUT,
-        read_message(&mut reader),
+        reader.read_message(),
     )
     .await
     {
@@ -392,7 +446,7 @@ async fn register(
             client_id,
             "Waiting for LeaderReady (leader still initialising)"
         );
-        let ready_msg = tokio::time::timeout(LEADER_READY_TIMEOUT, read_message(&mut reader)).await;
+        let ready_msg = tokio::time::timeout(LEADER_READY_TIMEOUT, reader.read_message()).await;
         match ready_msg {
             Ok(Ok(ServerMessage::LeaderReady)) => {
                 debug!(client_id, "Received LeaderReady; proceeding");
@@ -403,7 +457,7 @@ async fn register(
             }
             Ok(Ok(ServerMessage::ShuttingDown { .. })) => {
                 // ShuttingDown precedes Shutdown; read one more message to confirm
-                match read_message(&mut reader).await {
+                match reader.read_message().await {
                     Ok(ServerMessage::Shutdown) | Err(ProtocolError::ConnectionClosed) => {
                         return Err(ClientError::ConnectionClosed);
                     }
@@ -430,7 +484,7 @@ async fn register(
             tokio::select! {
                 biased;
                 _ = cancel_read.cancelled() => break DisconnectReason::ClientInitiated,
-                msg_result = read_message::<_, ServerMessage>(&mut reader) => {
+                msg_result = reader.read_message::<ServerMessage>() => {
                     match msg_result {
                         Ok(ServerMessage::Acp { payload }) => {
                             if from_server_tx.send(payload).is_err() {
@@ -690,6 +744,39 @@ mod tests {
             "expected UnsupportedControl, got {err:?}"
         );
 
+        client.cancel();
+        fake.cancel();
+    }
+
+    /// P161: frames that arrive together with `Registered` (here `LeaderReady` and an ACP notification, all in one
+    /// write) are buffered by the registration reads. The read loop must take over that same reader, buffer included,
+    /// or the ACP payload is silently lost.
+    #[tokio::test]
+    async fn p161_frames_coalesced_with_registration_reach_the_read_loop() {
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("coalesced.sock");
+        let payload = r#"{"jsonrpc":"2.0","method":"p161/after_ready","params":{}}"#.to_string();
+        let fake = spawn_fake_leader(
+            sock_path.clone(),
+            FakeLeaderBehavior::CoalescedRegisterReadyAcp {
+                payload: payload.clone(),
+            },
+        )
+        .await;
+        let mut client = LeaderClient::connect(
+            sock_path,
+            "test",
+            ClientMode::Stdio,
+            ClientCapabilities::default(),
+        )
+        .await
+        .expect("Registered{ready:false} + LeaderReady must complete the connect");
+        let got = tokio::time::timeout(Duration::from_secs(5), client.recv()).await;
+        assert_eq!(
+            got,
+            Ok(Some(payload)),
+            "the ACP frame that arrived with registration must be delivered"
+        );
         client.cancel();
         fake.cancel();
     }

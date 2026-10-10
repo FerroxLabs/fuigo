@@ -1488,6 +1488,8 @@ pub enum Effect {
         session_cwd: Option<std::path::PathBuf>,
         /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
         chat_kind: bool,
+        /// The agent's load attempt this task belongs to, echoed on its result ([`AgentView::begin_load_attempt`]).
+        attempt: u64,
     },
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
@@ -2410,12 +2412,16 @@ pub enum TaskResult {
         /// See [`TaskResult::SessionCreated::scheduler_background_loops`].
         /// A resumed session re-spawns its actor, so the load response carries the value that spawn just pinned.
         scheduler_background_loops: Option<bool>,
+        /// The load attempt that produced this result; a result of a superseded attempt is ignored.
+        attempt: u64,
     },
     /// Session load (resume) failed.
     SessionLoadFailed {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+        /// The load attempt that produced this result; a result of a superseded attempt is ignored.
+        attempt: u64,
     },
     /// Local `summary.json` display fields for [`Effect::HydrateSessionMetaFromDisk`].
     SessionMetaFromDisk {

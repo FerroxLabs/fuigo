@@ -536,3 +536,72 @@ fn p188_a_dead_attempts_hosted_call_goes_with_it() {
         .expect("the resend opens a block");
     assert_eq!(block_start["event"]["index"], 0, "{out:#?}");
 }
+
+/// P201 r2 (Grok r1 HIGH): a failed attempt showed a hosted row; the notice that voids it comes first, then the
+/// row's closing update (`failed`, no output). The transcript holds the accepted attempt only: no text, `tool_use`
+/// or `tool_result` of the dead one, for `web_search` (deferred call) and the split-path hosted tools alike.
+#[test]
+fn p201_a_failed_attempts_hosted_row_never_reaches_the_transcript() {
+    for (partials, web) in [(false, true), (true, true), (false, false), (true, false)] {
+        let mut r = messages(partials);
+        let mut out = Vec::new();
+        out.extend(r.reduce(StreamEvent::AgentMessage("A1".into())));
+        out.extend(r.reduce(StreamEvent::ToolCall(if web {
+            web_search_call("h1")
+        } else {
+            ToolCallEvent::hosted_for_test("h1", "code_interpreter")
+        })));
+        out.extend(r.reduce(StreamEvent::ResponseDiscarded {
+            message_id: None,
+            stream_start_ms: Some(5),
+        }));
+        out.extend(r.reduce(StreamEvent::ToolCallUpdate(ToolCallUpdateEvent {
+            tool_call_id: "h1".into(),
+            status: Some(acp::ToolCallStatus::Failed),
+            content: json!([]),
+            raw_output: Value::Null,
+            locations: json!([]),
+        })));
+        out.extend(r.reduce(StreamEvent::AgentMessage("A2".into())));
+        out.extend(r.reduce(StreamEvent::ResponseCompleted {
+            message_id: None,
+            stop_reason: Some("end_turn".into()),
+            usage: None,
+            signature: None,
+            stop_sequence: None,
+        }));
+        out.extend(r.finish(&end_turn()));
+        let tag = format!("partials={partials} web_search={web}");
+        let frames: Vec<&Value> = out.iter().filter(|l| l["type"] == "assistant").collect();
+        assert_eq!(frames.len(), 1, "{tag}: one assistant frame: {out:#?}");
+        assert_eq!(
+            frames[0]["message"]["content"],
+            json!([{"type": "text", "text": "A2"}]),
+            "{tag}: only the accepted attempt"
+        );
+        assert!(!out.iter().any(|l| l["type"] == "user"), "{tag}: no tool_result: {out:#?}");
+        // With partials the dead attempt's live `stream_event`s were already sent (and are marked void by
+        // `response_discarded`); what must hold in every mode is that no committed line carries the row
+        let committed: Vec<&Value> = out.iter().filter(|l| l["type"] != "stream_event").collect();
+        let committed = serde_json::to_string(&committed).unwrap();
+        assert!(!committed.contains("h1"), "{tag}: nothing committed of the dead row: {committed}");
+    }
+}
+
+/// Guard: a hosted tool that really failed inside an ACCEPTED attempt (payload present) is committed as before.
+#[test]
+fn p201_a_genuine_hosted_failure_is_still_committed() {
+    let mut r = messages(false);
+    let mut out = Vec::new();
+    out.extend(r.reduce(StreamEvent::ToolCall(ToolCallEvent::hosted_for_test("h1", "code_interpreter"))));
+    out.extend(r.reduce(StreamEvent::ToolCallUpdate(ToolCallUpdateEvent {
+        tool_call_id: "h1".into(),
+        status: Some(acp::ToolCallStatus::Failed),
+        content: json!([]),
+        raw_output: json!({"status": "failed"}),
+        locations: json!([]),
+    })));
+    out.extend(r.finish(&end_turn()));
+    let all = serde_json::to_string(&out).unwrap();
+    assert!(all.contains("tool_use") && all.contains("tool_result"), "{all}");
+}

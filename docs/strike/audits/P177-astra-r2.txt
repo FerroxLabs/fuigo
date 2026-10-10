@@ -1,0 +1,82 @@
+# P177 Astra round 2 (gpt-6-astra, read-only). Brief: scratchpad astra-r2.txt; final answer below.
+
+**P177 remains incomplete.** Audited `strike/p177` at `e595a148a`, round **2 of 3**, against `088fa6412`, `de6ca7dda`, and upstream `2bdd1d6a`. All 63 upstream table entries match. Findings below are source-derived; no Cargo or sandbox executions were run.
+
+| Round-1 finding | Result | Why |
+|---|---|---|
+| **#1 HIGH — Missing names creatable** | **NOT FIXED** | The ordinary `~/.cargo` case now gets a pin, but missing Git configs and overlapping essential/configured roots still escape protection: N2 and N5 below. |
+| **#2 HIGH — Workspace exempts protected tree** | **FIXED** | The tree remains protected and a workspace inside it causes refusal. [home_write_deny.rs:509](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:509) |
+| **#3 HIGH — Secret/tool-tree hard links unchecked** | **NOT FIXED** | The granted-home example is fixed, but trees **outside writable roots remain unscanned**. With `~/.ssh` outside those roots and an existing hard link from `~/.ssh/config` to `<workspace>/ssh-alias`, the source inode never enters alias detection. Writing the alias still changes SSH configuration. This limitation also exists upstream. [home_write_deny.rs:658](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:658) |
+| **#4 HIGH — FIFO startup name omitted** | **FIXED** | A direct FIFO now becomes a `File` entry, covering the reported unlink-and-replace attack. [home_write_deny.rs:410](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:410) |
+| **#5 MEDIUM — Scan/plan hard-link disagreement** | **FIXED** | Both now reject protected file entries with multiple links inside writable roots. This fixes consistency; harmless protected-to-protected links remain refused, including on macOS. [home_write_deny.rs:649](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:649) |
+| **#6 MEDIUM — Backup outside every root refused** | **FIXED** | An unmatched link now triggers bounded searches of writable roots. Completed searches finding no writable alias permit startup. Exhausted searches still refuse. [home_write_deny.rs:711](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:711) |
+
+New findings:
+
+1. **N1 HIGH — Writable child rebinds reopen protected intermediate symlinks.**  
+   [hook_write_deny.rs:363](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:363), [hook_write_deny.rs:489](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:489).
+
+   Grant the existing Cargo home, with this initial layout:
+   ```text
+   ~/.cargo/config.toml -> aux/current
+   ~/.cargo/aux/current -> /home/u/safe-cargo.toml
+   ```
+   Missing `config` or credentials causes `.cargo` to be pinned. `git_bind_targets` accepts both symlink nodes because they lie beneath that pin, then drops those nodes from `targets`. Consequently, `add_pinned_dir` considers `aux` unprotected and rebinds it writable. The sandbox can replace `aux/current` with a link to a malicious workspace config.
+
+   The inner verifier repeats the same assumption and checks the pin’s root, not whether the intermediate link’s parent was reopened. Identity revalidation does not catch this static layout. Bubblewrap’s later bind uses the host source, restoring writable access to that child. [Bubblewrap implementation](https://github.com/containers/bubblewrap/blob/v0.11.0/bubblewrap.c#L1123-L1193)
+
+2. **N2 HIGH — The unconditional `git_owned` exemption leaves missing default Git configs creatable.**  
+   [home_write_deny.rs:356](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:356), [home_write_deny.rs:525](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:525).
+
+   Start with `GIT_CONFIG_GLOBAL=/dev/null`, grant the existing `/home/u/.config/git`, and leave its `config` absent. P158 follows the override and does not create the default config. P177 nevertheless labels that default name Git-owned and skips pinning/refusal. Both plan construction and verification skip its missing `OptionalFile`.
+
+   The sandbox can create `~/.config/git/config` containing executable Git configuration, consumed by a later unsandboxed Git command without the override. Exemption must depend on what the actual Git plan protects.
+
+3. **N3 HIGH — Alias searches skip directories that are unlistable but traversable.**  
+   [home_write_deny.rs:737](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:737).
+
+   Suppose `.bashrc`, outside writable roots, has an existing hard link at `<workspace>/drop/alias`. Let `drop` belong to another UID with mode `0711`, while `alias` belongs to the sandboxed user and is writable.
+
+   `read_dir(drop)` fails, and `owned_by` returns false, so the search silently skips it. The user can still open and overwrite the known `drop/alias` pathname, changing `.bashrc`. Upstream’s corresponding check also tests directory searchability; this implementation dropped that protection. Entry-iteration and metadata errors are additionally discarded at lines 752 and 768.
+
+4. **N4 HIGH — Root-device filtering misses aliases beneath existing submounts.**  
+   [home_write_deny.rs:727](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:727).
+
+   Put `.bashrc` on filesystem B and its hard-link alias beneath an existing filesystem-B mount at `<workspace>/mounted/alias`. Let the workspace directory itself reside on filesystem A.
+
+   The search rejects the entire workspace because its root device differs from the protected inode’s device. It never discovers the B submount. The workspace grant still permits writing the alias through that hierarchy; Landlock grants are not restricted to the root directory’s device. [Landlock hierarchy and mount semantics](https://docs.kernel.org/userspace-api/landlock.html#bind-mounts-and-overlayfs)
+
+   This unsafe optimization is also present upstream; it does not establish that the root contains no writable alias.
+
+5. **N5 HIGH — Essential-root filtering erases explicit grant provenance.**  
+   [home_write_deny.rs:469](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:469), [home_write_deny.rs:538](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:538).
+
+   Set `TMPDIR=/home/u/.cargo`, explicitly grant that existing directory, and leave `config` absent. Every matching write-root entry is removed from `configured` because the same path appears in `essential`. Pinning is also prohibited because it contains an essential root.
+
+   The sandbox therefore accepts a writable, missing Cargo config despite the explicit grant. This exceeds the stated exception for paths held **only** by automatic roots. Workspace/grant provenance must survive overlap with essential roots.
+
+6. **N6 MEDIUM — Nested pins leave Cargo caches read-only.**  
+   [hook_write_deny.rs:489](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:489).
+
+   Set `CARGO_HOME=/home/u/.gradle/cargo`, grant `/home/u/.gradle`, and leave the Gradle and Cargo configuration files absent. The scan produces pins for both directories.
+
+   When selecting writable children of the inner Cargo pin, the predicate treats the ancestor `.gradle` **pin** as a permanently protected tree. Every Cargo child matches it, so registry, Git cache, and lock-file rebinds are omitted. Verification passes because both pins are read-only, but registry writes fail with `EROFS`. A build requiring registry population cannot satisfy requirement 3.
+
+7. **N7 MEDIUM — Newly created write grants make the outer and inner plans disagree.**  
+   [home_write_deny.rs:497](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:497), [profiles.rs:277](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/profiles.rs:277).
+
+   Grant an initially absent `/home/u/.m2`, with home outside automatic writable roots. The initial scan sees `.m2/settings.xml`’s nearest existing ancestor outside the grant and requests no pin. The bwrap plan creates neither path.
+
+   Capability construction subsequently creates `.m2`. Post-apply verification rescans, now requires a `.m2` pin, and refuses startup because that mount is writable. The anticipated-directory set accounts for startup directories but omits directories created for write grants. This fails closed, but introduces a deterministic first-start failure.
+
+New regressions against the requested baselines:
+
+- **Against `088fa6412`:** N1 also weakens existing P158 protection. Use the same intermediate-link layout for `GIT_CONFIG_GLOBAL` beneath `.cargo`: P158 refused the writable symlink nodes; P177’s pin exemption admits them and reopens their parent. N6 and N7 introduce cache/startup failures.
+- **Against `de6ca7dda`:** N6 and N7 introduce availability failures. Home-grant refusals and protected hard-link refusals are additional, declared restrictions; the latter now apply on macOS too. The remaining home-persistence bypasses were already possible in that baseline and represent unfinished protection, rather than removed protection.
+- **Devbox remains exempt.** The macOS renderer retains write-only literal/subpath denies for missing names and excludes pin/cache entries. No additional renderer defect was established by inspection.
+
+The new e2e contains a real, dependency-free offline Cargo build and execution marker, but it does not exercise registry population or nested pins. `git diff --check` passed. No Cargo, compilation, native enforcement tests, or file modifications were performed.
+
+**VERDICT: DO-NOT-LAND.**
+
+

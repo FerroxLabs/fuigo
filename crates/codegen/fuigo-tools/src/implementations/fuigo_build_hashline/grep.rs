@@ -31,7 +31,10 @@ async fn get_or_generate<'a>(
     fs: &dyn AsyncFileSystem,
 ) -> Option<&'a [Anchor]> {
     if !cache.contains_key(path) {
-        let bytes = fs.read_file(path).await.ok()?;
+        // P166/S12 (Grok r4 MEDIUM 4): bounded like every other tool read, never an uncapped `read_file`.
+        let bytes = crate::implementations::fuigo_build::read_file::read_tool_source(fs, path)
+            .await
+            .ok()?;
         let content = String::from_utf8_lossy(&bytes);
         let lines = split_lines(&content);
         cache.insert(path.to_path_buf(), scheme.generate_anchors(&lines));
@@ -752,5 +755,59 @@ mod tests {
             .filter(|l| l.matches(':').count() >= 3)
             .count();
         assert_eq!(anchored, 10);
+    }
+
+    /// P166 Grok r4 MEDIUM 4: the anchor pass reads each matched file through the bounded read, never an uncapped
+    /// `read_file` (a multi-gigabyte or growing log would be pulled whole into memory).
+    #[tokio::test]
+    async fn inject_anchors_uses_the_bounded_read() {
+        use crate::computer::local::LocalFs;
+        struct BoundedOnly;
+        #[async_trait::async_trait]
+        impl AsyncFileSystem for BoundedOnly {
+            async fn read_file(
+                &self,
+                _: &Path,
+            ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+                panic!("uncapped read_file on the hashline grep path");
+            }
+            fn supports_bounded_read(&self) -> bool {
+                true
+            }
+            async fn read_file_bounded(
+                &self,
+                path: &Path,
+                max_bytes: usize,
+            ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+                LocalFs.read_file_bounded(path, max_bytes).await
+            }
+            async fn write_file(
+                &self,
+                _: &Path,
+                _: &[u8],
+            ) -> Result<(), crate::computer::types::ComputerError> {
+                Ok(())
+            }
+            async fn delete_file(&self, _: &Path) -> Result<(), crate::computer::types::ComputerError> {
+                Ok(())
+            }
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("test.rs"), "fn main() {\n    let x = 1;\n}\n").unwrap();
+        let rg_output = format!(
+            "<workspace_result workspace_path=\"{}\">\n\
+             Found 1 matching lines\n\
+             test.rs\n\
+             2:    let x = 1;\n\
+             </workspace_result>",
+            tmp.path().display()
+        );
+        let scheme = test_scheme();
+        let result = inject_anchors(rg_output.as_bytes(), tmp.path(), &BoundedOnly, &*scheme).await;
+        let output = String::from_utf8_lossy(&result);
+        assert!(
+            output.lines().any(|l| l.starts_with('2') && l.matches(':').count() >= 3),
+            "{output}"
+        );
     }
 }

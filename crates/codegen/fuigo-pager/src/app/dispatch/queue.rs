@@ -257,7 +257,65 @@ pub(crate) fn maybe_release_queued_prompt_into_turn(
     super::interject::dispatch_interject_on(app, id, queued.text, queued.images)
 }
 
+/// Drain the next queued row. A held side question at the front is sent first (it is no turn),
+/// then the next row drains as before, so the queue keeps its order.
 pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
+    let mut effects = drain_front_side_questions(agent);
+    let mut drain = maybe_drain_queue_rows(agent);
+    effects.append(&mut drain.effects);
+    drain.effects = effects;
+    drain
+}
+
+/// Send every side question at the front of the queue, once the session is open and bound.
+/// A side question is no turn, so it does not wait for an idle turn; a row the user is editing stays put.
+fn drain_front_side_questions(agent: &mut AgentView) -> Vec<Effect> {
+    use crate::app::agent::QueueEntryKind;
+    let mut effects = Vec::new();
+    if agent.session.loading_replay || agent.load_failed {
+        return effects;
+    }
+    if agent.session.session_id.is_none() {
+        return effects;
+    }
+    let agent_id = agent.session.id;
+    loop {
+        let editing_id = match &agent.prompt_mode {
+            PromptMode::EditingQueued { id, .. } => Some(*id),
+            _ => None,
+        };
+        let front_is_side_question = agent
+            .session
+            .pending_prompts
+            .front()
+            .is_some_and(|p| p.kind == QueueEntryKind::SideQuestion && Some(p.id) != editing_id);
+        if !front_is_side_question {
+            return effects;
+        }
+        let Some(row) = agent.session.dequeue_prompt() else {
+            return effects;
+        };
+        effects.extend(send_held_side_question(agent, agent_id, row));
+    }
+}
+
+/// Send one held side question through the same path a typed `/btw` takes.
+fn send_held_side_question(
+    agent: &mut AgentView,
+    agent_id: AgentId,
+    row: crate::app::agent::QueuedPrompt,
+) -> Vec<Effect> {
+    let question = row.text.strip_prefix("/btw ").unwrap_or(&row.text).to_owned();
+    super::notes::start_side_question(
+        agent,
+        agent_id,
+        row.side_question_minimal,
+        question,
+        row.images,
+    )
+}
+
+fn maybe_drain_queue_rows(agent: &mut AgentView) -> QueueDrain {
     use crate::app::agent::QueueEntryKind;
     use crate::unified_log as ulog;
 
@@ -546,6 +604,11 @@ pub(super) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: None,
             }
         }
+        QueueEntryKind::SideQuestion => QueueDrain {
+            // Normally sent ahead of the drain; sent here too, so a row that reaches this point is never run as anything else
+            effects: send_held_side_question(agent, agent_id, queued),
+            page_flip_entry: None,
+        },
         QueueEntryKind::BashCommand => {
             // Start turn but do not push a user prompt block
             // The execute block from the shell is the visual entry

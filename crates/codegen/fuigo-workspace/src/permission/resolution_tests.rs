@@ -1504,7 +1504,9 @@ fn unmatchable_deny_url_shapes_warn() {
         ]
     });
     let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
-    assert_eq!(entries.len(), 3);
+    // P169: an unmatchable deny entry fails the whole deny key closed (the source locks down) instead of being kept.
+    assert_eq!(entries.len(), 0);
+    assert!(logs.contains("unenforceable deniedMcpServers entry"), "{logs:?}");
     assert!(
         logs.contains("has no host"),
         "host-less deny must warn, got: {logs:?}"
@@ -1587,11 +1589,11 @@ fn denied_mcp_servers_warns_on_unsupported_entry() {
         ]
     });
     let (entries, logs) = parse_mcp_entries_capturing_logs(&json, "deniedMcpServers");
-    // Only the enforceable URL entry survives…
-    assert_eq!(entries.len(), 1);
-    // …and the dropped entry is recorded, not silently swallowed.
+    // P169: an unenforceable deny entry fails the whole deny key closed (the source locks down)…
+    assert_eq!(entries.len(), 0);
+    // …and it is recorded, not silently swallowed.
     assert!(
-        logs.contains("ignoring unsupported deniedMcpServers entry"),
+        logs.contains("unenforceable deniedMcpServers entry"),
         "expected a warning for the unsupported deny entry, got: {logs:?}"
     );
 }
@@ -1625,7 +1627,7 @@ fn stdio_named(name: &str, command: &str) -> agent_client_protocol::McpServer {
     ))
 }
 
-fn allowlist_from(json: serde_json::Value) -> McpServerAllowlist {
+fn allowlist_from(json: serde_json::Value) -> McpServerPolicy {
     let path = std::path::Path::new("/test/managed-settings.json");
     parse_managed_settings_json(&json, path).mcp_allowlist
 }
@@ -3654,16 +3656,22 @@ async fn managed_config_toml_rules_resolve_as_non_admin_defaults() {
         matches!(&s.source, RequirementSource::ManagedConfig { .. }) && !is_admin_source(&s.source)
     }));
 
-    // A corrupt layer is skipped without dropping the healthy one.
+    // A corrupt user layer is skipped without dropping the healthy one.
+    // P183 round 7: a corrupt root-owned system layer keeps its last validated copy instead (it is admin policy).
+    std::fs::write(user.path().join("managed_config.toml"), "not valid toml [").unwrap();
+    assert_eq!(
+        fuigo_config::managed_config_layers_at(Some(system.path()), Some(user.path())).len(),
+        1
+    );
     std::fs::write(
         system.path().join("managed_config.toml"),
         "not valid toml [",
     )
     .unwrap();
-    assert_eq!(
-        fuigo_config::managed_config_layers_at(Some(system.path()), Some(user.path())).len(),
-        1
-    );
+    let kept = fuigo_config::managed_config_layers_at(Some(system.path()), Some(user.path()));
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].is_system);
+    assert_eq!(kept[0].value["permission"]["allow"][0].as_str(), Some("*"));
 
     let tmp = tempfile::tempdir().unwrap();
     let resolved = resolve_permissions_with_provenance_inner(
@@ -3820,6 +3828,58 @@ fn explicit_default_mode_blocks_permission_mode_hint() {
             config.as_ref().unwrap().prompt_policy,
             PromptPolicy::Ask,
             "{label}"
+        );
+    }
+}
+
+// ── P183 round 7 (Grok r4 H1, H3 and the sweep) ──────────────────
+
+/// P183 round 7 (sweep): a layer that writes both the compact lists and `[[permission.rules]]` keeps both; before, the verbose
+/// rules were ignored next to `deny = [...]`.
+#[test]
+fn toml_permission_compact_and_rules_both_kept_p183r7() {
+    let toml_val: toml::Value = toml::from_str(
+        "deny = [\"Bash(rm *)\"]\n[[rules]]\naction = \"deny\"\ntool = \"webfetch\"\n",
+    )
+    .unwrap();
+    let rules = parse_toml_permission_section(&toml_val).unwrap();
+    assert_eq!(rules.len(), 2, "{rules:?}");
+    assert!(rules.iter().any(|r| r.tool == ToolFilter::WebFetch));
+}
+
+/// P183 round 7: fuigo-config's `[permission]` shape check (the startup refusal) agrees with what this crate decodes: every
+/// name it accepts decodes, and a corpus of rules is accepted there exactly when it decodes here.
+#[test]
+fn config_permission_shape_matches_decode_p183r7() {
+    for tool in fuigo_config::PERMISSION_RULE_TOOLS {
+        let v = toml::Value::String((*tool).into());
+        assert!(v.try_into::<ToolFilter>().is_ok(), "{tool}");
+    }
+    for action in fuigo_config::PERMISSION_RULE_ACTIONS {
+        let v = toml::Value::String((*action).into());
+        assert!(v.try_into::<RuleAction>().is_ok(), "{action}");
+    }
+    for mode in fuigo_config::PERMISSION_PATTERN_MODES {
+        let v = toml::Value::String((*mode).into());
+        assert!(v.try_into::<PatternMode>().is_ok(), "{mode}");
+    }
+    for rule in [
+        "action = \"deny\"",
+        "action = \"allow\"\ntool = \"bash\"\npattern = \"ls *\"",
+        "action = \"ask\"\ntool = \"webfetch\"\npattern = \"*.example.com\"\npattern_mode = \"domain\"",
+        "action = \"deny\"\ntool = \"agent_message\"",
+        "tool = \"bash\"",
+        "action = \"block\"",
+        "action = \"deny\"\ntool = \"shell\"",
+        "action = \"deny\"\npattern = 1",
+        "action = \"deny\"\npattern_mode = \"regex\"",
+        "action = 1",
+    ] {
+        let v: toml::Value = toml::from_str(rule).unwrap();
+        assert_eq!(
+            fuigo_config::permission_rule_shape_ok(&v),
+            v.clone().try_into::<PermissionRule>().is_ok(),
+            "{rule:?}"
         );
     }
 }

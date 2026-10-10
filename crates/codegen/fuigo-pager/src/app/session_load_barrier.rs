@@ -323,6 +323,7 @@ mod tests {
             restore_degree: None,
             running_prompt_id: None,
             scheduler_background_loops: None,
+            attempt: 0,
         }
     }
 
@@ -331,6 +332,7 @@ mod tests {
             agent_id: AgentId(id),
             session_id: sid(session),
             error: "x".into(),
+            attempt: 0,
         }
     }
 

@@ -162,12 +162,12 @@ fn resolve_agent_profile_path(path: &std::path::Path) -> std::path::PathBuf {
         Ok(abs) => {
             fuigo_tty_utils::cli_eprintln!(
                 "error: --agent-profile path is not a file: {}",
-                abs.display()
+                fuigo_tty_utils::untrusted(abs.display())
             );
             std::process::exit(1);
         }
         Err(e) => {
-            fuigo_tty_utils::cli_eprintln!("error: --agent-profile path '{}': {}", path.display(), e);
+            fuigo_tty_utils::cli_eprintln!("error: --agent-profile path '{}': {}", fuigo_tty_utils::untrusted(path.display()), fuigo_tty_utils::untrusted(e));
             std::process::exit(1);
         }
     }
@@ -178,17 +178,56 @@ fn print_serve_startup_info(bind_addr: SocketAddr, secret: &str) {
     fuigo_tty_utils::cli_eprintln!("   Fuigo agent server starting...");
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!("   Address:  {}:{}", bind_addr.ip(), bind_addr.port());
-    fuigo_tty_utils::cli_eprintln!("   Secret:   {}", secret);
+    fuigo_tty_utils::cli_eprintln!("   Secret:   {}", fuigo_tty_utils::untrusted(secret));
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!(
         "   WebSocket URL: ws://{}/ws?server-key={}",
-        bind_addr, secret
+        bind_addr, fuigo_tty_utils::untrusted(secret)
     );
     fuigo_tty_utils::cli_eprintln!();
 }
 /// Entrypoint tag for `fuigo -p`; keys the quiet stderr default in `init_tracing_simple`.
 const HEADLESS_ENTRYPOINT: &str = "headless";
 /// Initialize simple tracing for non-TUI agent modes.
+/// The stderr log layer. tracing-subscriber 0.3.23 escapes ESC, BEL, BS, FF, DEL and C1 in messages and field values
+/// (its `EscapeGuard`) in a message but not in a `%` field, and never CR, LF, line separators or bidi controls, so each record also goes through
+/// [`fuigo_tty_utils::scrub_log_record`] (every escape is dropped; the layer is built with `with_ansi(false)`). A field recorded with `%` is NOT
+/// escaped by 0.3.23 (a test pins this), so the record filter is what stops an OSC or erase there.
+fn stderr_log_layer<S, W>(
+    make_writer: impl Fn() -> W + 'static,
+) -> tracing_subscriber::fmt::Layer<
+    S,
+    tracing_subscriber::fmt::format::DefaultFields,
+    tracing_subscriber::fmt::format::Format,
+    impl Fn() -> LogRecordWriter<W> + 'static,
+>
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    W: std::io::Write,
+{
+    tracing_subscriber::fmt::layer()
+        .with_target(false)
+        // No style at all (round S5, L4): the formatter's own faint/reset/colour are not emitted, so no ESC in a record
+        // can be the formatter's and `scrub_log_record` drops every one.
+        .with_ansi(false)
+        .log_internal_errors(false)
+        .with_writer(move || LogRecordWriter(make_writer()))
+}
+
+/// Applies [`fuigo_tty_utils::scrub_log_record`] to each record the fmt layer writes (one `write` call per event).
+struct LogRecordWriter<W>(W);
+
+impl<W: std::io::Write> std::io::Write for LogRecordWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        self.0.write_all(fuigo_tty_utils::scrub_log_record(&text).as_bytes())?;
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 fn init_tracing_simple(app_entrypoint: &'static str) {
     use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _};
     use fuigo_telemetry::debug_log::RMCP_SSE_NOISE_TARGET;
@@ -209,12 +248,10 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
     // a raw `eprintln!`; here the writer IS stderr, so a dead fd 2 would turn the first logged
     // error into a panic (SIGABRT under `panic = "abort"`). It is the layer's default today;
     // pinned so a dependency bump cannot bring the abort back.
-    let fmt_layer = fmt::layer()
-        .with_target(false)
-        .with_ansi(true)
-        .log_internal_errors(false)
+    let fmt_layer = stderr_log_layer(|| {
         // P70b: a log sink; credentials this process sent upstream are replaced (exact match).
-        .with_writer(|| fuigo_telemetry::sent_credentials::ScrubWriter::new(std::io::stderr()));
+        fuigo_telemetry::sent_credentials::ScrubWriter::new(std::io::stderr())
+    });
     let registry = tracing_subscriber::registry()
         .with(fmt_layer.with_filter(env_filter))
         .with(fuigo_telemetry::sampling_log::layer())
@@ -279,7 +316,7 @@ async fn run_setup_command(json: bool) {
                 }
             }
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("Couldn't fetch managed configuration. {e}");
+                fuigo_tty_utils::cli_eprintln!("Couldn't fetch managed configuration. {}", fuigo_tty_utils::untrusted(e));
                 std::process::exit(1);
             }
         }
@@ -303,7 +340,7 @@ async fn run_setup_command(json: bool) {
             );
         }
         SetupOutcome::Failed(e) => {
-            fuigo_tty_utils::cli_eprintln!("Couldn't apply managed configuration. {e}");
+            fuigo_tty_utils::cli_eprintln!("Couldn't apply managed configuration. {}", fuigo_tty_utils::untrusted(e));
             std::process::exit(1);
         }
     }
@@ -363,28 +400,72 @@ async fn kill_leaders() -> Result<()> {
         return Ok(());
     }
     let mut killed = 0u32;
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut cleaned = 0u32;
     for d in &leaders {
-        let Some(pid) = leader_pid(d) else {
-            continue;
-        };
-        if !fuigo_shell::util::is_fuigo_process(pid) {
-            if let Some(ref lock) = d.lock_path {
-                fuigo_tty_utils::cli_eprintln!("  PID {pid} is not a fuigo process, removing stale lock");
-                let _ = std::fs::remove_file(lock);
-                cleaned += 1;
+        use fuigo_shell::leader::{LeaderKillPlan, leader_kill_plan};
+        let plan = leader_kill_plan(cfg!(windows), d.live_info.is_some(), leader_pid(d));
+        match plan {
+            LeaderKillPlan::CannotIdentify => {
+                if !cfg!(windows) {
+                    continue; // unix: no pid known, nothing to say (unchanged)
+                }
+                fuigo_tty_utils::cli_eprintln!(
+                    "  A Fuigo background process could not be identified safely, so it was not stopped. Close the other Fuigo windows to let it exit."
+                );
+                if let Some(ref lock) = d.lock_path {
+                    fuigo_tty_utils::cli_eprintln!("  Its lock file is {}", fuigo_tty_utils::untrusted(lock.display().to_string()));
+                }
+                continue;
             }
-            if let Some(ref sock) = d.socket_path {
-                let _ = std::fs::remove_file(sock);
+            LeaderKillPlan::ViaPipeConnection => {
+                #[cfg(windows)]
+                {
+                    use fuigo_shell::leader::{KillByConnection, kill_leader_by_connection};
+                    let Some(ref sock) = d.socket_path else { continue };
+                    match kill_leader_by_connection(sock).await {
+                        KillByConnection::Killed(pid) => {
+                            fuigo_tty_utils::cli_eprintln!("  Killed leader PID {pid}");
+                            killed += 1;
+                        }
+                        KillByConnection::NotAnswering => {
+                            fuigo_tty_utils::cli_eprintln!("  The background process did not answer, so it was not stopped. Close the other Fuigo windows to let it exit.");
+                        }
+                        KillByConnection::Refused => {
+                            fuigo_tty_utils::cli_eprintln!("  The background process could not be identified safely as Fuigo, so it was not stopped.");
+                        }
+                        KillByConnection::Failed(e) => {
+                            fuigo_tty_utils::cli_eprintln!("  warning: failed to stop it: {}", fuigo_tty_utils::untrusted(e));
+                        }
+                    }
+                }
+                continue;
             }
-            continue;
+            LeaderKillPlan::ByPid(pid) => {
+                #[cfg(not(windows))]
+                {
+                    if !fuigo_shell::util::is_fuigo_process(pid) {
+                        if let Some(ref lock) = d.lock_path {
+                            fuigo_tty_utils::cli_eprintln!("  PID {pid} is not a fuigo process, removing stale lock");
+                            let _ = std::fs::remove_file(lock);
+                            cleaned += 1;
+                        }
+                        if let Some(ref sock) = d.socket_path {
+                            let _ = std::fs::remove_file(sock);
+                        }
+                        continue;
+                    }
+                    fuigo_tty_utils::cli_eprintln!("  Killing leader PID {pid}");
+                    if let Err(e) = fuigo_shell::util::kill_process_by_pid(pid) {
+                        fuigo_tty_utils::cli_eprintln!("  warning: failed to terminate PID {pid}: {}", fuigo_tty_utils::untrusted(e));
+                        continue;
+                    }
+                    killed += 1;
+                }
+                #[cfg(windows)]
+                let _ = pid; // never produced on Windows
+            }
         }
-        fuigo_tty_utils::cli_eprintln!("  Killing leader PID {pid}");
-        if let Err(e) = fuigo_shell::util::kill_process_by_pid(pid) {
-            fuigo_tty_utils::cli_eprintln!("  warning: failed to terminate PID {pid}: {e}");
-            continue;
-        }
-        killed += 1;
     }
     if killed > 0 {
         fuigo_tty_utils::cli_eprintln!("Killed {killed} leader process(es).");
@@ -435,7 +516,7 @@ fn print_leader_descriptor(d: &LeaderDescriptor) {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "?".into());
     let state = format!("{:?}", d.classification);
-    fuigo_tty_utils::cli_eprintln!("  PID {pid} ({state}) -- {sock}");
+    fuigo_tty_utils::cli_eprintln!("  PID {pid} ({state}) -- {}", fuigo_tty_utils::untrusted(sock));
 }
 fn leader_descriptor_json(d: &LeaderDescriptor) -> serde_json::Value {
     serde_json::json!({
@@ -703,7 +784,7 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
         pid,
     } = payload
     else {
-        fuigo_tty_utils::cli_eprintln!("unexpected control response: {payload:?}");
+        fuigo_tty_utils::cli_eprintln!("unexpected control response: {}", fuigo_tty_utils::untrusted(format!("{payload:?}")));
         return;
     };
     if json {
@@ -723,19 +804,19 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
         fuigo_tty_utils::cli_println!("Workspace exposure: not running (leader PID {pid})");
         return;
     }
-    fuigo_tty_utils::cli_println!("Workspace exposure: {state}");
+    fuigo_tty_utils::cli_println!("Workspace exposure: {}", fuigo_tty_utils::untrusted(state));
     if let Some(url) = hub_url {
-        fuigo_tty_utils::cli_println!("  hub:      {url}");
+        fuigo_tty_utils::cli_println!("  hub:      {}", fuigo_tty_utils::untrusted(url));
     }
     if let Some(dir) = cwd {
-        fuigo_tty_utils::cli_println!("  cwd:      {dir}");
+        fuigo_tty_utils::cli_println!("  cwd:      {}", fuigo_tty_utils::untrusted(dir));
     }
     fuigo_tty_utils::cli_println!("  uptime:   {}s", uptime_ms / 1000);
     fuigo_tty_utils::cli_println!("  active:   {active_tool_calls} tool call(s)");
     let session_list = if sessions.is_empty() {
         "-".to_string()
     } else {
-        sessions.join(", ")
+        fuigo_tty_utils::scrub_unsafe_display(&sessions.join(", "), Some(' ')).into_owned()
     };
     fuigo_tty_utils::cli_println!("  sessions: {} ({session_list})", sessions.len());
     fuigo_tty_utils::cli_println!("  leader:   PID {pid}");
@@ -1117,6 +1198,53 @@ async fn replay_acp_state_after_reconnect(
 /// (`fuigo_pager::headless::PERMISSION_DENIED_EXIT_CODE`), `4` this, `130`/`143` SIGINT/SIGTERM.
 /// `4` is the next free code and stays clear of `126`/`127` and of `128 + n`.
 const RUNTIME_STARTUP_FAILURE_EXIT_CODE: i32 = 4;
+/// The fewest open files Fuigo needs to start. Below this a start-up component that opens its own descriptors
+/// (tokio's signal pipe, the async-io reactor, the shared HTTP client, the config and policy files) fails with
+/// EMFILE, and which one fails first depends on the exact limit: several of them `expect`, so the process aborted
+/// (exit 134 with a panic message) before anything ran, or exited `1` like a failed run (K26). A limit under this
+/// is refused up front with the start-up failure code instead. Measured on Linux with `fuigo -p`: every limit up
+/// to 27 failed one way or another; the floor is set well above that, far below any real limit (1024 and up).
+const MIN_OPEN_FILES: u64 = 64;
+/// Whether an open-file soft limit of `limit` (`None` when it cannot be read, or on a platform without one) is enough
+/// to start. A limit that cannot be read is let through: refusing on a guess would block a working run.
+fn open_file_limit_is_enough(limit: Option<u64>) -> bool {
+    limit.is_none_or(|limit| limit >= MIN_OPEN_FILES)
+}
+/// The current open-file soft limit, after [`raise_fd_limit`] raised it as far as the hard limit allows.
+#[cfg(unix)]
+fn current_open_file_limit() -> Option<u64> {
+    let mut rlim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes one local struct.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) } != 0 {
+        return None;
+    }
+    // `RLIM_INFINITY` is far above any minimum. `rlim_t` is not `u64` on every unix target.
+    #[allow(clippy::unnecessary_cast)]
+    Some(rlim.rlim_cur as u64)
+}
+#[cfg(not(unix))]
+fn current_open_file_limit() -> Option<u64> {
+    None
+}
+/// Refuse to start when the open-file limit is below [`MIN_OPEN_FILES`]: one stderr line, then exit
+/// [`RUNTIME_STARTUP_FAILURE_EXIT_CODE`] (`4`, "Fuigo never started, nothing was run"). Nothing has run yet, so
+/// there is nothing to reap or flush.
+fn refuse_start_if_open_file_limit_too_low() {
+    let limit = current_open_file_limit();
+    if open_file_limit_is_enough(limit) {
+        return;
+    }
+    fuigo_tty_utils::cli_eprintln!(
+        "fuigo: the open-file limit is {} but Fuigo needs at least {MIN_OPEN_FILES} to start \
+         (exit {RUNTIME_STARTUP_FAILURE_EXIT_CODE}: Fuigo never started, nothing was run). \
+         Raise it, for example `ulimit -n 1024`, and run again.",
+        limit.unwrap_or_default()
+    );
+    std::process::exit(RUNTIME_STARTUP_FAILURE_EXIT_CODE);
+}
 /// Reap owned child trees, flush observability, then exit.
 /// Used by the agent/headless signal handler.
 ///
@@ -1165,7 +1293,7 @@ fn install_agent_parent_death_hook() {
 }
 fn finalize_span_profile() {
     if let Some(path) = fuigo_telemetry::span_profile::finalize() {
-        fuigo_tty_utils::cli_eprintln!("fuigo: span profile written to {}", path.display());
+        fuigo_tty_utils::cli_eprintln!("fuigo: span profile written to {}", fuigo_tty_utils::untrusted(path.display()));
     }
 }
 #[tracing::instrument(level = "debug", skip_all)]
@@ -1251,7 +1379,9 @@ async fn run_agent_command(
     fuigo_telemetry::instrumentation::install_panic_hook();
     if trust {
         match std::env::current_dir() {
-            Ok(cwd) => fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            Ok(cwd) => fuigo_workspace::folder_trust::report_cli_trust_grant(
+                &fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            ),
             Err(e) => {
                 tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
             }
@@ -1302,7 +1432,7 @@ async fn run_agent_command(
         None,
     );
     if let Some(warning) = launch_yolo.blocked_warning {
-        fuigo_tty_utils::cli_eprintln!("fuigo: {warning}");
+        fuigo_tty_utils::cli_eprintln!("fuigo: {}", fuigo_tty_utils::untrusted(warning));
     }
     agent_config.default_yolo_mode = launch_yolo.yolo;
     agent_config.default_auto_mode = fuigo_shell::util::config::effective_auto_for_launch(
@@ -1827,7 +1957,7 @@ fn cli_worker_threads() -> NonZeroUsize {
         },
     };
     if let Some(notice) = resolved.notice() {
-        fuigo_tty_utils::cli_eprintln!("{notice}");
+        fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(notice));
     }
     resolved.used()
 }
@@ -2006,7 +2136,7 @@ fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
         &mut std::io::stdout().lock(),
         fuigo_update::channel_label(),
     ) {
-        fuigo_tty_utils::cli_eprintln!("Error: {error}");
+        fuigo_tty_utils::cli_eprintln!("Error: {}", fuigo_tty_utils::untrusted(error));
         std::process::exit(1);
     }
     true
@@ -2016,10 +2146,28 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
         return false;
     };
     if let Err(error) = fuigo_pager::doctor_cmd::run(doctor_args.clone()) {
-        fuigo_tty_utils::cli_eprintln!("Error: {error:#}");
+        fuigo_tty_utils::cli_eprintln!("Error: {}", fuigo_tty_utils::untrusted(format!("{error:#}")));
         std::process::exit(1);
     }
     true
+}
+/// Startup requirements gate (P183): prints non-fatal warnings (tracing is not up yet, so a warning printed nowhere else would
+/// never be seen) and exits 2 with the update/admin guidance when a requirements layer refuses start. Every command that
+/// reaches config uses it, so a refusal is always exit 2.
+fn validate_requirements_or_exit() {
+    let requirements = fuigo_config::validate_requirements_with_warnings();
+    for warning in requirements.as_ref().map(Vec::as_slice).unwrap_or_default() {
+        fuigo_tty_utils::cli_eprintln!("Warning: {}", fuigo_tty_utils::untrusted(warning));
+    }
+    if let Err(e) = requirements {
+        fuigo_tty_utils::cli_eprintln!("Couldn't start Fuigo: {}", fuigo_tty_utils::untrusted(e));
+        fuigo_tty_utils::cli_eprintln!();
+        fuigo_tty_utils::cli_eprintln!(
+            "Update Fuigo to a version the policy allows, or ask your administrator \
+             to fix the managed requirements."
+        );
+        std::process::exit(2);
+    }
 }
 /// Subscription auth is dispatched before telemetry, session housekeeping and agent startup.
 fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
@@ -2028,8 +2176,9 @@ fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
     if !matches!(command, Command::Login { provider: Some(_), .. } | Command::Logout { provider: Some(_), .. } | Command::Models { provider: Some(_) }) {
         return false;
     }
+    // P183: the same requirements gate as the main path (warnings printed, exit 2 on refusal); this path returns before it
+    validate_requirements_or_exit();
     let result = (|| -> anyhow::Result<()> {
-        fuigo_config::validate_requirements()?;
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         runtime.block_on(async {
             match command {
@@ -2048,7 +2197,7 @@ fn dispatch_subscription_if_requested(args: &PagerArgs) -> bool {
         })
     })();
     if let Err(error) = result {
-        fuigo_tty_utils::cli_eprintln!("Fuigo subscription command failed: {error}");
+        fuigo_tty_utils::cli_eprintln!("Fuigo subscription command failed: {}", fuigo_tty_utils::untrusted(format!("{error:#}")));
         std::process::exit(1);
     }
     true
@@ -2092,7 +2241,15 @@ fn main() {
         fuigo_update::channel_name().unwrap_or_default(),
     ));
     let args = PagerArgs::parse_cli();
-    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) || dispatch_subscription_if_requested(&args) {
+    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+        exit_nonzero_if_stdout_failed();
+        return;
+    }
+    // P195 (K26, Grok r1): raise the open-file limit, then refuse a start under the floor, BEFORE the subscription
+    // commands (`login`, `logout`, `models`) and the requirements gate, so those never fail with a generic error or EMFILE.
+    raise_fd_limit();
+    refuse_start_if_open_file_limit_too_low();
+    if dispatch_subscription_if_requested(&args) {
         exit_nonzero_if_stdout_failed();
         return;
     }
@@ -2109,16 +2266,7 @@ fn main() {
     if memory_trace_wanted(args.memory_enabled_override()) {
         fuigo_pager::memory_trace::start(fuigo_pager::memory_trace::default_dir());
     }
-    raise_fd_limit();
-    if let Err(e) = fuigo_config::validate_requirements() {
-        fuigo_tty_utils::cli_eprintln!("Couldn't start Fuigo: {e}");
-        fuigo_tty_utils::cli_eprintln!();
-        fuigo_tty_utils::cli_eprintln!(
-            "Update Fuigo to a version the policy allows, or ask your administrator \
-             to fix the managed requirements."
-        );
-        std::process::exit(2);
-    }
+    validate_requirements_or_exit();
     let _sentry_guard = fuigo_telemetry::sentry::init(fuigo_telemetry::sentry::Config {
         client: "fuigo-pager",
         client_version: PAGER_CLIENT_VERSION,
@@ -2148,14 +2296,17 @@ fn main() {
         if let Some(notice) = fuigo_crash_handler::startup_notice(&reports) {
             // fd 2 may be a dead pane; a panicking eprintln! would itself abort.
             for line in notice.lines() {
-                fuigo_pager::best_effort_stderr::eprint_line(line);
+                fuigo_pager::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(
+                    line,
+                    Some(' '),
+                ));
             }
             fuigo_pager::best_effort_stderr::eprint_line("");
         }
         if !install_crash_recorder(&crash_dir) {
             fuigo_pager::best_effort_stderr::eprint_line(&format!(
                 "warning: crash recording is on but could not start (check permissions on {})",
-                crash_dir.display()
+                fuigo_tty_utils::untrusted(crash_dir.display())
             ));
         }
     }
@@ -2172,8 +2323,9 @@ fn main() {
     let runtime =
         fuigo_tty_utils::runtime::build_with_blocking_pool(&mut builder).unwrap_or_else(|e| {
             fuigo_tty_utils::cli_eprintln!(
-                "fuigo: failed to start tokio runtime: {e} (exit {RUNTIME_STARTUP_FAILURE_EXIT_CODE}: \
-                 Fuigo never started, nothing was run)"
+                "fuigo: failed to start tokio runtime: {} (exit {RUNTIME_STARTUP_FAILURE_EXIT_CODE}: \
+                 Fuigo never started, nothing was run)",
+                fuigo_tty_utils::untrusted(e)
             );
             shutdown_and_flush_telemetry(RUNTIME_STARTUP_FAILURE_EXIT_CODE);
         });
@@ -2188,7 +2340,10 @@ fn main() {
         Ok(HeadlessOutcome::PermissionDenied(denial)) => {
             fuigo_tty_utils::restore_native_stderr();
             finalize_span_profile();
-            fuigo_pager::best_effort_stderr::eprint_line(&denial.human_line());
+            fuigo_pager::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(
+                &denial.human_line(),
+                Some(' '),
+            ));
             drop(_sentry_guard);
             std::process::exit(denial.exit_code());
         }
@@ -2226,7 +2381,7 @@ fn main() {
 fn headless_error_report(e: &anyhow::Error) -> String {
     let report = match e.downcast_ref::<fuigo_pager::app::StartupFailure>() {
         Some(startup) => startup.user_report(),
-        None => format!("Error: {e:#}"),
+        None => format!("Error: {}", fuigo_tty_utils::untrusted(format!("{e:#}"))),
     };
     fuigo_telemetry::sent_credentials::scrub_owned(report)
 }
@@ -2303,18 +2458,19 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
         fuigo_pager::app::cli::SandboxStartup::Apply(profile) => profile,
         fuigo_pager::app::cli::SandboxStartup::Conflict { requested, saved } => {
             fuigo_tty_utils::cli_eprintln!(
-                "error: cannot resume this session under sandbox profile '{requested}' — \
-                 it was created with '{saved}'. Omit --sandbox to resume with '{saved}', \
-                 or start a new session to use '{requested}'."
+                "{}",
+                fuigo_pager::app::cli::sandbox_conflict_message(&requested, &saved)
             );
             std::process::exit(1);
         }
     };
     if args.trust {
         match std::env::current_dir() {
-            Ok(cwd) => fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            Ok(cwd) => fuigo_workspace::folder_trust::report_cli_trust_grant(
+                &fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            ),
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("warning: --trust: failed to resolve cwd; folder not trusted: {e}");
+                fuigo_tty_utils::cli_eprintln!("warning: --trust: failed to resolve cwd; folder not trusted: {}", fuigo_tty_utils::untrusted(e));
             }
         }
     }
@@ -2589,7 +2745,7 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
             None,
         );
         if let Some(warning) = launch_yolo.blocked_warning {
-            fuigo_tty_utils::cli_eprintln!("fuigo: {warning}");
+            fuigo_tty_utils::cli_eprintln!("fuigo: {}", fuigo_tty_utils::untrusted(warning));
         }
         let json_schema = args
             .json_schema
@@ -2698,7 +2854,7 @@ async fn finish_update_on_exit(
 ) -> bool {
     let run_blocking = |reason: Option<String>| async move {
         if let Some(reason) = reason {
-            fuigo_tty_utils::cli_eprintln!("{reason}");
+            fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(reason));
         }
         auto_update::run_update_if_available(
             auto_update::UpdateRunMode::Blocking,
@@ -2940,7 +3096,7 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
                 to_version,
                 ..
             })) => {
-                fuigo_tty_utils::cli_eprintln!("  ↻ Relaunching shared session (leader {from_version} → {to_version})…");
+                fuigo_tty_utils::cli_eprintln!("  ↻ Relaunching shared session (leader {} → {})…", fuigo_tty_utils::untrusted(from_version), fuigo_tty_utils::untrusted(to_version));
             }
             Ok(Ok(fuigo_shell::leader::ControlPayload::RelaunchDeclined { reason })) => {
                 tracing::debug!(%reason, "Leader declined relaunch");
@@ -2979,12 +3135,18 @@ async fn stop_leaders_after_downgrade(installed_version: &str) {
         match stop_leader_for_downgrade(socket_path, installed_version).await {
             DowngradeStopResult::Stopping { from_version } => {
                 fuigo_tty_utils::cli_eprintln!(
-                    "  ↻ Stopping shared session (leader {from_version} is newer than the installed {installed_version}); it restarts on {installed_version}."
+                    "  ↻ Stopping shared session (leader {} is newer than the installed {}); it restarts on {}.",
+                    fuigo_tty_utils::untrusted(from_version),
+                    fuigo_tty_utils::untrusted(installed_version),
+                    fuigo_tty_utils::untrusted(installed_version)
                 );
             }
             DowngradeStopResult::Unsupported { leader_version } => {
                 fuigo_tty_utils::cli_eprintln!(
-                    "  Shared session (leader {leader_version}) is newer than the installed {installed_version} and cannot be stopped remotely. Run `fuigo leader kill` to restart it on {installed_version}."
+                    "  Shared session (leader {}) is newer than the installed {} and cannot be stopped remotely. Run `fuigo leader kill` to restart it on {}.",
+                    fuigo_tty_utils::untrusted(leader_version),
+                    fuigo_tty_utils::untrusted(installed_version),
+                    fuigo_tty_utils::untrusted(installed_version)
                 );
             }
             DowngradeStopResult::Declined(reason) => {
@@ -2998,6 +3160,42 @@ async fn stop_leaders_after_downgrade(installed_version: &str) {
 }
 #[cfg(test)]
 mod tests {
+    /// P181 (Grok r3, tracing): tracing-subscriber 0.3.23 escapes ESC, BEL and C1 in a field value and a message, and
+    /// the layer's record filter removes what it leaves (CR, LF inside the record, bidi, line separators). Asserts on
+    /// the bytes written.
+    #[test]
+    fn the_stderr_log_layer_writes_no_raw_escape_from_a_field_or_a_message() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt as _;
+        #[derive(Clone)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf(Arc::new(Mutex::new(Vec::new())));
+        let sink = buf.clone();
+        let subscriber = tracing_subscriber::registry().with(super::stderr_log_layer(move || sink.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(field = %"a\x1b]0;x\x07b\u{202e}c\rd\ne", "msg \x1b[2J \u{9b}31m\nforged line");
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let body = out.trim_end_matches('\n');
+        assert_eq!(out.matches('\n').count(), 1, "one record, one line: {out:?}");
+        // the only raw ESC bytes are the formatter's own SGR (`ESC [ digits m`)
+        let raw_esc = body.match_indices('\x1b').filter(|(i, _)| !body[*i..].starts_with("\x1b[") || !body[*i + 2..].trim_start_matches(|c: char| c.is_ascii_digit() || c == ';').starts_with('m')).count();
+        assert_eq!(raw_esc, 0, "{out:?}");
+        // the message is escaped by tracing-subscriber; the `%` field is NOT (the raw ESC was in the bytes before the
+        // record filter), and both stay readable as inert text
+        assert!(body.contains("a ]0;x bc d e") && body.contains("msg \\x1b[2J"), "{out:?}");
+        assert!(!body.contains('\u{202e}') && !body.contains('\r') && !body.contains('\u{9b}'), "{out:?}");
+    }
+
     /// P149 (S8, live lane C2 D1): `fuigo -p`'s `Error:` line replaces a credential this process sent that the
     /// provider echoed back, wherever in the error chain it sits.
     #[test]
@@ -3060,6 +3258,16 @@ mod tests {
         for taken in [0, 1, 2, denial.exit_code(), 130, 143] {
             assert_ne!(RUNTIME_STARTUP_FAILURE_EXIT_CODE, taken, "{taken} already means something else");
         }
+    }
+
+    /// K26: the open-file floor. Pure, so the boundary is pinned without lowering this test process's own limit.
+    #[test]
+    fn the_open_file_floor_refuses_below_and_accepts_at_and_above() {
+        assert!(!open_file_limit_is_enough(Some(0)));
+        assert!(!open_file_limit_is_enough(Some(MIN_OPEN_FILES - 1)));
+        assert!(open_file_limit_is_enough(Some(MIN_OPEN_FILES)));
+        assert!(open_file_limit_is_enough(Some(1024)));
+        assert!(open_file_limit_is_enough(None), "an unreadable limit is not a reason to refuse");
     }
 
     /// On Windows the parent-death hook is the only record that an agent was
@@ -4428,6 +4636,36 @@ mod interrupt_exit_reaps_children {
 
 #[cfg(test)]
 mod trust_record_sink_wiring {
+    #[test]
+    fn subscription_commands_refuse_requirements_with_exit_2_p183r4() {
+        // A source check, like the one below: provider login/logout/models must stop on a requirements error with the same
+        // exit 2 and guidance as the main path, not the generic exit 1.
+        let src = include_str!("main.rs");
+        let start = src.find("\nfn dispatch_subscription_if_requested(").expect("dispatch fn");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("fn end")];
+        assert!(body.contains("validate_requirements_or_exit()"), "provider path must use the exit-2 gate");
+        let main_body = &src[src.find("\nfn main() {").expect("fn main")..];
+        assert!(main_body.contains("validate_requirements_or_exit()"), "main must use the exit-2 gate");
+    }
+
+    /// P195 (K26, Grok r1): the open-file refusal precedes the requirements gate on BOTH paths: in `main` the raise and the
+    /// refuse come before the subscription dispatch and before `main`'s own `validate_requirements_or_exit()`; the
+    /// subscription dispatch (which validates) is only called after them. A source check, like the ones around it.
+    #[test]
+    fn the_open_file_refusal_precedes_the_requirements_gate_on_both_paths() {
+        let src = include_str!("main.rs");
+        let start = src.find("\nfn main() {").expect("fn main");
+        let body = &src[start..start + src[start..].find("\n}\n").expect("fn end")];
+        let raise = body.find("\n    raise_fd_limit();").expect("main raises the limit");
+        let refuse = body.find("\n    refuse_start_if_open_file_limit_too_low();").expect("main refuses");
+        let dispatch = body.find("dispatch_subscription_if_requested(&args)").expect("subscription dispatch");
+        let validate = body.find("\n    validate_requirements_or_exit();").expect("main validates");
+        assert!(raise < refuse, "raise before refuse");
+        assert!(refuse < dispatch, "refuse before the subscription path (which validates)");
+        assert!(refuse < validate, "refuse before main's requirements gate");
+        assert_eq!(body.matches("refuse_start_if_open_file_limit_too_low();").count(), 1, "one refusal in main");
+    }
+
     /// `main` must install the trust-record sink before anything can write the
     /// trust set. A source check, because `main` cannot be run from a unit test.
     #[test]
@@ -4437,7 +4675,7 @@ mod trust_record_sink_wiring {
         let install = body
             .find("fuigo_shell::agent::config::install_trust_record_sink()")
             .expect("main() must install the trust-record sink");
-        for earlier in ["PagerArgs::parse_cli()", "fuigo_config::validate_requirements()"] {
+        for earlier in ["PagerArgs::parse_cli()", "validate_requirements_or_exit()"] {
             assert!(install < body.find(earlier).expect(earlier), "sink must precede {earlier}");
         }
     }

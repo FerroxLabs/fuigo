@@ -438,10 +438,19 @@ fn strip_control_chars(s: &str) -> String {
             !c.is_control()
                 && !matches!(
                     c,
-                    '\u{200b}'..='\u{200f}'
-                        | '\u{202a}'..='\u{202e}'
-                        | '\u{2066}'..='\u{2069}'
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{180e}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'..='\u{206f}'
                         | '\u{feff}'
+                        | '\u{fff9}'..='\u{fffb}'
+                        | '\u{13430}'..='\u{1343f}'
+                        | '\u{1bca0}'..='\u{1bca3}'
+                        | '\u{1d173}'..='\u{1d17a}'
+                        | '\u{e0001}'
+                        | '\u{e0020}'..='\u{e007f}'
                 )
         })
         .collect()
@@ -665,6 +674,19 @@ pub struct ActionOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_item_strips_every_invisible_display_class() {
+        for c in [
+            '\u{00ad}', '\u{061c}', '\u{180e}', '\u{2028}', '\u{2029}', '\u{2060}', '\u{fff9}',
+            '\u{fffb}', '\u{13430}', '\u{1343f}', '\u{1bca0}', '\u{1bca3}', '\u{1d173}',
+            '\u{1d17a}', '\u{e0001}', '\u{e0020}', '\u{e0041}', '\u{e007f}',
+        ] {
+            let item = ComponentItem::new(format!("na{c}me"), Some(format!("de{c}sc")));
+            assert_eq!(item.name, "name", "U+{:04X}", c as u32);
+            assert_eq!(item.description.as_deref(), Some("desc"), "U+{:04X}", c as u32);
+        }
+    }
 
     #[test]
     fn hooks_action_tagged_enum_format() {

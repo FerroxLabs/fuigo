@@ -54,23 +54,45 @@ fn resolve_link<'a>(ids: &[u32], table: &'a [LinkRef], i: usize) -> Option<&'a L
     }
 }
 
+/// Scrub every cell of `buf` before it can be written to the terminal.
+/// ratatui drops controls and zero-width graphemes when it writes a string, but it still paints U+2028, U+2029 and a soft
+/// hyphen, and it keeps a tag or other hidden character that trails a base character inside that cell's symbol. A cell
+/// holding one gets the title policy of the shared filter (row breaks become a space, hidden characters go, ZWJ emoji and
+/// valid subdivision flags stay); a cell left empty becomes a space.
+/// The scan allocates only for a cell that needs it.
+pub fn neutralize_buffer(buf: &mut Buffer) {
+    for cell in &mut buf.content {
+        let symbol = cell.symbol();
+        if symbol.is_ascii() && !symbol.bytes().any(|b| b < 0x20 || b == 0x7f) {
+            continue;
+        }
+        if !symbol.chars().any(fuigo_tty_utils::is_unsafe_display_char) {
+            continue;
+        }
+        let clean = fuigo_tty_utils::scrub_unsafe_title_with(symbol, Some(' '));
+        if clean != symbol {
+            let clean = if clean.is_empty() { " ".to_string() } else { clean };
+            cell.set_symbol(&clean);
+        }
+    }
+}
+
 /// Emit an OSC 8 hyperlink open sequence.
 ///
-/// Control characters are stripped from `url` to prevent premature sequence
-/// termination or escape injection. The sequence is terminated with BEL
+/// A `url` holding any unsafe display character (controls, bidi, tags, line separators) gets no OSC 8 at all. The sequence is terminated with BEL
 /// (`\x07`) for broadest terminal/multiplexer support; here the BEL is
 /// immediately followed by the cell draw's ESC (cursor move / SGR), which all
 /// mainstream terminals parse correctly (OSC-BEL followed by CSI is ubiquitous,
 /// e.g. title sets). ST would also be valid but is less widely supported.
 fn write_osc8_open<W: Write>(w: &mut W, url: &str, id: Option<u32>) -> io::Result<()> {
-    let sanitized: std::borrow::Cow<str> = if url.chars().any(|c| c.is_control()) {
-        std::borrow::Cow::Owned(url.chars().filter(|c| !c.is_control()).collect())
-    } else {
-        std::borrow::Cow::Borrowed(url)
-    };
+    // A target holding any control, bidi, tag, soft hyphen or line separator is refused whole: deleting characters
+    // would link somewhere the user never saw. The cells still draw, only unlinked.
+    if url.chars().any(fuigo_tty_utils::is_unsafe_display_char) {
+        return Ok(());
+    }
     match id {
-        Some(id) => write!(w, "\x1b]8;id={id};{sanitized}\x07"),
-        None => write!(w, "\x1b]8;;{sanitized}\x07"),
+        Some(id) => write!(w, "\x1b]8;id={id};{url}\x07"),
+        None => write!(w, "\x1b]8;;{url}\x07"),
     }
 }
 
@@ -340,6 +362,8 @@ where
     /// `width * height > 65 535`.  On extra-large terminals (e.g. 420×160 = 67 200
     /// cells) this causes the entire UI to be rendered into a tiny corner.
     pub fn flush(&mut self) -> io::Result<bool> {
+        // Every painted surface ends in this buffer: no hidden character or row break reaches the terminal from it
+        neutralize_buffer(&mut self.buffers[self.current]);
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
         let updates = diff_large(previous_buffer, current_buffer);
@@ -426,6 +450,8 @@ where
             return self.flush();
         }
 
+        // The plain path above scrubs in `flush`; this one diffs on its own
+        neutralize_buffer(&mut self.buffers[cur]);
         let updates = diff_large_with_links(
             &self.buffers[prev],
             &self.buffers[cur],
@@ -856,6 +882,11 @@ where
     where
         F: FnOnce(&mut Buffer),
     {
+        // The lines go straight into the terminal's scrollback, so they are scrubbed like a frame
+        let draw_fn = |buf: &mut Buffer| {
+            draw_fn(buf);
+            neutralize_buffer(buf);
+        };
         match self.viewport {
             #[cfg(feature = "scrolling-regions")]
             Viewport::Inline(_) => self.insert_before_scrolling_regions(height, draw_fn),
@@ -1553,5 +1584,161 @@ mod inline_resize_tests {
         terminal.autoresize().unwrap();
 
         assert_eq!(terminal.viewport_area(), Rect::new(0, 0, 80, 40));
+    }
+}
+
+#[cfg(test)]
+mod osc8_open_tests {
+    use super::write_osc8_open;
+
+    fn emitted(url: &str) -> String {
+        let mut out = Vec::new();
+        write_osc8_open(&mut out, url, Some(3)).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_clean_target_is_linked() {
+        assert_eq!(emitted("https://example.com/a"), "\x1b]8;id=3;https://example.com/a\x07");
+    }
+
+    #[test]
+    fn a_target_with_an_unsafe_character_gets_no_osc8_and_is_never_edited() {
+        for bad in [
+            "https://evil.example/\u{202e}moc.safe",
+            "https://evil.example/a\u{2028}b",
+            "https://evil.example/a\u{ad}b",
+            "https://evil.example/a\u{e0041}b",
+            "https://evil.example/a\x1b]0;x\x07b",
+            "https://evil.example/a\u{9b}b",
+        ] {
+            assert_eq!(emitted(bad), "", "{bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cell_neutralize_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::{Terminal, neutralize_buffer};
+
+    fn terminal(width: u16, height: u16) -> Terminal<TestBackend> {
+        Terminal::with_options(
+            TestBackend::new(width, height),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        )
+        .unwrap()
+    }
+
+    fn row(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    fn hidden(buf: &Buffer, y: u16) -> bool {
+        row(buf, y).chars().any(fuigo_tty_utils::is_unsafe_display_char)
+    }
+
+    const FLAG_ENGLAND: &str =
+        "\u{1F3F4}\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+    const FAMILY: &str = "\u{1F469}\u{200D}\u{1F52C}";
+
+    /// P181 (Grok round): ratatui paints U+2028 and a tag attached to a base character, so the cell buffer is the last
+    /// place every painted surface passes. Hidden characters become spaces or go; joined emoji and valid flags stay.
+    #[test]
+    fn neutralize_buffer_scrubs_cells_and_keeps_joined_emoji_and_flags() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 40, 4));
+        buf.set_string(0, 0, "a\u{2028}b\u{2029}c", Style::default());
+        buf.set_string(0, 1, "x\u{e0041}y\u{ad}z\u{202e}w", Style::default());
+        assert!(hidden(&buf, 0) && hidden(&buf, 1), "the buffer holds hidden characters before the scrub");
+        buf.set_string(0, 2, format!("{FAMILY} {FLAG_ENGLAND}!"), Style::default());
+        buf.set_string(0, 3, "plain text 好 \u{e9}", Style::default());
+        let before = row(&buf, 2);
+        let before3 = row(&buf, 3);
+        neutralize_buffer(&mut buf);
+        assert!(!hidden(&buf, 0) && !hidden(&buf, 1));
+        // How many columns a soft hyphen takes depends on the width tables, so only the letters are compared
+        assert_eq!(row(&buf, 0).replace(' ', ""), "abc");
+        assert_eq!(row(&buf, 1).replace(' ', ""), "xyzw");
+        assert_eq!(row(&buf, 2), before, "joined emoji and a valid flag are kept");
+        assert_eq!(row(&buf, 3), before3, "clean text is untouched");
+    }
+
+    #[test]
+    fn a_frame_never_reaches_the_backend_with_a_hidden_character() {
+        let mut term = terminal(30, 3);
+        term.draw(|frame| {
+            frame.buffer_mut().set_string(0, 0, "a\u{2028}b", Style::default());
+            frame.buffer_mut().set_string(0, 1, "x\u{e0041}y", Style::default());
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let all = format!("{}{}", row(buf, 0), row(buf, 1));
+        assert!(!all.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{all:?}");
+        assert_eq!(all.replace(' ', ""), "abxy");
+    }
+
+    /// The pager draws with `flush_with_links`, not `draw`; a linked frame takes the other branch.
+    #[test]
+    fn a_linked_frame_is_scrubbed_too() {
+        use ratatui::backend::CrosstermBackend;
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone)]
+        struct Shared(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Shared {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let shared = Shared(Arc::new(Mutex::new(Vec::new())));
+        let mut term = Terminal::with_options(
+            CrosstermBackend::new(shared.clone()),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, 30, 3)),
+            },
+        )
+        .unwrap();
+        term.set_frame_links(&[super::LinkSpan {
+            row: 2,
+            col_start: 0,
+            col_end: 4,
+            url: "https://example.com".into(),
+            id: None,
+        }]);
+        {
+            // The frame borrows the terminal; end the borrow before flushing.
+            let mut frame = term.get_frame();
+            frame.buffer_mut().set_string(0, 0, "a\u{2028}b\u{e0041}", Style::default());
+            frame.buffer_mut().set_string(0, 2, "link", Style::default());
+        }
+        term.flush_with_links().unwrap();
+        let bytes = String::from_utf8_lossy(&shared.0.lock().unwrap()).into_owned();
+        assert!(bytes.contains("\x1b]8;"), "the linked frame took the link branch: {bytes:?}");
+        assert!(!bytes.contains('\u{2028}') && !bytes.contains('\u{e0041}'), "{bytes:?}");
+    }
+
+    #[test]
+    fn inserted_scrollback_lines_are_scrubbed_too() {
+        let mut term = terminal(30, 3);
+        term.insert_before(1, |buf| {
+            buf.set_string(0, 0, "p\u{2028}q\u{e0041}", Style::default());
+        })
+        .unwrap();
+        let all: String = (0..3).map(|y| row(term.backend().buffer(), y)).collect::<Vec<_>>().join("|")
+            + &(0..term.backend().scrollback().area.height)
+                .map(|y| row(term.backend().scrollback(), y))
+                .collect::<String>();
+        assert!(!all.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{all:?}");
+        assert!(all.replace(' ', "").contains("pq"), "{all:?}");
     }
 }

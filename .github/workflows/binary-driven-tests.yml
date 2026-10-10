@@ -53,7 +53,7 @@ jobs:
           set -uo pipefail
           mkdir -p binary-driven-receipts
           failed=0
-          cargo test --locked --no-fail-fast -p fuigo-shell --test '*_acp' 2>&1 | tee binary-driven-receipts/fuigo-shell-acp.log || failed=1
+          cargo test --locked --no-fail-fast -p fuigo-shell --features test-support --test '*_acp' 2>&1 | tee binary-driven-receipts/fuigo-shell-acp.log || failed=1
           cargo test --locked --no-fail-fast -p fuigo-pager-bin --tests 2>&1 | tee binary-driven-receipts/fuigo-pager-bin.log || failed=1
           cargo test --locked -p fuigo-test-support --lib env::local_binary_tests -- --include-ignored 2>&1 | tee binary-driven-receipts/binary-freshness.log || failed=1
           exit "$failed"

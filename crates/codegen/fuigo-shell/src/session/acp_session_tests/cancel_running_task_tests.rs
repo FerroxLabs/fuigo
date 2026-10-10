@@ -19,7 +19,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
         .run_until(async {
             let tmp = tempfile::TempDir::new().unwrap();
             let session_dir = tmp.path().join("session");
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
             let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
             let terminal = Arc::new(DummyTerminal {});
             let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -249,6 +249,7 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -854,6 +855,7 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -1000,7 +1002,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
             let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
             let terminal = Arc::new(DummyTerminal {});
             let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1159,6 +1161,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",
@@ -2553,7 +2556,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let (persistence_tx, _persistence_rx) =
                 tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
             let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
             let terminal = Arc::new(DummyTerminal {});
             let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2712,6 +2715,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",

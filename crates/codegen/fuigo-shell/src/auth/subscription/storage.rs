@@ -20,6 +20,12 @@ type Records = BTreeMap<SubscriptionProvider, ProviderAccounts>;
 /// anything longer falls back to the in-process stash below.
 const PERSIST_RETRY_DELAYS: [Duration; 2] = [Duration::from_millis(50), Duration::from_millis(250)];
 
+/// Not `WouldBlock`: Windows surfaces contention (ERROR_LOCK_VIOLATION) as `Uncategorized`.
+fn lock_is_contended(e: &std::io::Error) -> bool {
+    let contended = fs2::lock_contended_error();
+    e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
+}
+
 /// Credentials a SUCCESSFUL refresh issued but the store could not write.
 ///
 /// By then the provider has rotated the refresh token. The record on disk holds either the
@@ -173,7 +179,7 @@ impl SubscriptionStore {
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(file),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if lock_is_contended(&e) => {}
                 Err(_) => return Err(SubscriptionError::Storage),
             }
             if tokio::time::Instant::now() >= deadline {

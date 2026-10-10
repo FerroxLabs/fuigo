@@ -11,6 +11,7 @@ authors = ["Ferrox Labs"]
 # the shipped dependency tree via anstream/clap.
 anstyle-parse = { workspace = true }
 crossterm = { workspace = true }
+fuigo-tty-utils = { workspace = true }
 ratatui = { workspace = true }
 unicode-width = { workspace = true }
 

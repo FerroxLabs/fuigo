@@ -1482,6 +1482,30 @@ impl FinalizedToolset {
         };
         (parse_input)(canonical_params)
     }
+    /// The arguments as the tool behind `tool_name` receives them: client-facing parameter names mapped back to the
+    /// canonical ones, exactly as [`Self::try_parse`] and dispatch do. `None` for an unknown name.
+    pub fn canonical_params(
+        &self,
+        tool_name: &str,
+        tool_params: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        let tools = self.tools.read();
+        let tool = tools.iter().find(|t| t.client_name == tool_name)?;
+        Some(if tool.reverse_params.is_empty() {
+            tool_params.clone()
+        } else {
+            remap_json_keys(tool_params.clone(), &tool.reverse_params)
+        })
+    }
+    /// The registry id of the implementation behind a client-facing name (the inverse of
+    /// [`Self::tool_name_for_registry_id`]).
+    pub fn registry_id_for_tool_name(&self, tool_name: &str) -> Option<String> {
+        self.tools
+            .read()
+            .iter()
+            .find(|t| t.client_name == tool_name)
+            .map(|t| t.registry_id.clone())
+    }
     /// Execute a tool, returning only its raw output.
     ///
     /// Unlike [`call()`], this skips reminders and persistence. Used by
@@ -1532,6 +1556,12 @@ impl FinalizedToolset {
         );
         if let Some(cwd) = parent_ctx.extensions.get::<fuigo_tool_runtime::Cwd>() {
             ctx.extensions.insert((*cwd).clone());
+        }
+        if let Some(globs) = parent_ctx
+            .extensions
+            .get::<crate::types::resources::CallDenyReadGlobs>()
+        {
+            ctx.extensions.insert((*globs).clone());
         }
         let tool_id = fuigo_tool_protocol::ToolId::new(&registry_id)
             .unwrap_or_else(|_| fuigo_tool_protocol::ToolId::new("unknown").expect("valid"));
@@ -1625,6 +1655,43 @@ impl FinalizedToolset {
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
     ) -> fuigo_tool_runtime::ToolStream<ToolRunResult> {
+        self.call_streaming_inner(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            cwd_override,
+            cancellation,
+            None,
+        )
+    }
+    /// [`Self::call_streaming`] with Read-deny globs for this call only
+    /// ([`CallDenyReadGlobs`](crate::types::resources::CallDenyReadGlobs)): the search tools exclude them in addition
+    /// to the toolset's own, and nothing shared is written (P173).
+    pub fn call_streaming_with_deny_read_globs(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        deny_read_globs: Vec<String>,
+    ) -> fuigo_tool_runtime::ToolStream<ToolRunResult> {
+        self.call_streaming_inner(
+            tool_name,
+            tool_args,
+            tool_call_id,
+            None,
+            None,
+            Some(crate::types::resources::CallDenyReadGlobs(deny_read_globs)),
+        )
+    }
+    fn call_streaming_inner(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        cwd_override: Option<std::path::PathBuf>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+        call_deny_read_globs: Option<crate::types::resources::CallDenyReadGlobs>,
+    ) -> fuigo_tool_runtime::ToolStream<ToolRunResult> {
         use futures::StreamExt;
         let this = Arc::clone(self);
         let tool_name = tool_name.to_owned();
@@ -1636,6 +1703,7 @@ impl FinalizedToolset {
                 &tool_call_id,
                 cwd_override,
                 cancellation,
+                call_deny_read_globs,
             ) {
                 Ok(parts) => parts,
                 Err(e) => {
@@ -1686,6 +1754,7 @@ impl FinalizedToolset {
         tool_call_id: &str,
         cwd_override: Option<std::path::PathBuf>,
         cancellation: Option<tokio_util::sync::CancellationToken>,
+        call_deny_read_globs: Option<crate::types::resources::CallDenyReadGlobs>,
     ) -> Result<DispatchParts, fuigo_tool_runtime::ToolError> {
         let (registry_id, output_converter, reverse_params) = {
             let tools = self.tools.read();
@@ -1728,6 +1797,9 @@ impl FinalizedToolset {
         if let Some(cancellation) = cancellation {
             ctx.extensions
                 .insert(fuigo_tool_runtime::Cancellation(cancellation));
+        }
+        if let Some(globs) = call_deny_read_globs {
+            ctx.extensions.insert(globs);
         }
         if let Some(ref version) = contract_version {
             ctx.extensions
@@ -2548,6 +2620,7 @@ mod tests {
             timeout: None,
             description: "list files".into(),
             is_background: false,
+            workdir: None,
         });
         let merged = merge_tool_meta(
             &toolset,
@@ -5022,6 +5095,7 @@ mod tests {
                 "test-call",
                 None,
                 None,
+                None,
             )
             .expect("prepare_dispatch succeeds");
         let wvc = parts
@@ -5031,6 +5105,57 @@ mod tests {
             .expect("WorkspaceViewerContext must be stamped on the ctx");
         assert!(wvc.stream_tool_progress);
     }
+    /// P173: per-call Read-deny globs ride on the call's context and never touch the shared resources, so one call
+    /// cannot replace another's excludes.
+    #[tokio::test]
+    async fn prepare_dispatch_stamps_call_deny_read_globs_on_the_call_only() {
+        let (toolset, _tmp) = toolset_with_viewer_ctx(None);
+        let parts = toolset
+            .prepare_dispatch(
+                "read_file",
+                serde_json::json!({"target_file": "noop"}),
+                "test-call",
+                None,
+                None,
+                Some(crate::types::resources::CallDenyReadGlobs(vec![
+                    "**/secrets/**".to_owned(),
+                ])),
+            )
+            .expect("prepare_dispatch succeeds");
+        let globs = parts
+            .ctx
+            .extensions
+            .get::<crate::types::resources::CallDenyReadGlobs>()
+            .expect("the call's deny globs are on its context");
+        assert_eq!(globs.0, vec!["**/secrets/**".to_owned()]);
+        assert!(
+            toolset
+                .resources
+                .lock()
+                .await
+                .get::<crate::types::resources::DenyReadGlobs>()
+                .is_none(),
+            "a call's deny globs must not be written into the shared resources"
+        );
+        let other = toolset
+            .prepare_dispatch(
+                "read_file",
+                serde_json::json!({"target_file": "noop"}),
+                "other-call",
+                None,
+                None,
+                None,
+            )
+            .expect("prepare_dispatch succeeds");
+        assert!(
+            other
+                .ctx
+                .extensions
+                .get::<crate::types::resources::CallDenyReadGlobs>()
+                .is_none(),
+            "another call does not see them"
+        );
+    }
     #[tokio::test]
     async fn prepare_dispatch_omits_workspace_viewer_ctx_when_none() {
         let (toolset, _tmp) = toolset_with_viewer_ctx(None);
@@ -5039,6 +5164,7 @@ mod tests {
                 "read_file",
                 serde_json::json!({"target_file": "noop"}),
                 "test-call",
+                None,
                 None,
                 None,
             )

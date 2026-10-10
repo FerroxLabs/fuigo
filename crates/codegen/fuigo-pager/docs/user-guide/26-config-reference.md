@@ -398,7 +398,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `models.agent_type` | `string` | `yes` | `user` | Fallback agent_type for models without a per-model override. |
-| `models.allowed_models` | `string[]` | `pin` | `user` | Glob allowlist for the model picker, default, and `-m`. Empty means no restriction. |
+| `models.allowed_models` | `string[]` | `pin` | `user` | Glob allowlist for the model picker, default, and `-m`. Empty means no restriction. A `requirements.toml` pin replaces the user's list (it matches model ids, not your `[model.*]` names), and choosing a model outside it is refused everywhere (`-m`, `/model`, ACP `session/set_model`, the configured default, and subagent models from `[subagents.models]`, agent definitions, goal/persona overrides and resume, which inherit the parent model instead). A pinned value that is not a list of strings allows no model. |
 | `models.default` | `string` | `pin` | `user` | Model used for new sessions. Also `FUIGO_DEFAULT_MODEL`, `--model`, `-m`. |
 | `models.default_reasoning_effort` | `string` | `yes` | `user` | Default reasoning effort for the default model when the model supports it. |
 | `models.disabled_models` | `string[]` | `yes` | `user` | Remove these model IDs from the catalog. Wins over `hidden_models`. |
@@ -648,6 +648,17 @@ These keys exist only in `requirements.toml`:
 | `features.image_edit` | `boolean` | — | Pin image_edit availability. Requirements only; a user-file entry is unrecognized and unset leaves the remotely configured default. |
 | `ui.disable_bypass_permissions_mode` | `boolean` | — | Lock always-approve off. The lock is enforced only from a requirements layer; true in user or managed files is ignored. |
 
+These top-level policy keys are read from `requirements.toml` and from `managed_config.toml` (and from the Claude `managed-settings.json`). Every file that sets one counts and the strictest wins; see [Plugins: restrict which MCP servers can run](09-plugins.md#set-the-same-policy-in-fuigos-own-files).
+
+| Key | Type | Details |
+| --- | --- | --- |
+| `allowed_mcp_servers` | array of `{ server_url }`, `{ command }`, `{ server_command = [argv] }`, `{ server_name }` | Only listed MCP servers run. Empty blocks every server. |
+| `denied_mcp_servers` | same entries | Listed servers never run. An entry Fuigo cannot enforce blocks every server. |
+| `allow_managed_mcp_servers_only` | `boolean` | Only servers an allow list names run; an admin file's lock accepts only admin files' allow entries. |
+| `enable_all_project_mcp_servers` | `boolean` | `false` drops a repository's MCP servers unless an allow list names them. |
+| `strict_known_marketplaces` | array of `{ source = "git", url }` or `{ source = "github", repo }` | Only these marketplaces can be added, and only plugins installed from them load, install or enable. Other plugins (project, `[plugins].paths`, `--plugin-dir`, Claude-imported) do not load. Empty blocks all. |
+| `allow_managed_hooks_only` | `boolean` | `true` runs only hooks from `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml`; other hooks are skipped and enabling one is refused. |
+
 ## What happens when a setting is refused
 
 | Situation | What Fuigo does |
@@ -656,6 +667,8 @@ These keys exist only in `requirements.toml`:
 | A developer sets a key you shipped in `managed_config.toml` | Their value applies, except `features.remote_fetch`. Pin the key instead if it must hold. |
 | `requirements.toml` is missing or its signature does not verify | The pins do not apply, and Fuigo starts without them. Set `fail_closed = true` to refuse to start instead. |
 | A pinned key names a value this version does not recognise | The key is ignored and the rest of the file still applies. |
+| An admin policy file (`/etc/fuigo/...`, MDM, the Claude `managed-settings.json`) exists but cannot be read or parsed, or is not owned by root, or group/other can write it | Policy fails closed: every MCP server and marketplace is blocked, only managed hooks run, project MCP servers are dropped, and (for `requirements.toml`) no model can be selected until the file is fixed. `fuigo inspect` names the file. |
+| `~/.fuigo/requirements.toml` or `~/.fuigo/managed_config.toml` cannot be read or parsed | Fuigo logs a warning and skips that file; the admin layers still apply. A file that parses applies as usual, and a key in it with the wrong type still blocks. |
 
 ## Check what is in effect
 

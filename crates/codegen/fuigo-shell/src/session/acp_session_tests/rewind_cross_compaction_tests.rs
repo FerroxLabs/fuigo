@@ -511,9 +511,12 @@ async fn restore_compacted_live_state(actor: &crate::session::acp_session::Sessi
     actor.chat_state_handle.restore_snapshot(snap);
 }
 
-/// P111 (DI-01): "rewind all" across a compaction whose checkpoint file is gone (a reopened session, P88). The
-/// conversation cannot be rebuilt, so the rewind fails, and it must fail BEFORE any project file is restored or
+/// P111 (DI-01): "rewind all" to a prompt after a compaction whose checkpoint file is gone (a reopened session, P88).
+/// The conversation cannot be rebuilt, so the rewind fails, and it must fail BEFORE any project file is restored or
 /// deleted: before P111 the files were reverted first and the response then said `success: false, reverted_files: []`.
+/// P172: the target is now past the compaction (prompt 6), because only the target's own base checkpoint is needed;
+/// a target before the compaction is rebuilt from the raw transcript (see the test below). The error names what is
+/// missing and says nothing was changed.
 #[tokio::test(flavor = "current_thread")]
 async fn failed_cross_compaction_rewind_changes_no_project_file() {
     let local = tokio::task::LocalSet::new();
@@ -544,7 +547,7 @@ async fn run_failed_replay_scenario() {
 
     let resp = actor
         .handle_rewind(RewindRequest {
-            target_prompt_index: 3,
+            target_prompt_index: 6,
             force: true,
             mode: RewindMode::All,
         })
@@ -559,9 +562,14 @@ async fn run_failed_replay_scenario() {
     let _ = std::fs::remove_dir_all(&session_dir);
 
     assert!(!resp.success, "the rewind cannot rebuild the conversation: {resp:?}");
-    assert!(
-        resp.error.as_deref().is_some_and(|e| e.contains("checkpoint")),
-        "the response says why: {resp:?}"
+    assert_eq!(
+        resp.error.as_deref(),
+        Some(
+            "Cannot rewind to prompt #6: the compaction checkpoint for prompts #5 onward is missing \
+             (compaction_checkpoints/ckptgone.json); pick a prompt before #5, or one at or after the next \
+             compaction. Nothing was changed: no file was reverted and the conversation was not rewound."
+        ),
+        "the response says what is missing and that nothing changed: {resp:?}"
     );
     assert_eq!(
         edited.as_deref(),
@@ -635,6 +643,113 @@ async fn run_cross_compaction_rewind_all_scenario() {
     assert_eq!(texts, vec!["SYS", "UI0", "P0", "P1", "P2"]);
     assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
     assert_eq!(truncated, vec![3]);
+}
+
+/// Prompt 6 edited `edited.txt` and created `created.txt`; the tracker holds their before-snapshots.
+async fn record_prompt_6_edits(actor: &crate::session::acp_session::SessionActor, root: &std::path::Path) {
+    std::fs::write(root.join("edited.txt"), "after prompt 6").unwrap();
+    std::fs::write(root.join("created.txt"), "created by prompt 6").unwrap();
+    let tracker = &actor.file_state_tracker;
+    tracker
+        .add_before_snapshot_for_prompt(6, &root.join("edited.txt"), root, Some("before prompt 6".into()))
+        .await;
+    tracker
+        .add_before_snapshot_for_prompt(6, &root.join("created.txt"), root, None)
+        .await;
+}
+
+/// P172 (D2): "rewind all" to a prompt BEFORE the compaction whose checkpoint is gone (deleted by the old 30-day
+/// sweep, D1). The conversation is rebuilt from the raw transcript, which the checkpoint is not needed for; only its
+/// `original_user_info` is unavailable, so the current session preamble is kept. Before P172 this failed.
+#[tokio::test(flavor = "current_thread")]
+async fn pre_compaction_rewind_succeeds_when_the_checkpoint_is_gone() {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(run_pre_compaction_checkpoint_gone_scenario()).await;
+}
+
+async fn run_pre_compaction_checkpoint_gone_scenario() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let (persistence_tx, persistence_rx) = super::support::answering_persistence();
+    let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p172-pre").await;
+
+    let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+    write_compacted_session_fixture(&session_dir, "ckptswept");
+    std::fs::remove_file(session_dir.join("compaction_checkpoints/ckptswept.json")).unwrap();
+    restore_compacted_live_state(&actor).await;
+    record_prompt_6_edits(&actor, root).await;
+
+    let resp = actor
+        .handle_rewind(RewindRequest { target_prompt_index: 3, force: true, mode: RewindMode::All })
+        .await
+        .expect("handle_rewind ok");
+
+    let texts: Vec<String> = actor.chat_state_handle.get_conversation().await.iter().map(|c| c.text_content()).collect();
+    let truncated = drained_truncate_requests(&persistence_rx);
+    let _ = std::fs::remove_dir_all(&session_dir);
+
+    assert!(resp.success, "{resp:?}");
+    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(), Some("before prompt 6"));
+    assert!(!root.join("created.txt").exists());
+    assert_eq!(texts, vec!["SYS", "UI1", "P0", "P1", "P2"]);
+    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
+    assert_eq!(truncated, vec![3]);
+}
+
+/// P172 (D2): a session compacted twice whose OLDER checkpoint is gone. A rewind past the newer compaction needs only
+/// the newer checkpoint; before P172 it failed with "Compaction checkpoint file missing" for the older one.
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_past_the_newer_compaction_succeeds_when_the_older_checkpoint_is_gone() {
+    let local = tokio::task::LocalSet::new();
+    local.run_until(run_older_checkpoint_gone_scenario()).await;
+}
+
+async fn run_older_checkpoint_gone_scenario() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let (persistence_tx, persistence_rx) = super::support::answering_persistence();
+    let (actor, _gateway_rx) = actor_on_real_fs(root, persistence_tx, "p172-older").await;
+
+    let session_dir = crate::session::persistence::session_dir(&actor.session_info);
+    // The fixture's checkpoint (at prompt 5) is the newer one; an older compaction at prompt 3 precedes it.
+    write_compacted_session_fixture(&session_dir, "ckptnew");
+    let updates = vec![
+        user_chunk("P0", 0),
+        user_chunk("P1", 1),
+        user_chunk("P2", 2),
+        checkpoint_update("ckptold", 3),
+        user_chunk("P3", 3),
+        user_chunk("P4", 4),
+        checkpoint_update("ckptnew", 5),
+        user_chunk("P5", 5),
+        agent_chunk("R5"),
+        user_chunk("P6", 6),
+    ];
+    let mut content = Vec::new();
+    for u in &updates {
+        content.extend(serde_json::to_vec(&SessionUpdateEnvelope::from_update(u).unwrap()).unwrap());
+        content.push(b'\n');
+    }
+    std::fs::write(session_dir.join("updates.jsonl"), content).unwrap();
+    assert!(!session_dir.join("compaction_checkpoints/ckptold.json").exists(), "fixture: the older one is gone");
+    restore_compacted_live_state(&actor).await;
+    record_prompt_6_edits(&actor, root).await;
+
+    let resp = actor
+        .handle_rewind(RewindRequest { target_prompt_index: 6, force: true, mode: RewindMode::All })
+        .await
+        .expect("handle_rewind ok");
+
+    let texts: Vec<String> = actor.chat_state_handle.get_conversation().await.iter().map(|c| c.text_content()).collect();
+    let truncated = drained_truncate_requests(&persistence_rx);
+    let _ = std::fs::remove_dir_all(&session_dir);
+
+    assert!(resp.success, "{resp:?}");
+    assert_eq!(std::fs::read_to_string(root.join("edited.txt")).ok().as_deref(), Some("before prompt 6"));
+    assert!(!root.join("created.txt").exists());
+    assert_eq!(texts, vec!["SYS", "SUMMARY", "P5", "R5"]);
+    assert_eq!(actor.chat_state_handle.get_prompt_index().await, 6);
+    assert_eq!(truncated, vec![6]);
 }
 
 /// P111 (DI-02): a file that cannot be restored, and one that cannot be deleted. Before P111 the handler logged them,
@@ -1124,7 +1239,7 @@ async fn run_rewind_points_rewrite_failure_scenario() {
                             Ok(Default::default())
                         });
                     }
-                    PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to } if gate.start() => {
+                    PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to, .. } if gate.start() => {
                         rewrites.lock().unwrap().push(rewrite);
                         let _ = respond_to.send(if rewrite_fails {
                             Err(std::io::Error::other("disk full"))

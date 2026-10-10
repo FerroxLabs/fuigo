@@ -224,12 +224,16 @@ fn abbreviated_commit(c: Option<&str>) -> &str {
     c.map(|s| &s[..7.min(s.len())]).unwrap_or("?")
 }
 
+/// `subject` and `source_arg` may hold text from a project or the command line: both are scrubbed here, so a caller
+/// cannot forget (pass them raw; do not pre-wrap).
 fn trust_prompt(subject: &str, source_arg: &str) -> String {
     format!(
-        "Installing {subject} requires confirmation.\n\
+        "Installing {} requires confirmation.\n\
          Plugins can run hooks, MCP servers, and skills on your machine, so installation needs explicit trust.\n\
          \n\
-         To proceed, re-run with --trust:\n  fuigo plugin install {source_arg} --trust"
+         To proceed, re-run with --trust:\n  fuigo plugin install {} --trust",
+        fuigo_tty_utils::untrusted(subject),
+        fuigo_tty_utils::untrusted(source_arg)
     )
 }
 
@@ -282,9 +286,11 @@ fn cmd_list(json: bool, available: bool) -> Result<()> {
                 .unwrap_or_default();
             let names: Vec<&str> = repo.plugins.keys().map(|s| s.as_str()).collect();
             fuigo_tty_utils::cli_println!(
-                "  {repo_key}: {} [{}]{mp}",
-                names.join(", "),
-                kind_label(&repo.kind)
+                "  {}: {} [{}]{}",
+                fuigo_tty_utils::untrusted(repo_key),
+                fuigo_tty_utils::untrusted(names.join(", ")),
+                fuigo_tty_utils::untrusted(kind_label(&repo.kind)),
+                fuigo_tty_utils::untrusted(&mp)
             );
         }
     }
@@ -435,9 +441,10 @@ fn cmd_install(source: &str, trust: bool) -> Result<()> {
             }
             log_plugin_installed(install_kind(!outcome.is_local), true, None);
             fuigo_tty_utils::cli_println!(
-                "Installed {} plugin(s) from {source}: {}",
+                "Installed {} plugin(s) from {}: {}",
                 outcome.plugin_names.len(),
-                outcome.plugin_names.join(", "),
+                fuigo_tty_utils::untrusted(source),
+                fuigo_tty_utils::untrusted(outcome.plugin_names.join(", ")),
             );
             Ok(())
         }
@@ -466,7 +473,10 @@ fn cmd_install_marketplace(
                 Err(e) => bail!("{e}"),
             },
         };
-        let subject = format!("\"{}\" from marketplace \"{from}\"", mref.name);
+        let subject = format!(
+            "\"{}\" from marketplace \"{}\"",
+            mref.name, from
+        );
         fuigo_tty_utils::cli_eprintln!("{}", trust_prompt(&subject, source));
         std::process::exit(1);
     }
@@ -490,19 +500,21 @@ fn cmd_install_marketplace(
                 fuigo_tty_utils::cli_println!(
                     "Plugin \"{}\" is already installed from {}. \
                      Run `fuigo plugin update {}` to update it.",
-                    mref.name, outcome.source_display_name, update_name,
+                    fuigo_tty_utils::untrusted(&mref.name),
+                    fuigo_tty_utils::untrusted(&outcome.source_display_name),
+                    fuigo_tty_utils::untrusted(update_name),
                 );
                 return Ok(());
             }
             log_plugin_installed(install_kind(outcome.source_is_git), true, None);
             if let Some(note) = &outcome.other_copies_note {
-                fuigo_tty_utils::cli_println!("{note}");
+                fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(note));
             }
             fuigo_tty_utils::cli_println!(
                 "Installed {} plugin(s) from {}: {}",
                 outcome.plugin_names.len(),
-                outcome.source_display_name,
-                outcome.plugin_names.join(", "),
+                fuigo_tty_utils::untrusted(&outcome.source_display_name),
+                fuigo_tty_utils::untrusted(outcome.plugin_names.join(", ")),
             );
             Ok(())
         }
@@ -529,7 +541,7 @@ fn cmd_uninstall(name: &str, confirm: bool, keep_data: bool) -> Result<()> {
             fuigo_tty_utils::cli_println!(
                 "Uninstalled {} plugin(s): {}{suffix}",
                 outcome.removed_plugins.len(),
-                outcome.removed_plugins.join(", "),
+                fuigo_tty_utils::untrusted(outcome.removed_plugins.join(", ")),
             );
             Ok(())
         }
@@ -569,22 +581,23 @@ fn cmd_update(name: Option<&str>) -> Result<()> {
                 new_commit,
             } => {
                 fuigo_tty_utils::cli_println!(
-                    "{repo_key}: updated ({} -> {})",
-                    abbreviated_commit(old_commit.as_deref()),
-                    abbreviated_commit(new_commit.as_deref()),
+                    "{}: updated ({} -> {})",
+                    fuigo_tty_utils::untrusted(repo_key),
+                    fuigo_tty_utils::untrusted(abbreviated_commit(old_commit.as_deref())),
+                    fuigo_tty_utils::untrusted(abbreviated_commit(new_commit.as_deref())),
                 );
             }
             RepoUpdateOutcome::AlreadyUpToDate { repo_key } => {
-                fuigo_tty_utils::cli_println!("{repo_key}: already up to date");
+                fuigo_tty_utils::cli_println!("{}: already up to date", fuigo_tty_utils::untrusted(repo_key));
             }
             RepoUpdateOutcome::Pinned { repo_key, ref_name } => {
-                fuigo_tty_utils::cli_println!("{repo_key}: pinned to {ref_name}, skipping");
+                fuigo_tty_utils::cli_println!("{}: pinned to {}, skipping", fuigo_tty_utils::untrusted(repo_key), fuigo_tty_utils::untrusted(ref_name));
             }
             RepoUpdateOutcome::LiveLocal { repo_key } => {
-                fuigo_tty_utils::cli_println!("{repo_key}: local symlink, already live");
+                fuigo_tty_utils::cli_println!("{}: local symlink, already live", fuigo_tty_utils::untrusted(repo_key));
             }
             RepoUpdateOutcome::Failed { repo_key, error } => {
-                fuigo_tty_utils::cli_eprintln!("{repo_key}: update failed: {error}");
+                fuigo_tty_utils::cli_eprintln!("{}: update failed: {}", fuigo_tty_utils::untrusted(repo_key), fuigo_tty_utils::untrusted(error));
             }
         }
     }
@@ -599,12 +612,15 @@ fn cmd_enable(name: &str) -> Result<()> {
                Run `fuigo plugin list` to see installed plugins."
         );
     }
+    // P169: managed marketplace policy refuses before either config write; under a restriction the bare name is
+    // persisted as the one allowed install's full id.
+    let target = fuigo_shell::plugin::plugin_enable_target(name).map_err(|reason| anyhow::anyhow!(reason))?;
     if let Err(e) = fuigo_shell::config::remove_disabled_plugin(name) {
         tracing::warn!("failed to remove from disabled list: {e}");
     }
-    fuigo_shell::config::add_enabled_plugin(name)
+    fuigo_shell::config::add_enabled_plugin(&target)
         .map_err(|e| anyhow::anyhow!("Failed to enable plugin: {e}"))?;
-    fuigo_tty_utils::cli_println!("Enabled plugin: {name}");
+    fuigo_tty_utils::cli_println!("Enabled plugin: {}", fuigo_tty_utils::untrusted(name));
     Ok(())
 }
 
@@ -621,7 +637,7 @@ fn cmd_disable(name: &str) -> Result<()> {
     }
     fuigo_shell::config::add_disabled_plugin(name)
         .map_err(|e| anyhow::anyhow!("Failed to disable plugin: {e}"))?;
-    fuigo_tty_utils::cli_println!("Disabled plugin: {name}");
+    fuigo_tty_utils::cli_println!("Disabled plugin: {}", fuigo_tty_utils::untrusted(name));
     Ok(())
 }
 
@@ -640,11 +656,11 @@ fn cmd_details(name: &str) -> Result<()> {
         .map(|mp| format!("\n  source: {}", mp.source_display_name))
         .unwrap_or_default();
 
-    fuigo_tty_utils::cli_println!("{repo_key}");
-    fuigo_tty_utils::cli_println!("  path: {}", repo.path.display());
-    fuigo_tty_utils::cli_println!("  kind: {}{mp}", kind_label(&repo.kind));
-    fuigo_tty_utils::cli_println!("  installed: {}", repo.installed_at);
-    fuigo_tty_utils::cli_println!("  updated: {}", repo.updated_at);
+    fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(repo_key));
+    fuigo_tty_utils::cli_println!("  path: {}", fuigo_tty_utils::untrusted(repo.path.display()));
+    fuigo_tty_utils::cli_println!("  kind: {}{}", fuigo_tty_utils::untrusted(kind_label(&repo.kind)), fuigo_tty_utils::untrusted(&mp));
+    fuigo_tty_utils::cli_println!("  installed: {}", fuigo_tty_utils::untrusted(&repo.installed_at));
+    fuigo_tty_utils::cli_println!("  updated: {}", fuigo_tty_utils::untrusted(&repo.updated_at));
     fuigo_tty_utils::cli_println!("  plugins ({}):", repo.plugins.len());
     for (pname, p) in &repo.plugins {
         let ver = p
@@ -657,12 +673,12 @@ fn cmd_details(name: &str) -> Result<()> {
             .as_deref()
             .map(|s| format!(" (subdir: {s})"))
             .unwrap_or_default();
-        fuigo_tty_utils::cli_println!("    {pname}{ver}{sub}");
+        fuigo_tty_utils::cli_println!("    {}{}{}", fuigo_tty_utils::untrusted(pname), fuigo_tty_utils::untrusted(&ver), fuigo_tty_utils::untrusted(&sub));
     }
 
     if let Ok(ManifestLoadResult::Found(manifest)) = load_manifest(&repo.path) {
         if let Some(ref desc) = manifest.description {
-            fuigo_tty_utils::cli_println!("  description: {desc}");
+            fuigo_tty_utils::cli_println!("  description: {}", fuigo_tty_utils::untrusted(desc));
         }
         print_component_summary(&manifest, &repo.path);
     }
@@ -680,12 +696,12 @@ fn cmd_validate(path: &str) -> Result<()> {
                 .validate()
                 .map_err(|e| anyhow::anyhow!("Manifest validation failed: {e}"))?;
             fuigo_tty_utils::cli_println!("Plugin manifest is valid.");
-            fuigo_tty_utils::cli_println!("  name: {}", manifest.name);
+            fuigo_tty_utils::cli_println!("  name: {}", fuigo_tty_utils::untrusted(&manifest.name));
             if let Some(ref v) = manifest.version {
-                fuigo_tty_utils::cli_println!("  version: {v}");
+                fuigo_tty_utils::cli_println!("  version: {}", fuigo_tty_utils::untrusted(v));
             }
             if let Some(ref d) = manifest.description {
-                fuigo_tty_utils::cli_println!("  description: {d}");
+                fuigo_tty_utils::cli_println!("  description: {}", fuigo_tty_utils::untrusted(d));
             }
             print_component_summary(&manifest, &root);
             Ok(())
@@ -738,7 +754,7 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
     }
 
     if dry_run {
-        fuigo_tty_utils::cli_println!("Would create tag: {tag}");
+        fuigo_tty_utils::cli_println!("Would create tag: {}", fuigo_tty_utils::untrusted(&tag));
         if push {
             fuigo_tty_utils::cli_println!("Would push tag to remote.");
         }
@@ -758,7 +774,7 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    fuigo_tty_utils::cli_println!("Created tag: {tag}");
+    fuigo_tty_utils::cli_println!("Created tag: {}", fuigo_tty_utils::untrusted(&tag));
 
     if push {
         let mut push_cmd = std::process::Command::new("git");
@@ -774,7 +790,7 @@ fn cmd_tag(path: &str, push: bool, force: bool, dry_run: bool) -> Result<()> {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        fuigo_tty_utils::cli_println!("Pushed tag {tag} to origin.");
+        fuigo_tty_utils::cli_println!("Pushed tag {} to origin.", fuigo_tty_utils::untrusted(&tag));
     }
     Ok(())
 }
@@ -834,7 +850,7 @@ fn marketplace_list(
                 SourceKind::Git { url, .. } => url.clone(),
                 SourceKind::Local { path } => path.display().to_string(),
             };
-            fuigo_tty_utils::cli_println!("  {}: {id}", s.name);
+            fuigo_tty_utils::cli_println!("  {}: {}", fuigo_tty_utils::untrusted(&s.name), fuigo_tty_utils::untrusted(&id));
         }
     }
     Ok(())
@@ -873,8 +889,8 @@ pub(crate) fn marketplace_add(
     // Local paths never match the git-URL allowlist, so a restricted strictKnownMarketplaces policy blocks them; intentionally fail-closed
     let allowlist =
         &fuigo_workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
-        bail!("Marketplace source blocked: {}", allowlist.block_reason());
+    if let Some(reason) = allowlist.add_block_reason(&identity) {
+        bail!("Marketplace source blocked: {reason}");
     }
 
     let already_configured = match &input {
@@ -981,7 +997,7 @@ pub(crate) fn marketplace_add(
         })
     })?;
 
-    fuigo_tty_utils::cli_println!("Added marketplace source: {name} ({identity})");
+    fuigo_tty_utils::cli_println!("Added marketplace source: {} ({})", fuigo_tty_utils::untrusted(&name), fuigo_tty_utils::untrusted(&identity));
     Ok(())
 }
 
@@ -1124,12 +1140,12 @@ fn marketplace_remove(
     let uninstalled = plugin::uninstall_marketplace_source_plugins(&identity);
 
     if uninstalled.is_empty() {
-        fuigo_tty_utils::cli_println!("Removed marketplace source: {} ({identity})", source.name);
+        fuigo_tty_utils::cli_println!("Removed marketplace source: {} ({})", fuigo_tty_utils::untrusted(&source.name), fuigo_tty_utils::untrusted(&identity));
     } else {
         fuigo_tty_utils::cli_println!(
             "Removed marketplace source and uninstalled {} plugin(s): {}",
             uninstalled.len(),
-            uninstalled.join(", "),
+            fuigo_tty_utils::untrusted(uninstalled.join(", ")),
         );
     }
     Ok(())
@@ -1169,7 +1185,7 @@ fn marketplace_update_with_cache_root(
                 cache_root,
             ) {
                 Ok(_) => {
-                    fuigo_tty_utils::cli_println!("  {}: synced", source.name);
+                    fuigo_tty_utils::cli_println!("  {}: synced", fuigo_tty_utils::untrusted(&source.name));
                     refreshed += 1;
                 }
                 Err(e) => errors.push(format!("{}: {e}", source.name)),
@@ -1180,7 +1196,7 @@ fn marketplace_update_with_cache_root(
     if refreshed == 0 && errors.is_empty() {
         if let Some(filter) = name {
             if name_matched {
-                fuigo_tty_utils::cli_println!("Source \"{filter}\" is local, nothing to sync.");
+                fuigo_tty_utils::cli_println!("Source \"{}\" is local, nothing to sync.", fuigo_tty_utils::untrusted(filter));
             } else {
                 bail!("Marketplace source \"{filter}\" not found.");
             }
@@ -1193,7 +1209,7 @@ fn marketplace_update_with_cache_root(
         fuigo_tty_utils::cli_eprintln!(
             "Refreshed {refreshed} source(s) with {} error(s): {}",
             errors.len(),
-            errors.join("; "),
+            fuigo_tty_utils::untrusted(errors.join("; ")),
         );
     }
     Ok(())
@@ -1301,6 +1317,14 @@ mod tests {
         assert!(!msg.contains("Error"));
         assert!(!msg.contains("Failed"));
         assert!(!msg.contains("Plugin source:"));
+    }
+
+    #[test]
+    fn trust_prompt_scrubs_the_subject_itself() {
+        let msg = trust_prompt("from git repo x\x1b]0;t\x07\nInstalling forged", "u/r\x1b[2J");
+        assert!(!msg.contains('\x1b') && !msg.contains('\x07'), "{msg:?}");
+        assert!(msg.starts_with("Installing from git repo x ]0;t  Installing forged requires confirmation.\n"), "{msg:?}");
+        assert!(msg.contains("fuigo plugin install u/r [2J --trust"), "{msg:?}");
     }
 
     #[test]

@@ -11,6 +11,8 @@ mod common;
 mod background_task_reaped_on_quit;
 #[path = "pty_e2e/continue_resumes_session_with_history.rs"]
 mod continue_resumes_session_with_history;
+#[path = "pty_e2e/failed_session_load_refuses_prompts_with_a_resume_hint.rs"]
+mod failed_session_load_refuses_prompts_with_a_resume_hint;
 #[path = "pty_e2e/endline_park_is_markerless.rs"]
 mod endline_park_is_markerless;
 #[path = "pty_e2e/endline_wakeups_close_with_markers.rs"]

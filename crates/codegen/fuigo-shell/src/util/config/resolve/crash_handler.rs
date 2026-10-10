@@ -4,6 +4,15 @@ use toml::Value as TomlValue;
 /// Env override for the full crash-handler install gate.
 pub(crate) const ENV_CRASH_HANDLER: &str = "FUIGO_CRASH_HANDLER";
 
+/// The requirements tier of the gate. P183 round 8: an admin policy file that is broken with no validated copy could have
+/// turned crash reporting off, so it is off (`false` at the highest tier); the old `.ok()` read it as "no policy" and left the default on.
+fn crash_handler_requirements_tier(v: Option<&TomlValue>) -> Option<bool> {
+    if !fuigo_config::broken_admin_files().is_empty() {
+        return Some(false);
+    }
+    crash_handler_from_toml(v)
+}
+
 fn crash_handler_from_toml(v: Option<&TomlValue>) -> Option<bool> {
     v?.get("diagnostics")?.get("crash_handler")?.as_bool()
 }
@@ -39,7 +48,7 @@ pub fn resolve_crash_handler_enabled(
     remote: Option<&RemoteSettings>,
 ) -> crate::agent::config::Resolved<bool> {
     resolve_crash_handler_enabled_layers(
-        crash_handler_from_toml(requirements),
+        crash_handler_requirements_tier(requirements),
         crash_handler_from_toml(user),
         crash_handler_from_toml(managed),
         remote.and_then(|r| r.crash_handler_enabled),
@@ -159,7 +168,7 @@ pub fn load_crash_handler_enabled_sync() -> bool {
     let user = crate::config::load_from_disk().ok();
     let managed = load_managed_toml_layers();
     resolve_crash_handler_enabled_layers(
-        crash_handler_from_toml(requirements.as_ref()),
+        crash_handler_requirements_tier(requirements.as_ref()),
         crash_handler_from_toml(user.as_ref()),
         crash_handler_from_toml(managed.as_ref()),
         cached_remote_crash_handler_enabled()
@@ -401,5 +410,22 @@ mod crash_handler_gate_tests {
         assert_eq!(cached_remote_crash_handler_enabled(), Some(false));
         cache_remote_crash_handler_enabled(None);
         assert_eq!(cached_remote_crash_handler_enabled(), None);
+    }
+}
+
+#[cfg(test)]
+mod admin_source_tests_p183r10 {
+    use super::*;
+    use crate::util::config::admin_seam_test_support as seam;
+
+    /// A broken admin file or MDM payload with no validated copy turns crash reporting off at the highest tier.
+    #[test]
+    fn broken_admin_source_turns_the_crash_handler_off_p183r10() {
+        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+            let _seam = make();
+            assert_eq!(crash_handler_requirements_tier(None), Some(false));
+        }
+        let _ok = seam::healthy();
+        assert_eq!(crash_handler_requirements_tier(None), None);
     }
 }

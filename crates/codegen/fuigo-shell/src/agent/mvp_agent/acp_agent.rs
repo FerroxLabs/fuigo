@@ -31,13 +31,18 @@ fn tool_overrides_capability() -> serde_json::Value {
 /// `authenticateApiKey` (P08) tells a client, before it authenticates, that `authenticate` accepts a key in
 /// `_meta["fuigo/apiKey"]` even when `authMethods` is empty (Contract E.3 keeps the empty list for a credential-less start).
 fn fuigo_capabilities() -> serde_json::Value {
-    serde_json::json!({
+    let mut caps = serde_json::json!({
         "toolOverrides": tool_overrides_capability(),
         "authenticateApiKey": auth_method::runtime_api_key_capability(),
         // P188: `retry_state` `retrying` carries `discardEmitted` (and `streamStartMs`) when a resend voids output
         // the client already received. A client resets on `discardEmitted` only when this key is present.
         "retryDiscard": { "version": 1 },
-    })
+    });
+    // P190: `interject` and `queue` (each `{version, ..}`); P189 adds `sessionPark` in `init_flags`
+    caps.as_object_mut()
+        .expect("capabilities is an object")
+        .extend(crate::agent::init_flags::capability_entries());
+    caps
 }
 /// The `authenticate` reply for a login that failed or that the user cancelled.
 /// Every embedding client calls `authenticate` on connect, and this is the failure path users hit most:
@@ -92,9 +97,8 @@ impl acp::Agent for MvpAgent {
             }
             Self::reclaim_worktrees(fuigo_home, auto_gc_policy);
         });
-        tokio::task::spawn_blocking(|| {
-            crate::session::persistence::cleanup_stale_sessions(None);
-        });
+        // P172 (D1): the session-folder TTL sweep runs from the first `session/new` or attach instead
+        // (`spawn_session_sweep`), where the live session folder is known and has been marked live first.
         if remote_settled {
             self.start_search_index_once();
         }
@@ -648,6 +652,7 @@ impl acp::Agent for MvpAgent {
                     // The model catalog's fetch credential was chosen at startup, when this key did not exist (a
                     // credential-less start resolves `ModelFetchAuth::Session`), and a replaced key is a different
                     // account: invalidate and refetch exactly as any other identity change does.
+                    self.models_manager.note_successful_sign_in();
                     self.models_manager.on_auth_changed().await;
                 }
                 self.ensure_telemetry_client();
@@ -953,6 +958,7 @@ impl acp::Agent for MvpAgent {
                     crate::managed_config::post_login_sync(Some(auth.clone())),
                 );
                 self.set_auth_method(arguments.method_id.clone());
+                self.models_manager.note_successful_sign_in();
                 self.models_manager.on_auth_changed().await;
                 if crate::agent::chat_modes::process_chat_mode_enabled() {
                     self.chat_modes.warm_in_background();
@@ -1053,12 +1059,13 @@ impl acp::Agent for MvpAgent {
             .await
             .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
         if self.models_manager.allowlist_excludes_all() {
+            let message =
+                crate::agent::models::allowlist_excludes_all_message(&self.cfg.borrow());
             self.send_model_auto_switched(
                     &arguments.session_id,
                     &acp::ModelId::new(String::new()),
                     &acp::ModelId::new(String::new()),
-                    "None of your models are allowed by allowed_models. \
-                 Broaden it or remove it from your config, then restart.",
+                    &message,
                 )
                 .await;
             return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
@@ -3057,9 +3064,9 @@ impl MvpAgent {
             }
         };
         if !model.info.user_selectable {
-            return Err(
-                crate::acp_error::invalid_params("This model isn't allowed by your allowed_models setting."),
-            );
+            return Err(crate::acp_error::invalid_params(
+                crate::agent::models::allowlist_denied_message(&self.cfg.borrow()),
+            ));
         }
         let session_id = args.session_id.clone();
         let effort_override = match parse_reasoning_effort_meta(args.meta.as_ref()) {

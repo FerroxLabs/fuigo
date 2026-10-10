@@ -539,6 +539,14 @@ impl SessionActor {
             .sum();
         tracing::Span::current().record("prompt_length", prompt_length as i64);
         *self.active_skill.lock() = None;
+        // P186c: tell this session's user, once per broken version, that the admin policy is locked down (or no longer is)
+        let admin_notices = self
+            .admin_policy_watch
+            .check(crate::session::admin_policy_watch::TURN_START_BUDGET)
+            .await;
+        for message in admin_notices {
+            self.send_fuigo_notification_transient(FuigoSessionUpdate::ConfigNotice { message });
+        }
         fuigo_telemetry::unified_log::info(
             "shell.handle_prompt.start",
             Some(self.session_info.id.0.as_ref()),
@@ -1795,6 +1803,33 @@ impl SessionActor {
                 }
             }
         }
+        // P195 (K25): a headless run (`fuigo -p`) whose goal's token budget this turn's answer spent. An interactive session
+        // carries on to the goal harness's turn-end check, which stops the goal budget-limited; a headless run has no later
+        // turn, so the run ended at this answer because the budget did and reports it as the budget's typed denial (exit 3).
+        // The goal is stopped here, by the same transition the turn-end check would make, so the error that follows is not
+        // read as an infrastructure failure that pauses a goal still active.
+        if self.attach_non_interactive.get()
+            && matches!(&result, Ok(TurnOutcome::Completed { stop: CompletedStop::EndTurn, .. }))
+            && let Some(denial) = self.goal_budget_spent_denial().await
+        {
+            // The answer completed: say so on the error, with its structured output, so the headless run still
+            // writes the answer in its one result document instead of an error document without it.
+            let structured = match &result {
+                Ok(TurnOutcome::Completed { structured_output: Some(so), .. }) => Some(match so {
+                    Ok(v) => serde_json::json!({ "value": v }),
+                    Err(e) => serde_json::json!({ "error": e }),
+                }),
+                _ => None,
+            };
+            let mut err = denial.to_acp_error();
+            if let Some(serde_json::Value::Object(data)) = err.data.as_mut() {
+                data.insert("answer_completed".to_string(), serde_json::Value::Bool(true));
+                if let Some(structured) = structured {
+                    data.insert("answer_structured_output".to_string(), structured);
+                }
+            }
+            result = Err(err);
+        }
         drop(turn_scope_guard);
         match result {
             Ok(outcome) => {
@@ -2191,6 +2226,14 @@ impl SessionActor {
         }
         let mut attempt = 0u32;
         loop {
+            // P195 (K25): a budget that ended the run is final. A retry only asks the model again, and the budget
+            // refuses it again (or, past the reserved final answer, the next one found the record already terminal and
+            // ended as an untyped receipt, so a `maxRetries` of 2 or more turned the typed denial into exit 1).
+            if let Err(err) = &result
+                && crate::acp_error::ExecutionBudgetDenial::is_budget_denial(err)
+            {
+                return result;
+            }
             attempt += 1;
             let error_desc = match &result {
                 Ok(_) => "Agent finished without completing required task".into(),

@@ -57,11 +57,11 @@ pub(crate) struct SnapshotHold {
     pub(crate) turn_id: u64,
     pub(crate) since: Instant,
     alive: std::sync::Weak<()>,
-    _file: std::fs::File,
+    _file: crate::session::storage::jsonl::HeldLock,
 }
 
 impl SnapshotHold {
-    pub(crate) fn new(turn_id: u64, file: std::fs::File, alive: std::sync::Weak<()>) -> Self {
+    pub(crate) fn new(turn_id: u64, file: crate::session::storage::jsonl::HeldLock, alive: std::sync::Weak<()>) -> Self {
         Self { turn_id, since: Instant::now(), alive, _file: file }
     }
     /// Whether the turn that holds the lock still exists.
@@ -94,14 +94,14 @@ fn open(path: &Path) -> Option<std::fs::File> {
 
 /// Take `path` (a lock file) exclusively, waiting at most [`SNAPSHOT_LOCK_WAIT`] (polling, so the wait blocks the calling
 /// thread). `Ok(None)`: the lock file cannot be opened or locked at all. `Err(Interrupted)`: it stayed held (retryable).
-pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<std::fs::File>> {
+pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<crate::session::storage::jsonl::HeldLock>> {
     let Some(file) = open(path) else {
         return Ok(None);
     };
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Ok(Some(file)),
+            Ok(()) => return Ok(Some(crate::session::storage::jsonl::HeldLock::new(file))),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
                 CONTENDED.lock().insert(path.to_path_buf());
@@ -124,13 +124,13 @@ pub(crate) fn acquire_blocking(path: &Path, what: &Path) -> io::Result<Option<st
 /// [`acquire_blocking`] for an async task (the persistence actor): it yields while it waits, and gives up after
 /// [`SNAPSHOT_LOCK_WAIT`] by going on without the lock (a snapshot that holds it for that long is stuck, and the actor must
 /// not stop persisting for it).
-pub(crate) async fn acquire_async(session_dir: &Path) -> Option<std::fs::File> {
+pub(crate) async fn acquire_async(session_dir: &Path) -> Option<crate::session::storage::jsonl::HeldLock> {
     let path = lock_path(session_dir);
     let file = open(&path)?;
     let deadline = Instant::now() + SNAPSHOT_LOCK_WAIT;
     loop {
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => return Some(file),
+            Ok(()) => return Some(crate::session::storage::jsonl::HeldLock::new(file)),
             Err(error) if error.kind() == fs2::lock_contended_error().kind() => {
                 #[cfg(test)]
                 CONTENDED.lock().insert(path.clone());

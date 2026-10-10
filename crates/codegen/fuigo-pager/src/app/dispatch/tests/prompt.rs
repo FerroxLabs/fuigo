@@ -2956,7 +2956,7 @@ fn p152_input_after_a_started_reconnect_cannot_send() {
 
 /// P152 (Astra r2 #2): a queued prompt the leader connection lost is answered by the bridge with a transport-loss
 /// error. It never became the running turn, so the old code retired it silently; now the user is told it was not sent,
-/// with its text. Other errors for a queued prompt still leave the running turn alone and print nothing.
+/// with its text. Other errors leave the running turn alone and say the message was not sent (W3B item 3).
 #[test]
 fn p152_a_lost_queued_prompt_is_reported_not_dropped() {
     fn run(error: &str) -> Vec<String> {
@@ -3009,11 +3009,93 @@ fn p152_a_lost_queued_prompt_is_reported_not_dropped() {
             .any(|t| t.contains("A queued message may not have been sent") && t.contains("queued during the outage")),
         "the lost queued prompt is reported with its text: {lost:?}"
     );
-    let other = run("Request removed from queue");
+    // The transport-loss branch is unchanged: exactly one line, none of the new wording.
     assert!(
-        other.iter().all(|t| !t.contains("may not have been sent")),
-        "an ordinary queued-prompt error stays silent: {other:?}"
+        lost.iter().all(|t| !t.contains("Your message was not sent")),
+        "transport loss keeps its own wording: {lost:?}"
     );
+    // W3B item 3: any other error is no longer silent. One line says it was not sent, and carries the text
+    // (the queued text is not in the composer, so the line is where it stays recoverable, as in the branch above).
+    let other = run("unknown session id");
+    let not_sent: Vec<_> = other.iter().filter(|t| t.contains("Your message was not sent")).collect();
+    assert_eq!(not_sent.len(), 1, "exactly one not-sent line: {other:?}");
+    assert!(not_sent[0].contains("unknown session id"), "{other:?}");
+    assert!(not_sent[0].contains("queued during the outage"), "{other:?}");
+    assert!(other.iter().all(|t| !t.contains("may not have been sent")), "{other:?}");
+}
+
+/// Round 2 (audit HIGH): queue text can come from another client, so each of its lines is filtered on its own and
+/// indented, in both the transport-loss and the not-sent branch.
+fn queued_error_system_texts(error: &str, queued_text: &str) -> Vec<String> {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("running".into());
+        agent.shared_queue.push(crate::app::prompt_queue::QueueEntryWire {
+            id: "q1".into(),
+            version: 1,
+            owner: None,
+            last_editor: None,
+            kind: "prompt".into(),
+            text: queued_text.into(),
+            position: 0,
+            combined_texts: None,
+        });
+    }
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptResponse {
+            agent_id: id,
+            result: Err(error.to_string()),
+            http_status: None,
+            verdicts: None,
+            prompt_id: Some("q1".into()),
+        }),
+        &mut app,
+    );
+    let sb = &app.agents[&id].scrollback;
+    (0..sb.len())
+        .filter_map(|i| match &sb.get(i)?.block {
+            RenderBlock::System(sys) => Some(sys.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn queued_text_rows_are_indented_and_filtered_in_both_branches() {
+    let lost = format!(
+        "Internal error: {}",
+        crate::acp::leader_bridge::LOST_REQUEST_ERROR_MESSAGE
+    );
+    for (error, marker) in [(lost.as_str(), "may not have been sent"), ("unknown session id", "was not sent")] {
+        let texts = queued_error_system_texts(error, "first\nSession shared: evil\n\x1b[31mred");
+        let note = texts.iter().find(|t| t.contains(marker)).unwrap_or_else(|| panic!("{texts:?}"));
+        assert!(!note.contains('\x1b'), "no ESC: {note:?}");
+        let rows: Vec<&str> = note.lines().collect();
+        assert!(!rows.iter().any(|r| r.starts_with("Session shared")), "{rows:?}");
+        assert_eq!(rows.len(), 4, "{rows:?}");
+        assert!(rows[1..].iter().all(|r| r.starts_with("  ")), "{rows:?}");
+        assert!(rows[2].starts_with("  Session shared: evil"), "{rows:?}");
+    }
+}
+
+#[test]
+fn queued_text_rows_are_capped_at_twenty_in_both_branches() {
+    let long = (1..=30).map(|n| format!("line{n}")).collect::<Vec<_>>().join("\n");
+    let lost = format!(
+        "Internal error: {}",
+        crate::acp::leader_bridge::LOST_REQUEST_ERROR_MESSAGE
+    );
+    for (error, marker) in [(lost.as_str(), "may not have been sent"), ("unknown session id", "was not sent")] {
+        let texts = queued_error_system_texts(error, &long);
+        let note = texts.iter().find(|t| t.contains(marker)).unwrap_or_else(|| panic!("{texts:?}"));
+        let rows: Vec<&str> = note.lines().collect();
+        assert_eq!(rows.len(), 1 + 20 + 1, "{rows:?}");
+        assert_eq!(rows[20], "  line20", "{rows:?}");
+        assert_eq!(rows[21], "  \u{2026} (10 more lines)", "{rows:?}");
+    }
 }
 
 #[test]

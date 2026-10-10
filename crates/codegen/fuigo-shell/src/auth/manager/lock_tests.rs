@@ -71,9 +71,19 @@ fn nonblocking_acquire_writes_holder_info() {
 
     let _lock = try_lock_auth_file_nonblocking(&path).expect("uncontended non-blocking acquire");
 
+    // Windows cannot read a locked range through a second handle (os error 33), and the holder line is telemetry
+    // only: read it while held on unix, and after release (the line stays in the file) everywhere.
+    #[cfg(unix)]
+    {
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        let (pid, _ts) =
+            parse_holder_info(&content).expect("non-blocking acquire must write parseable info");
+        assert_eq!(pid, std::process::id());
+    }
+    drop(_lock);
     let content = std::fs::read_to_string(&lock_path).unwrap();
     let (pid, _ts) =
-        parse_holder_info(&content).expect("non-blocking acquire must write parseable info");
+        parse_holder_info(&content).expect("the holder line must stay in the file after release");
     assert_eq!(pid, std::process::id());
 }
 
@@ -275,11 +285,19 @@ async fn acquire_release_and_reacquire_succeed() {
     assert!(lock.is_some(), "should acquire lock");
 
     let lock_path = path.with_file_name("auth.json.lock");
-    let content = std::fs::read_to_string(&lock_path).unwrap();
-    let (pid, _ts) = parse_holder_info(&content).unwrap();
-    assert_eq!(pid, std::process::id());
+    // Windows cannot read a locked range through a second handle (os error 33), and the holder line is telemetry
+    // only: read it while held on unix, and after release (the line stays in the file) everywhere.
+    #[cfg(unix)]
+    {
+        let content = std::fs::read_to_string(&lock_path).unwrap();
+        let (pid, _ts) = parse_holder_info(&content).unwrap();
+        assert_eq!(pid, std::process::id());
+    }
 
     drop(lock);
+    let content = std::fs::read_to_string(&lock_path).unwrap();
+    let (pid, _ts) = parse_holder_info(&content).expect("the holder line must stay after release");
+    assert_eq!(pid, std::process::id());
 
     let lock2 = try_lock_auth_file_async(&path, StdDuration::from_secs(1), Heartbeat::Skip)
         .await
@@ -835,4 +853,14 @@ fn p150_auth_lock_file_is_owner_only() {
         _ => panic!("uncontended blocking acquire"),
     }
     assert_eq!(mode(&lock_path), 0o600, "blocking acquire must create it owner-only");
+}
+
+#[test]
+fn a_lock_held_through_another_handle_is_busy_not_failed() {
+    use fs2::FileExt;
+    let dir = tempfile::tempdir().unwrap();
+    let lock_path = dir.path().join("auth.json.lock");
+    let holder = File::create(&lock_path).unwrap();
+    holder.lock_exclusive().unwrap();
+    assert!(matches!(try_acquire_once(&lock_path), LockAttempt::Busy));
 }

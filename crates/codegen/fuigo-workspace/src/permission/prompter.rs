@@ -577,6 +577,8 @@ impl AcpPrompter {
         match access {
             AccessKind::Edit(_) => self.edit_options.clone(),
             AccessKind::AgentMessage { .. } => self.agent_message_options.clone(),
+            // P165: a side-effecting tool approval is one call only; there is no grant to remember
+            AccessKind::Tool(_) => tool_options(),
             AccessKind::Bash(bash_command) => {
                 // For FuigoTUI clients, use the fancy interactive options with term selection
                 // For generic clients (web, etc.), use simpler options that work without special UI handling
@@ -886,7 +888,30 @@ pub fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::AgentMessage { .. } => {
             fuigo_tools::implementations::fuigo_build::SEND_SUBAGENT_MESSAGE_TOOL_NAME.to_owned()
         }
+        AccessKind::Tool(name) => name.clone(),
     }
+}
+
+/// Options for an [`AccessKind::Tool`] prompt: allow or reject this one call.
+fn tool_options() -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
+    IndexMap::from([
+        (
+            acp::PermissionOptionId::new("allow-once"),
+            acp::PermissionOption::new(
+                "allow-once",
+                "Yes, allow once".to_owned(),
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+        ),
+        (
+            acp::PermissionOptionId::new("reject-once"),
+            acp::PermissionOption::new(
+                "reject-once",
+                REJECT_ONCE_LABEL.to_owned(),
+                acp::PermissionOptionKind::RejectOnce,
+            ),
+        ),
+    ])
 }
 
 /// Map a [`PromptOutcome`] to the `events.jsonl` [`PermissionDecision`].

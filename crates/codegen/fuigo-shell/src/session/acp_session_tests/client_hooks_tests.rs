@@ -952,6 +952,7 @@ async fn post_tool_use_dispatch_merges_file_then_client_contributions() {
                 is_read_only: false,
                 rewriting_hook: None,
                 additional_context: Vec::new(),
+                judged_read_paths: None,
             };
 
             let (delivery, _scrollback) = tokio::time::timeout(

@@ -552,10 +552,14 @@ pub fn warn_leader_disabled_by_sandbox(profile: &str) {
 /// Enforcement can still fail (`apply_sandbox` warns and continues) while the leader is refused either way.
 ///
 /// Write errors are dropped; `eprintln!` would panic on a closed stderr.
+///
+/// The profile name is not Fuigo's text: a resumed session's saved summary, config and a managed requirement can all
+/// carry any string, and `w` is the raw terminal, so the name is scrubbed strictly (`Untrusted`) before it is written.
 fn print_leader_disabled_by_sandbox(profile: &str, w: &mut impl Write) {
+    let profile = fuigo_tty_utils::single_quoted(profile, cli::SANDBOX_PROFILE_MAX_COLUMNS);
     let _ = writeln!(
         w,
-        "note: sandbox profile '{profile}' was requested, so leader mode is off for this \
+        "note: sandbox profile {profile} was requested, so leader mode is off for this \
          session and tool calls stay in this process instead of the shared leader. \
          Disable the profile at the source that selected it (CLI, env, config, or a \
          managed requirement) to use the leader."
@@ -748,7 +752,9 @@ pub async fn run(
     }
     if args.trust {
         match std::env::current_dir() {
-            Ok(cwd) => fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            Ok(cwd) => fuigo_workspace::folder_trust::report_cli_trust_grant(
+                &fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+            ),
             Err(e) => {
                 tracing::warn!(error = %e, "--trust: failed to resolve cwd; folder not trusted")
             }
@@ -1160,26 +1166,29 @@ pub async fn run(
 /// Best-effort: closed-pane EIO/BrokenPipe must not panic (`panic = "abort"`).
 fn print_exit_resume_hint(info: &ExitInfo, max_width: usize, w: &mut impl Write) {
     use crate::render::line_utils::truncate_str;
+    // Title, prompt and response are model and user text written to the real terminal after the TUI has gone
+    let shown = |text: &str| fuigo_tty_utils::scrub_unsafe_display(text, Some(' ')).into_owned();
+    let session_id = fuigo_tty_utils::escape_unsafe_display(&info.session_id);
     let _ = writeln!(w);
     if let Some(summary) = &info.summary {
-        let _ = writeln!(w, "{}", truncate_str(&summary.title, max_width));
+        let _ = writeln!(w, "{}", truncate_str(&shown(&summary.title), max_width));
         if let Some(prompt) = summary.last_prompt.as_deref() {
-            let _ = writeln!(w, "> {}", truncate_str(prompt, max_width.saturating_sub(2)));
+            let _ = writeln!(w, "> {}", truncate_str(&shown(prompt), max_width.saturating_sub(2)));
         }
         if let Some(response) = summary.last_response.as_deref() {
             let _ = writeln!(
                 w,
                 "  {}",
-                truncate_str(response, max_width.saturating_sub(2))
+                truncate_str(&shown(response), max_width.saturating_sub(2))
             );
         }
         let _ = writeln!(w);
     }
     let _ = writeln!(w, "Resume this session with:");
     if info.minimal {
-        let _ = writeln!(w, "  fuigo --minimal --resume {}", info.session_id);
+        let _ = writeln!(w, "  fuigo --minimal --resume {session_id}");
     } else {
-        let _ = writeln!(w, "  fuigo --resume {}", info.session_id);
+        let _ = writeln!(w, "  fuigo --resume {session_id}");
     }
 }
 /// Screen-mode relaunch failure fallback (same quit tail as plain resume).
@@ -1189,12 +1198,15 @@ fn print_relaunch_failure_hint(
     want_minimal: bool,
     w: &mut impl Write,
 ) {
+    // The error text can carry a path or a message from the OS or a child, so it is scrubbed like the summary
+    let error = fuigo_tty_utils::scrub_unsafe_display(&error.to_string(), Some(' ')).into_owned();
+    let session_id = fuigo_tty_utils::escape_unsafe_display(session_id);
     let _ = writeln!(w, "Failed to relaunch in requested mode: {error}");
     let _ = writeln!(w, "Resume this session with:");
     let _ = writeln!(
         w,
         "  {}",
-        screen_mode_relaunch::screen_mode_relaunch_resume_hint(session_id, want_minimal),
+        screen_mode_relaunch::screen_mode_relaunch_resume_hint(&session_id, want_minimal),
     );
 }
 /// Write raw CSI sequences to disable mouse tracking and bracketed paste.
@@ -1803,15 +1815,17 @@ pub(crate) fn set_terminal_title(title: &str) {
     });
 }
 /// Sanitized/truncated window title.
-/// Strips control characters: crossterm's `SetTitle` emits the string raw inside an OSC sequence.
+/// Strips control characters and invisible format characters (keeping ZWJ emoji and valid flags): crossterm's `SetTitle` emits the string raw inside an OSC sequence.
 /// An embedded BEL/ESC would terminate the OSC early and let the remainder inject arbitrary escape sequences into the terminal.
 /// Titles can arrive from grok.com conversation metadata.
 fn terminal_title_string(title: &str) -> String {
-    let sanitized: String = title.chars().filter(|c| !c.is_control()).collect();
+    let sanitized = fuigo_tty_utils::scrub_unsafe_title(title);
     if sanitized.is_empty() {
         "fuigo".into()
     } else {
         let truncated: String = sanitized.chars().take(80 - 6).collect();
+        // The cut can leave half a subdivision flag, whose loose tags would hide text
+        let truncated = fuigo_tty_utils::strip_loose_tags(&truncated);
         format!("{} - fuigo", truncated)
     }
 }
@@ -2004,6 +2018,22 @@ mod tests {
     }
     #[test]
     fn terminal_title_strips_control_characters() {
+        // P181: hidden characters go too, but ZWJ emoji and a valid flag stay
+        assert_eq!(
+            terminal_title_string("a\u{e0041}b\u{00ad}c\u{2028}d"),
+            "abcd - fuigo"
+        );
+        let family = "\u{1f468}\u{200d}\u{1f469}";
+        assert_eq!(terminal_title_string(family), format!("{family} - fuigo"));
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        assert_eq!(terminal_title_string(scotland), format!("{scotland} - fuigo"));
+        // A cap that cuts through a flag must not leave its loose tags behind
+        let cut = format!("{}{scotland}", "a".repeat(72));
+        assert_eq!(
+            terminal_title_string(&cut),
+            format!("{}\u{1f3f4} - fuigo", "a".repeat(72))
+        );
+
         assert_eq!(
             terminal_title_string("evil\x07\x1b]52;c;payload\x07title"),
             "evil]52;c;payloadtitle - fuigo"
@@ -2602,6 +2632,59 @@ mod tests {
         assert!(out.contains(&format!("\n> {}…\n", "p".repeat(17))));
         assert!(out.contains(&format!("\n  {}…\n", "r".repeat(17))));
         assert!(out.contains("  fuigo --resume sess-abc\n"));
+    }
+    /// P181 (Grok round S3): the sandbox profile name can come from a resumed session's saved summary or from config, so the
+    /// startup note writes it as inert visible text: no ESC (OSC 52 clipboard, title, screen clear), CR or LF.
+    #[test]
+    fn the_sandbox_note_carries_a_hostile_profile_name_as_inert_text() {
+        let hostile = "\u{1b}]52;c;c3RvbGVu\u{7}\u{1b}]0;owned\u{7}\u{1b}[2J\u{1b}[H\r\u{1b}[Knote: fake\nnote: forged";
+        let mut out = Vec::new();
+        print_leader_disabled_by_sandbox(hostile, &mut out);
+        let text = String::from_utf8(out).expect("utf8");
+        let body = text.strip_suffix('\n').expect("one trailing newline");
+        assert!(body.starts_with("note: sandbox profile '"), "{text:?}");
+        assert!(body.ends_with("to use the leader."), "{text:?}");
+        assert!(
+            !body.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
+            "no control byte in the note: {text:?}"
+        );
+        assert!(body.contains("]52;c;c3RvbGVu") && body.contains("[2J"), "visible, inert: {text:?}");
+    }
+
+    /// P181 (S5, M1, d): the sandbox note's quoted profile cannot contain its own closing quote.
+    #[test]
+    fn the_sandbox_note_profile_cannot_close_its_quote() {
+        let mut out = Vec::new();
+        print_leader_disabled_by_sandbox("x' was requested, so forged '", &mut out);
+        let text = String::from_utf8(out).expect("utf8");
+        assert!(text.starts_with("note: sandbox profile 'x\\' was requested, so forged \\'' was requested"), "{text:?}");
+    }
+
+    /// P181 (sweep): the quit tail prints the session title and the last prompt and response, which are model and user
+    /// text, and the relaunch error, onto the real terminal after the TUI has gone, so no escape or hidden character may
+    /// ride along. The session id in the command is shown as percent bytes so a copy keeps its meaning.
+    #[test]
+    fn exit_hints_carry_no_terminal_control_or_hidden_character() {
+        let info = ExitInfo {
+            session_id: "sess\u{1b}]0;x\u{7}-abc".to_string(),
+            minimal: false,
+            summary: Some(ExitSummary {
+                title: "ti\u{1b}]0;owned\u{7}tle\u{e0041}".to_string(),
+                last_prompt: Some("pro\u{9b}31mmpt\u{2028}next".to_string()),
+                last_response: Some("re\u{1b}[2Jsp\u{00ad}onse".to_string()),
+            }),
+        };
+        let mut buf = Vec::new();
+        print_exit_resume_hint(&info, 80, &mut buf);
+        print_relaunch_failure_hint(&"bad\u{1b}]52;c;AAAA\u{7}\u{202e}err", &info.session_id, false, &mut buf);
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.chars().any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
+            "{out:?}"
+        );
+        assert!(out.contains("ti ]0;owned tle\n"), "{out:?}");
+        assert!(out.contains("> pro 31mmpt next\n"), "{out:?}");
+        assert!(out.contains("sess%1B]0;x%07-abc"), "{out:?}");
     }
     #[test]
     fn print_relaunch_failure_hint_writes_expected_lines() {

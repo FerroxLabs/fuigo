@@ -692,20 +692,75 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
     });
     effects
 }
-/// Handle the user accepting the folder-trust question: persist the grant for
-/// the workspace (writes `~/.fuigo/trusted_folders.toml`), mark trust resolved,
-/// then replay any deferred session startup (only if auth is also done).
-pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<Effect> {
-    if let TrustState::Pending { workspace } = &app.trust_state {
-        fuigo_workspace::folder_trust::grant_folder_trust(workspace);
+/// What accepting the trust question does with a [`GrantResolution`](fuigo_workspace::folder_trust::GrantResolution).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::app::dispatch) enum TrustGateOutcome {
+    /// Saved (or auto-trusted): resolve the question.
+    Finish,
+    /// Not saved, but this process honours it (the embedded agent runs here): resolve, and say it is session-only.
+    /// This is the `--sandbox` case (writes under the home are denied); it never quits (upstream 1.0.36).
+    FinishSessionLocal,
+    /// Nothing that the agent will see was recorded: keep the question up with the reason, so the user can fix it and
+    /// answer again, or decline. Never resolve silently, never quit.
+    StayPending,
+}
+
+/// A session-only grant lives in THIS process; a leader-hosted agent runs in another process and would not see it.
+pub(in crate::app::dispatch) fn trust_gate_outcome(
+    resolution: fuigo_workspace::folder_trust::GrantResolution,
+    leader_mode: bool,
+) -> TrustGateOutcome {
+    use fuigo_workspace::folder_trust::GrantResolution;
+    match resolution {
+        GrantResolution::Trusted => TrustGateOutcome::Finish,
+        GrantResolution::SessionLocal if !leader_mode => TrustGateOutcome::FinishSessionLocal,
+        GrantResolution::SessionLocal | GrantResolution::Unrecorded => TrustGateOutcome::StayPending,
     }
-    finish_trust(app)
+}
+
+/// Handle the user accepting the folder-trust question: persist the grant for the shown workspace key (writes
+/// `~/.fuigo/trusted_folders.toml`), then resolve trust and replay any deferred session startup (only if auth is also
+/// done). A grant that was not saved is reported, never silently treated as saved (P167).
+pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<Effect> {
+    let TrustState::Pending { workspace } = &app.trust_state else {
+        return vec![];
+    };
+    // Grant exactly the key the question showed; do not re-derive it.
+    let outcome = fuigo_workspace::folder_trust::grant_folder_trust_key(workspace);
+    match trust_gate_outcome(outcome.resolution(), app.leader_mode) {
+        TrustGateOutcome::Finish => finish_trust(app),
+        TrustGateOutcome::FinishSessionLocal => {
+            // A one-off note in the session the user lands in (both the full and the minimal view show it in the
+            // transcript, and one never shown is printed after the TUI exits); a toast alone is not painted in minimal
+            // mode (Astra r3).
+            let effects = finish_trust(app);
+            app.note_leader_notice(outcome.to_string());
+            effects
+        }
+        TrustGateOutcome::StayPending => {
+            let msg = match &outcome {
+                fuigo_workspace::folder_trust::GrantOutcome::Granted {
+                    persist: fuigo_workspace::folder_trust::PersistStatus::ProcessLocalOnly { error },
+                    ..
+                } => format!(
+                    "Couldn't save folder trust ({error}), and the agent runs in the leader process, which only sees a \
+                     saved grant. Check that your Fuigo home ($FUIGO_HOME, default ~/.fuigo) is writable, then press y \
+                     again (or n to quit)."
+                ),
+                _ => outcome.to_string(),
+            };
+            app.show_toast(&msg);
+            app.trust_error = Some(msg);
+            vec![]
+        }
+    }
 }
 /// Tail of accepting the folder-trust question (via [`dispatch_trust_folder`]; declining quits instead).
 /// Resolves `trust_state` to `Done`, focuses the welcome prompt, and replays the deferred session startup once auth is also resolved.
 /// Drains only when [`AppView::session_startup_allowed`], the same predicate `AuthComplete` uses, so whichever gate resolves last drains exactly once.
 pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
     app.trust_state = TrustState::Done;
+    app.trust_error = None;
     app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
         drain_startup_actions(app)

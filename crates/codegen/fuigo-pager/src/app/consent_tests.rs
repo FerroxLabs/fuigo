@@ -411,3 +411,18 @@ fn no_body_shape_leaks_a_url_or_raw_markup() {
         );
     }
 }
+
+/// Every invisible class the shared set names is dropped from server text; newlines and flag emoji survive
+#[test]
+fn sanitize_notice_text_drops_every_unsafe_display_class() {
+    let classes = [
+        '\u{00AD}', '\u{061C}', '\u{180E}', '\u{200B}', '\u{202E}', '\u{2028}', '\u{2029}',
+        '\u{2060}', '\u{FEFF}', '\u{FFF9}', '\u{FFFB}', '\u{13430}', '\u{1343F}', '\u{1BCA0}',
+        '\u{1BCA3}', '\u{1D173}', '\u{E0001}', '\u{E0020}', '\u{E0041}', '\u{E007F}',
+    ];
+    for c in classes {
+        let raw = format!("a{c}b\nc");
+        assert_eq!(sanitize_notice_text(&raw), "ab\nc", "U+{:04X}", c as u32);
+    }
+    assert_eq!(sanitize_notice_text("ok \u{1F3F4} \u{05d0}"), "ok \u{1F3F4} \u{05d0}");
+}

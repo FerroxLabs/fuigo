@@ -97,7 +97,7 @@ async fn forward_outbound_line_tracked(
 }
 
 /// What a request dropped as stale gets back instead of silence (P152).
-const STALE_REQUEST_ERROR_MESSAGE: &str =
+pub(crate) const STALE_REQUEST_ERROR_MESSAGE: &str =
     "The Fuigo leader restarted before this request reached it, so nothing was sent. Try again.";
 
 /// The JSON-RPC error response for a REQUEST line the writer dropped as stale, or `None` for a notification or a

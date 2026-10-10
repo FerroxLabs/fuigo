@@ -172,7 +172,7 @@ impl DrainReport {
         let mut out: Vec<String> = self
             .failures
             .iter()
-            .map(|e| format!("fuigo: a settings change was not saved: {e}"))
+            .map(|e| format!("fuigo: a settings change was not saved: {}", fuigo_tty_utils::untrusted(e)))
             .collect();
         if self.timed_out {
             out.push(
@@ -314,5 +314,21 @@ mod tests {
         let failure = boom.blocking_recv().unwrap().unwrap_err().acknowledge();
         assert!(failure.contains("panicked"), "{failure}");
         assert_eq!(after.blocking_recv().unwrap().map_err(WriteFailure::acknowledge), Ok(7));
+    }
+
+    /// A failure message carries text from the file system or the config file; the exit lines built from it must not
+    /// carry an escape, CR, LF or tab, so a hostile path cannot erase or forge Fuigo's own line.
+    #[test]
+    fn exit_messages_scrub_the_failure_text() {
+        let report = DrainReport {
+            failures: vec!["bad \x1b[2K\r\x1b[8m\nfuigo: forged\tline".to_owned()],
+            timed_out: false,
+        };
+        let out = report.messages().join("\n");
+        assert!(out.starts_with("fuigo: a settings change was not saved: bad "), "{out:?}");
+        assert!(out.contains("forged"), "{out:?}");
+        for bad in ['\x1b', '\r', '\n', '\t'] {
+            assert!(!out.contains(bad), "{bad:?} survived in {out:?}");
+        }
     }
 }

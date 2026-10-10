@@ -31,7 +31,7 @@ impl HookRegistry {
         let enabled = |specs: &[HookSpec]| {
             specs
                 .iter()
-                .any(|s| s.is_managed_policy() || (s.enabled && !disabled.contains(&s.name)))
+                .any(|s| !disabled.blocks(s))
         };
         let canonical = event.canonical();
         enabled(self.hooks_for(canonical))

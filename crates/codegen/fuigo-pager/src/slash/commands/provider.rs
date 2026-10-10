@@ -327,11 +327,8 @@ const ENV_ALLOW_UPSTREAM_HOSTS: &str = fuigo_extra_ca::egress::ENV_FUIGO_ALLOW_U
 /// this cannot answer differently from the resolver that will actually refuse
 /// the connection.
 fn blocked_upstream_host(base_url: &str) -> Option<String> {
-    if !fuigo_extra_ca::egress::guard_enabled() {
-        return None;
-    }
     let host = url::Url::parse(base_url).ok()?.host_str()?.to_owned();
-    fuigo_extra_ca::egress::is_blocked_host(&host).then_some(host)
+    fuigo_extra_ca::egress::is_refused_host(&host).then_some(host)
 }
 
 /// The provider's first environment variable that is actually set here.
@@ -652,6 +649,27 @@ mod tests {
             ProviderWriteOutcome::Written { kept: Vec::new() },
         ));
         assert!(!out.contains("FUIGO_ALLOW_UPSTREAM_HOSTS=1"), "{out}");
+    }
+
+    /// P187: a host list that names the provider's host lifts the block for it,
+    /// so there is nothing to warn about; a list that does not name it still warns.
+    #[test]
+    #[serial_test::serial(FUIGO_ALLOW_UPSTREAM_HOSTS)]
+    fn does_not_warn_when_the_host_list_names_the_provider_host() {
+        {
+            let _guard = crate::test_util::EnvVarGuard::set(ENV_ALLOW_UPSTREAM_HOSTS, "api.x.ai");
+            let out = message(render(
+                "xai",
+                ProviderWriteOutcome::Written { kept: Vec::new() },
+            ));
+            assert!(!out.contains("egress guard"), "{out}");
+        }
+        let _guard = crate::test_util::EnvVarGuard::set(ENV_ALLOW_UPSTREAM_HOSTS, "auth.x.ai");
+        let out = message(render(
+            "xai",
+            ProviderWriteOutcome::Written { kept: Vec::new() },
+        ));
+        assert!(out.contains("egress guard"), "{out}");
     }
 
     /// F6 (negative, allowed host): a provider the guard never touches must not
