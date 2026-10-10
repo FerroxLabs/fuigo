@@ -2856,3 +2856,48 @@ command = "/bin/sh '{hook_script}'"
     assert!(wire.is_empty(), "the saved key went to the client: {wire:?}");
     assert!(!m.stderr().contains(P70_DISK_KEY), "the saved key reached the agent's stderr");
 }
+
+/// P190: `initialize` advertises `interject` and `queue` in `agentCapabilities._meta["fuigo/capabilities"]` so a client need not feature-detect
+/// `_fuigo/interject` or the queue methods; the existing initialize fields are unchanged.
+#[tokio::test(flavor = "current_thread")]
+async fn initialize_advertises_interject_and_queue_flags() {
+    let mut m = Murage::spawn(
+        AgentSpawnSpec {
+            leading_args: GLOBAL_DEFAULT,
+            agent_args: AGENT_MURAGE,
+            remove_env: NO_ENV_KEY,
+            ..AgentSpawnSpec::default()
+        },
+        |_| {},
+    )
+    .await;
+    let init = m.initialize().await;
+    let caps = &init["result"]["agentCapabilities"]["_meta"]["fuigo/capabilities"];
+    assert_eq!(caps["interject"], json!({ "version": 1 }), "init: {init}");
+    assert_eq!(caps["queue"]["version"], 1, "init: {init}");
+    // The exact method set: a method added or dropped here is a wire change a client must be told about.
+    let mut methods: Vec<&str> = caps["queue"]["methods"]
+        .as_array()
+        .expect("queue.methods array")
+        .iter()
+        .map(|x| x.as_str().expect("queue method is a string"))
+        .collect();
+    methods.sort_unstable();
+    let mut want = ["_fuigo/queue/remove", "_fuigo/queue/reorder", "_fuigo/queue/clear", "_fuigo/queue/edit",
+        "_fuigo/queue/interject", "_fuigo/queue/hold_edit", "_fuigo/queue/release_edit"];
+    want.sort_unstable();
+    assert_eq!(methods, want, "init: {init}");
+    // The capabilities that were there before keep their exact shape (Astra r2 LOW).
+    assert_eq!(caps["retryDiscard"], json!({ "version": 1 }), "init: {init}");
+    assert_eq!(caps["authenticateApiKey"], json!({ "metaKey": API_KEY_META, "persistOptIn": true }), "init: {init}");
+    assert_eq!(
+        caps["toolOverrides"],
+        json!({ "x_keyword_search": true, "x_semantic_search": true, "x_user_search": false, "x_thread_fetch": false }),
+        "init: {init}"
+    );
+    // Unchanged fields.
+    assert_eq!(init["result"]["authMethods"], json!([]), "init: {init}");
+    assert_eq!(init["result"]["agentCapabilities"]["loadSession"], true, "init: {init}");
+    assert!(init["result"]["_meta"]["fuigoShell"] == true, "init: {init}");
+    assert!(!runtime_key_advert(&init).is_null(), "fuigo/capabilities still advertised: {init}");
+}

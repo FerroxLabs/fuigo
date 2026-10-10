@@ -202,9 +202,11 @@ fn format_server_line_inner(name: &str, count: usize, desc: &Option<String>) -> 
     }
 }
 
+/// One clean line from an untrusted description: controls and line separators become spaces, tag characters, soft
+/// hyphens and other invisible format characters are dropped (the shared `fuigo-tty-utils` set), then whitespace collapses.
 pub fn sanitize_description(s: &str) -> String {
-    s.split(['\n', '\r'])
-        .flat_map(|line| line.split_whitespace())
+    fuigo_tty_utils::scrub_unsafe_display(s, Some(' '))
+        .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -365,6 +367,16 @@ impl fuigo_tool_runtime::Tool for SearchTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181: a server description is untrusted; controls, tag characters, soft hyphens and separators must not survive.
+    #[test]
+    fn sanitize_description_drops_hidden_characters_and_controls() {
+        assert_eq!(
+            sanitize_description("a\u{e0041}b\u{00ad}c\u{2028}d\u{1b}[31m e\u{200b}f"),
+            "abc d [31m ef"
+        );
+        assert_eq!(sanitize_description("one\ntwo \t three"), "one two three");
+    }
     use crate::types::tool_index::{
         SearchSnapshot, ServerSummary, ToolIndex, ToolSearchIndex, ToolSearchResult,
     };

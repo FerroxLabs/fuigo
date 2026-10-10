@@ -21,6 +21,12 @@ pub(crate) struct RelayRefusal {
 }
 
 fn scrub(text: &str) -> String {
+    fuigo_tty_utils::scrub_unsafe_display(text, None).into_owned()
+}
+
+/// A session id routes the refusal to one session by exact match, so only controls are removed from it (as before),
+/// never the joiners a valid id may hold. It is not shown.
+fn scrub_id(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
@@ -41,8 +47,29 @@ pub(crate) fn relay_refusal(params: &str) -> Option<RelayRefusal> {
         None => "Relay refused: its URL is not usable. Details are in the session".to_owned(),
     };
     Some(RelayRefusal {
-        session_id: parsed.session_id.as_deref().map(scrub).filter(|s| !s.is_empty()),
+        session_id: parsed.session_id.as_deref().map(scrub_id).filter(|s| !s.is_empty()),
         text: message,
         toast,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::relay_refusal;
+
+    /// P181: a refusal crosses a process boundary, so tag characters, soft hyphens and line separators are dropped from what is shown.
+    #[test]
+    fn hidden_characters_are_dropped_from_every_field() {
+        let params = serde_json::json!({
+            "origin": "https://r\u{e0041}.exa\u{00ad}mple",
+            "message": "bad\u{2028}text\u{e0042}",
+            "sessionId": "s\u{200d}1\u{7}",
+        })
+        .to_string();
+        let refusal = relay_refusal(&params).expect("a message is present");
+        assert_eq!(refusal.text, "badtext");
+        // The id routes by exact match: controls go, a joiner a valid id may hold stays
+        assert_eq!(refusal.session_id.as_deref(), Some("s\u{200d}1"));
+        assert!(refusal.toast.contains("https://r.example"), "{}", refusal.toast);
+    }
 }

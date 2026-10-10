@@ -35,6 +35,7 @@ fn session_loaded_with_restore_shows_summary_in_scrollback() {
     let id = AgentId(0);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-restore"),
             models: None,
@@ -350,6 +351,7 @@ fn session_loaded_without_adoption_finishes_replayed_running_entries() {
     }
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-stuck"),
             models: None,
@@ -467,6 +469,7 @@ fn session_loaded_purges_replay_transient() {
     let before = test_support::calls();
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-purge"),
             models: None,
@@ -492,6 +495,7 @@ fn session_loaded_during_open_reload_window_defers_to_window() {
     app.agents.get_mut(&id).unwrap().begin_session_reload(1);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-w"),
             models: None,
@@ -521,6 +525,7 @@ fn session_load_failed_during_open_reload_window_defers_to_window() {
     let staging_len = app.agents[&id].scrollback.len();
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-w"),
             error: "boom".into(),
@@ -596,6 +601,7 @@ fn session_loaded_with_restore_failure_shows_warning_banner() {
     let id = AgentId(0);
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-fail"),
             models: None,
@@ -640,6 +646,7 @@ fn session_loaded_without_restore_no_summary() {
     let id = AgentId(0);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-plain"),
             models: None,
@@ -681,6 +688,7 @@ fn session_loaded_without_restore_resets_restore_degree() {
     let id = AgentId(0);
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-r2"),
             models: None,
@@ -698,6 +706,7 @@ fn session_loaded_without_restore_resets_restore_degree() {
     );
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-r2"),
             models: None,
@@ -727,6 +736,7 @@ fn session_loaded_with_flag_emits_five_fetches_and_clears_flag() {
     }
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             models: None,
@@ -784,6 +794,7 @@ fn session_load_failed_clears_flag_no_fetches() {
     }
     let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("s"),
             error: "boom".to_string(),
@@ -926,6 +937,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
     app.agents.get_mut(&new_id).unwrap().session.session_id = Some("new-fork-sid".into());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: new_id,
             session_id: "new-fork-sid".into(),
             models: None,
@@ -956,6 +968,7 @@ fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
     let queue_before = app.agents[&id].session.pending_prompts.len();
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: "test-session".into(),
             models: None,
@@ -980,6 +993,7 @@ fn session_load_failed_clears_pending_first_prompt() {
     app.agents.get_mut(&id).unwrap().pending_first_prompt = Some("orphaned directive".into());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
             agent_id: id,
             session_id: "test-session".into(),
             error: "boom".into(),
@@ -1061,6 +1075,7 @@ fn session_loaded_clears_stale_running_entries() {
     );
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-stale"),
             models: None,
@@ -1097,6 +1112,7 @@ fn a_restored_transcript_stays_recallable_after_a_failed_fetch() {
     }
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-history"),
             models: None,
@@ -1436,6 +1452,7 @@ fn resume_after_load_failed_reissues_load() {
     assert!(app.agents[&agent_0].loading_placeholder_id.is_some());
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
             agent_id: agent_0,
             session_id: acp::SessionId::new("fail-then-retry"),
             error: "transient".into(),
@@ -3518,4 +3535,717 @@ fn p152_resuming_an_open_session_says_it_switched() {
         toast.contains("already open"),
         "the switch must be explained, got toast {toast:?}"
     );
+}
+
+/// A tab whose load failed queues nothing: a prompt, a skill, or `!cmd` gets the notice, and `/new` and `exit` still run
+#[test]
+fn failed_load_unbinds_the_tab_and_refuses_prompts() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let agent_0 = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
+            agent_id: agent_0,
+            session_id: acp::SessionId::new("dead-1"),
+            error: "busy".into(),
+        }),
+        &mut app,
+    );
+    assert_eq!(None, app.agents[&agent_0].session.session_id);
+    for effects in [
+        dispatch(Action::SendPrompt("hi".into()), &mut app),
+        dispatch(Action::SendPrompt("/some-skill x".into()), &mut app),
+        dispatch(Action::SendBashCommand("ls".into()), &mut app),
+    ] {
+        assert!(effects.is_empty(), "nothing is sent, got {effects:?}");
+        assert!(app.agents[&agent_0].session.pending_prompts.is_empty());
+        assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
+    }
+    assert!(
+        LOAD_FAILED_NOTICE.contains("/resume") && LOAD_FAILED_NOTICE.contains("/new"),
+        "the notice names the way out"
+    );
+    assert!(
+        dispatch(Action::SendPrompt("exit".into()), &mut app)
+            .iter()
+            .any(|e| matches!(e, Effect::Quit))
+    );
+    let effects = dispatch(Action::SendPrompt("/new".into()), &mut app);
+    let new_agent = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::CreateSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("/new still starts a session");
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: new_agent,
+            session_id: "fresh-1".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    assert!(!app.agents[&new_agent].load_failed);
+    let effects = dispatch(Action::SendPrompt("hi".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "the new session takes prompts, got {effects:?}"
+    );
+}
+
+/// In `--minimal` there are no toasts, so the refusal lands in the scrollback.
+#[test]
+fn failed_load_refusal_is_a_scrollback_note_in_minimal() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let mut app = test_app();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    fail_load(&mut app, AgentId(0));
+    let effects = dispatch(Action::SendPrompt("hi".into()), &mut app);
+    assert!(effects.is_empty());
+    let agent = &app.agents[&AgentId(0)];
+    let notes: Vec<String> = (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.get(i))
+        .filter_map(|entry| entry.block.searchable_text())
+        .collect();
+    assert!(
+        notes.iter().any(|note| note.contains(LOAD_FAILED_NOTICE)),
+        "{notes:?}"
+    );
+}
+
+fn test_image() -> crate::prompt_images::PastedImage {
+    crate::prompt_images::PastedImage {
+        element_id: fuigo_ratatui_textarea::ElementId::from_raw(0),
+        display_number: 0,
+        mime_type: "image/png".into(),
+        dimensions: Some((10, 10)),
+        byte_len: 16,
+        encoded_bytes: Some(vec![0u8; 16].into()),
+        source_path: None,
+        staged_temp_path: None,
+        session_image_path: None,
+        preview: crate::prompt_images::PromptImagePreview::default(),
+    }
+}
+
+fn fail_load(app: &mut AppView, agent_id: AgentId) {
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt: 0,
+            agent_id,
+            session_id: acp::SessionId::new("dead-1"),
+            error: "busy".into(),
+        }),
+        app,
+    );
+}
+
+/// One row held during a failed load returns whole to an empty composer, with its image or bash mode
+#[test]
+fn failed_load_returns_a_held_row_whole() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent.prompt.set_text("look at ");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    agent.prompt.insert_image(test_image()).unwrap();
+    let (text, images, chips) = agent.prompt.stash().into_submission();
+    agent.session.enqueue_prompt(text);
+    let row = agent.session.pending_prompts.front_mut().expect("held row");
+    row.images = images;
+    row.chip_elements = chips;
+    agent.prompt.set_text("");
+    fail_load(&mut app, agent_0);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!("look at [Image #1] ", agent.prompt.text());
+    assert_eq!(1, agent.prompt.drain_images().len());
+
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    dispatch(Action::SendBashCommand("ls".into()), &mut app);
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert_eq!(
+        (crate::app::agent_view::PromptInputMode::Bash, "ls"),
+        (agent.prompt_input_mode, agent.prompt.text())
+    );
+}
+
+/// An edit of a held row in progress is saved into that row as text, even when it now reads as a command
+#[test]
+fn failed_load_keeps_an_edit_of_a_held_row() {
+    let agent_0 = AgentId(0);
+    for (edited, image) in [("edited draft", false), ("/compact ", true)] {
+        let mut app = test_app();
+        dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+        dispatch(Action::SendPrompt("first draft".into()), &mut app);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        let id = agent.session.pending_prompts.front().expect("held row").id;
+        agent.enter_queue_edit(id, false, None);
+        agent.prompt.set_text(edited);
+        if image {
+            agent.prompt.set_cursor(edited.len());
+            agent.prompt.insert_image(test_image()).unwrap();
+        }
+        let expected = agent.prompt.text().to_owned();
+        fail_load(&mut app, agent_0);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        assert!(matches!(
+            agent.prompt_mode,
+            crate::app::agent_view::PromptMode::Normal
+        ));
+        assert!(agent.session.pending_prompts.is_empty());
+        assert_eq!(expected, agent.prompt.text());
+        assert_eq!(usize::from(image), agent.prompt.drain_images().len());
+    }
+}
+
+/// A cleared edit leaves edit mode, and the held row returns with its text
+#[test]
+fn failed_load_with_a_cleared_edit_returns_the_held_row() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    dispatch(Action::SendPrompt("first draft".into()), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    let id = agent.session.pending_prompts.front().expect("held row").id;
+    agent.enter_queue_edit(id, false, None);
+    agent.prompt.set_text("");
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert!(matches!(
+        agent.prompt_mode,
+        crate::app::agent_view::PromptMode::Normal
+    ));
+    assert_eq!("first draft", agent.prompt.text());
+}
+
+/// Several held rows leave the draft alone and are listed as not sent, with their images counted
+#[test]
+fn failed_load_lists_several_held_rows_as_not_sent() {
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let agent_0 = AgentId(0);
+    dispatch(Action::SendPrompt("typed while loading".into()), &mut app);
+    dispatch(Action::SendBashCommand("ls".into()), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent
+        .session
+        .pending_prompts
+        .front_mut()
+        .expect("held row")
+        .images
+        .push(test_image());
+    agent.prompt.set_text("still typing");
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!("still typing", agent.prompt.text());
+    let listed: Vec<String> = agent
+        .scrollback
+        .iter_entries()
+        .filter_map(|(_, entry)| match &entry.block {
+            crate::scrollback::block::RenderBlock::System(system) => Some(system.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        listed
+            .iter()
+            .any(|line| line.contains("1 image dropped")
+                && line.contains("typed while loading\n!ls")),
+        "{listed:?}"
+    );
+}
+
+fn notes_of(agent: &crate::app::agent_view::AgentView) -> Vec<String> {
+    (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.get(i))
+        .filter_map(|entry| entry.block.searchable_text())
+        .collect()
+}
+
+fn load_attempt_of(effects: &[Effect]) -> u64 {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::LoadSession { attempt, .. } => Some(*attempt),
+            _ => None,
+        })
+        .expect("a LoadSession effect")
+}
+
+/// A remote restore that fails leaves the tab refused, and what was typed while it ran comes back
+#[test]
+fn failed_restore_refuses_the_tab_and_returns_the_held_prompt() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("far-1".into(), None, false), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    // A remote restore leaves the agent without a session id
+    agent.unbind_session_id();
+    agent.session.loading_replay = true;
+    agent.session.enqueue_prompt("hi".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionRestoreFailed {
+            agent_id: agent_0,
+            error: "no such session".into(),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_0];
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!("hi", agent.prompt.text());
+    assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
+    let effects = dispatch(Action::SendPrompt("again".into()), &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(app.agents[&agent_0].session.pending_prompts.is_empty());
+}
+
+/// A late failure of an earlier load must not unbind a session that a reconnect load restored
+#[test]
+fn a_late_load_failure_leaves_a_session_a_newer_load_restored() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    let effects = dispatch(Action::LoadSession("live-1".into(), None, false), &mut app);
+    let first = load_attempt_of(&effects);
+    assert_ne!(0, first);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent.begin_session_reload(7);
+    agent.finalize_reload_and_maybe_adopt(7, true, None);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: agent_0,
+            session_id: acp::SessionId::new("live-1"),
+            error: "timed out".into(),
+            attempt: first,
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_0];
+    assert_eq!(Some(acp::SessionId::new("live-1")), agent.session.session_id);
+    assert!(!agent.load_failed);
+    assert!(
+        !notes_of(agent).iter().any(|n| n.contains("Couldn't load")),
+        "no failure is shown for a session that is open"
+    );
+    let effects = dispatch(Action::SendPrompt("hi".into()), &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "the open session takes the prompt, got {effects:?}"
+    );
+    assert_ne!(
+        Some(LOAD_FAILED_NOTICE.to_owned()),
+        app.agents[&agent_0].toast.as_ref().map(|(s, _)| s.clone())
+    );
+}
+
+/// The failure of the latest attempt still refuses the tab, and a newer `/resume` supersedes an older one
+#[test]
+fn only_the_latest_load_attempt_may_fail_the_tab() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    let first = load_attempt_of(&dispatch(
+        Action::LoadSession("dead-1".into(), None, false),
+        &mut app,
+    ));
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    let second = agent.begin_load_attempt();
+    assert!(second > first);
+    let fail = |attempt| {
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: agent_0,
+            session_id: acp::SessionId::new("dead-1"),
+            error: "busy".into(),
+            attempt,
+        })
+    };
+    dispatch(fail(first), &mut app);
+    assert!(!app.agents[&agent_0].load_failed, "the older attempt is ignored");
+    dispatch(fail(second), &mut app);
+    assert!(app.agents[&agent_0].load_failed);
+}
+
+/// `/btw` on a failed tab keeps the typed question and says why
+#[test]
+fn btw_on_a_failed_tab_keeps_the_composer() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    fail_load(&mut app, agent_0);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent.prompt.set_text("/btw what happened");
+    let effects = dispatch(Action::SendPrompt("/btw what happened".into()), &mut app);
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!("/btw what happened", app.agents[&agent_0].prompt.text());
+    assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
+}
+
+/// While the session opens, `/btw` waits with the other held rows and comes back if the open fails
+#[test]
+fn btw_during_a_load_is_held_and_returned_when_the_load_fails() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent.prompt.set_text("/btw what happened");
+    let effects = dispatch(Action::SendPrompt("/btw what happened".into()), &mut app);
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SendBtw { .. })),
+        "nothing is sent into a session that may not open: {effects:?}"
+    );
+    assert_eq!(1, app.agents[&agent_0].session.pending_prompts.len());
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!("/btw what happened", agent.prompt.text());
+}
+
+/// A fork's first message is returned when the child session does not open
+#[test]
+fn failed_load_returns_a_forks_first_message() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    app.agents.get_mut(&agent_0).unwrap().pending_first_prompt = Some("do the thing".into());
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert!(agent.pending_first_prompt.is_none());
+    assert_eq!("do the thing", agent.prompt.text());
+
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let agent = app.agents.get_mut(&agent_0).unwrap();
+    agent.pending_first_prompt = Some("do the thing".into());
+    agent.unbind_session_id();
+    dispatch(
+        Action::TaskComplete(TaskResult::ForkSessionFailed {
+            agent_id: agent_0,
+            error: "gone".into(),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&agent_0];
+    assert!(agent.pending_first_prompt.is_none());
+    assert_eq!("do the thing", agent.prompt.text());
+}
+
+/// Send now and interject on a failed tab give the payload back instead of dropping it
+#[test]
+fn send_now_and_interject_on_a_failed_tab_give_the_payload_back() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let agent_0 = AgentId(0);
+    for send_now in [true, false] {
+        let mut app = test_app();
+        dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+        fail_load(&mut app, agent_0);
+        let action = if send_now {
+            Action::SendPromptNow {
+                text: "now please".into(),
+                images: Vec::new(),
+            }
+        } else {
+            Action::Interject {
+                text: "now please".into(),
+                images: Vec::new(),
+            }
+        };
+        let effects = dispatch(action, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        let agent = &app.agents[&agent_0];
+        assert_eq!("now please", agent.prompt.text(), "send_now={send_now}");
+        assert!(agent.session.pending_prompts.is_empty());
+        assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
+    }
+}
+
+/// Send now while the session is still opening holds the row, so a failed open returns it
+#[test]
+fn send_now_during_a_load_is_held() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let effects = dispatch(
+        Action::SendPromptNow {
+            text: "now please".into(),
+            images: Vec::new(),
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(1, app.agents[&agent_0].session.pending_prompts.len());
+    fail_load(&mut app, agent_0);
+    assert_eq!("now please", app.agents[&agent_0].prompt.text());
+}
+
+/// The error text of a failed load is shown without its escape sequences
+#[test]
+fn load_and_restore_errors_are_shown_without_escape_sequences() {
+    let agent_0 = AgentId(0);
+    let hostile = "bad \u{1b}]0;owned\u{7} \u{1b}[31mred";
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: agent_0,
+            session_id: acp::SessionId::new("dead-1"),
+            error: hostile.into(),
+            attempt: 0,
+        }),
+        &mut app,
+    );
+    let mut app2 = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app2);
+    app2.agents.get_mut(&agent_0).unwrap().unbind_session_id();
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionRestoreFailed {
+            agent_id: agent_0,
+            error: hostile.into(),
+        }),
+        &mut app2,
+    );
+    for app in [&app, &app2] {
+        let joined = notes_of(&app.agents[&agent_0]).join("\n");
+        assert!(joined.contains("Couldn't"), "{joined}");
+        assert!(!joined.contains('\u{1b}') && !joined.contains('\u{7}'), "{joined:?}");
+    }
+}
+
+fn loaded_ok(app: &mut AppView, agent_id: AgentId, session: &str, attempt: u64) -> Vec<Effect> {
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt,
+            agent_id,
+            session_id: acp::SessionId::new(session),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+            scheduler_background_loops: None,
+        }),
+        app,
+    )
+}
+
+fn restore_failed(app: &mut AppView, agent_id: AgentId) {
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionRestoreFailed {
+            agent_id,
+            error: "no such session".into(),
+        }),
+        app,
+    );
+}
+
+/// Round 3, finding 1: a side question held during a load is sent as a side question, never run as a compact
+#[test]
+fn held_btw_is_sent_as_a_side_question_when_the_load_succeeds() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    let effects = dispatch(Action::LoadSession("live-1".into(), None, false), &mut app);
+    let attempt = load_attempt_of(&effects);
+    app.agents
+        .get_mut(&agent_0)
+        .unwrap()
+        .prompt
+        .set_text("/btw what happened");
+    let held = dispatch(Action::SendPrompt("/btw what happened".into()), &mut app);
+    assert!(!held.iter().any(|e| matches!(e, Effect::SendBtw { .. })), "{held:?}");
+    dispatch(Action::SendPrompt("then do this".into()), &mut app);
+    let effects = loaded_ok(&mut app, agent_0, "live-1", attempt);
+    let btw: Vec<usize> = effects
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Effect::SendBtw { question, .. } if question == "what happened" => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(1, btw.len(), "{effects:?}");
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::Compact { .. })),
+        "a side question must never start a compact: {effects:?}"
+    );
+    let prompts: Vec<usize> = effects
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match e {
+            Effect::SendPrompt { text, .. } if text == "then do this" => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(1, prompts.len(), "{effects:?}");
+    assert!(btw[0] < prompts[0], "queue order: {effects:?}");
+    assert!(app.agents[&agent_0].session.pending_prompts.is_empty());
+}
+
+/// Round 3, finding 2: `/btw` typed on a restoring tab (no session id yet) is held, with or without an image
+#[test]
+fn btw_during_a_remote_restore_is_held_and_returned_when_the_restore_fails() {
+    let agent_0 = AgentId(0);
+    for image in [false, true] {
+        let mut app = test_app();
+        dispatch(Action::LoadSession("far-1".into(), None, false), &mut app);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        agent.unbind_session_id();
+        agent.session.loading_replay = true;
+        agent.prompt.set_text("/btw where is the bug ");
+        if image {
+            agent.prompt.set_cursor(agent.prompt.text().len());
+            agent.prompt.insert_image(test_image()).unwrap();
+        }
+        let typed = agent.prompt.text().to_owned();
+        let effects = dispatch(Action::SendPrompt(typed.clone()), &mut app);
+        assert!(effects.is_empty(), "image={image}: {effects:?}");
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        assert_eq!(1, agent.session.pending_prompts.len(), "image={image}: held");
+        assert_eq!("", agent.prompt.text(), "image={image}");
+        restore_failed(&mut app, agent_0);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        assert!(agent.session.pending_prompts.is_empty(), "image={image}");
+        assert_eq!(typed.trim_end(), agent.prompt.text().trim_end(), "image={image}");
+        assert_eq!(usize::from(image), agent.prompt.drain_images().len(), "image={image}");
+    }
+}
+
+/// Round 3, finding 2: the same held question is sent once as a side question when the restore succeeds
+#[test]
+fn btw_during_a_remote_restore_is_sent_once_when_the_load_succeeds() {
+    let agent_0 = AgentId(0);
+    for image in [false, true] {
+        let mut app = test_app();
+        let effects = dispatch(Action::LoadSession("far-1".into(), None, false), &mut app);
+        let attempt = load_attempt_of(&effects);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        agent.session.loading_replay = true;
+        agent.prompt.set_text("/btw where is the bug ");
+        if image {
+            agent.prompt.set_cursor(agent.prompt.text().len());
+            agent.prompt.insert_image(test_image()).unwrap();
+        }
+        let typed = agent.prompt.text().to_owned();
+        dispatch(Action::SendPrompt(typed), &mut app);
+        let effects = loaded_ok(&mut app, agent_0, "far-1", attempt);
+        let sent: Vec<_> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::SendBtw { question, blocks, .. } => Some((question.clone(), blocks.is_some())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(1, sent.len(), "image={image}: {effects:?}");
+        assert!(sent[0].0.starts_with("where is the bug"), "{sent:?}");
+        assert_eq!(image, sent[0].1, "images ride along as blocks");
+        assert!(!effects.iter().any(|e| matches!(e, Effect::Compact { .. })));
+    }
+}
+
+/// Round 3, finding 3: a reconnect load that fails leaves the tab refused, and a late result of the older load changes nothing
+#[test]
+fn failed_reconnect_refuses_the_tab_and_late_results_are_dropped() {
+    use crate::app::dispatch::prompt::LOAD_FAILED_NOTICE;
+    let agent_0 = AgentId(0);
+    for late_success in [false, true] {
+        let mut app = test_app();
+        let effects = dispatch(Action::LoadSession("live-1".into(), None, false), &mut app);
+        let first = load_attempt_of(&effects);
+        dispatch(Action::SendPrompt("held while loading".into()), &mut app);
+        let agent = app.agents.get_mut(&agent_0).unwrap();
+        agent.begin_session_reload(7);
+        assert!(agent.finalize_reload_and_maybe_adopt(7, false, None));
+        let agent = &app.agents[&agent_0];
+        assert!(agent.load_failed, "late_success={late_success}");
+        assert!(agent.session.session_id.is_none(), "unbound");
+        assert!(!agent.session.loading_replay);
+        assert!(agent.session.pending_prompts.is_empty());
+        assert_eq!("held while loading", agent.prompt.text());
+        let notes_before = notes_of(agent).len();
+        if late_success {
+            loaded_ok(&mut app, agent_0, "live-1", first);
+        } else {
+            dispatch(
+                Action::TaskComplete(TaskResult::SessionLoadFailed {
+                    attempt: first,
+                    agent_id: agent_0,
+                    session_id: acp::SessionId::new("live-1"),
+                    error: "late".into(),
+                }),
+                &mut app,
+            );
+        }
+        let agent = &app.agents[&agent_0];
+        assert!(agent.load_failed, "the older result must not revive or re-refuse the tab");
+        assert!(agent.session.session_id.is_none());
+        assert_eq!("held while loading", agent.prompt.text(), "returned once");
+        assert_eq!(notes_before, notes_of(agent).len(), "no second failure line");
+        let effects = dispatch(Action::SendPrompt("again".into()), &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(LOAD_FAILED_NOTICE, read_toast(&app));
+        let effects = dispatch(Action::LoadSession("live-1".into(), None, false), &mut app);
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::LoadSession { .. })),
+            "/resume starts a fresh load: {effects:?}"
+        );
+    }
+}
+
+/// Round 3, finding 4: an interject while the session opens is held, so a failed open can still give it back
+#[test]
+fn interject_during_a_load_is_held_and_returned_when_the_load_fails() {
+    let agent_0 = AgentId(0);
+    let mut app = test_app();
+    dispatch(Action::LoadSession("dead-1".into(), None, false), &mut app);
+    let effects = dispatch(
+        Action::Interject {
+            text: "actually do this".into(),
+            images: vec![],
+        },
+        &mut app,
+    );
+    assert!(
+        !effects.iter().any(|e| matches!(e, Effect::SendInterject { .. })),
+        "{effects:?}"
+    );
+    assert_eq!(1, app.agents[&agent_0].session.pending_prompts.len());
+    fail_load(&mut app, agent_0);
+    let agent = &app.agents[&agent_0];
+    assert!(agent.session.pending_prompts.is_empty());
+    assert_eq!("actually do this", agent.prompt.text());
+}
+
+/// Round 3, finding 5: with no load in flight every send path behaves as before
+#[test]
+fn healthy_session_sends_everything_immediately() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SendPrompt("/btw quick".into()), &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::SendBtw { question, .. }] if question == "quick"), "{effects:?}");
+    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+    assert!(matches!(effects.as_slice(), [Effect::SendPrompt { text, .. }] if text == "hello"), "{effects:?}");
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+    let effects = dispatch(
+        Action::SendPromptNow { text: "now".into(), images: vec![] },
+        &mut app,
+    );
+    assert!(effects.iter().any(|e| matches!(e, Effect::SendPromptNow { .. })), "{effects:?}");
+    let effects = dispatch(
+        Action::Interject { text: "mid".into(), images: vec![] },
+        &mut app,
+    );
+    assert!(matches!(effects.as_slice(), [Effect::SendInterject { .. }]), "{effects:?}");
 }

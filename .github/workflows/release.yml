@@ -549,7 +549,7 @@ jobs:
     name: assemble and publish
     needs: [build, sign, security]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 180
     environment: npm-publish
     permissions:
       contents: read
@@ -750,18 +750,25 @@ jobs:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -uo pipefail
+          # The registry can take a long time to show a freshly published
+          # platform package: for 1.0.23, @fuigo/linux-x64 took about 95
+          # minutes and failed this step twice at its old 10-minute limit
+          # (nothing was staged: `npm stage list` was empty). One shared
+          # two-hour deadline for all six names, polled once a minute.
+          deadline=$(( $(date +%s) + 7200 ))
           for p in darwin-arm64 darwin-x64 linux-arm64 linux-x64 win32-arm64 win32-x64; do
             name="@fuigo/$p"
             ok=0
-            for _ in $(seq 1 60); do
+            while :; do
               if npm view "$name@$VERSION" version >/dev/null 2>&1; then
                 echo "--- $name@$VERSION resolves"; ok=1; break
               fi
-              sleep 10
+              [ "$(date +%s)" -lt "$deadline" ] || break
+              sleep 60
             done
             if [ "$ok" = 0 ]; then
-              echo "::error::$name@$VERSION did not become resolvable within 10 minutes."
-              echo "::error::It may be sitting in npm Staged Packages awaiting promotion."
+              echo "::error::$name@$VERSION did not become resolvable within 2 hours."
+              echo "::error::Check \`npm stage list\` first: if it lists the package, promote it; if it is empty, the registry is slow to show the version, so re-run this job (publishing is guarded and re-runnable)."
               exit 1
             fi
           done
@@ -799,7 +806,7 @@ jobs:
     needs: publish
     if: github.event_name == 'push' || inputs.dry_run == false
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       matrix:
@@ -815,6 +822,32 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      # The publish job already waited for the platform packages, but each
+      # runner asks the registry afresh and `fuigo` itself took about 7 minutes
+      # to appear for 1.0.23. Wait (up to 2 hours, once a minute) until both
+      # names this runner installs resolve, so a slow registry is not reported
+      # as a broken package.
+      - name: Wait until the registry shows this version
+        shell: bash
+        run: |
+          set -uo pipefail
+          VERSION=$(node -p "require('./crates/codegen/fuigo-pager/npm/fuigo/package.json').version")
+          deadline=$(( $(date +%s) + 7200 ))
+          for name in "fuigo" "@fuigo/${{ matrix.platform }}"; do
+            ok=0
+            while :; do
+              if npm view "$name@$VERSION" version >/dev/null 2>&1; then
+                echo "--- $name@$VERSION resolves"; ok=1; break
+              fi
+              [ "$(date +%s)" -lt "$deadline" ] || break
+              sleep 60
+            done
+            if [ "$ok" = 0 ]; then
+              echo "::error::$name@$VERSION did not become resolvable within 2 hours."
+              echo "::error::Check \`npm stage list\` first: if it lists the package, promote it; if it is empty, the registry is slow, so re-run this job."
+              exit 1
+            fi
+          done
       - name: Verify registry package and native execution
         shell: bash
         run: |

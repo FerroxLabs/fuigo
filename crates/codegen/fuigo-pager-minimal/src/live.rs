@@ -94,6 +94,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal, ctx: &Terminal
         &app.trust_state,
         app.has_access(),
         app.is_zdr_blocked(),
+        app.trust_error.as_deref(),
     );
     let pending_hint = minimal_pending_hint(&app.pending_action);
     let transcript_hint = if minimal_api::minimal_ctrl_o_opens_transcript(app) {
@@ -574,8 +575,7 @@ fn render_minimal_status(
         render_idle_hint(buf, area, theme);
         return;
     }
-    let is_pending_user_input =
-        !agent.permission_queue.is_empty() || minimal_api::question_view(agent).is_some();
+    let is_pending_user_input = minimal_api::is_awaiting_user_answer(agent);
     let goal_verifying = agent
         .goal_state
         .as_ref()

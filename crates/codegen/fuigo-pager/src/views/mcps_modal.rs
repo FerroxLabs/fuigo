@@ -192,6 +192,9 @@ pub struct McpServerInfo {
     /// Why the server is not usable, when the shell says (P152): a policy block or the recorded start/handshake failure.
     /// Shown under an `[unavailable]` server instead of the generic "server may not be connected".
     pub status_reason: Option<String>,
+    /// The managed-policy verdict when the shell dropped this server (P169): the row badges "blocked by policy" instead
+    /// of reading as a personal disable, in the full TUI and in minimal mode.
+    pub blocked_reason: Option<String>,
     pub tool_count: usize,
     pub auth_required: bool,
     pub setup_required: bool,
@@ -318,13 +321,27 @@ pub fn convert_list_response(resp: McpsListResponse) -> Vec<McpServerInfo> {
                         .or_else(|| session.unavailable_reason.clone())
                         .filter(|reason| !reason.trim().is_empty())
                 }),
+                // K7: a server that needs sign-in says why when its automatic token refresh was refused
+                McpServerDisplayStatus::NeedsAuth => entry.session.as_ref().and_then(|session| {
+                    session
+                        .unavailable_reason
+                        .clone()
+                        .filter(|reason| !reason.trim().is_empty())
+                }),
                 _ => None,
-            };
+            }
+            // The reason is text from a server or its auth flow: scrub it before it can reach a terminal cell
+            .map(|reason| fuigo_tty_utils::untrusted(&reason).to_string());
             McpServerInfo {
                 name: entry.name,
                 display_name: entry.display_name,
                 status,
                 status_reason,
+                blocked_reason: entry
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.blocked_reason.clone())
+                    .filter(|reason| !reason.trim().is_empty()),
                 tool_count,
                 auth_required,
                 setup_required,
@@ -399,6 +416,7 @@ mod tests {
             display_name: None,
             status,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 0,
             auth_required: false,
             setup_required: false,
@@ -466,6 +484,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// P169: the shell's policy verdict for a dropped server reaches the row as `blocked_reason`.
+    #[test]
+    fn convert_list_response_carries_the_policy_block() {
+        let resp: McpsListResponse = serde_json::from_value(serde_json::json!({
+            "servers": [
+                {
+                    "name": "corp-denied",
+                    "source": "local",
+                    "session": {
+                        "enabled": false,
+                        "blockedReason": "The server corp-denied is blocked by an organization policy (managed_config.toml)."
+                    }
+                },
+                { "name": "off", "source": "local", "session": { "enabled": false } }
+            ]
+        }))
+        .unwrap();
+        let servers = convert_list_response(resp);
+        let blocked = servers.iter().find(|s| s.name == "corp-denied").unwrap();
+        assert_eq!(
+            blocked.blocked_reason.as_deref(),
+            Some("The server corp-denied is blocked by an organization policy (managed_config.toml).")
+        );
+        assert!(!blocked.enabled);
+        let off = servers.iter().find(|s| s.name == "off").unwrap();
+        assert_eq!(off.blocked_reason, None);
     }
 
     #[test]
@@ -625,6 +671,74 @@ mod tests {
         assert!(servers[0].setup.is_some());
     }
 
+    /// K7: a server that needs sign-in carries the reason its automatic token refresh was refused; a blank one is dropped.
+    #[test]
+    fn convert_list_response_needs_auth_keeps_the_refusal_reason() {
+        let entry = |reason: Option<&str>| McpsServerEntry {
+            name: "cog".into(),
+            display_name: None,
+            source: Some("local".into()),
+            source_label: None,
+            config_type: Some("http".into()),
+            setup: None,
+            setup_values: None,
+            session: Some(McpsServerSession {
+                enabled: true,
+                status: None,
+                tools: vec![],
+                auth_required: true,
+                setup_required: false,
+                blocked_reason: None,
+                unavailable_reason: reason.map(str::to_string),
+            }),
+        };
+        let servers = convert_list_response(McpsListResponse {
+            servers: vec![
+                entry(Some("refusing to send OAuth credentials to https://idp.example/token: refused")),
+                entry(Some("   ")),
+                entry(None),
+            ],
+        });
+        assert!(servers.iter().all(|s| s.status == McpServerDisplayStatus::NeedsAuth));
+        assert_eq!(
+            servers[0].status_reason.as_deref(),
+            Some("refusing to send OAuth credentials to https://idp.example/token: refused")
+        );
+        assert_eq!(servers[1].status_reason, None);
+        assert_eq!(servers[2].status_reason, None);
+    }
+
+    #[test]
+    fn needs_auth_reason_from_a_server_cannot_carry_an_escape_sequence() {
+        let entry = |reason: &str| McpsServerEntry {
+            name: "cog".into(),
+            display_name: None,
+            source: Some("local".into()),
+            source_label: None,
+            config_type: Some("http".into()),
+            setup: None,
+            setup_values: None,
+            session: Some(McpsServerSession {
+                enabled: true,
+                status: None,
+                tools: vec![],
+                auth_required: true,
+                setup_required: false,
+                blocked_reason: None,
+                unavailable_reason: Some(reason.to_string()),
+            }),
+        };
+        let servers = convert_list_response(McpsListResponse {
+            servers: vec![entry("refused\x1b]0;pwned\x07\x1b[2J\u{9b}31m\u{202e}tail")],
+        });
+        let reason = servers[0].status_reason.as_deref().expect("reason kept");
+        assert!(reason.starts_with("refused"), "{reason:?}");
+        assert!(
+            !reason.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "control or bidi char survived: {reason:?}"
+        );
+    }
+
     #[test]
     fn patch_server_row_updates_existing() {
         let mut servers = vec![
@@ -682,6 +796,7 @@ mod tests {
             display_name: None,
             status: McpServerDisplayStatus::Ready,
             status_reason: None,
+            blocked_reason: None,
             tool_count: 3,
             auth_required: false,
             setup_required: false,

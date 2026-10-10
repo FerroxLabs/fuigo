@@ -274,7 +274,7 @@ where
     }
     let auth_scope = agent_config.fuigo_com_config.auth_scope();
     let initial_auth_key_hash = fuigo_config::user_fuigo_home()
-        .map(|g| g.join("auth.json"))
+        .map(|g| crate::auth::auth_json_path(&g))
         .and_then(|auth_path| crate::auth::read_auth_json(&auth_path).ok())
         .and_then(|store| {
             crate::auth::lookup_auth(&store, &auth_scope).map(|a| crate::config::reloader::hash_auth_key(&a.key))
@@ -557,7 +557,7 @@ pub async fn run_headless(
             fuigo_tty_utils::cli_eprintln!();
             fuigo_tty_utils::cli_eprintln!(
                 "Open Fuigo: {} (press Enter to open in browser)",
-                fuigo_code_url
+                fuigo_tty_utils::untrusted(&fuigo_code_url)
             );
             fuigo_tty_utils::cli_eprintln!();
             let url_for_open = fuigo_code_url.clone();
@@ -706,7 +706,7 @@ fn bridge_permitted(
         }
         Err(refused) => {
             refused.record(site);
-            fuigo_tty_utils::cli_eprintln!("{refused}");
+            fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(&refused));
             board.publish(Some(refused.notice_payload()));
             false
         }
@@ -1292,7 +1292,7 @@ pub async fn run_leader(
             }
             let auth_scope = agent_config.fuigo_com_config.auth_scope();
             let initial_auth_key_hash = fuigo_config::user_fuigo_home()
-                .map(|g| g.join("auth.json"))
+                .map(|g| crate::auth::auth_json_path(&g))
                 .and_then(|auth_path| crate::auth::read_auth_json(&auth_path).ok())
                 .and_then(|store| {
                     crate::auth::lookup_auth(&store, &auth_scope)

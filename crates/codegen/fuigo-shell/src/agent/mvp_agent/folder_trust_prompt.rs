@@ -214,9 +214,13 @@ impl MvpAgent {
                 return;
             }
 
-            // Persist the grant, then flip the cached untrusted verdict to trusted
-            // The `Some(false)` arm of `resolve_and_record` re-reads the store
-            fuigo_workspace::folder_trust::grant_folder_trust(&cwd);
+            // Persist the grant for the key the client was shown (not re-derived), then flip the cached untrusted verdict to trusted
+            // The `Some(false)` arm of `resolve_and_record` re-reads the store (and this process's own grant)
+            let outcome = fuigo_workspace::folder_trust::grant_folder_trust_key(&key);
+            let notify: Vec<_> = targets.iter().map(|t| t.cmd_tx.clone()).collect();
+            if !settle_gui_grant(&outcome, &cwd, &notify, &prompted, &key) {
+                return;
+            }
             folder_trust::resolve_and_record(&cwd, remote.as_ref(), false);
 
             // A snapshot: the reload awaits, and a session starting meanwhile updates the set.
@@ -246,6 +250,51 @@ struct ReloadTarget {
     cmd_tx: tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>,
     initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
     cwd: PathBuf,
+}
+
+/// What the GUI prompt does with a grant result. Returns true when the grant takes effect in this process (reload and
+/// resolve go ahead), false when nothing was recorded and the workspace stays gated.
+///
+/// A grant that was not saved is told to the user in every session it covers, not only logged (Astra r1 #4). An
+/// unrecorded grant also releases the dedup key so a later session can ask again once the cause is fixed.
+fn settle_gui_grant(
+    outcome: &fuigo_workspace::folder_trust::GrantOutcome,
+    cwd: &std::path::Path,
+    sessions: &[tokio::sync::mpsc::UnboundedSender<crate::session::SessionCommand>],
+    prompted: &RefCell<std::collections::HashSet<PathBuf>>,
+    key: &std::path::Path,
+) -> bool {
+    if !outcome.dismisses_gate() {
+        for cmd_tx in sessions {
+            let _ = cmd_tx.send(crate::session::SessionCommand::NotifyConfigNoticeIfNew {
+                notice: outcome.to_string(),
+            });
+        }
+    }
+    match outcome.resolution() {
+        fuigo_workspace::folder_trust::GrantResolution::Trusted => true,
+        // The write was denied (e.g. under a sandbox): this agent process holds the grant, so the reload applies for
+        // this session; the notice above said it was not saved.
+        fuigo_workspace::folder_trust::GrantResolution::SessionLocal => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                error = %outcome,
+                "folder trust: grant not saved; trusted for this session only"
+            );
+            true
+        }
+        // Nothing recorded (unreadable store, no home, moved folder): stay gated, and release the dedup key so a
+        // later session can ask again once the cause is fixed.
+        fuigo_workspace::folder_trust::GrantResolution::Unrecorded => {
+            tracing::warn!(
+                cwd = %cwd.display(),
+                error = %outcome,
+                "folder trust: grant refused; workspace stays gated"
+            );
+            prompted.borrow_mut().remove(key);
+            false
+        }
+    }
 }
 
 /// Inputs for [`reload_project_servers_after_grant`], bundled to avoid a long positional arg list.
@@ -503,5 +552,61 @@ mod tests {
         // Unknown outcome must fail closed to Reject (never silently "trust").
         let unknown: FolderTrustResponse = serde_json::from_str(r#"{"outcome":"banana"}"#).unwrap();
         assert_eq!(unknown.outcome, FolderTrustOutcome::Reject);
+    }
+
+    fn p180_drain_notices(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
+    ) -> Vec<String> {
+        let mut notices = Vec::new();
+        while let Ok(cmd) = rx.try_recv() {
+            if let crate::session::SessionCommand::NotifyConfigNoticeIfNew { notice } = cmd {
+                notices.push(notice);
+            }
+        }
+        notices
+    }
+
+    /// P180 (P167 Astra LOW): the GUI prompt tells every covered session when a grant was not saved, and keeps the
+    /// workspace gated (releasing the dedup key) when nothing was recorded.
+    #[test]
+    fn p180_gui_prompt_sends_a_notice_when_a_grant_is_not_saved() {
+        use fuigo_workspace::folder_trust::{GrantOutcome, GrantRefuse, PersistStatus};
+        let key = PathBuf::from("/p180/ws");
+        let cwd = PathBuf::from("/p180/ws");
+        let prompted = RefCell::new(std::collections::HashSet::from([key.clone()]));
+        let (tx1, mut rx1) = tokio::sync::mpsc::unbounded_channel();
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        let sessions = [tx1, tx2];
+
+        // Session-only: both sessions are told, the grant goes ahead, the key stays.
+        let session_only = GrantOutcome::Granted {
+            key: key.clone(),
+            persist: PersistStatus::ProcessLocalOnly { error: std::io::Error::other("denied") },
+        };
+        assert!(settle_gui_grant(&session_only, &cwd, &sessions, &prompted, &key));
+        for rx in [&mut rx1, &mut rx2] {
+            let notices = p180_drain_notices(rx);
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].contains("this session only"), "{notices:?}");
+        }
+        assert!(prompted.borrow().contains(&key));
+
+        // Unrecorded: both sessions are told, the grant stops, the dedup key is released.
+        let refused = GrantOutcome::Refused { reason: GrantRefuse::Unreadable };
+        assert!(!settle_gui_grant(&refused, &cwd, &sessions, &prompted, &key));
+        for rx in [&mut rx1, &mut rx2] {
+            let notices = p180_drain_notices(rx);
+            assert_eq!(notices.len(), 1, "{notices:?}");
+            assert!(notices[0].contains("trust store could not be read"), "{notices:?}");
+        }
+        assert!(!prompted.borrow().contains(&key), "an unrecorded grant releases the dedup key");
+
+        // Saved: no notice, the grant goes ahead.
+        prompted.borrow_mut().insert(key.clone());
+        let saved = GrantOutcome::Granted { key: key.clone(), persist: PersistStatus::Durable };
+        assert!(settle_gui_grant(&saved, &cwd, &sessions, &prompted, &key));
+        for rx in [&mut rx1, &mut rx2] {
+            assert!(p180_drain_notices(rx).is_empty());
+        }
     }
 }

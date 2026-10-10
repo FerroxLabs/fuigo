@@ -26,6 +26,8 @@
 mod allow_path;
 pub mod child_net;
 mod deny;
+mod git_write_deny;
+mod home_write_deny;
 mod hook_write_deny;
 mod logging;
 mod network_policy;
@@ -36,7 +38,10 @@ mod runtime_sockets;
 #[cfg(test)]
 mod test_util;
 mod types;
-pub use hook_write_deny::{profile_enforces_hook_write_deny, verify_hook_write_deny_enforced};
+pub use git_write_deny::{GitPathKind, GitProtectedPath};
+pub use hook_write_deny::{
+    profile_enforces_hook_write_deny, verify_git_write_deny_enforced, verify_hook_write_deny_enforced,
+};
 pub use logging::SandboxLogger;
 pub use network_policy::{
     ChildNetworkPolicy, NETWORK_POLICY_SNAPSHOT_VERSION, NetworkPolicySnapshot,
@@ -312,8 +317,7 @@ pub(crate) fn bwrap_reexec_command_ex(
         Ok(exe) => exe,
         Err(e) => {
             fuigo_tty_utils::cli_eprintln!(
-                "error: could not resolve the current executable for the bwrap re-exec: {e}"
-            );
+                "error: could not resolve the current executable for the bwrap re-exec: {}", fuigo_tty_utils::untrusted(&e));
             return None;
         }
     };
@@ -329,16 +333,15 @@ pub(crate) fn bwrap_reexec_command_ex(
     if let Some(plan) = hook_plan
         && let Err(e) = hook_write_deny::append_hook_plan_binds(&mut cmd, plan)
     {
-        fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan materialization failed: {e}");
+        fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan materialization failed: {}", fuigo_tty_utils::untrusted(&e));
         return None;
     }
     if !deny_read.is_empty() {
         for path in deny_read {
             let Some(blocked) = bwrap_blocked_source_for_path(Path::new(path)) else {
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: could not create bwrap placeholder for read-deny path {path}; \
-                     refusing to start with a partial sandbox"
-                );
+                    "error: could not create bwrap placeholder for read-deny path {}; \
+                     refusing to start with a partial sandbox", fuigo_tty_utils::untrusted(&path));
                 return None;
             };
             cmd.arg("--ro-bind").arg(&blocked).arg(path);
@@ -348,8 +351,7 @@ pub(crate) fn bwrap_reexec_command_ex(
         Ok(path) => path,
         Err(e) => {
             fuigo_tty_utils::cli_eprintln!(
-                "error: could not prepare the bwrap containment sentinel: {e}"
-            );
+                "error: could not prepare the bwrap containment sentinel: {}", fuigo_tty_utils::untrusted(&e));
             return None;
         }
     };
@@ -361,8 +363,7 @@ pub(crate) fn bwrap_reexec_command_ex(
             Ok(encoded) => encoded,
             Err(error) => {
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: runtime-socket deny handoff encoding failed: {error}"
-                );
+                    "error: runtime-socket deny handoff encoding failed: {}", fuigo_tty_utils::untrusted(&error));
                 return None;
             }
         };
@@ -534,7 +535,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Ok(resolved) => Some(resolved),
             Err(e) => {
                 if resolve_failure_must_refuse(profile, workspace) {
-                    fuigo_tty_utils::cli_eprintln!("error: sandbox profile resolve failed: {e}");
+                    fuigo_tty_utils::cli_eprintln!("error: sandbox profile resolve failed: {}", fuigo_tty_utils::untrusted(&e));
                     return None;
                 }
                 None
@@ -550,18 +551,29 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
         .map(|(_, sockets)| sockets.clone())
         .unwrap_or_default();
     let needs_hooks = requires_hook_write_deny(profile, workspace);
-    let hook_plan = if needs_hooks {
+    let mut hook_plan = if needs_hooks {
         match hook_write_deny::prepare_hook_write_deny(profile) {
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
+                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
                 return None;
             }
         }
     } else {
         None
     };
+    // Git hooks and configs ride on the hook plan: same profiles, same read-only binds
+    if let (Some(plan), Some((resolved_profile, _))) = (hook_plan.as_mut(), resolved.as_ref())
+        && let Err(e) = hook_write_deny::add_git_leaves_to_plan(
+            plan,
+            &resolved_profile.git_write_deny,
+            &resolved_profile.read_write,
+        )
+    {
+        fuigo_tty_utils::cli_eprintln!("error: git write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+        return None;
+    }
     if needs_hooks && hook_plan.is_none() {
         fuigo_tty_utils::cli_eprintln!(
             "error: hook write-deny is required but no plan was prepared"
@@ -582,8 +594,7 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
             Err(reason) => {
                 tracing::error!(%reason, "sandbox deny-glob expansion failed; refusing to start");
                 fuigo_tty_utils::cli_eprintln!(
-                    "error: sandbox deny glob could not be enforced on Linux: {reason}"
-                );
+                    "error: sandbox deny glob could not be enforced on Linux: {}", fuigo_tty_utils::untrusted(&reason));
                 return None;
             }
         }
@@ -604,18 +615,37 @@ fn bwrap_deny_plan(profile: &ProfileName, workspace: &Path) -> Option<BwrapDenyP
     } else {
         Vec::new()
     };
-    let hook_plan = if requires_hook_write_deny(profile, workspace) {
+    let mut hook_plan = if requires_hook_write_deny(profile, workspace) {
         match hook_write_deny::prepare_hook_write_deny(profile) {
             Ok(hook_write_deny::HookWriteDenyPrepare::NotRequired) => None,
             Ok(hook_write_deny::HookWriteDenyPrepare::Plan(plan)) => Some(plan),
             Err(e) => {
-                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {e}");
+                fuigo_tty_utils::cli_eprintln!("error: hook write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
                 return None;
             }
         }
     } else {
         None
     };
+    // Without Landlock every path is writable, so every git target is bound
+    if let Some(plan) = hook_plan.as_mut() {
+        let config = profiles::load_sandbox_config(workspace);
+        let bound = profile
+            .resolve_profile(workspace, &config)
+            .map_err(|e| e.to_string())
+            .and_then(|resolved| {
+                hook_write_deny::add_git_leaves_to_plan(
+                    plan,
+                    &resolved.git_write_deny,
+                    &[PathBuf::from("/")],
+                )
+                .map_err(|e| e.to_string())
+            });
+        if let Err(e) = bound {
+            fuigo_tty_utils::cli_eprintln!("error: git write-deny plan failed: {}", fuigo_tty_utils::untrusted(&e));
+            return None;
+        }
+    }
     Some(BwrapDenyPlan {
         deny_write_optional,
         hook_plan,

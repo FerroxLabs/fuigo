@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use super::*;
+use crate::leader::protocol::read_message;
+use crate::leader::transport::LeaderListener;
 use tempfile::TempDir;
 
 /// Parse a raw payload for the parse-once helper APIs.
@@ -5899,4 +5901,144 @@ async fn p142_the_withheld_upload_notice_reaches_an_attached_client() {
         1
     );
     handle.cancel.cancel();
+}
+
+/// P161 (U6): the session loop's `select!` lets an outbound write win while a client frame is only half read.
+/// The partial frame must survive that cancellation. Before P161 the length prefix and the partial body were dropped,
+/// the rest of the body was parsed as a new length prefix, and the session desynchronized (it never answered again).
+#[tokio::test]
+async fn p161_inbound_frame_survives_an_outbound_write_winning_the_session_select() {
+    use tokio::io::AsyncWriteExt as _;
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("p161.sock");
+    let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
+    // The server binds in its own task; wait for the socket rather than racing it.
+    let mut attempts = 0;
+    let stream = loop {
+        match LeaderStream::connect(&sock_path).await {
+            Ok(stream) => break stream,
+            Err(e) if attempts >= 250 => panic!("leader socket never came up: {e}"),
+            Err(_) => {
+                attempts += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    };
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    write_message(
+        &mut writer,
+        &ClientMessage::Register {
+            client_type: "test".into(),
+            mode: ClientMode::Stdio,
+            capabilities: ClientCapabilities::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let registered: ServerMessage = read_message(&mut reader).await.unwrap();
+    assert!(matches!(registered, ServerMessage::Registered { .. }));
+
+    // Send the length prefix and half the body of a Ping, then let the session's read consume them and park.
+    let body = serde_json::to_vec(&ClientMessage::Ping).unwrap();
+    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+    frame.extend_from_slice(&body);
+    let (head, tail) = frame.split_at(4 + body.len() / 2);
+    writer.write_all(head).await.unwrap();
+    writer.flush().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // An outbound message for this client: the biased select's outbound branch wins over the parked read.
+    handle
+        .response_tx
+        .send(r#"{"jsonrpc":"2.0","method":"fuigo/sessions/changed","params":{}}"#.to_string())
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let msg = tokio::time::timeout_at(deadline, read_message::<_, ServerMessage>(&mut reader))
+            .await
+            .expect("the broadcast must reach the client")
+            .unwrap();
+        if matches!(&msg, ServerMessage::Acp { payload } if payload.contains("fuigo/sessions/changed"))
+        {
+            break;
+        }
+    }
+
+    // Finish the interrupted Ping and send a second one: both must be answered.
+    writer.write_all(tail).await.unwrap();
+    writer.flush().await.unwrap();
+    write_message(&mut writer, &ClientMessage::Ping).await.unwrap();
+    let mut pongs = 0;
+    while pongs < 2 {
+        let msg = tokio::time::timeout_at(deadline, read_message::<_, ServerMessage>(&mut reader))
+            .await
+            .unwrap_or_else(|_| {
+                panic!("session desynchronized: {pongs} of 2 Pongs before the deadline")
+            })
+            .unwrap_or_else(|e| panic!("session ended after {pongs} of 2 Pongs: {e}"));
+        if matches!(msg, ServerMessage::Pong) {
+            pongs += 1;
+        }
+    }
+    handle.cancel.cancel();
+}
+
+/// P161: the session `select!` must not lose an outbound message that is queued in the same tick its cancel fires.
+/// `drain_client_outbound_on_cancel` exists to deliver such messages (shutdown notices). Before P161, with kanal, a send handed
+/// straight to the parked `recv()` future is dropped together with that future when the cancel branch wins (kanal
+/// documents its receive future as unusable in `select!`), so the drain found nothing and the message was lost.
+/// tokio mpsc's `recv()` is cancel-safe: the message stays queued and the drain delivers it.
+#[tokio::test]
+async fn p161_outbound_queued_as_cancel_fires_is_drained_not_lost() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("p161-drain.sock");
+    let listener = LeaderListener::bind(&sock_path).unwrap();
+    let (client, accepted) = tokio::join!(LeaderStream::connect(&sock_path), listener.accept());
+    let (server_stream, _) = accepted.unwrap();
+    let (mut reader, mut writer) = tokio::io::split(client.unwrap());
+    let (tx, server_rx) = mpsc::unbounded_channel::<ClientOutbound>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
+    let cancel = CancellationToken::new();
+    let (_ready_tx, ready_rx) = watch::channel(true);
+    let session = tokio::spawn(run_client_session(
+        ClientId(1),
+        server_stream,
+        server_rx,
+        event_tx,
+        cancel.clone(),
+        ready_rx,
+        default_test_control_state(&sock_path),
+    ));
+    write_message(
+        &mut writer,
+        &ClientMessage::Register {
+            client_type: "test".into(),
+            mode: ClientMode::Stdio,
+            capabilities: ClientCapabilities::default(),
+        },
+    )
+    .await
+    .unwrap();
+    let registered: ServerMessage = read_message(&mut reader).await.unwrap();
+    assert!(matches!(registered, ServerMessage::Registered { .. }));
+    // The session reports its registration and then parks in the loop's select (outbound recv waiting).
+    let event = event_rx.recv().await.unwrap();
+    assert!(matches!(event, ServerEvent::Registered(..)));
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    tx.send(ServerMessage::Pong.into()).unwrap();
+    cancel.cancel();
+    session.await.unwrap().unwrap();
+
+    let got = tokio::time::timeout(
+        Duration::from_secs(5),
+        read_message::<_, ServerMessage>(&mut reader),
+    )
+    .await;
+    assert!(
+        matches!(got, Ok(Ok(ServerMessage::Pong))),
+        "the outbound message queued before cancel must be drained to the client, got {got:?}"
+    );
 }

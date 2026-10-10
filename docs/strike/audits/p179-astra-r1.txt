@@ -1,0 +1,23 @@
+VERDICT: LAND-OK — zero BLOCKER, zero HIGH.
+
+Audited clean `strike/p179` at `7b72937a`, against `fbf53c96` and `de6ca7dd`, using the diff, source, Fable audit and R163 receipt. No cargo, builds or repository changes.
+
+Findings, all LOW:
+
+- **Callback coverage:** [differential tests](/Volumes/Mando/WaylandBots/Fuigo/wt-p179/crates/codegen/fuigo-secrets/src/sent_credentials.rs:2489) compare merged scrub output, which hides reordered or duplicate callbacks. Removing per-mark `candidates.dedup()` would survive these assertions: spelling `abcdefgh%4X` against `abcdefgh%4…` produces duplicate `(0,10)` callbacks but identical output. This is source reasoning, not an executed Rust mutant.
+- **Decoder coverage:** [plain-run tests](/Volumes/Mando/WaylandBots/Fuigo/wt-p179/crates/codegen/fuigo-secrets/src/sent_credentials.rs:2671) check token classification, not complete decoded buffers/maps. Both differential scrub paths use the optimized decoder. The short-prefix fixture also omits ASCII `floor=1`. Direct callback and decoder-map comparisons would close these gaps.
+- **New allocation cost:** [tail construction](/Volumes/Mando/WaylandBots/Fuigo/wt-p179/crates/codegen/fuigo-secrets/src/sent_credentials.rs:1009) temporarily stores every admissible prefix before sorting/deduplication; deduplication retains capacity. For P prefix boundaries, this adds O(P) scratch and up to O(P log P) construction per mark-containing scrub. Long-credential costs are unmeasured.
+- **Inherited neighbour ambiguity:** Fable’s literal escape-like suffix limitation remains; preserving the established escaped-neighbour rule is justified.
+
+1. **FIXED — cut-off filtering.** No missed match or order difference found. Construction uses the same character-index-to-byte floor and proper-prefix boundaries as `truncated_prefix_len`, including multibyte endings. Short prefixes remain unconditional candidates. Both ends are combined; sorting/deduplicating spelling indices preserves original order, distinct spellings and endpoint priority. `OnceCell` depends only on immutable spellings, so reuse across pieces is sound. Supplied timings support the targeted improvement; collision-heavy inputs retain the old worst case.
+
+2. **FIXED — bulk copying.** Every copied byte consumes one identity token. First-level maps append absolute source positions; second-level maps copy corresponding `mid_map` entries. `until`, `stop`, escape consumption and retained tails remain equivalent, including tokens crossing bounds.
+
+3. **NOT FIXED — deliberately retained, correctly.** No context-free rule resolves both interpretations generally. `YWJjZGVmZ2%41` also represents the different value `abcdefg` followed by a backtick after percent/base64 decoding. Accepting the raw `%` would violate the same false-positive constraint as P163’s escaped `/` fixture.
+
+4. **NOT FIXED — test coverage gaps above.** Broad output coverage exists; callback order/multiplicity and complete decoder-map equivalence lack direct guards.
+
+**NEW versus `fbf53c96`:** additional table allocation/construction above; no functional regression found.
+**Versus v1.0.21:** supplied five-key slowdowns remain—percent 0.26→0.83 s, JSON 0.03→0.08 s—attributable to inherited P163 views.
+
+Supplemental Python models found zero differences across 78,666 candidate checks, 1,200 ordered comparisons and 3,016 decoder comparisons, including 216 at 64 KiB boundaries. These support the source review; they are not Rust runtime proof. Remote timings were not independently reproduced.

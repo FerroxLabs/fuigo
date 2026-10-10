@@ -638,7 +638,7 @@ fuigo -p "Run the test suite" --yolo
 | `1`  | Error. Authentication failure, network error, or runtime error |
 | `2`  | A managed-policy requirement is not met. Fuigo refused to start; update Fuigo or ask your administrator to fix the managed requirements |
 | `3`  | **Blocked.** The run ended because a tool permission was denied and headless mode had nobody to ask, or because an execution budget (a token budget, `FUIGO_MAX_MODEL_CALLS`, `FUIGO_MAX_RUNTIME_SECS`) refused the next model request (see [Blocked by a Permission](#blocked-by-a-permission)) |
-| `4`  | The tokio runtime could not be created (Fuigo never started; nothing was run). No other start-up failure uses this code |
+| `4`  | Fuigo never started and nothing was run: the tokio runtime could not be created, or the open-file limit (`ulimit -n`) is below the 64 Fuigo needs to start. No other start-up failure uses this code |
 | `130` | Interrupted by SIGINT (Ctrl+C)                                   |
 | `143` | Terminated by SIGTERM, or torn down because the process that started Fuigo exited (see [Parent-Process Binding](#parent-process-binding)) |
 
@@ -652,7 +652,8 @@ Headless mode has no operator to ask, so it never approves a permission request.
 because of such a refusal exits **`3`**, not `0` and not `1`. So does a run that an execution budget
 ended (a goal's `--budget`, a workflow child's output grant, or the `FUIGO_MAX_MODEL_CALLS` /
 `FUIGO_MAX_RUNTIME_SECS` limits): the budget refused the next model request, the model-call limit
-left only the final answer's call (whether the model answered in that call or tried to act), or the runtime limit passed while a model request was in
+left only the final answer's call (whether the model answered in that call or tried to act, and however many times a Stop hook or an agent's completion requirement retries after it), the
+goal's token budget was spent by the answer that completed the turn, or the runtime limit passed while a model request was in
 flight. That is the same outcome, reported through the same record, with a budget `rule`. That distinction is the point: `0`
 would make a blocked run look finished, and `1` would make it look like a crash, so a CI job could
 not tell which had happened.
@@ -670,7 +671,7 @@ stdout that a script can read without parsing that English.
 One line on stderr, for every `--output-format` and whether or not a terminal is attached:
 
 ```
-fuigo: blocked — permission denied in headless mode: Write src/main.rs (tool call tc-17).
+fuigo: blocked — permission denied in headless mode: “Write src/main.rs” (tool call [tc-17]).
 Denied by rule `headless_never_approves`. Remedy: pre-approve it before the run — pass
 --allow, raise --permission-mode, or trust a folder whose project config allows it; headless
 mode has nobody to ask. No --allow rule covers a shell command that writes a file by redirect
@@ -735,7 +736,11 @@ stderr line, or use `streaming-json`:
 `tool_name` and `tool_input` are the ones on the `tool_use` block for the same `tool_use_id`, earlier
 in the stream. A budget denial adds **no** `permission_denials` entry, because no tool was refused.
 Its `result` is `is_error: true`, and `errors[]` carries the agent's message, which names the rule and
-the remedy. When the refused call never streamed a `tool_use`, `tool_name` is the agent's title for
+the remedy. When a goal's `--budget` is spent by an answer that completed, the run still exits `3`, but the answer
+is kept: `json` prints its normal single document (`text`, `stopReason` `end_turn`, `sessionId`, `permissionDenied`),
+`streaming-json` ends with the normal `end` line carrying `permissionDenied`, and `streaming-messages-json` ends with one
+`result` line that is the budget denial (`is_error: true`, `subtype: "error_during_execution"`, `stop_reason` `null`,
+`errors[]` naming the rule) and whose `result` additionally carries the answer text. When the refused call never streamed a `tool_use`, `tool_name` is the agent's title for
 it and `tool_input` is `{}`.
 
 Only the **first** permission refusal of a run is reported; later ones are its consequences. A
@@ -802,13 +807,10 @@ The code marks a run that *ended* at the refusal, and only that:
   That is `1`, the same as it would have been without the refusal. A refusal does not relabel a
   failure, or the remedy would send you off to pre-approve something that was never the problem. The
   record, if the failure still wrote a terminal record, has `endedRun: false` and no `exitCode`.
-- A budget ended the run on one of the paths not yet typed in this release, so the exit is not `3`:
-  a goal's token `--budget` reached when an answer completes (the goal stops budget-limited and
-  the run exits `0`); the output grant spent on the last salvaged truncated (`max_tokens`)
-  response (exit `1`, an untyped partial receipt); a completion requirement with `maxRetries` of
-  `2` or more retrying past the model-call limit's final answer (exit `1`). These end with an
-  ordinary error or a finished answer, not a budget refusal, so no denial record or refusal line is
-  written for them.
+- A budget ended a **workflow child** on the one path not typed: the child's output grant spent on
+  the last salvaged truncated (`max_tokens`) response, which the child reports as an untyped partial
+  receipt. Length salvage is a debug override (`FUIGO_LENGTH_SALVAGE`) and output grants belong to
+  workflow children only, so `fuigo -p`'s own run never takes this path.
 - The provider answered the model request with an error of its own (a status, an authentication
   refusal, a rate limit, a stream error) and the runtime limit passed while that failure was being
   reported. The run fails with the provider's error (exit `1`): the limit did not end that request.

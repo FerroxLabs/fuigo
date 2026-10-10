@@ -384,3 +384,159 @@ fn upgrade_legacy_reasoning_singular_anthropic_no_id() {
     assert_eq!(r.id, "");
     assert_eq!(r.encrypted_content.as_deref(), Some("signature-bytes-here"));
 }
+
+fn reasoning_with_signature(text: &str, signature: &str) -> rs::ReasoningItem {
+    let mut r = synthesized_reasoning_item(text);
+    r.encrypted_content = Some(signature.to_owned());
+    r
+}
+
+/// Every reasoning sibling replays as its own block, in order, each with its own signature; a redacted
+/// item replays as `redacted_thinking` carrying its opaque data and no `thinking` / `signature` fields.
+#[test]
+fn replay_emits_every_thinking_and_redacted_block_in_order() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("go"),
+        ConversationItem::Reasoning(reasoning_with_signature("first", "sig-1")),
+        ConversationItem::Reasoning(redacted_thinking_item("opaque-blob")),
+        ConversationItem::Reasoning(reasoning_with_signature("second", "sig-2")),
+        ConversationItem::assistant("done"),
+    ])
+    .with_model("messages-compatible-model");
+
+    let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+    let blocks = json["messages"][1]["content"].as_array().unwrap();
+    let kinds: Vec<&str> = blocks.iter().map(|b| b["type"].as_str().unwrap()).collect();
+    assert_eq!(
+        kinds,
+        vec!["thinking", "redacted_thinking", "thinking", "text"],
+        "{json:#}"
+    );
+    assert_eq!(blocks[0]["thinking"], "first");
+    assert_eq!(blocks[0]["signature"], "sig-1");
+    assert_eq!(blocks[1]["data"], "opaque-blob");
+    assert!(blocks[1].get("signature").is_none(), "{json:#}");
+    assert_eq!(blocks[2]["thinking"], "second");
+    assert_eq!(blocks[2]["signature"], "sig-2");
+}
+
+/// A redacted item is Anthropic-only: the Responses input must not carry it to another protocol.
+#[test]
+fn responses_input_skips_redacted_thinking_items() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("go"),
+        ConversationItem::Reasoning(redacted_thinking_item("opaque-blob")),
+        ConversationItem::assistant("done"),
+    ])
+    .with_model("m");
+    let responses_req: rs::CreateResponse = (&req).into();
+    let rs::InputParam::Items(items) = responses_req.input else {
+        panic!("Expected Items input");
+    };
+    let json = serde_json::to_string(&items).unwrap();
+    assert!(!json.contains("opaque-blob"), "{json}");
+    assert!(!json.contains(REDACTED_THINKING_ITEM_ID), "{json}");
+}
+
+fn wire_response(content: serde_json::Value) -> crate::messages::MessagesResponse {
+    serde_json::from_value(serde_json::json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+        "model": "messages-compatible-model",
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 1, "output_tokens": 1},
+    }))
+    .unwrap()
+}
+
+/// The non-streaming path keeps every thinking / redacted_thinking block as a sibling `Reasoning`, in wire order,
+/// ahead of the `Assistant`, so replaying its history does not lose reasoning.
+#[test]
+fn non_streaming_response_keeps_every_thinking_block() {
+    let resp = wire_response(serde_json::json!([
+        {"type": "thinking", "thinking": "first", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "opaque-blob"},
+        {"type": "text", "text": "hello"},
+        {"type": "thinking", "thinking": "second", "signature": "sig-2"},
+    ]));
+    let items = messages_response_to_items(resp);
+    assert_eq!(items.len(), 4, "{items:#?}");
+    let ConversationItem::Reasoning(a) = &items[0] else {
+        panic!("item 0 must be Reasoning: {items:#?}")
+    };
+    assert_eq!(reasoning_item_text(a), "first");
+    assert_eq!(a.encrypted_content.as_deref(), Some("sig-1"));
+    let ConversationItem::Reasoning(b) = &items[1] else {
+        panic!("item 1 must be Reasoning: {items:#?}")
+    };
+    assert!(is_redacted_thinking_item(b));
+    assert_eq!(b.encrypted_content.as_deref(), Some("opaque-blob"));
+    let ConversationItem::Reasoning(c) = &items[2] else {
+        panic!("item 2 must be Reasoning: {items:#?}")
+    };
+    assert_eq!(c.encrypted_content.as_deref(), Some("sig-2"));
+    assert!(matches!(&items[3], ConversationItem::Assistant(a) if a.content.as_ref() == "hello"));
+}
+
+/// History persistence is plain serde on `ConversationItem`: a reload must hand back every block unchanged.
+#[test]
+fn reasoning_items_survive_a_serde_round_trip_for_resume() {
+    let items = vec![
+        ConversationItem::Reasoning(reasoning_with_signature("first", "sig-1")),
+        ConversationItem::Reasoning(redacted_thinking_item("opaque-blob")),
+        ConversationItem::Reasoning(reasoning_with_signature("second", "sig-2")),
+        ConversationItem::assistant("done"),
+    ];
+    let wire: Vec<String> = items
+        .iter()
+        .map(|i| serde_json::to_string(i).unwrap())
+        .collect();
+    let back: Vec<ConversationItem> = wire
+        .iter()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let req_before = serde_json::to_value(build_messages_request(
+        &ConversationRequest::from_items(
+            std::iter::once(ConversationItem::user("go"))
+                .chain(items)
+                .collect(),
+        )
+        .with_model("m"),
+    ))
+    .unwrap();
+    let req_after = serde_json::to_value(build_messages_request(
+        &ConversationRequest::from_items(
+            std::iter::once(ConversationItem::user("go"))
+                .chain(back)
+                .collect(),
+        )
+        .with_model("m"),
+    ))
+    .unwrap();
+    assert_eq!(req_before, req_after);
+    assert_eq!(req_after["messages"][1]["content"][1]["type"], "redacted_thinking");
+}
+
+/// The response-completed update reports the last thinking block's signature.
+#[test]
+fn last_reasoning_signature_is_the_last_block() {
+    let resp = ConversationResponse {
+        items: vec![
+            ConversationItem::Reasoning(reasoning_with_signature("a", "sig-1")),
+            ConversationItem::Reasoning(reasoning_with_signature("b", "sig-2")),
+            ConversationItem::assistant("x"),
+        ],
+        stop_reason: None,
+        usage: None,
+        cost_usd_ticks: None,
+        message_chunks_emitted: 0,
+        doom_loop_signals: Vec::new(),
+        stop_message: None,
+        message_id: None,
+        raw_stop_reason: None,
+        stop_sequence: None,
+    };
+    assert_eq!(resp.last_reasoning_signature(), Some("sig-2"));
+}

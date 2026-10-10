@@ -209,11 +209,10 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
     ) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
-        let mut entries: Vec<CodexReadFileEntry> = input.files.take().unwrap_or_default();
-        entries.retain(|e| !e.path.trim().is_empty());
-        let single_path = !input.file_path.trim().is_empty();
+        // P174: the same plan `read_target_paths` reports to the permission check, so only judged paths are read.
+        let entries = planned_entries(&mut input);
         if entries.is_empty() {
-            if !single_path {
+            if input.file_path.trim().is_empty() {
                 return Ok(ReadFileOutput::FileReadError(
                     "Provide file_path (one file) or files (a list of {path, offset?, limit?}) to read."
                         .to_string(),
@@ -221,18 +220,6 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
             }
             return read_one(&resources, input, MAX_READ_BYTES).await;
         }
-        if single_path {
-            entries.insert(
-                0,
-                CodexReadFileEntry {
-                    path: std::mem::take(&mut input.file_path),
-                    offset: Some(input.offset),
-                    limit: Some(input.limit),
-                },
-            );
-        }
-        let mut seen = std::collections::HashSet::new();
-        entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
         let count = entries.len();
         let mut remaining = MAX_READ_BYTES;
         let mut content = String::new();
@@ -325,6 +312,48 @@ impl fuigo_tool_runtime::Tool for CodexReadFileTool {
     }
 }
 
+/// The entries a multi-file call reads, in order: `file_path` first when it is set, then every non-blank
+/// `files[].path`, each `(path, offset, limit)` once. Empty for the single-file form (no non-blank `files`), which
+/// reads `file_path` alone. Takes `files` (and `file_path` when it joins the list) out of `input`.
+fn planned_entries(input: &mut CodexReadFileInput) -> Vec<CodexReadFileEntry> {
+    let mut entries: Vec<CodexReadFileEntry> = input.files.take().unwrap_or_default();
+    entries.retain(|e| !e.path.trim().is_empty());
+    if entries.is_empty() {
+        return entries;
+    }
+    if !input.file_path.trim().is_empty() {
+        entries.insert(
+            0,
+            CodexReadFileEntry {
+                path: std::mem::take(&mut input.file_path),
+                offset: Some(input.offset),
+                limit: Some(input.limit),
+            },
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
+    entries
+}
+
+/// Every path a call reads, in order, each once (P174): `file_path` for the single-file form, else `file_path` (when
+/// set) and every `files[].path`, spelled exactly as the tool opens them. The permission check judges each one as a
+/// Read; `run` reads from the same plan, so it reads no other path.
+pub fn read_target_paths(input: &CodexReadFileInput) -> Vec<String> {
+    let mut input = input.clone();
+    let entries = planned_entries(&mut input);
+    let paths: Vec<String> = if entries.is_empty() {
+        Some(input.file_path)
+            .filter(|p| !p.trim().is_empty())
+            .into_iter()
+            .collect()
+    } else {
+        entries.into_iter().map(|e| e.path).collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+}
+
 /// Read one file under `byte_budget` (formatted bytes). A window over the
 /// budget is cut at the last whole line that fits and a hint names the next
 /// offset; a single line that alone exceeds it is a `FileTooLarge`.
@@ -357,12 +386,38 @@ async fn read_one(
             ));
         }
 
+        // P166/S7 parity (Grok r4 MEDIUM 5): `.gitignore` on the logical path and the physical target, as `read_file`.
+        if let Some(filter) =
+            crate::implementations::fuigo_build::read_file::read_gitignore_filter(resources).await
+        {
+            let physical = crate::util::fs::try_canonicalize(&path)
+                .await
+                .unwrap_or_else(|_| path.clone());
+            if crate::implementations::fuigo_build::read_file::gitignore_refuses(
+                filter,
+                path.clone(),
+                physical,
+            )
+            .await
+            {
+                return Ok(ReadFileOutput::FileReadError(format!(
+                    "Error: {} is ignored by .gitignore and cannot be read.",
+                    path.display()
+                )));
+            }
+        }
+
         // 2. Read file via AsyncFileSystem.
         let fs;
         {
             fs = resources.lock().await.require::<FileSystem>()?.0.clone();
         }
-        let file_bytes = match fs.read_file(&path).await {
+        let file_bytes = match crate::implementations::fuigo_build::read_file::read_tool_source(
+            fs.as_ref(),
+            &path,
+        )
+        .await
+        {
             Ok(bytes) => bytes,
             Err(e) => {
                 return Ok(ReadFileOutput::FileReadError(format!(
@@ -1007,5 +1062,98 @@ mod tests {
             }
             other => panic!("expected FileContent, got {other:?}"),
         }
+    }
+
+    /// P174: the permission check judges `read_target_paths`; the tool reads exactly those files, in that order, and
+    /// nothing else (a `==> path <==` header per file read).
+    #[tokio::test]
+    async fn reads_exactly_the_target_paths() {
+        let tmp = TempDir::new().unwrap();
+        let p = |name: &str| {
+            let path = tmp.path().join(name);
+            std::fs::write(&path, format!("{name}\n")).unwrap();
+            path.to_string_lossy().to_string()
+        };
+        let (first, a, b) = (p("first.txt"), p("a.txt"), p("b.txt"));
+        let entry = |path: &str| CodexReadFileEntry { path: path.to_owned(), offset: None, limit: None };
+        let input = CodexReadFileInput {
+            files: Some(vec![entry(&a), entry("  "), entry(&b), entry(&a)]),
+            file_path: first.clone(),
+            offset: 1,
+            limit: defaults::limit(),
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        let targets = read_target_paths(&input);
+        assert_eq!(targets, vec![first.clone(), a.clone(), b.clone()]);
+        let shared = test_resources(tmp.path()).into_shared();
+        let ReadFileOutput::FileContent(fc) =
+            fuigo_tool_runtime::Tool::run(&CodexReadFileTool, test_ctx(shared.clone()), input).await.unwrap()
+        else {
+            panic!("expected FileContent");
+        };
+        let headers: Vec<&str> = fc
+            .content
+            .lines()
+            .filter_map(|line| line.strip_prefix("==> ").and_then(|l| l.strip_suffix(" <==")))
+            .collect();
+        assert_eq!(headers, targets.iter().map(String::as_str).collect::<Vec<_>>());
+
+        // Single-file form: only `file_path`; blank `files` entries add nothing; no path at all reads nothing.
+        let single = CodexReadFileInput { files: Some(vec![entry(" ")]), ..CodexReadFileInput { files: None, file_path: first.clone(), offset: 1, limit: defaults::limit(), mode: ReadMode::Slice, indentation: None } };
+        assert_eq!(read_target_paths(&single), vec![first]);
+        let none = CodexReadFileInput { file_path: " ".into(), files: Some(vec![entry("")]), ..single };
+        assert!(read_target_paths(&none).is_empty());
+    }
+
+    /// P166 Grok r4 MEDIUM 5 (S7 parity): the codex read tool denies an ignored LOGICAL path, even when its symlink
+    /// resolves outside the repo. Before, it never consulted the gitignore filter at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_read_denies_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        std::fs::write(repo.path().join("open.txt"), "fine\n").unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let shared = || {
+            let mut resources = test_resources(repo.path());
+            resources.insert(crate::types::resources::GitignoreFilter::new(
+                builder.build().unwrap(),
+                canonical.clone(),
+            ));
+            resources.insert(crate::types::resources::RespectGitignore(true));
+            resources.into_shared()
+        };
+        let input = |path: std::path::PathBuf| CodexReadFileInput {
+            files: None,
+            file_path: path.to_string_lossy().into_owned(),
+            offset: 1,
+            limit: 10,
+            mode: ReadMode::Slice,
+            indentation: None,
+        };
+        let denied = fuigo_tool_runtime::Tool::run(
+            &CodexReadFileTool,
+            test_ctx(shared()),
+            input(repo.path().join("secret").join("key.txt")),
+        )
+        .await
+        .unwrap();
+        match denied {
+            ReadFileOutput::FileReadError(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore denial, got {other:?}"),
+        }
+        let allowed = fuigo_tool_runtime::Tool::run(
+            &CodexReadFileTool,
+            test_ctx(shared()),
+            input(repo.path().join("open.txt")),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(allowed, ReadFileOutput::FileContent(_)), "{allowed:?}");
     }
 }

@@ -87,4 +87,37 @@ mod tests {
         let hits: Vec<usize> = raw_stdout_macro_lines(text).map(|(n, _)| n).collect();
         assert_eq!(hits, vec![1, 5, 7, 8]);
     }
+
+    /// P181 (Grok round): the CLI subcommands that print human output through a writer take it from `display_stdout()`,
+    /// which filters the text on a terminal. A bare `stdout()` handle in these files would print a path, branch or server
+    /// name unfiltered.
+    #[test]
+    fn cli_subcommands_write_human_output_through_the_display_writer() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let files = [
+            "src/usage_cmd.rs",
+            "src/export_cmd.rs",
+            "src/disk_usage_cmd/mod.rs",
+            "src/doctor_cmd/mod.rs",
+            "src/worktree_cmd/mod.rs",
+        ];
+        let mut offenders = Vec::new();
+        for rel in files {
+            let path = root.join(rel);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let code = text.split("#[cfg(test)]").next().unwrap_or("");
+            for (n, line) in code.lines().enumerate() {
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                // `stdin().is_terminal()` and the like are fine; only a stdout handle is a sink
+                if line.contains("io::stdout()") || line.contains("stdout().lock()") {
+                    offenders.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+                }
+            }
+            assert!(code.contains("display_stdout()"), "{rel} no longer writes through display_stdout()");
+        }
+        assert!(offenders.is_empty(), "unfiltered stdout handle:\n{}", offenders.join("\n"));
+    }
 }

@@ -40,6 +40,7 @@ pub fn is_hook_disabled(hook_name: &str) -> bool {
 }
 
 /// What the hooks modal and status reports show as disabled; managed-policy hooks never do, since dispatch ignores their disable state.
+/// Under `allow_managed_hooks_only` every other hook shows disabled (P169).
 /// Keep this in lockstep with `dispatcher::eligible_or_record_skip` or the modal lies about what runs.
 pub fn hook_disabled_for_display(spec: &crate::config::HookSpec) -> bool {
     hook_disabled_for_display_with(spec, &DisabledHooks::load())
@@ -50,21 +51,49 @@ pub fn hook_disabled_for_display_with(
     spec: &crate::config::HookSpec,
     disabled: &DisabledHooks,
 ) -> bool {
-    !spec.is_managed_policy() && (!spec.enabled || disabled.contains(&spec.name))
+    disabled.blocks(spec)
 }
 
-/// One-shot snapshot of the disabled-hooks file, for callers that evaluate many specs per pass (dispatch loops, the stop-gate guard).
-/// One `load()` replaces a file read per spec.
-pub struct DisabledHooks(std::collections::HashSet<String>);
+/// Why a hook is skipped at dispatch and shown disabled in the modal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookSkipReason {
+    /// Its `enabled` flag is off or its name is in `$FUIGO_HOME/disabled-hooks`.
+    UserDisabled,
+    /// `allow_managed_hooks_only` is pinned by managed policy and the hook is not managed policy.
+    ManagedOnly,
+}
+
+/// The note shown when a hook is refused under `allow_managed_hooks_only` (P169).
+pub const MANAGED_HOOKS_ONLY_NOTE: &str = "Only managed hooks run: your organization's policy \
+     (allow_managed_hooks_only) turns off user, project and plugin hooks.";
+
+/// One-shot snapshot of the per-spec skip inputs: the disabled-hooks file and the `allow_managed_hooks_only` pin.
+/// [`Self::skip_reason`] is the one rule the dispatcher, the stop-gate guard and the modal apply, so they cannot
+/// disagree about what runs. One `load()` replaces a file read per spec.
+#[derive(Debug, Default)]
+pub struct DisabledHooks {
+    names: std::collections::HashSet<String>,
+    managed_only: bool,
+}
 
 impl DisabledHooks {
-    /// Build from explicit names (tests; no filesystem or env dependence).
+    /// Build from explicit names with no managed-only pin (tests; no filesystem or env dependence).
     pub fn from_names<I: IntoIterator<Item = String>>(names: I) -> Self {
-        Self(names.into_iter().collect())
+        Self::new(names, false)
     }
 
+    /// Build from explicit names and pin (tests).
+    pub fn new<I: IntoIterator<Item = String>>(names: I, managed_only: bool) -> Self {
+        Self {
+            names: names.into_iter().collect(),
+            managed_only,
+        }
+    }
+
+    /// Read the disabled-hooks file and the `allow_managed_hooks_only` pin (every managed-config and requirements
+    /// layer plus the Claude managed-settings file; an unreadable policy layer engages it).
     pub fn load() -> Self {
-        let names = disabled_hooks_file_path()
+        let names: Vec<String> = disabled_hooks_file_path()
             .and_then(|file| std::fs::read_to_string(file).ok())
             .map(|content| {
                 content
@@ -75,11 +104,35 @@ impl DisabledHooks {
                     .collect()
             })
             .unwrap_or_default();
-        Self(names)
+        Self::new(
+            names,
+            fuigo_config::policy_sources::managed_hooks_only_pin().is_disabled(),
+        )
     }
 
     pub fn contains(&self, hook_name: &str) -> bool {
-        self.0.contains(hook_name)
+        self.names.contains(hook_name)
+    }
+
+    /// `allow_managed_hooks_only` is pinned.
+    pub fn managed_only(&self) -> bool {
+        self.managed_only
+    }
+
+    /// Managed-policy hooks are never skipped; the managed-only pin outranks a user disable as the reported reason.
+    pub fn skip_reason(&self, spec: &crate::config::HookSpec) -> Option<HookSkipReason> {
+        if spec.is_managed_policy() {
+            return None;
+        }
+        if self.managed_only {
+            return Some(HookSkipReason::ManagedOnly);
+        }
+        (!spec.enabled || self.names.contains(&spec.name)).then_some(HookSkipReason::UserDisabled)
+    }
+
+    /// Whether dispatch skips `spec`; also what the modal shows as disabled.
+    pub fn blocks(&self, spec: &crate::config::HookSpec) -> bool {
+        self.skip_reason(spec).is_some()
     }
 }
 

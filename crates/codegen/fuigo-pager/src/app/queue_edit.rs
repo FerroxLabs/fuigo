@@ -385,39 +385,7 @@ impl AgentView {
                 })
             }
             None => {
-                let edited = self.prompt.stash();
-                let (new_text, mut images, chip_elements) = edited.into_submission();
-                // Local row: in-place mutation
-                // Recompute token ranges for the edited text; the stale ranges would point at the pre-edit byte offsets
-                let skill_token_ranges = self
-                    .prompt
-                    .slash_controller
-                    .recognized_token_ranges(&new_text, &self.session.models);
-                if let Some(entry) = self.session.pending_prompts.iter_mut().find(|p| p.id == id) {
-                    let retained: std::collections::HashSet<u64> = images
-                        .iter()
-                        .map(|image| image.preview.identity())
-                        .collect();
-                    for old in entry.images.drain(..) {
-                        if !retained.contains(&old.preview.identity()) {
-                            crate::prompt_images::cleanup_temp_file(&old);
-                        }
-                    }
-                    entry.text = new_text;
-                    entry.images = std::mem::take(&mut images);
-                    entry.chip_elements = chip_elements;
-                    entry.skill_token_ranges = skill_token_ranges;
-                    // Clear stale wire_blocks: edited text may no longer match the original skill invocation
-                    // The prompt will be sent as plain text via the normal path
-                    // Pager builtins never get here (`is_complete_builtin_invocation` routed them to dispatch)
-                    // ACP, skill, and unknown `/…` text is left for the agent's resolve(), which does not know pager builtins
-                    entry.wire_blocks = None;
-                    // display_as_skill rides wire_blocks (see its field doc)
-                    // Clear both together, or the drain keeps stale skill styling over the ranges
-                    entry.display_as_skill = false;
-                }
-                crate::prompt_images::drain_and_cleanup(&mut images);
-                self.exit_editing_mode();
+                self.save_local_queued_edit(id);
                 // Saving the blocked row is the card's Edit resolution: release and resend it in place
                 // Saving any other row must not unpark the blocked front; the card comes back
                 if self
@@ -437,6 +405,43 @@ impl AgentView {
                 }
             }
         }
+    }
+
+    /// Writes the composer back into local row `id` and leaves edit mode, without resolving the text as a command.
+    pub(in crate::app) fn save_local_queued_edit(&mut self, id: u64) {
+        let edited = self.prompt.stash();
+        let (new_text, mut images, chip_elements) = edited.into_submission();
+        // Local row: in-place mutation
+        // Recompute token ranges for the edited text; the stale ranges would point at the pre-edit byte offsets
+        let skill_token_ranges = self
+            .prompt
+            .slash_controller
+            .recognized_token_ranges(&new_text, &self.session.models);
+        if let Some(entry) = self.session.pending_prompts.iter_mut().find(|p| p.id == id) {
+            let retained: std::collections::HashSet<u64> = images
+                .iter()
+                .map(|image| image.preview.identity())
+                .collect();
+            for old in entry.images.drain(..) {
+                if !retained.contains(&old.preview.identity()) {
+                    crate::prompt_images::cleanup_temp_file(&old);
+                }
+            }
+            entry.text = new_text;
+            entry.images = std::mem::take(&mut images);
+            entry.chip_elements = chip_elements;
+            entry.skill_token_ranges = skill_token_ranges;
+            // Clear stale wire_blocks: edited text may no longer match the original skill invocation
+            // The prompt will be sent as plain text via the normal path
+            // Pager builtins never get here (`is_complete_builtin_invocation` routed them to dispatch)
+            // ACP, skill, and unknown `/…` text is left for the agent's resolve(), which does not know pager builtins
+            entry.wire_blocks = None;
+            // display_as_skill rides wire_blocks (see its field doc)
+            // Clear both together, or the drain keeps stale skill styling over the ranges
+            entry.display_as_skill = false;
+        }
+        crate::prompt_images::drain_and_cleanup(&mut images);
+        self.exit_editing_mode();
     }
 
     /// Interject-key intercept while editing a queued row, delegated from the `ActionId::InterjectPrompt` registry arm in `handle_prompt_key`.

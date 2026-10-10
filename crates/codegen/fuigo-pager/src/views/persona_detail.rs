@@ -407,6 +407,11 @@ fn render_detail_editor(
     }
 }
 
+/// Untrusted text for one painted row: the shared display filter, row breaks become spaces.
+fn clean(text: &str) -> std::borrow::Cow<'_, str> {
+    fuigo_tty_utils::scrub_unsafe_display(text, Some(' '))
+}
+
 /// Render the persona detail modal.
 pub fn render_persona_detail(
     buf: &mut Buffer,
@@ -415,7 +420,7 @@ pub fn render_persona_detail(
     theme: &Theme,
     compact: bool,
 ) {
-    let title = format!("persona: {}", state.name);
+    let title = format!("persona: {}", fuigo_tty_utils::scrub_unsafe_title(&state.name));
     let shortcuts = build_shortcuts(state);
     let config = ModalWindowConfig {
         title: &title,
@@ -444,7 +449,7 @@ pub fn render_persona_detail(
         buf.set_string(
             content_area.x,
             y,
-            msg,
+            clean(msg),
             Style::default().fg(theme.accent_error),
         );
         y += 2;
@@ -458,7 +463,14 @@ pub fn render_persona_detail(
 
         let is_selected = state.selected_field == field;
         let label = field.label();
-        let value = state.field_value(field);
+        // Instructions keep their line breaks (the wrapper splits and scrubs them); every other value is one row
+        let scrubbed;
+        let value = if field == PersonaField::Instructions {
+            state.field_value(field)
+        } else {
+            scrubbed = clean(state.field_value(field)).into_owned();
+            scrubbed.as_str()
+        };
 
         // Background highlight for selected row.
         let row_bg = if is_selected {
@@ -649,7 +661,12 @@ pub fn render_persona_detail(
                 break;
             }
             let req = if entry.required { ", required" } else { "" };
-            let header = format!("  \u{2022} {} ({}{})", entry.name, entry.io_type, req);
+            let header = format!(
+                "  \u{2022} {} ({}{})",
+                clean(&entry.name),
+                clean(&entry.io_type),
+                req
+            );
             buf.set_string(
                 content_area.x,
                 y,
@@ -691,7 +708,7 @@ pub fn render_persona_detail(
     if y < max_y
         && let Some(ref path) = state.source_path
     {
-        let src = format!("Source: {}", path.display());
+        let src = format!("Source: {}", clean(&path.display().to_string()));
         let truncated: String = src.chars().take(w).collect();
         buf.set_string(
             content_area.x,
@@ -936,6 +953,9 @@ pub fn handle_persona_detail_mouse(
 fn word_wrap_lines(text: &str, max_width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for raw_line in text.lines() {
+        // Persona text comes from a file: hidden characters go before the line is measured
+        let raw_line = fuigo_tty_utils::scrub_unsafe_display(raw_line, Some(' '));
+        let raw_line = raw_line.as_ref();
         if raw_line.width() <= max_width {
             lines.push(raw_line.to_string());
         } else {

@@ -107,6 +107,14 @@ pub enum SamplingEvent {
         signature: String,
     },
 
+    /// A `redacted_thinking` block finished: the model's encrypted reasoning, opaque to the client, with its `data` blob.
+    /// Emitted at the block's stop, in wire order with the `ReasoningCompleted` events around it, so a headless consumer keeps
+    /// the block where the model put it. Emitted by the Messages L2 transform only; an empty blob is not forwarded.
+    RedactedThinking {
+        request_id: RequestId,
+        data: String,
+    },
+
     /// Streaming completed successfully.
     Completed {
         request_id: RequestId,
@@ -187,6 +195,7 @@ impl SamplingEvent {
             | Self::ToolCallDelta { request_id, .. }
             | Self::ResponseStarted { request_id, .. }
             | Self::ReasoningCompleted { request_id, .. }
+            | Self::RedactedThinking { request_id, .. }
             | Self::Completed { request_id, .. }
             | Self::DoomLoopSignals { request_id, .. }
             | Self::ImagesStripped { request_id, .. }

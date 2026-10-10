@@ -711,13 +711,14 @@ impl RenameDraft {
     }
 
     pub(crate) fn set_text(&mut self, text: impl Into<String>) {
-        let text = text
+        // The cap runs before the tag pass, so a cut can never leave half a flag
+        let capped: String = text
             .into()
             .chars()
             .filter(|character| rename_wire_character_allowed(*character))
             .take(MAX_RENAME_SCALARS)
-            .collect::<String>();
-        self.editor.set_text(text);
+            .collect();
+        self.editor.set_text(fuigo_tty_utils::strip_loose_tags(&capped));
     }
 }
 
@@ -726,8 +727,9 @@ fn rename_character_allowed(character: char) -> bool {
 }
 
 fn rename_wire_character_allowed(character: char) -> bool {
-    // Preserve an existing emoji ZWJ sequence; interactive inserts still reject format chars.
-    character == '\u{200d}' || rename_character_allowed(character)
+    // Preserve an existing emoji ZWJ or flag tag sequence; interactive inserts still reject format chars.
+    matches!(character, '\u{200d}' | '\u{e0020}'..='\u{e007f}')
+        || rename_character_allowed(character)
 }
 
 /// One selectable directory in the location picker (see [`LocationPickerState`]).
@@ -4190,10 +4192,15 @@ fn handle_rename_key(draft: &mut RenameDraft, key: &KeyEvent) -> InputOutcome {
 
 fn handle_rename_paste(draft: &mut RenameDraft, text: &str) -> InputOutcome {
     let remaining = MAX_RENAME_SCALARS.saturating_sub(draft.text().chars().count());
-    let outcome =
-        draft
-            .editor
-            .insert_paste_with_policy(text, rename_wire_character_allowed, remaining);
+    let allowed = text
+        .chars()
+        .filter(|character| rename_wire_character_allowed(*character));
+    let capped: String = allowed.take(remaining).collect();
+    let outcome = draft.editor.insert_paste_with_policy(
+        &fuigo_tty_utils::strip_loose_tags(&capped),
+        rename_wire_character_allowed,
+        remaining,
+    );
     rename_edit_outcome(outcome)
 }
 

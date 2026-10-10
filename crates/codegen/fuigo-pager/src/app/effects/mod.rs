@@ -409,7 +409,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind } => {
+        Effect::LoadSession { agent_id, session_id, session_cwd, chat_kind, attempt } => {
             let tx = acp_tx.clone();
             let mut meta = session_flags.to_meta();
             let is_chat_path = chat_kind || session_flags.chat_mode;
@@ -468,6 +468,7 @@ pub(crate) fn execute(
                                 scheduler_background_loops: parse_session_scheduler_background_loops(
                                     resp.meta.as_ref(),
                                 ),
+                                attempt,
                             }
                         }
                         Err(e) => {
@@ -483,6 +484,7 @@ pub(crate) fn execute(
                                 agent_id,
                                 session_id: acp_session_id,
                                 error: acp_error_user_text(&e),
+                                attempt,
                             }
                         }
                     }

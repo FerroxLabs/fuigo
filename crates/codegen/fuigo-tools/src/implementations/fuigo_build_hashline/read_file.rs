@@ -221,7 +221,13 @@ impl fuigo_tool_runtime::Tool for HashlineReadTool {
                         .build_scheme()
                         .map_err(fuigo_tool_runtime::ToolError::invalid_arguments)?;
                     let fs = res.require::<FileSystem>()?.0.clone();
-                    let content = match fs.read_file(&fc.absolute_path).await {
+                    // P166/S12: the anchor reread is bounded like the first read.
+                    let content = match crate::implementations::fuigo_build::read_file::read_tool_source(
+                        fs.as_ref(),
+                        &fc.absolute_path,
+                    )
+                    .await
+                    {
                         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                         Err(_) => fc.raw_output.clone(),
                     };
@@ -453,6 +459,64 @@ mod tests {
                 assert!(fc.content_concise.is_none());
             }
             other => panic!("Expected FileContent, got {:?}", other),
+        }
+    }
+
+    /// P166/S12, Astra r3 MEDIUM: the anchor reread goes through the bounded read too, never an uncapped `read_file`.
+    #[tokio::test]
+    async fn hashline_reread_uses_the_bounded_read() {
+        struct BoundedOnly;
+        #[async_trait::async_trait]
+        impl crate::computer::types::AsyncFileSystem for BoundedOnly {
+            async fn read_file(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+                panic!("uncapped read_file on the hashline path");
+            }
+            fn supports_bounded_read(&self) -> bool {
+                true
+            }
+            async fn read_file_bounded(
+                &self,
+                path: &std::path::Path,
+                max_bytes: usize,
+            ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+                LocalFs.read_file_bounded(path, max_bytes).await
+            }
+            async fn write_file(
+                &self,
+                _: &std::path::Path,
+                _: &[u8],
+            ) -> Result<(), crate::computer::types::ComputerError> {
+                Ok(())
+            }
+            async fn delete_file(
+                &self,
+                _: &std::path::Path,
+            ) -> Result<(), crate::computer::types::ComputerError> {
+                Ok(())
+            }
+        }
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("t.rs"), "fn main() {}\n").unwrap();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(BoundedOnly)));
+        let input = ReadFileInput {
+            path: "t.rs".to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: None,
+        };
+        let result =
+            fuigo_tool_runtime::Tool::run(&HashlineReadTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
+        match result {
+            ReadFileOutput::FileContent(fc) => assert!(fc.content.contains("fn main()")),
+            other => panic!("Expected FileContent, got {other:?}"),
         }
     }
 

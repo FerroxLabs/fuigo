@@ -79,7 +79,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let (gateway_tx, _) = mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let cwd = fuigo_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
             let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
             let terminal = Arc::new(DummyTerminal {});
             let (hunk_tx, _) = tokio::sync::mpsc::unbounded_channel();
@@ -273,6 +273,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                     false,
                 )),
                 active_skill: parking_lot::Mutex::new(None),
+                admin_policy_watch: Default::default(),
                 plan_mode: Arc::new(parking_lot::Mutex::new(
                     crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
                         "/tmp/test-session",

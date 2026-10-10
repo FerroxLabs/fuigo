@@ -188,6 +188,7 @@ fn prepared_post_tool_use_call(id: &str, tool_name: &str) -> PreparedToolCall {
         is_read_only: false,
         rewriting_hook: None,
         additional_context: Vec::new(),
+        judged_read_paths: None,
     }
 }
 fn mcp_text_result(marker: &str) -> ToolRunResult {

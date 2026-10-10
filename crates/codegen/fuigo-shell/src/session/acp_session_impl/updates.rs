@@ -1088,9 +1088,8 @@ impl SessionActor {
                     cache_creation_input_tokens: u64::from(u.cache_creation_prompt_tokens),
                     reasoning_tokens: u64::from(u.reasoning_tokens),
                 });
-        let signature = response
-            .reasoning_items()
-            .find_map(|r| r.encrypted_content.clone());
+        // The LAST thinking block's signature: a message can carry several, each with its own
+        let signature = response.last_reasoning_signature().map(str::to_owned);
         FuigoSessionUpdate::ResponseCompleted {
             message_id: response.message_id.clone(),
             stop_reason: response.raw_stop_reason.clone(),
@@ -1122,6 +1121,20 @@ impl SessionActor {
         // P188: a resend after visible output owes every client a discard of that output. Every resend path (the
         // sampler's retry loop, the turn loop's transient/auth/media-gen/auto-recovery resends) announces itself here,
         // so the discard is stamped here once.
+        // P201: a hosted tool (web_search, x_search, code_interpreter) the failed attempt started and never finished
+        // is still `in_progress` on the client. Each such row is closed (`failed`) AFTER the notice below is queued: the
+        // notice voids the attempt first, so a consumer that commits a terminal update (the headless transcript, the
+        // chat-history rebuild) finds the row already dropped and commits nothing of the dead attempt.
+        let open_hosted = if matches!(
+            update,
+            FuigoSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::Retrying { .. }
+            )
+        ) {
+            self.unaccepted_output.take_open_hosted()
+        } else {
+            Vec::new()
+        };
         if let FuigoSessionUpdate::RetryState(
             crate::extensions::notification::RetryState::Retrying {
                 discard_emitted,
@@ -1155,7 +1168,10 @@ impl SessionActor {
                 .event_tx
                 .send(SessionEvent::OrderedFuigo(Box::new(ordered)))
             {
-                Ok(()) => return,
+                Ok(()) => {
+                    self.close_hosted_rows(open_hosted).await;
+                    return;
+                }
                 // The session loop is gone, so nothing queued can precede it: deliver it directly
                 Err(unsent) => {
                     if let SessionEvent::OrderedFuigo(ordered) = unsent.0 {
@@ -1168,12 +1184,31 @@ impl SessionActor {
                         )
                         .await;
                     }
+                    self.close_hosted_rows(open_hosted).await;
                     return;
                 }
             }
         }
         self.deliver_fuigo_notification(update, extra_meta, durability, false)
             .await;
+    }
+
+    /// P201: `tool_call_update` status `failed` (title kept, no output) for each hosted row a failed attempt left
+    /// `in_progress`, so no client keeps one spinning. Sent after the retry notice that voids the attempt.
+    async fn close_hosted_rows(&self, rows: Vec<(String, String)>) {
+        for (call_id, name) in rows {
+            let (title, _kind, _raw_input) = backend_tool_display(&name);
+            self.send_update(
+                acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                    acp::ToolCallId::new(Arc::from(call_id.as_str())),
+                    acp::ToolCallUpdateFields::new()
+                        .status(Some(acp::ToolCallStatus::Failed))
+                        .title(Some(title)),
+                )),
+                None,
+            )
+            .await;
+        }
     }
 
     /// The fan-out half of [`Self::send_fuigo_notification_with_extra_meta`]: stamp meta, persist, forward, mirror a

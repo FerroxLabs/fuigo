@@ -79,13 +79,24 @@ impl HooksMap {
 
     /// Parse a `hooks` table from TOML. Unlike [`Self::from_value`], a malformed event is skipped so one bad event can't drop the layer.
     pub fn from_toml_value(value: toml::Value) -> Result<Self, String> {
+        Self::from_toml_value_with(value, GroupErrorPolicy::SkipEvent)
+    }
+
+    /// P183 round 7 (Grok r4 M4): [`Self::from_toml_value`] with [`GroupErrorPolicy::Fail`]: a malformed event fails the parse.
+    /// Used for the requirements and policy layers; startup validation (`fuigo_config::hook_event_shape_ok`, kept in step
+    /// with this by `config_hook_shape_matches_strict_parse_p183r7`) refuses such an admin or fail_closed layer.
+    pub fn from_toml_value_strict(value: toml::Value) -> Result<Self, String> {
+        Self::from_toml_value_with(value, GroupErrorPolicy::Fail)
+    }
+
+    fn from_toml_value_with(value: toml::Value, policy: GroupErrorPolicy) -> Result<Self, String> {
         let entries: HashMap<String, toml::Value> = value
             .try_into()
             .map_err(|e: toml::de::Error| format!("invalid hooks structure: {e}"))?;
         Self::assemble(
             entries,
             |v| v.try_into().map_err(|e: toml::de::Error| e.to_string()),
-            GroupErrorPolicy::SkipEvent,
+            policy,
         )
     }
 }
@@ -498,9 +509,27 @@ pub fn parse_hooks_from_config_layers(
             Some(dir) if !dir.as_os_str().is_empty() => dir.to_path_buf(),
             _ => home.clone().unwrap_or_else(|| PathBuf::from(".")),
         };
-        let hooks_map = match HooksMap::from_toml_value(layer.hooks().clone()) {
+        // P183 round 7 (Grok r4 M4): a requirements or policy layer is parsed strictly, so a malformed event is reported as an
+        // error (startup already refused it in an admin or fail_closed layer); the layer's other events still load
+        let strict = layer.provenance().is_managed_policy()
+            || layer.provenance() == HookProvenance::UserRequirements;
+        let parsed = if strict {
+            HooksMap::from_toml_value_strict(layer.hooks().clone()).or_else(|detail| {
+                tracing::error!(source = %source_name, error = %detail, "hooks: malformed event in a requirements or policy layer");
+                all_errors.push(HookError::ParseFile {
+                    path: error_path.to_path_buf(),
+                    detail,
+                });
+                // The error is reported once; the lenient parse still loads the layer's other events
+                HooksMap::from_toml_value(layer.hooks().clone()).map_err(|_| None)
+            })
+        } else {
+            HooksMap::from_toml_value(layer.hooks().clone()).map_err(Some)
+        };
+        let hooks_map = match parsed {
             Ok(map) => map,
-            Err(detail) => {
+            Err(None) => continue,
+            Err(Some(detail)) => {
                 all_errors.push(HookError::ParseFile {
                     path: error_path.to_path_buf(),
                     detail,
@@ -850,6 +879,61 @@ fn strip_reserved_env_keys(
 mod tests {
     use super::*;
     use crate::test_support::with_env_var;
+
+    /// P183 round 7 (Grok r4 M4): fuigo-config's startup shape check for a `[hooks]` event agrees with the strict parse here,
+    /// on a corpus of legal and malformed events.
+    #[test]
+    fn config_hook_shape_matches_strict_parse_p183r7() {
+        for event in [
+            "[{ hooks = [{ type = \"command\", command = \"a.sh\" }] }]",
+            "[{ matcher = \"Bash\", hooks = [{ type = \"command\", command = \"a.sh\", timeout = 5, env = { A = \"b\" } }] }]",
+            "[{ hooks = [{ type = \"http\", url = \"https://h.example/x\" }] }]",
+            "[{ hooks = [] }]",
+            "[]",
+            "\"deny.sh\"",
+            "{ hooks = [] }",
+            "[\"deny.sh\"]",
+            "[{ matcher = \"Bash\" }]",
+            "[{ matcher = 1, hooks = [] }]",
+            "[{ hooks = \"a.sh\" }]",
+            "[{ hooks = [{ command = \"a.sh\" }] }]",
+            "[{ hooks = [{ type = 1 }] }]",
+            "[{ hooks = [{ type = \"command\", command = 1 }] }]",
+            "[{ hooks = [{ type = \"command\", url = false }] }]",
+            "[{ hooks = [{ type = \"command\", timeout = \"5\" }] }]",
+            "[{ hooks = [{ type = \"command\", timeout = -1 }] }]",
+            "[{ hooks = [{ type = \"command\", env = { A = 1 } }] }]",
+            "[{ hooks = [{ type = \"command\", env = \"A=b\" }] }]",
+        ] {
+            let doc: toml::Value = toml::from_str(&format!("PreToolUse = {event}\n")).unwrap();
+            let value = doc["PreToolUse"].clone();
+            assert_eq!(
+                fuigo_config::hook_event_shape_ok(&value),
+                HooksMap::from_toml_value_strict(doc.clone()).is_ok(),
+                "{event}"
+            );
+        }
+    }
+
+    /// P183 round 7 (Grok r4 M4): a malformed event in a requirements layer is reported as an error (strict parse); the
+    /// layer's other events still load. A user config layer keeps the plain warn-and-skip.
+    #[test]
+    fn requirements_layer_malformed_event_is_an_error_p183r7() {
+        let hooks: toml::Value = toml::from_str(
+            "PreToolUse = \"deny.sh\"\n[[Stop]]\nhooks = [{ type = \"command\", command = \"/bin/true\" }]\n",
+        )
+        .unwrap();
+        for (provenance, reported) in [
+            (HookProvenance::Requirements, true),
+            (HookProvenance::UserRequirements, true),
+            (HookProvenance::User, false),
+        ] {
+            let layer = fuigo_config::HookConfigLayer::new(provenance, "layer", hooks.clone());
+            let (specs, errors) = parse_hooks_from_config_layers(&[layer]);
+            assert_eq!(!errors.is_empty(), reported, "{provenance:?}: {errors:?}");
+            assert_eq!(specs.len(), 1, "{provenance:?}: the Stop hook still loads");
+        }
+    }
 
     #[test]
     fn is_managed_policy_covers_root_owned_tiers_only() {

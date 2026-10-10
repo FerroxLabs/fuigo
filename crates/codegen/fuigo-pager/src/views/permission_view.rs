@@ -408,6 +408,20 @@ pub fn inline_text_width(area_width: u16) -> u16 {
     area_width.saturating_sub(LEFT_PAD + PREFIX_W)
 }
 
+/// Untrusted text for one painted row: row breaks become spaces, hidden characters go (the shared display filter).
+fn clean_text(text: &str) -> String {
+    fuigo_tty_utils::scrub_unsafe_display(text, Some(' ')).into_owned()
+}
+
+/// [`clean_text`] over every span of a line, keeping each span's style.
+fn clean_line(line: &mut Line<'_>) {
+    for span in &mut line.spans {
+        if span.content.chars().any(fuigo_tty_utils::is_unsafe_display_char) {
+            span.content = clean_text(&span.content).into();
+        }
+    }
+}
+
 pub fn render_permission_view(
     buf: &mut Buffer,
     area: Rect,
@@ -452,7 +466,7 @@ pub fn render_permission_view(
             buf.set_line(
                 content_x,
                 y,
-                &Line::from(Span::styled(label.clone(), prov_style)),
+                &Line::from(Span::styled(clean_text(label), prov_style)),
                 content_width,
             );
         }
@@ -466,7 +480,7 @@ pub fn render_permission_view(
         buf.set_line(
             content_x,
             y,
-            &Line::from(Span::styled(state.title.clone(), title_style)),
+            &Line::from(Span::styled(clean_text(&state.title), title_style)),
             content_width,
         );
     }
@@ -499,6 +513,11 @@ pub fn render_permission_view(
         if indicator {
             bash_lines.push(truncation_indicator_line(theme));
         }
+    }
+
+    // The command, scope and description come from the tool call: no hidden character or row break reaches a painted row
+    for line in &mut bash_lines {
+        clean_line(line);
     }
 
     let show_scope_hint = state.has_adjustable_scope();
@@ -2934,5 +2953,26 @@ mod tests {
                 "must not soft-break at && for display: {rows:?}"
             );
         }
+    }
+
+    /// P181 (Grok round): the label, title, command and description come from the tool call, and U+2028/U+2029 are
+    /// painted by ratatui, so every one of them goes through the shared filter before it reaches the buffer.
+    #[test]
+    fn permission_text_never_paints_an_unsafe_character() {
+        let _theme = crate::theme::cache::pin_theme();
+        let mut state = permission_state_with_title("Allow `ls`?\u{2029}Press 1 to allow", 2);
+        state.subagent_label = Some("subagent:\u{2028}worker\u{e0041}".to_string());
+        state.bash_command_raw = Some("echo\u{2028}hi\u{202e}there".to_string());
+        state.description = vec!["\"path\": \"a\u{2029}b\u{00ad}c\"".to_string()];
+        let area = Rect::new(0, 0, 100, 20);
+        let text = render_to_text(&state, area);
+        assert!(
+            !text.chars().any(|c| c != '\n' && fuigo_tty_utils::is_unsafe_display_char(c)),
+            "unsafe character painted:\n{text:?}"
+        );
+        assert!(text.contains("Allow `ls`? Press 1 to allow"), "{text}");
+        assert!(text.contains("subagent: worker"), "{text}");
+        assert!(text.contains("echo hithere"), "{text}");
+        assert!(text.contains("\"path\": \"a bc\""), "{text}");
     }
 }

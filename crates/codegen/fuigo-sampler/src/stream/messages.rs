@@ -47,6 +47,8 @@ struct BlockState {
     args_acc: String,
     thinking_acc: String,
     signature: String,
+    /// The first `SignatureDelta` replaces a start-seeded signature (no doubling); later deltas append.
+    signature_delta_seen: bool,
     /// The wire `type` of the first delta on THIS block that this client does not model, if any.
     ///
     /// An unmodelled delta is dropped rather than fatal, so the block's accumulators have a hole in
@@ -61,6 +63,8 @@ enum BlockType {
     Text,
     ToolUse,
     Thinking,
+    /// A `redacted_thinking` block: the opaque `data` blob is held in `BlockState::signature`.
+    RedactedThinking,
 }
 
 /// Transform a raw Anthropic Messages API stream into a stream of [`SamplingEvent`]s.
@@ -112,11 +116,12 @@ pub fn stream_messages<'a>(
         let mut final_stop_sequence: Option<String> = None;
 
         // Assistant-response accumulators (built up as ContentBlockStop events fire)
-        // Reasoning is collected into a synthesized `rs::ReasoningItem`
-        // It is emitted as a sibling `ConversationItem::Reasoning` before the trailing Assistant
+        // Each thinking (and redacted_thinking) block becomes its own `rs::ReasoningItem`, in wire order
+        // They are emitted as sibling `ConversationItem::Reasoning`s before the trailing Assistant
+        // Keeping every block matters: the API requires prior thinking blocks back unmodified, each with its own signature
         let mut assistant_text = String::new();
         let mut assistant_tool_calls: Vec<ToolCall> = Vec::new();
-        let mut assistant_reasoning: Option<rs::ReasoningItem> = None;
+        let mut assistant_reasoning: Vec<rs::ReasoningItem> = Vec::new();
 
         // Index counters
         let mut chunk_index: u64 = 0;
@@ -202,6 +207,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: thinking.clone(),
                                 signature: signature.clone(),
+                                signature_delta_seen: false,
                                 dropped_unknown_delta: None,
                             },
                         );
@@ -223,6 +229,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                signature_delta_seen: false,
                                 dropped_unknown_delta: None,
                             },
                         );
@@ -250,6 +257,7 @@ pub fn stream_messages<'a>(
                                 args_acc: String::new(),
                                 thinking_acc: String::new(),
                                 signature: String::new(),
+                                signature_delta_seen: false,
                                 dropped_unknown_delta: None,
                             },
                         );
@@ -264,9 +272,24 @@ pub fn stream_messages<'a>(
                         };
                     }
                     // Encrypted reasoning the model chose to redact
-                    // The `RedactedThinking` wire variant exists so a stream containing one deserializes instead of failing the whole event parse
-                    // Its opaque `data` blob is not forwarded as a `SamplingEvent`; no consumer claims redacted_thinking support
-                    Some(ContentBlock::RedactedThinking { .. }) => {}
+                    // The opaque `data` blob is kept (in the `signature` slot) and finalized at the block's stop as a sentinel-tagged reasoning item
+                    // Replaying it unchanged is what the API requires; it is also forwarded as a `SamplingEvent::RedactedThinking` at the block's stop
+                    Some(ContentBlock::RedactedThinking { data }) => {
+                        blocks.insert(
+                            index,
+                            BlockState {
+                                block_type: BlockType::RedactedThinking,
+                                text_acc: String::new(),
+                                tool_name: String::new(),
+                                tool_id: String::new(),
+                                args_acc: String::new(),
+                                thinking_acc: String::new(),
+                                signature: data,
+                                signature_delta_seen: false,
+                                dropped_unknown_delta: None,
+                            },
+                        );
+                    }
                     // Image / ToolResult are not expected in assistant streams.
                     Some(_) => {}
                     // A content-block type this client does not model: no block state is opened,
@@ -321,7 +344,13 @@ pub fn stream_messages<'a>(
                                 }
                             }
                             StreamDelta::SignatureDelta { signature } => {
-                                state.signature = signature;
+                                // The first delta replaces any start-seeded signature so a gateway sending both never doubles it
+                                // Later deltas append: a signature split across deltas must survive whole
+                                if !state.signature_delta_seen {
+                                    state.signature_delta_seen = true;
+                                    state.signature.clear();
+                                }
+                                state.signature.push_str(&signature);
                             }
                             StreamDelta::TextDelta { text } => {
                                 if !text.is_empty() {
@@ -405,13 +434,25 @@ pub fn stream_messages<'a>(
                                     } else {
                                         Some(state.signature)
                                     };
-                                    assistant_reasoning = Some(rs::ReasoningItem {
+                                    assistant_reasoning.push(rs::ReasoningItem {
                                         id: String::new(),
                                         summary,
                                         content: None,
                                         encrypted_content,
                                         status: None,
                                     });
+                                }
+                            }
+                            BlockType::RedactedThinking => {
+                                if !state.signature.is_empty() {
+                                    // Forward the block in wire order, so the headless reducer keeps it where the model put it
+                                    yield SamplingEvent::RedactedThinking {
+                                        request_id: request_id.clone(),
+                                        data: state.signature.clone(),
+                                    };
+                                    assistant_reasoning.push(
+                                        fuigo_sampling_types::redacted_thinking_item(state.signature),
+                                    );
                                 }
                             }
                             BlockType::ToolUse => {
@@ -620,9 +661,7 @@ pub fn stream_messages<'a>(
         });
 
         let mut items: Vec<ConversationItem> = Vec::new();
-        if let Some(r) = assistant_reasoning {
-            items.push(ConversationItem::Reasoning(r));
-        }
+        items.extend(assistant_reasoning.into_iter().map(ConversationItem::Reasoning));
         items.push(assistant_item);
 
         let stream_end = Instant::now();

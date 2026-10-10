@@ -109,6 +109,32 @@ pub(crate) async fn test_agent_with_user_message_template(
     )
     .await
 }
+/// An agent whose definition requires `tool` to be called before a turn may end, recovering up to `max_retries` times (1 ms apart).
+#[cfg(test)]
+pub(crate) async fn test_agent_with_completion_requirement(
+    tool: &str,
+    max_retries: u32,
+) -> fuigo_agent::Agent {
+    let mut definition = fuigo_agent::AgentDefinition::default_fuigo_build();
+    definition.completion_requirement = Some(fuigo_agent::config::CompletionRequirement {
+        tool: tool.to_string(),
+        reminder: format!("You must call `{tool}` before you finish."),
+        recovery: Some(fuigo_agent::config::RecoveryPolicy {
+            max_retries,
+            base_delay_ms: 1,
+            max_delay_ms: 1,
+        }),
+    });
+    test_agent_from_config(
+        fuigo_tools::registry::types::ToolServerConfig {
+            tools: vec![],
+            behavior_preset: None,
+        },
+        definition,
+        std::sync::Arc::new(fuigo_tools::computer::local::LocalTerminalBackend::new()),
+    )
+    .await
+}
 #[cfg(test)]
 async fn test_agent_from_config(
     config: fuigo_tools::registry::types::ToolServerConfig,
@@ -244,7 +270,7 @@ pub(crate) async fn create_test_actor_with_terminal(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    let cwd = fuigo_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
     let fs = Arc::new(fuigo_workspace::file_system::MockFs::new(cwd.to_path_buf()));
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_tracker_handle = fuigo_hunk_tracker::HunkTrackerActor::spawn(
@@ -393,6 +419,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        admin_policy_watch: Default::default(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
@@ -717,7 +744,7 @@ pub(crate) fn install_permission_manager(
     use fuigo_paths::AbsPathBuf;
     use fuigo_workspace::permission::{ClientType, spawn_permission_manager};
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
-        .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
+        .unwrap_or_else(|_| AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap());
     let (handle, _ev) = spawn_permission_manager(
         actor.session_info.id.clone(),
         gateway,

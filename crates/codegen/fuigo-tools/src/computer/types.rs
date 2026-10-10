@@ -52,6 +52,26 @@ impl From<std::io::Error> for ComputerError {
 pub trait AsyncFileSystem: Send + Sync {
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError>;
 
+    /// Whether [`Self::read_file_bounded`] is implemented (P166/S12).
+    fn supports_bounded_read(&self) -> bool {
+        false
+    }
+
+    /// Read a complete regular file without acquiring more than `max_bytes + 1` bytes.
+    /// Over the cap is `FileTooLarge`; a FIFO, device or socket is `InvalidInput` (local backend).
+    /// Unsupported backends must not fall back to an unbounded read.
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let _ = (path, max_bytes);
+        Err(ComputerError::io_with_kind(
+            "bounded file reads are not supported by this backend",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError>;

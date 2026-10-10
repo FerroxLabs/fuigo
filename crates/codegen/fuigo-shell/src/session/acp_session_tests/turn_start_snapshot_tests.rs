@@ -399,3 +399,17 @@ async fn a_deadline_that_passes_with_the_chat_item_queued_does_not_release_the_l
     assert!(chat.contains("QUEUED-P135"), "the lock was released before the chat item was written (fork saw updates={}, chat=none)", updates.contains("QUEUED-P135"));
     assert!(updates.contains("QUEUED-P135"), "the fork saw the chat item without its echo");
 }
+
+/// Lock hygiene (R-lock-hygiene): a descriptor copy that outlives the guard (a forked child's inherited copy; `try_clone`
+/// stands in for it) must not keep the snapshot lock held after the guard is released.
+#[test]
+fn a_released_snapshot_lock_is_free_although_a_copy_of_its_descriptor_lives_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = crate::session::storage::snapshot_lock::lock_path(dir.path());
+    let held = crate::session::storage::snapshot_lock::acquire_blocking(&path, &path).unwrap().unwrap();
+    let inherited = held.try_clone().unwrap();
+    drop(held);
+    let other = crate::session::storage::snapshot_lock::acquire_blocking(&path, &path);
+    drop(inherited);
+    assert!(other.is_ok_and(|lock| lock.is_some()), "the released snapshot lock stayed held by an inherited descriptor");
+}

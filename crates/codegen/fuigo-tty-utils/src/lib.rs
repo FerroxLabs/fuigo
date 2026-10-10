@@ -61,6 +61,16 @@ pub use process_resources::{
     sample_process_memory, sample_process_resources,
 };
 
+mod clap_error;
+pub use clap_error::render_clap_error;
+
+mod display_char;
+pub use display_char::{
+    escape_unsafe_display, is_unsafe_display_char, is_unsafe_title_char, replace_unsafe_display,
+    bracketed, cap_display_middle, capped, curly_quoted, delimited, display_width, quoted, Delim, UNTRUSTED_MAX_COLUMNS, scrub_log_record, scrub_model_text, scrub_terminal_text, scrub_unsafe_display, single_quoted, untrusted, untrusted_stdout_data, Untrusted, UntrustedStdoutData,
+    scrub_unsafe_title, scrub_unsafe_title_with, strip_loose_tags,
+};
+
 mod process_scope;
 pub use process_scope::{ProcessScope, global_process_scope};
 

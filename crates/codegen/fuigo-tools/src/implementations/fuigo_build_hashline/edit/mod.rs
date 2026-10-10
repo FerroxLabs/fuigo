@@ -317,6 +317,19 @@ impl fuigo_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // P166 Grok r5 MEDIUM 3: refuse a gitignored path (logical or physical) before reading it, like `search_replace`.
+        if crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
+            &resources,
+            &joined_path,
+            true,
+        )
+        .await
+        {
+            return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} is ignored by .gitignore and cannot be edited.",
+                input.file_path
+            )));
+        }
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,
@@ -1143,5 +1156,36 @@ mod tests {
             "context_before: {}",
             d.context_before
         );
+    }
+
+    /// P166 Grok r5 MEDIUM 3: like `search_replace`, an edit of a gitignored path is refused before the file is read,
+    /// for the logical path the model named (a symlinked ignored directory) as well as the physical target.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hashline_edit_refuses_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let mut resources = test_resources(repo.path());
+        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        let input = HashlineEditInput {
+            file_path: "secret/key.txt".to_string(),
+            edits: vec![HashlineOp::InsertAfter {
+                anchor: "EOF".to_owned(),
+                content: "more".to_owned(),
+            }],
+        };
+        let result = fuigo_tool_runtime::Tool::run(&HashlineEditTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => assert!(msg.contains("ignored by .gitignore"), "{msg}"),
+            other => panic!("expected the gitignore refusal, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(outside.path().join("key.txt")).unwrap(), "TOP SECRET\n");
     }
 }

@@ -662,8 +662,8 @@ async fn resolve_existing_session(
         );
         fuigo_tty_utils::cli_eprintln!(
             "Session {} found locally (originally in {})",
-            session_id,
-            original_cwd
+            fuigo_tty_utils::untrusted(session_id),
+            fuigo_tty_utils::untrusted(&original_cwd)
         );
         return Ok(ResolvedExisting {
             id: session_id.to_string(),
@@ -691,8 +691,8 @@ async fn resolve_existing_session(
                 "Session not found locally; deferring restore to worktree resume handler"
             );
             fuigo_tty_utils::cli_eprintln!(
-                "Session {:?} not found locally; it will be restored into the new worktree.",
-                session_id
+                "Session '{}' not found locally; it will be restored into the new worktree.",
+                fuigo_tty_utils::untrusted(session_id)
             );
             if !ctx.restore_code {
                 fuigo_tty_utils::cli_eprintln!("{WORKTREE_NO_RESTORE_CODE_NOTICE}");
@@ -925,10 +925,10 @@ async fn restore_session_from_remote(
 fn emit_pre_tui_restore_line(on_stdout: bool, line: &str) {
     use std::io::Write;
     if on_stdout {
-        fuigo_tty_utils::cli_println!("{line}");
+        fuigo_tty_utils::cli_println!("{}", fuigo_tty_utils::untrusted(line));
         let _ = std::io::stdout().flush();
     } else {
-        fuigo_tty_utils::cli_eprintln!("{line}");
+        fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(line));
         let _ = std::io::stderr().flush();
     }
 }
@@ -987,7 +987,7 @@ async fn resolve_session_by_title(
     };
     let id = chosen.info.id.to_string();
     tracing::info!(session_id = %id, "Session resolved by title");
-    fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", id);
+    fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", fuigo_tty_utils::untrusted(&id));
     Ok(Some(ResolvedExisting {
         id,
         original_cwd: None,

@@ -122,6 +122,20 @@ async fn fetch_npm_tag_propagates_npm_failure() {
 
 #[tokio::test]
 #[serial]
+async fn fetch_npm_tag_failure_names_the_package_and_the_tag() {
+    let g = FakeBinGuard::install_npm();
+    g.set_exit_code(1);
+
+    for tag in ["latest", "alpha"] {
+        let err = fetch_npm_tag_for_test(tag, None).await.unwrap_err();
+        let msg = format!("{err:#}");
+        let expected = format!("npm view fuigo@{tag} failed");
+        assert!(msg.contains(&expected), "expected `{expected}` in: {msg}");
+    }
+}
+
+#[tokio::test]
+#[serial]
 async fn fetch_npm_tag_invalid_json_returns_err() {
     let g = FakeBinGuard::install_npm();
     g.set_stdout("not valid json {");

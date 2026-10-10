@@ -101,7 +101,45 @@ mod windows_impl {
         Client(tokio::net::windows::named_pipe::NamedPipeClient),
     }
 
+    /// The pid of the process that owns the SERVER end of the named pipe `client_end` is connected to, from the OS
+    /// (`GetNamedPipeServerProcessId`). Unlike any pid a peer reports in a message, a peer cannot choose this one.
+    pub(crate) fn pipe_server_pid_of_handle(client_end: std::os::windows::io::RawHandle) -> Option<u32> {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
+        let mut pid: u32 = 0;
+        // SAFETY: `client_end` is a live pipe handle owned by the caller for the duration of the call; `pid` is writable.
+        unsafe { GetNamedPipeServerProcessId(HANDLE(client_end), &mut pid) }
+            .ok()
+            .map(|()| pid)
+            .filter(|pid| *pid != 0)
+    }
+
     impl LeaderStream {
+        /// The OS-reported pid of the server end of the pipe, for a client-side stream (`None` for a server-side stream).
+        pub(crate) fn os_server_pid(&self) -> Option<u32> {
+            use std::os::windows::io::AsRawHandle;
+            match &self.inner {
+                StreamInner::Client(c) => pipe_server_pid_of_handle(c.as_raw_handle()),
+                StreamInner::Server(_) => None,
+            }
+        }
+        /// The raw handle of a client-side stream (`None` for a server-side stream), for OS queries about the other end.
+        pub(crate) fn client_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            use std::os::windows::io::AsRawHandle;
+            match &self.inner {
+                StreamInner::Client(c) => Some(c.as_raw_handle()),
+                StreamInner::Server(_) => None,
+            }
+        }
+        /// The raw handle of a server-side stream (`None` for a client-side stream).
+        #[cfg(test)]
+        pub(crate) fn server_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            use std::os::windows::io::AsRawHandle;
+            match &self.inner {
+                StreamInner::Server(s) => Some(s.as_raw_handle()),
+                StreamInner::Client(_) => None,
+            }
+        }
         /// Connect to a listener at `path`.
         /// The path is translated to a named-pipe name and `ClientOptions::open` is used.
         pub(crate) async fn connect<P: AsRef<Path>>(path: P) -> io::Result<Self> {
@@ -173,24 +211,26 @@ mod windows_impl {
     impl LeaderListener {
         /// Reserve a named-pipe name (no on-disk file is created).
         pub(crate) fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
             let pipe_name = path_to_pipe_name(path.as_ref());
-            let first = ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&pipe_name)?;
+            // Owner = this user; allowed = this user and SYSTEM only (see `peer_auth`).
+            let first = crate::leader::peer_auth::win::create_secure_server(&pipe_name, true)?;
             Ok(Self {
                 pipe_name,
                 next_server: tokio::sync::Mutex::new(Some(first)),
             })
         }
 
+        /// The raw handle of the pre-created pending instance, if any.
+        #[cfg(test)]
+        pub(crate) async fn pending_raw_handle_for_test(&self) -> Option<std::os::windows::io::RawHandle> {
+            use std::os::windows::io::AsRawHandle;
+            self.next_server.lock().await.as_ref().map(|s| s.as_raw_handle())
+        }
+
         /// Wait for the next incoming connection.
         /// Mirrors `UnixListener::accept`, returning a connected stream and a unit placeholder for the peer address (named pipes don't carry one).
         /// Cancellation safe (P145): see [`super::accept_from_slot`].
         pub(crate) async fn accept(&self) -> io::Result<(LeaderStream, ())> {
-            use tokio::net::windows::named_pipe::ServerOptions;
-
             // Bounded with a backoff so a persistently failing connect() can't busy-spin
             const MAX_ACCEPT_ATTEMPTS: usize = 10;
             const RETRY_BACKOFF: Duration = Duration::from_millis(20);
@@ -198,7 +238,7 @@ mod windows_impl {
             let mut slot = self.next_server.lock().await;
             let server = super::accept_from_slot(
                 &mut slot,
-                || ServerOptions::new().create(&self.pipe_name),
+                || crate::leader::peer_auth::win::create_secure_server(&self.pipe_name, false),
                 MAX_ACCEPT_ATTEMPTS,
                 RETRY_BACKOFF,
             )
@@ -402,5 +442,24 @@ mod accept_slot_tests {
         assert_eq!(err.to_string(), "broken");
         assert_eq!(created.load(Ordering::SeqCst), 4, "one per attempt plus the refill");
         assert!(slot.is_some(), "the slot is refilled for the next accept");
+    }
+}
+/// Packet 2 round 2: the OS names the process behind the server end of a pipe; a real pipe in this test process.
+#[cfg(all(test, windows))]
+mod os_server_pid_tests {
+    use super::windows_impl::pipe_server_pid_of_handle;
+    use std::os::windows::io::AsRawHandle;
+    use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+    #[tokio::test]
+    async fn the_client_handle_reports_the_pid_of_the_process_serving_the_pipe() {
+        let name = format!(r"\\.\pipe\fuigo-test-r2-os-server-pid-{}", std::process::id());
+        let server = ServerOptions::new().first_pipe_instance(true).create(&name).unwrap();
+        let client = ClientOptions::new().open(&name).unwrap();
+        server.connect().await.unwrap();
+        assert_eq!(
+            pipe_server_pid_of_handle(client.as_raw_handle()),
+            Some(std::process::id()),
+            "this process created the server end"
+        );
     }
 }

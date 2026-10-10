@@ -175,7 +175,9 @@ impl Reducer for AcpReducer {
                 stream_start_ms,
             },
             // Only the Messages reducer consumes these, for its `--include-partial-messages` framing
-            StreamEvent::ResponseStarted { .. } | StreamEvent::ReasoningCompleted { .. } => {
+            StreamEvent::ResponseStarted { .. }
+            | StreamEvent::ReasoningCompleted { .. }
+            | StreamEvent::RedactedThinking { .. } => {
                 return vec![];
             }
             StreamEvent::ResponseCompleted {

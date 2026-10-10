@@ -153,6 +153,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 mod cta;
 mod elicitation;
+pub(crate) use elicitation::UnansweredElicitation;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
 mod interactions;
@@ -1670,6 +1671,10 @@ pub struct AgentView {
     /// `WorktreeSessionFailed` (non-orphan branch), and
     /// `ForkSessionFailed`.
     pub(crate) pending_fork_banner: Option<PendingForkBanner>,
+    /// Set when `session/load` failed, so this tab has no session and a plain prompt is refused with a notice.
+    pub(crate) load_failed: bool,
+    /// Latest load attempt number issued for this agent ([`AgentView::begin_load_attempt`]).
+    pub(crate) load_attempt: u64,
     /// Entry ID of the "Loading session ..." placeholder block pushed
     /// by `dispatch_load_session_inner`. Cleared by the `SessionLoaded`
     /// handler so the placeholder doesn't linger on screen when the

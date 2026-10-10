@@ -1226,6 +1226,13 @@ fn auth_hit_rects(
     (Some(copy_rect), Some(fb_rect))
 }
 
+/// The sign-in URL as painted: controls, tag characters, soft hyphens and other invisible format characters show as
+/// their percent-encoded bytes (`%C2%AD`). The URL is painted cell by cell and copied by hand, so deleting a character
+/// would change what the copy means and hiding one would let it ride along unseen.
+fn auth_url_display(url: &str) -> std::borrow::Cow<'_, str> {
+    fuigo_tty_utils::escape_unsafe_display(url)
+}
+
 /// Render the "raw URL" mode: shows the full URL with mouse capture disabled so the user can select and copy it natively.
 fn render_raw_url_mode(
     content_area: Rect,
@@ -1277,8 +1284,9 @@ fn render_raw_url_mode(
     if let Some(url) = auth_url {
         let url_style = Style::default().fg(theme.accent_user);
         let url_y = msg_area.y + 2; // after hint + blank
-        // Control characters are skipped below to prevent terminal escape injection, so measure the URL without them
-        let url_len = url.chars().filter(|c| !c.is_control()).count() as u16;
+        // Control characters are shown as percent bytes to prevent terminal escape injection, so measure the URL as painted
+        let url = auth_url_display(url);
+        let url_len = url.chars().count() as u16;
         let x_offset = if url_len <= full_width {
             (full_width - url_len) / 2
         } else {
@@ -1287,7 +1295,7 @@ fn render_raw_url_mode(
         let buf_area = buf.area();
         let buf_max_col = buf_area.x + buf_area.width;
         let buf_max_row = buf_area.y + buf_area.height;
-        for (i, ch) in url.chars().filter(|c| !c.is_control()).enumerate() {
+        for (i, ch) in url.chars().enumerate() {
             let col = msg_area.x + x_offset + (i as u16) % full_width;
             let row = url_y + (i as u16) / full_width;
             if row >= msg_area.y + msg_area.height {
@@ -2754,6 +2762,15 @@ fn masked_auth_token_view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P181: the sign-in URL is painted cell by cell, so a hidden character shows as its percent bytes instead of riding along unseen.
+    #[test]
+    fn auth_url_display_drops_hidden_characters() {
+        assert_eq!(
+            auth_url_display("https://a\u{00ad}.example/\u{e0041}x\u{2028}y\x1b"),
+            "https://a%C2%AD.example/%F3%A0%81%81x%E2%80%A8y%1B"
+        );
+    }
     use crate::app::app_view::SessionPickerEntry;
     use crate::views::picker::PickerState;
     use crate::views::session_picker::{build_grouped_picker_entries, build_session_entry_data};

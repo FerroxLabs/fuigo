@@ -678,6 +678,7 @@ impl WorkspaceHandle {
             hub_handle: tokio::sync::Mutex::new(None),
             hub_tools_snapshot: arc_swap::ArcSwap::new(Arc::new(vec![])),
             hub_config: config.hub_config,
+            project_permissions_trusted: config.project_lsp_trusted,
             auth_provider: config.auth_provider,
             activity_notify_handle: arc_swap::ArcSwap::new(Arc::new(None)),
             client_ext_sink: arc_swap::ArcSwap::new(Arc::new(None)),
@@ -2701,14 +2702,13 @@ impl WorkspaceHandle {
             started: started.servers.iter().map(|s| s.name.clone()).collect(),
             failed: started.failed.clone(),
         };
-        crate::mcp::install_and_advertise_qualified(
-            &session,
-            &sid,
-            &tool_server,
-            started.servers,
-            life,
-        )
-        .await?;
+        // P173: every advertised MCP tool answers to the local permission policy.
+        let gated = crate::hub::PolicyGatedRegistry {
+            server: tool_server.clone(),
+            workspace: self.clone(),
+        };
+        crate::mcp::install_and_advertise_qualified(&session, &sid, &gated, started.servers, life)
+            .await?;
         if !result.started.is_empty() {
             let _ = self
                 .shared
@@ -2797,11 +2797,16 @@ impl WorkspaceHandle {
         };
         let _update_guard = session.update_lock.lock().await;
         let config = bind_mcp.read().clone();
+        // P173: every advertised MCP tool answers to the local permission policy.
+        let gated = crate::hub::PolicyGatedRegistry {
+            server: tool_server,
+            workspace: self.clone(),
+        };
         let delta = match crate::mcp::converge_session(
             &session,
             session_id,
             &config,
-            &tool_server,
+            &gated,
             reclaim,
             self.shared.session_event_writer(session_id),
         )

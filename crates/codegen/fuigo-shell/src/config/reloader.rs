@@ -159,7 +159,7 @@ impl ConfigReloader {
                         error!(error = %e, "auth hot-reload failed, keeping previous credentials");
                         // Whole-file deletion (NotFound) and corrupt JSON land here
                         // The resulting memory/disk divergence must be visible in unified.jsonl
-                        let path = self.fuigo_home.join("auth.json");
+                        let path = self.auth_path();
                         fuigo_telemetry::unified_log::error(
                             "auth reload: auth.json unreadable, keeping previous credentials",
                             None,
@@ -238,8 +238,14 @@ impl ConfigReloader {
         }
     }
 
+    /// The login file the reloader reads: the same resolver the auth manager uses (`FUIGO_AUTH_PATH` as given, else
+    /// `<home>/auth.json`), so a login stored at a custom path reloads like the default one.
+    fn auth_path(&self) -> PathBuf {
+        crate::auth::auth_json_path(&self.fuigo_home)
+    }
+
     pub(crate) fn reload_auth(&mut self) -> anyhow::Result<()> {
-        let auth_path = self.fuigo_home.join("auth.json");
+        let auth_path = self.auth_path();
         let store = read_auth_json(&auth_path)?;
 
         match crate::auth::lookup_auth(&store, &self.auth_scope) {
@@ -547,6 +553,11 @@ mod tests {
 
     #[tokio::test]
     async fn reloader_skips_unchanged_auth() {
+        // Reads `<home>/auth.json`: an inherited FUIGO_AUTH_PATH would redirect the reloader (P180 Astra r1)
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _auth_env = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let tmp = tempfile::TempDir::new().unwrap();
         let auth = make_auth("same-key");
         let mut store = BTreeMap::new();
@@ -577,6 +588,11 @@ mod tests {
 
     #[tokio::test]
     async fn reloader_detects_new_auth_key() {
+        // Reads `<home>/auth.json`: an inherited FUIGO_AUTH_PATH would redirect the reloader (P180 Astra r1)
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _auth_env = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let tmp = tempfile::TempDir::new().unwrap();
         let auth = make_auth("new-key");
         let mut store = BTreeMap::new();
@@ -608,6 +624,11 @@ mod tests {
 
     #[tokio::test]
     async fn reloader_detects_auth_cleared() {
+        // Reads `<home>/auth.json`: an inherited FUIGO_AUTH_PATH would redirect the reloader (P180 Astra r1)
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _auth_env = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let tmp = tempfile::TempDir::new().unwrap();
         // Write auth.json with a DIFFERENT scope; our scope is missing
         let auth = make_auth("other-key");
@@ -636,6 +657,11 @@ mod tests {
 
     #[tokio::test]
     async fn reloader_handles_malformed_auth_json() {
+        // Reads `<home>/auth.json`: an inherited FUIGO_AUTH_PATH would redirect the reloader (P180 Astra r1)
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _auth_env = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("auth.json"), "not valid json{{{").unwrap();
 
@@ -661,6 +687,11 @@ mod tests {
 
     #[tokio::test]
     async fn reloader_handles_missing_auth_json() {
+        // Reads `<home>/auth.json`: an inherited FUIGO_AUTH_PATH would redirect the reloader (P180 Astra r1)
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let _auth_env = fuigo_test_support::EnvGuard::unset("FUIGO_AUTH_PATH");
         let tmp = tempfile::TempDir::new().unwrap();
         // No auth.json written
 
@@ -1061,5 +1092,45 @@ command = "/bin/test"
         )
         .unwrap();
         assert_eq!(cfg.get("mcp_servers"), cfg.get("mcp_servers"));
+    }
+
+    /// P180: a login stored at a custom `FUIGO_AUTH_PATH` reloads like the default one. Before the fix the reloader
+    /// read only `<home>/auth.json` and never saw it.
+    #[tokio::test]
+    async fn p180_reload_auth_reads_the_login_at_a_custom_auth_path() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::EnvGuard;
+        let home = tempfile::TempDir::new().unwrap();
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        let auth_path = elsewhere.path().join("custom-auth.json");
+        let _auth_env = EnvGuard::set("FUIGO_AUTH_PATH", &auth_path);
+
+        let scope = "https://test.example.com".to_string();
+        let mut store = BTreeMap::new();
+        store.insert(scope.clone(), make_auth("custom-path-key"));
+        std::fs::write(&auth_path, serde_json::to_string_pretty(&store).unwrap()).unwrap();
+        assert!(!home.path().join("auth.json").exists());
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let empty_config = toml::Value::Table(toml::map::Map::new());
+        let mut reloader = ConfigReloader::new(
+            home.path().to_path_buf(),
+            0,
+            empty_config,
+            scope,
+            None,
+            tx,
+            None,
+        );
+
+        reloader
+            .reload_auth()
+            .expect("the login at the custom path is readable");
+        match rx.try_recv() {
+            Ok(ConfigUpdate::Auth(auth)) => assert_eq!(auth.key, "custom-path-key"),
+            other => panic!("expected an Auth update from the custom path, got {other:?}"),
+        }
     }
 }

@@ -700,12 +700,14 @@ struct GrepFormatConfig {
     max_output_bytes: usize,
     /// Stable display path used in the `<workspace_result …>` wrapper / errors.
     cwd_display: String,
+    /// Read rules filter this search: ripgrep's stderr text (it names files) is never shown.
+    filtered: bool,
 }
 
 /// A spawned ripgrep ready to be read, plus the resolved formatting config.
 struct GrepReady {
     child: Child,
-    stdout_pipe: Option<ChildStdout>,
+    stdout_pipe: Option<RgStdout>,
     stderr_pipe: Option<ChildStderr>,
     config: GrepFormatConfig,
 }
@@ -732,13 +734,13 @@ async fn prepare_grep(
         (
             res.get::<DisplayCwd>().map(|d| d.0.clone()),
             res.get::<PathNotFoundHints>().is_some_and(|h| h.0),
-            res.get::<DenyReadGlobs>()
-                .map(|d| d.0.clone())
-                .unwrap_or_default(),
+            crate::types::resources::deny_read_globs_for_call(ctx, &res),
         )
     };
 
     // Resolve the model-provided path for the working directory.
+    // P198 part G: the path is handed to ripgrep as resolved (no `.` / `..` collapse): there are no ripgrep excludes
+    // any more, the post-filter judges the result paths.
     let workdir = resolve_model_path(
         &cwd,
         display_cwd.as_deref(),
@@ -747,6 +749,46 @@ async fn prepare_grep(
     // Use display_cwd for output paths so model sees stable paths.
     let display_base = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
     let cwd_display = display_base.display().to_string();
+
+    // P166 Grok r5 MEDIUM 3 sweep: ripgrep searches a path it is given even when that path is gitignored, so an
+    // ignored search path (logical or physical) is refused like `read_file` refuses it.
+    if let Some(path) = input.path.as_deref()
+        && crate::implementations::fuigo_build::read_file::tool_path_refused_by_gitignore(
+            &resources, &workdir, false,
+        )
+        .await
+    {
+        return Ok(GrepStep::Early(GrepSearchOutput {
+            stdout: format!("Error: {path} is ignored by .gitignore and cannot be searched.").into_bytes(),
+            stderr: Vec::new(),
+            exit_code: 2,
+            match_count: 0,
+            file_matches: Vec::new(),
+        }));
+    }
+
+    // P198: ripgrep reads a file it is given even when a `--glob !` exclude names it, so an explicit search path
+    // that a Read-deny rule covers (as the exclude spells it) is refused here, whatever its spelling.
+    if let Some(path) = input.path.as_deref()
+        && let Some(filter) = crate::util::read_deny::ReadDenyFilter::new(&cwd, &deny_read_globs)
+    {
+        let physical = crate::util::fs::try_canonicalize(&workdir).await.ok();
+        let is_dir = workdir.is_dir();
+        // Also judged with `.` / `..` collapsed (refusal side only; ripgrep gets `workdir` as it is).
+        let lexical = workdir.components().collect::<std::path::PathBuf>();
+        if filter.denies(&workdir, is_dir)
+            || filter.denies(&lexical, is_dir)
+            || physical.is_some_and(|p| filter.denies(&p, is_dir))
+        {
+            return Ok(GrepStep::Early(GrepSearchOutput {
+                stdout: format!("Error: {path} is excluded by a read rule and cannot be searched.").into_bytes(),
+                stderr: Vec::new(),
+                exit_code: 2,
+                match_count: 0,
+                file_matches: Vec::new(),
+            }));
+        }
+    }
 
     // Pre-check: if the search path doesn't exist, return enriched hints
     // before rg runs. We intentionally pre-check with metadata() rather
@@ -806,14 +848,40 @@ async fn prepare_grep(
         cmd.arg("--glob").arg(glob);
     }
 
-    // Managed Read-deny globs become ripgrep excludes so a search never reads
-    // a policy-forbidden path — whether reached by a recursive walk or by a
-    // `glob` arg that targets a denied file. Added AFTER the caller's `--glob`
-    // so the exclude wins (ripgrep applies the last matching glob). An
-    // explicitly-passed denied `path` is blocked earlier by the permission
-    // manager (ripgrep searches explicit paths even against excludes).
-    for deny in &deny_read_globs {
-        cmd.arg("--glob").arg(format!("!{deny}"));
+    // P198 round 3: Read-deny rules are NOT translated into ripgrep globs (a second matcher that disagreed with the
+    // policy both ways). Ripgrep prints `--json` records for a directory search and `RgJsonStream` drops every record
+    // of a file the policy matcher denies, before any line or head-limit accounting. (An explicit FILE search prints no
+    // path and was judged above.) Cost: ripgrep still reads denied files; their results are discarded.
+    let result_filter = crate::util::read_deny::ResultFilter::new(&cwd, &deny_read_globs);
+    let with_context = input.context.unwrap_or(0) > 0
+        || input.before_context.unwrap_or(0) > 0
+        || input.after_context.unwrap_or(0) > 0;
+    let filtered = result_filter.is_active();
+    if !filtered {
+        // Managed Read-deny globs become ripgrep excludes so a search never reads
+        // a policy-forbidden path — whether reached by a recursive walk or by a
+        // `glob` arg that targets a denied file. Added AFTER the caller's `--glob`
+        // so the exclude wins (ripgrep applies the last matching glob). An
+        // explicitly-passed denied `path` is blocked earlier by the permission
+        // manager (ripgrep searches explicit paths even against excludes).
+        for deny in &deny_read_globs {
+            cmd.arg("--glob").arg(format!("!{deny}"));
+        }
+    }
+    let null_mode = (result_filter.is_active() && !workdir.is_file()).then_some(match output_mode {
+        OutputMode::FilesWithMatches => crate::util::rg_json::RgJsonMode::Files,
+        OutputMode::Count => crate::util::rg_json::RgJsonMode::CountNull,
+        OutputMode::Content => crate::util::rg_json::RgJsonMode::Heading { context: with_context },
+    });
+    if null_mode == Some(crate::util::rg_json::RgJsonMode::CountNull) {
+        // Count: ripgrep's own `-c`, with NUL after the path; only names and counts are printed, so only names are judged.
+        cmd.arg("--null");
+    } else if null_mode.is_some() {
+        // Typed records instead of text: see `util::rg_json`. `-l` / `-c` are derived from them.
+        cmd.arg("--json");
+        if matches!(output_mode, OutputMode::FilesWithMatches) {
+            cmd.arg("--max-count").arg("1");
+        }
     }
 
     if let Some(t) = &input.r#type
@@ -842,14 +910,16 @@ async fn prepare_grep(
         cmd.arg("-A").arg(a.to_string());
     }
 
-    match output_mode {
-        OutputMode::FilesWithMatches => {
-            cmd.arg("-l");
+    if null_mode.is_none() || null_mode == Some(crate::util::rg_json::RgJsonMode::CountNull) {
+        match output_mode {
+            OutputMode::FilesWithMatches => {
+                cmd.arg("-l");
+            }
+            OutputMode::Count => {
+                cmd.arg("-c");
+            }
+            OutputMode::Content => {}
         }
-        OutputMode::Count => {
-            cmd.arg("-c");
-        }
-        OutputMode::Content => {}
     }
 
     cmd.arg("-e").arg(&input.pattern);
@@ -888,7 +958,15 @@ async fn prepare_grep(
     };
 
     // Take pipes so child remains accessible for cleanup on timeout.
-    let stdout_pipe = child.stdout.take();
+    let stdout_pipe: Option<RgStdout> = match (child.stdout.take(), null_mode) {
+        (Some(pipe), Some(mode)) => Some(filtered_stdout(
+            pipe,
+            // The text form passes `--max-columns 1000 --max-columns-preview`, which `--json` ignores.
+            crate::util::rg_json::RgJsonStream::new(mode, result_filter).with_max_columns(1000),
+        )),
+        (Some(pipe), None) => Some(RgStdout::Plain(pipe)),
+        (None, _) => None,
+    };
     let stderr_pipe = child.stderr.take();
 
     // Resolve truncation settings from tool-specific Params (static config; no
@@ -918,8 +996,51 @@ async fn prepare_grep(
             max_chars_per_line,
             max_output_bytes,
             cwd_display,
+            filtered,
         },
     }))
+}
+
+/// ripgrep's stdout: the pipe itself (no read rules) or the Read-deny post-filter's reader.
+enum RgStdout {
+    Plain(ChildStdout),
+    Filtered(Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+}
+
+impl tokio::io::AsyncRead for RgStdout {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            RgStdout::Plain(p) => std::pin::Pin::new(p).poll_read(cx, buf),
+            RgStdout::Filtered(p) => std::pin::Pin::new(p).poll_read(cx, buf),
+        }
+    }
+}
+
+/// Forward ripgrep's `--null` output through `stream` (P198 round 3). The returned reader ends when ripgrep's output ends;
+/// if the reader is dropped (the head limit was reached) the forwarder stops and drops ripgrep's pipe.
+fn filtered_stdout(mut pipe: ChildStdout, mut stream: crate::util::rg_json::RgJsonStream) -> RgStdout {
+    use tokio::io::AsyncWriteExt;
+    let (mut tx, rx) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let mut tmp = [0u8; 8192];
+        loop {
+            match pipe.read(&mut tmp).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let out = stream.feed(&tmp[..n]);
+                    if !out.is_empty() && tx.write_all(&out).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+        let _ = tx.write_all(&stream.finish()).await;
+    });
+    RgStdout::Filtered(Box::new(rx))
 }
 
 /// Longest prefix of `bytes` that ends on a UTF-8 character boundary.
@@ -991,7 +1112,7 @@ fn accept_rg_stdout_chunk(
 /// The post-budget "exact-fit" probe is **time-bounded** ([`EXACT_FIT_PROBE_TIMEOUT`]).
 /// An unbounded `read` would hold the outer tool timeout and, on expiry, drop the
 /// already-buffered matches in favor of a timeout error card.
-async fn read_rg_stdout_capped(mut stdout_pipe: ChildStdout, max_lines: usize) -> (Vec<u8>, bool) {
+async fn read_rg_stdout_capped(mut stdout_pipe: RgStdout, max_lines: usize) -> (Vec<u8>, bool) {
     let mut buf = Vec::with_capacity(MAX_STDOUT_BYTES.min(65_536));
     let mut complete_lines = 0usize;
     let mut truncated = false;
@@ -1061,6 +1182,9 @@ fn finalize_grep(
     exit_code: i32,
     config: &GrepFormatConfig,
 ) -> GrepSearchOutput {
+    if config.filtered {
+        return finalize_grep_filtered(stdout_buf, stdout_truncated, stderr_buf, exit_code, config);
+    }
     let stdout = String::from_utf8_lossy(&stdout_buf);
     let stderr = String::from_utf8_lossy(&stderr_buf);
 
@@ -1166,6 +1290,148 @@ fn finalize_grep(
         stdout: format!(
             "<workspace_result workspace_path=\"{}\">\n{}\n</workspace_result>",
             config.cwd_display, formatted_output
+        )
+        .into_bytes(),
+        stderr: stderr_buf,
+        exit_code,
+        match_count,
+        file_matches,
+    }
+}
+
+/// [`finalize_grep`] for a search under Read-deny rules (P198): ripgrep's stderr text is never shown except its own
+/// pattern error, partial failures are reported without naming a file, and "every match hidden" is "no matches".
+fn finalize_grep_filtered(
+    stdout_buf: Vec<u8>,
+    stdout_truncated: bool,
+    stderr_buf: Vec<u8>,
+    exit_code: i32,
+    config: &GrepFormatConfig,
+) -> GrepSearchOutput {
+    let stdout = String::from_utf8_lossy(&stdout_buf);
+    let no_files_searched = String::from_utf8_lossy(&stderr_buf).contains("No files were searched");
+    // P198 round 4: with read rules ripgrep's stderr names files and is NEVER shown; some allowed results may exist.
+    let partial_failure = config.filtered && exit_code == 2 && !stdout.is_empty();
+    // Part G: ripgrep's OWN pattern error names no file and is shown as without rules; any other stderr may name one.
+    let own_error = config.filtered && crate::util::rg_json::is_own_error(exit_code, stdout.is_empty(), &stderr_buf);
+    let filtered = config.filtered && !own_error;
+    let stderr_buf = if filtered { Vec::new() } else { stderr_buf };
+    let stderr = if filtered {
+        std::borrow::Cow::Borrowed("search failed for some paths")
+    } else {
+        String::from_utf8_lossy(&stderr_buf)
+    };
+    let exit_code = if partial_failure {
+        0
+    } else if config.filtered && exit_code == 0 && stdout.is_empty() {
+        // every match was in a file the read rules hide
+        1
+    } else {
+        exit_code
+    };
+
+    // Handle exit codes.
+    if (exit_code == 1 && stdout.is_empty()) || (exit_code == 2 && no_files_searched) {
+        let result = format!(
+            "<workspace_result workspace_path=\"{}\">\nNo matches found\n</workspace_result>",
+            config.cwd_display
+        );
+        return GrepSearchOutput {
+            stdout: result.into_bytes(),
+            stderr: Vec::new(),
+            exit_code,
+            match_count: 0,
+            file_matches: Vec::new(),
+        };
+    }
+
+    if exit_code == 2 {
+        let error_msg = format!(
+            "Error calling tool: {} (exit 2, root: {})",
+            stderr, config.cwd_display
+        );
+        return GrepSearchOutput {
+            stdout: error_msg.into_bytes(),
+            stderr: stderr_buf,
+            exit_code,
+            match_count: 0,
+            file_matches: Vec::new(),
+        };
+    }
+
+    if exit_code != 0 {
+        let error_msg = format!(
+            "Error calling tool: unknown error (exit {}, root: {})",
+            exit_code, config.cwd_display
+        );
+        return GrepSearchOutput {
+            stdout: error_msg.into_bytes(),
+            stderr: stderr_buf,
+            exit_code,
+            match_count: 0,
+            file_matches: Vec::new(),
+        };
+    }
+
+    let (formatted_output, match_count, file_matches) = {
+        let mut output_lines: Vec<String> = stdout.lines().map(|s| s.to_string()).collect();
+        let mut is_truncated = stdout_truncated;
+        if output_lines.len() > config.effective_head_limit {
+            is_truncated = true;
+            output_lines.truncate(config.effective_head_limit);
+        }
+
+        let file_matches = if matches!(config.output_mode, OutputMode::Content) {
+            parse_file_matches(&output_lines, config.max_chars_per_line)
+        } else {
+            Vec::new()
+        };
+
+        let match_count_value = match config.output_mode {
+            OutputMode::Content => count_matches(&output_lines),
+            OutputMode::FilesWithMatches => output_lines.len(),
+            OutputMode::Count => {
+                let mut sum_matches = 0usize;
+                for line in &output_lines {
+                    if let Some(count_str) = line.split(':').next_back()
+                        && let Ok(count) = count_str.parse::<usize>()
+                    {
+                        sum_matches += count;
+                    }
+                }
+                sum_matches
+            }
+        };
+
+        let formatted = match config.output_mode {
+            OutputMode::Content => format_content_output(
+                output_lines,
+                is_truncated,
+                config.max_chars_per_line,
+                config.max_output_bytes,
+            ),
+            OutputMode::FilesWithMatches => format_files_with_matches_output(
+                output_lines,
+                is_truncated,
+                config.max_chars_per_line,
+                config.max_output_bytes,
+            ),
+            OutputMode::Count => format_count_output(
+                output_lines,
+                is_truncated,
+                config.max_chars_per_line,
+                config.max_output_bytes,
+            ),
+        };
+        (formatted, match_count_value, file_matches)
+    };
+
+    GrepSearchOutput {
+        stdout: format!(
+            "<workspace_result workspace_path=\"{}\">\n{}{}\n</workspace_result>",
+            config.cwd_display,
+            formatted_output,
+            if partial_failure { "\nsearch failed for some paths" } else { "" }
         )
         .into_bytes(),
         stderr: stderr_buf,
@@ -1511,6 +1777,46 @@ pub fn format_count_output(
 
 #[cfg(test)]
 mod tests {
+
+    /// P198 part G reopened: interleaved records of two files through `finalize_grep`, in every output mode.
+    #[test]
+    fn interleaved_json_records_finalize_per_mode() {
+        use crate::util::rg_json::RgJsonMode;
+        use crate::util::rg_json_tests as fake;
+        let f = fake::fx();
+        let fin = |mode: OutputMode, rj: RgJsonMode, lines: &[String]| {
+            let body = fake::run(&f, rj, lines).into_bytes();
+            let config = GrepFormatConfig {
+                output_mode: mode,
+                effective_head_limit: 100,
+                max_chars_per_line: 1_000,
+                max_output_bytes: 100_000,
+                cwd_display: "cwd".to_string(),
+                filtered: true,
+            };
+            String::from_utf8_lossy(&finalize_grep(body, false, Vec::new(), 0, &config).stdout).into_owned()
+        };
+        let both = fake::interleaved_allowed();
+        let content = fin(OutputMode::Content, RgJsonMode::Heading { context: true }, &both);
+        for needle in ["1:A1", "2:A2", "5:B5", "6-B6ctx"] {
+            assert_eq!(content.matches(needle).count(), 1, "{content}");
+        }
+        let files = fin(OutputMode::FilesWithMatches, RgJsonMode::Files, &both);
+        assert_eq!(files.matches("src/a.rs").count(), 1, "{files}");
+        assert_eq!(files.matches("src/b.rs").count(), 1, "{files}");
+        let counts = fin(OutputMode::Count, RgJsonMode::Count, &both);
+        assert!(counts.contains("src/a.rs:2") && counts.contains("src/b.rs:1"), "{counts}");
+        let mixed = fake::interleaved_with_denied();
+        for (mode, rj) in [
+            (OutputMode::Content, RgJsonMode::Heading { context: true }),
+            (OutputMode::FilesWithMatches, RgJsonMode::Files),
+            (OutputMode::Count, RgJsonMode::Count),
+        ] {
+            let out = fin(mode, rj, &mixed);
+            assert!(out.contains("src/a.rs"), "{out}");
+            assert!(!out.contains("secrets") && !out.contains("DENIED"), "{out}");
+        }
+    }
     use super::*;
     use crate::types::tool_metadata::test_ctx;
 
@@ -2315,6 +2621,7 @@ mod tests {
             max_chars_per_line: DEFAULT_MAX_CHARS_PER_LINE,
             max_output_bytes,
             cwd_display: "/ws".to_string(),
+            filtered: false,
         }
     }
 
@@ -2699,5 +3006,184 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         drop(stdout_pipe);
+    }
+
+    /// P166 Grok r5 MEDIUM 3 sweep: ripgrep searches an explicitly named path even when it is gitignored, so with
+    /// `RespectGitignore` on, an ignored search path (logical or physical) is refused like `read_file` refuses it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn grep_refuses_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        let canonical = dunce::canonicalize(repo.path()).unwrap();
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(&canonical);
+        builder.add_line(None, "secret/").unwrap();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(repo.path().to_path_buf()));
+        resources.insert(crate::types::resources::GitignoreFilter::new(builder.build().unwrap(), canonical));
+        resources.insert(crate::types::resources::RespectGitignore(true));
+        let mut input = make_grep_input("SECRET");
+        input.path = Some("secret".to_string());
+        let output = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(!stdout.contains("TOP SECRET"), "{stdout}");
+        assert!(stdout.contains("ignored by .gitignore"), "{stdout}");
+        assert_eq!(output.match_count, 0);
+    }
+
+    /// P198: a `path` that names a denied file is not searched (ripgrep reads an explicit file argument even when a
+    /// glob excludes it), and a Read-denied file's name is not returned either.
+    #[tokio::test]
+    async fn deny_read_globs_cover_an_explicit_file_path() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join(".env"), "FAKE_SECRET=zzz\n").unwrap();
+        fs::write(tmp.path().join("README.md"), "FAKE in readme\n").unwrap();
+        let run = |path: &str, deny: &[&str]| {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(tmp.path().to_path_buf()));
+            resources.insert(DenyReadGlobs(deny.iter().map(|s| s.to_string()).collect()));
+            let mut input = make_grep_input("FAKE");
+            input.path = Some(path.to_string());
+            async move {
+                let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+                    .await
+                    .unwrap();
+                String::from_utf8_lossy(&out.stdout).into_owned()
+            }
+        };
+        let out = run(".env", &["**/.env"]).await;
+        assert!(!out.contains("FAKE_SECRET"), "explicit denied file must not be searched: {out}");
+        let out = run(&tmp.path().join(".env").to_string_lossy(), &["**/.env"]).await;
+        assert!(!out.contains("FAKE_SECRET"), "absolute spelling too: {out}");
+        // Control: the explicit file is read when nothing denies it; an allowed explicit file is searched.
+        assert!(run(".env", &[]).await.contains("FAKE_SECRET"));
+        assert!(run("README.md", &["**/.env"]).await.contains("FAKE in readme"));
+    }
+
+    /// Everything the fuigo-build grep prints for `FAKE` in all three output modes.
+    async fn grep_all_modes(cwd: std::path::PathBuf, path: Option<String>, deny: Option<Vec<String>>) -> String {
+        let mut all = String::new();
+        for mode in [OutputMode::Content, OutputMode::FilesWithMatches, OutputMode::Count] {
+            let mut resources = Resources::new();
+            resources.insert(Cwd(cwd.clone()));
+            if let Some(deny) = &deny {
+                resources.insert(DenyReadGlobs(deny.clone()));
+            }
+            let mut input = make_grep_input("FAKE");
+            input.path = path.clone();
+            input.output_mode = Some(mode);
+            let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input)
+                .await
+                .unwrap();
+            all.push_str(&String::from_utf8_lossy(&out.stdout));
+            all.push('\n');
+        }
+        all
+    }
+
+    /// P198 round 4: binary notices, odd names, a failing ripgrep and "nothing denied" through the `--json` records.
+    #[tokio::test]
+    async fn json_records_hide_denied_files_in_every_mode() {
+        crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move {
+            grep_all_modes(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn rules_that_are_not_total_do_not_hide_a_directory() {
+        crate::util::read_deny::fixture::check_round4_rules(|cwd, path, deny| async move {
+            grep_all_modes(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 round 4: with context lines and a rule that denies nothing, the re-rendered content is the text form.
+    #[tokio::test]
+    async fn json_rendering_equals_text_rendering_with_context() {
+        let t = crate::util::read_deny::fixture::tree();
+        let dir = t.base.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["g1.txt", "g2.txt"] {
+            std::fs::write(dir.join(name), "1\nFAKE\n3\n4\n5\n6\nFAKE\n8\n").unwrap();
+        }
+        std::fs::write(dir.join("m.txt"), "a\nFAKE\nb\nFAKE\n").unwrap();
+        for (context, multiline) in [(Some(1), false), (None, true), (Some(2), true)] {
+            let mut outs = Vec::new();
+            for deny in [None, Some(vec!["nothing-here/**".to_string()])] {
+                let mut resources = Resources::new();
+                resources.insert(Cwd(dir.clone()));
+                if let Some(deny) = deny {
+                    resources.insert(DenyReadGlobs(deny));
+                }
+                let mut input = make_grep_input("FAKE");
+                input.context = context;
+                input.multiline = multiline;
+                let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input).await.unwrap();
+                outs.push(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+            assert!(outs[0].contains("FAKE"), "{}", outs[0]);
+            assert_eq!(
+                crate::util::read_deny::fixture::sorted_lines(&outs[0]),
+                crate::util::read_deny::fixture::sorted_lines(&outs[1]),
+                "context {context:?} multiline {multiline}"
+            );
+        }
+    }
+
+    /// P198 r2: absolute rule (also outside the cwd, and through a symlinked cwd), bare name and siblings, in every
+    /// output mode.
+    #[tokio::test]
+    async fn read_rules_follow_the_policy_matcher() {
+        crate::util::read_deny::fixture::check_grep(|cwd, path, deny| async move {
+            grep_all_modes(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 r2: with an empty rule list the output is byte-identical to the output with no rule object at all.
+    #[tokio::test]
+    async fn an_empty_rule_list_changes_nothing() {
+        let t = crate::util::read_deny::fixture::tree();
+        for path in [None, Some("secrets".to_string())] {
+            let none = grep_all_modes(t.proj.clone(), path.clone(), None).await;
+            assert!(none.contains("FAKE_SECRET") || none.contains("key_material.txt"), "{none}");
+            let empty = grep_all_modes(t.proj.clone(), path, Some(Vec::new())).await;
+            // Same bytes up to ripgrep's parallel line order.
+            assert_eq!(
+                crate::util::read_deny::fixture::sorted_lines(&none),
+                crate::util::read_deny::fixture::sorted_lines(&empty)
+            );
+        }
+    }
+
+    /// P198 round 3: results are post-filtered by the policy matcher (symlinked cwd, case, outside rule, braces,
+    /// false-denial guards, odd names, missing cwd), in every output mode.
+    #[tokio::test]
+    async fn results_are_post_filtered_by_the_policy_matcher() {
+        crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move {
+            grep_all_modes(cwd, path, Some(deny)).await
+        })
+        .await;
+    }
+
+    /// P198 round 3: a denied file is not counted in the count lines, and a file name with a colon stays attributed.
+    #[tokio::test]
+    async fn counts_exclude_denied_files() {
+        let t = crate::util::read_deny::fixture::tree();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(t.proj.clone()));
+        resources.insert(DenyReadGlobs(vec!["secrets/**".to_string()]));
+        let mut input = make_grep_input("FAKE");
+        input.output_mode = Some(OutputMode::Count);
+        let out = fuigo_tool_runtime::Tool::run(&GrepTool, test_ctx(resources.into_shared()), input).await.unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(!text.contains("key_material.txt"), "{text}");
+        assert!(text.contains("public.txt") && text.contains("notes.txt"), "{text}");
+        assert!(!text.contains("keylink") || !text.contains("secrets/key"), "{text}");
     }
 }

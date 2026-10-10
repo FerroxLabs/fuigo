@@ -1525,11 +1525,12 @@ mod token_endpoint_binding_tests {
     /// hold a query) into the error text that the refresh path writes to its logs.
     #[tokio::test]
     async fn transport_errors_from_the_token_endpoint_do_not_carry_its_url() {
-        // A loopback port with nothing listening: the connection is refused.
-        let port = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap().port()
-        };
+        // A loopback port with nothing listening: the connection is refused. P176: the port stays bound (not
+        // listening) for the whole test, so no concurrent test can be handed it and record this request; a freed
+        // ephemeral port once reached `p47_wire_auth_enrichment`'s harness listener.
+        let bound = tokio::net::TcpSocket::new_v4().unwrap();
+        bound.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let port = bound.local_addr().unwrap().port();
         let issuer = format!("http://127.0.0.1:{port}");
         let endpoint = format!("{issuer}/token?tenant_key=query-secret");
         let refresh = refresh_tokens(&issuer, &endpoint, "the-refresh-token", "client", None, None)
@@ -1549,6 +1550,7 @@ mod token_endpoint_binding_tests {
                 assert!(!text.contains("the-refresh-token"), "{text}");
             }
         }
+        drop(bound);
     }
 
     /// The local-dev exemption needs BOTH the variable and the exact local issuer; any other

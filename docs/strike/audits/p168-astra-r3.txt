@@ -1,0 +1,40 @@
+# Astra round 3 verdict (final message; full transcript sha256 7b3ba5a0e1d8c5086628095aeef98af5e3c8a3e970654b19b261f9f12252ac20, kept off-repo)
+Audited clean `strike/p168` at **`a5d5749b7`**, read-only. No Cargo or compilation ran.
+
+| Round-2 finding | Result | Evidence |
+|---|---|---|
+| HIGH: optional Git argument letters consume the next word | **FIXED** | `-M/-C/-B/-U/-X` preserve subsequent output flags. [shell_access.rs:1230](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1230) |
+| HIGH: scanning restarts before the Git verb | **FIXED** | Scanning begins after the resolved verb; `git --namespace -- archive -o .env HEAD` reports `.env`. [shell_access.rs:1246](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1246) |
+| MEDIUM: Git `-S` value rescanned | **NOT FIXED** | Standalone `-S` is corrected; valid clustered `-pS` still fails, detailed below. |
+| MEDIUM: rustc `--emit` bypasses argument consumption | **FIXED** | Typed outputs now use the same consumption walk. The reported `--remap-path-prefix` case produces no write. [shell_access.rs:1274](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1274) |
+
+**S6 — NOT FIXED.** One HIGH regression and one residual MEDIUM remain.
+
+**S14 — FIXED.** Both templates and the encrypted copy are byte-identical to the round-2-verified versions. Only test formatting changed. Apply-patch template remains **21,307 / 21,473 bytes**.
+
+The following regressions are **NEW versus both `532e913` and v1.0.21 (`de6ca7dd`)**:
+
+1. **HIGH — A consumed `--` still hides subsequent output flags.**  
+   [shell_access.rs:1261](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1261) stops scanning unconditionally. Argument consumption at [line 1284](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1284) recognizes only exact long names, while Go’s value-taking options are unmodeled.
+
+   | Command | Both baselines | Current |
+   |---|---|---|
+   | GNU `sort --temp -- -o .env README.md` | `.env` write | No writes |
+   | `go build -tags -- -o .env ./cmd` with a valid Go package | `.env` write | No writes |
+
+   GNU sort accepts `--temp` as `--temporary-directory`; native GNU sort 9.11 accepted the equivalent `/dev/null` probe. Go consumes `--` as the tags value: a parser-only probe reached the subsequent `-o`. These behaviors follow the [GNU option definitions](https://github.com/coreutils/coreutils/blob/v9.11/src/sort.c#L577), [Go argument parser](https://go.dev/src/flag/flag.go#L1129), and [tags parser](https://go.dev/src/cmd/go/internal/work/build.go#L379).
+
+   Both required consumers consequently miss the output path. **Fix:** resolve value-taking GNU abbreviations and consume Go’s value-taking flags before interpreting `--`; retain conservative behavior where parsing is uncertain. Add extraction, Edit deny/ask, and auto-mode regression cases.
+
+2. **MEDIUM — Clustered Git pickaxe options still rescan their value.**  
+   At [shell_access.rs:1296](/Volumes/Mando/WaylandBots/Fuigo/wt-p168/crates/codegen/fuigo-workspace/src/permission/shell_access.rs:1296), consumption matches only complete tokens such as `-S`.
+
+   `git log -1 -pS --out Cargo.toml` is a valid read-only history search, accepted by native Git. Current code reports a write to `Cargo.toml`; both baselines report none. This can trigger an unrelated Edit denial.
+
+   **Fix:** parse value consumption inside Git query clusters independently of output-cluster recognition, preserving `git status -uno` as a non-write. Add this negative regression case.
+
+Evidence: source review, native parser probes, and an in-memory Python model matching all **57 helper vectors**. Rust tests were not executed. Other permission gates may still prompt; these findings concern the required write/path detectors.
+
+**0 BLOCKER, 1 HIGH, 1 MEDIUM.**
+
+**NOT LAND-OK**

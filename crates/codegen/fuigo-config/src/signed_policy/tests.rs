@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_support::with_remote_disarm_lock;
 use ring::signature::KeyPair;
 
 fn test_keypair() -> (ring::signature::Ed25519KeyPair, Vec<u8>) {
@@ -485,8 +486,8 @@ fn sidecar_round_trips_on_disk() {
 
 #[test]
 fn verification_armed_with_embedded_key() {
-    // Armed: prod v1 key compiled in.
-    assert!(verification_active());
+    // Armed: prod v1 key compiled in. The flag is process-global; read it under the lock.
+    with_remote_disarm_lock(|| assert!(verification_active()));
     assert_eq!(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS.len(), 1);
     assert_eq!(EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS[0].0, "v1");
     assert!(embedded_key_id_trusted("v1"));
@@ -506,40 +507,46 @@ fn verification_armed_with_embedded_key() {
 /// An empty key set turns verification off; an incident disarm looks the same.
 #[test]
 fn with_dark_forces_keyless_verification_inactive() {
-    test_seam::with_dark(|| {
-        assert!(
-            !verification_active(),
-            "Some(&[]) must force the keyless build for rollback tests"
-        );
-        assert!(!embedded_key_id_trusted("v1"));
+    // The final assert reads the process-global kill-switch the remote-disarm tests flip.
+    with_remote_disarm_lock(|| {
+        test_seam::with_dark(|| {
+            assert!(
+                !verification_active(),
+                "Some(&[]) must force the keyless build for rollback tests"
+            );
+            assert!(!embedded_key_id_trusted("v1"));
+        });
+        // with_dark restores the embedded keys on exit
+        assert!(verification_active());
     });
-    // with_dark restores the embedded keys on exit
-    assert!(verification_active());
 }
 
 /// Armed: a policy with a missing or untrusted sidecar is flagged; an empty dir is not.
 #[test]
 fn cloud_cache_signature_invalid_when_armed() {
-    let dir = tempfile::tempdir().unwrap();
-    assert!(verification_active());
-    assert!(!cloud_cache_signature_invalid(
-        dir.path(),
-        Some("team-007"),
-        1_000
-    ));
-    write_policy(dir.path(), &payload());
-    assert!(cloud_cache_signature_invalid(
-        dir.path(),
-        Some("team-007"),
-        1_000
-    ));
-    let (kp, _) = test_keypair();
-    write_sidecar(dir.path(), &sign(&kp, &payload())).unwrap();
-    assert!(cloud_cache_signature_invalid(
-        dir.path(),
-        Some("team-007"),
-        1_000
-    ));
+    // Reads the process-global kill-switch the remote-disarm tests flip: serialise with them.
+    with_remote_disarm_lock(|| {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(verification_active());
+        assert!(!cloud_cache_signature_invalid(
+            dir.path(),
+            Some("team-007"),
+            1_000
+        ));
+        write_policy(dir.path(), &payload());
+        assert!(cloud_cache_signature_invalid(
+            dir.path(),
+            Some("team-007"),
+            1_000
+        ));
+        let (kp, _) = test_keypair();
+        write_sidecar(dir.path(), &sign(&kp, &payload())).unwrap();
+        assert!(cloud_cache_signature_invalid(
+            dir.path(),
+            Some("team-007"),
+            1_000
+        ));
+    });
 }
 
 /// Keyless: the public gate stays inert with an unsigned policy on disk.
@@ -914,11 +921,13 @@ fn signed_cache_compromised_is_no_authentic_sidecar_when_armed() {
     };
     write_policy(home, &p);
     write_sidecar(home, &sign(&kp, &p)).unwrap();
-    assert!(verification_active());
-    assert_eq!(
-        signed_cache_compromised(home, Some("team-007"), 1_000),
-        SignedVerdict::NoAuthenticSidecar
-    );
+    with_remote_disarm_lock(|| {
+        assert!(verification_active());
+        assert_eq!(
+            signed_cache_compromised(home, Some("team-007"), 1_000),
+            SignedVerdict::NoAuthenticSidecar
+        );
+    });
 }
 
 /// Anti-rollback TTL: an expired authentic opted-in sidecar reads compromised even with intact content and a matching principal.
@@ -1046,13 +1055,6 @@ fn rotation_selects_the_trusted_key_by_signed_key_id() {
 // The #[path] include below keeps the same private access
 #[path = "claim_tests.rs"]
 mod claim_tests;
-
-/// Serialize tests that mutate the process-global kill-switch and key seam.
-fn with_remote_disarm_lock<R>(f: impl FnOnce() -> R) -> R {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    f()
-}
 
 #[test]
 fn remote_kill_switch_dark_embed_stays_inactive() {

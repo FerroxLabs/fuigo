@@ -1,0 +1,88 @@
+# P177 Astra round 3 (gpt-6-astra, read-only). Brief: scratchpad astra-r3.txt; final answer below.
+
+Audited clean `strike/p177` at **`89db015ee`**, round **3 of 3**, against `088fa6412`, `de6ca7dda`, and upstream `2bdd1d6a`. All **63 upstream home entries match**. Enforcement remains incomplete.
+
+Findings are source-derived. No cargo, builds, sandbox executions, or file modifications were performed.
+
+| Round-1 finding | Result | Why |
+|---|---|---|
+| **#1 — Missing protected names creatable** | **NOT FIXED** | Ordinary Cargo pins and explicit-grant refusals work, but the automatic Fuigo-home exemption still permits missing protected names outside the stated temp-home limit: **N9**. |
+| **#2 — Workspace exempts protected tree** | **FIXED** | A workspace inside a protected tree now causes refusal; the tree is retained. |
+| **#3 — Secret/tool-tree hard links unchecked** | **NOT FIXED** | The ordinary outside-root `.ssh/config` alias is detected now. Unlistable source trees still escape detection: **N10**. The stated outside-root tool/browser limitation also remains. |
+| **#4 — FIFO startup name omitted** | **FIXED** | Special-file names become protected `File` entries, covering replacement. |
+| **#5 — Scan/plan hard-link disagreement** | **FIXED** | Both reject multiply linked protected file entries inside writable roots. Harmless protected-to-protected links remain refused by design. |
+| **#6 — Harmless backup links automatically refused** | **FIXED** | Completed bounded searches without a writable alias permit startup; an unexplained link alone no longer forces refusal. |
+
+| Round-2 finding | Result | Why |
+|---|---|---|
+| **N1 — Rebinds reopen link parents** | **FIXED** | Rebind selection now considers `LinkNode` entries and keeps their containing children read-only. |
+| **N2 — `git_owned` exemption** | **FIXED** | Removed. Missing default Git configs are pinned or refused independently of Git’s environment override. |
+| **N3 — Searchable, unlistable alias directories skipped** | **FIXED** | Alias searches check searchability and propagate iteration/metadata errors. This does not fix the separate protected-source listing problem in **N10**. |
+| **N4 — Root-device filter misses submounts** | **FIXED** | The device filter is removed; every existing writable root is searched. |
+| **N5 — Essential-root filtering loses grant provenance** | **FIXED** | Workspace and explicit grants retain separate provenance, including overlap with temp roots. |
+| **N6 — Nested Cargo pins close caches** | **FIXED** | Ancestor pins no longer suppress inner cache rebinds. All pins precede child rebinds. |
+| **N7 — Missing grant disagrees between scans** | **FIXED** | The reported missing `.m2` grant is anticipated and materialized as a pin. A different nested-creation failure remains: **N13**. |
+
+For N6, the mount ordering is valid: Bubblewrap obtains bind sources from the host’s old root, so child binds can restore writable access after the parent pins. [Bubblewrap implementation](https://github.com/containers/bubblewrap/blob/v0.11.0/bubblewrap.c#L1123-L1193)
+
+New findings:
+
+1. **N8 HIGH — Linux grants beneath protected trees bypass the entire tree denial.**  
+   [hook_write_deny.rs:376](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:376), [home_write_deny.rs:519](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:519).
+
+   Use workspace `/home/u/project` and a custom `read_write` grant for existing `/home/u/.config/nvim/lua`. The protected entry is `.config/nvim`, which is an **ancestor** of the grant. `git_bind_targets` only accepts protected paths at or beneath writable roots, so it drops this tree. The workspace-inside-tree refusal does not apply because the workspace is elsewhere.
+
+   The sandbox can overwrite a Lua module loaded by the next unsandboxed Neovim startup. The inner verifier repeats the same target selection and passes without checking this tree.
+
+2. **N9 HIGH — The automatic Fuigo-home exception exceeds the stated temp-home limit.**  
+   [home_write_deny.rs:554](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:554), [home_write_deny.rs:871](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:871).
+
+   On Linux, set `HOME=/home/u`, `FUIGO_HOME=/home/u/.cargo`, use an unrelated workspace, and leave `.cargo/config` absent. `.cargo` is automatically writable and “essential,” which prevents pinning. It is absent from `configured`, so refusal is skipped too.
+
+   Both outer planning and inner verification leave `config` creatable. The sandbox can install a malicious `build.rustc-wrapper`; the legacy `config` takes precedence over `config.toml`. This requires no temp-home layout. [Cargo configuration rules](https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure)
+
+3. **N10 HIGH — Protected-source listing errors still fail open.**  
+   [home_write_deny.rs:678](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:678), [home_write_deny.rs:686](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:686).
+
+   For an unprivileged user, prepare a hard link from `~/.ssh/config` to `<workspace>/ssh-alias`, then make `.ssh` searchable but unlistable, mode `0111`. Known filenames remain accessible.
+
+   The new always-listed walk attempts `.ssh`, silently ignores its listing failure, and never records the protected inode. Writing `ssh-alias` therefore changes SSH configuration. Startup trees outside writable roots have the same error suppression. No scan bound needs to be exhausted.
+
+4. **N11 HIGH — macOS permits importing a protected file through a missing parent directory.**  
+   [deny/mod.rs:148](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/deny/mod.rs:148), [global_hook_sources.rs:153](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-config/src/global_hook_sources.rs:153).
+
+   Start a home-writable macOS profile with `.cargo` absent. Rules deny `.cargo/config*` and `.cargo/bin`, but ancestor enumeration stops at the missing `.cargo`. No rule protects that parent node.
+
+   Prepare `~/stage/config` containing a malicious Cargo configuration, then rename `~/stage` to `~/.cargo`. The rename operates on the unprotected directory node and imports the protected filename without creating it individually. Upstream explicitly generates missing-ancestor node denies for this attack; Fuigo’s reused renderer does not.
+
+5. **N12 HIGH — macOS link-only entries lack protection against parent replacement.**  
+   [home_write_deny.rs:420](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:420), [deny/mod.rs:229](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/deny/mod.rs:229).
+
+   Prepare:
+
+   ```text
+   ~/.cargo/config.toml -> <workspace>/state/disabled
+   <workspace>/state/disabled -> /dev/null
+   ```
+
+   These become link-node denies. Unlike ordinary protected entries, link-node rendering never protects their directory ancestors.
+
+   The sandbox can move `state` aside and replace it with a prepared directory containing a regular, malicious `disabled` configuration. Neither original symlink needs to be individually unlinked. The unchanged home symlink then resolves to attacker-controlled configuration.
+
+6. **N13 MEDIUM — Creating a nested pin invalidates the parent identity captured earlier.**  
+   [hook_write_deny.rs:410](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:410), [hook_write_deny.rs:463](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:463), [hook_write_deny.rs:140](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:140).
+
+   On ext4, grant existing `~/.cargo` and initially absent `~/.cargo/zsh`, set `ZDOTDIR=~/.cargo/zsh`, and leave the corresponding configuration files absent.
+
+   The scan requests both pins. Planning captures `.cargo` first, then creates its `zsh` child. That increments `.cargo`’s link count. `append_hook_plan_binds` subsequently rejects its own plan as `IdentityChanged`. This is a deterministic first-start failure caused by setup ordering, without concurrent mutation.
+
+New regressions against the requested baselines:
+
+| Baseline | Assessment |
+|---|---|
+| **`088fa6412`** | **N13** introduces a startup failure through the new pin machinery. The reported N1 weakening of P158 is fixed. N8–N12 are remaining protection gaps, not demonstrated removal of previously enforced home protection. |
+| **v1.0.21 / `de6ca7dda`** | **N13** likewise introduces a startup failure. Home-grant and protected-hard-link refusals remain additional declared restrictions. The security bypasses above were already possible without P177’s home protection. |
+
+Devbox remains exempt. Ordinary Cargo cache rebinds are present in source, but this audit supplies no runtime proof of Cargo builds or registry population. `git diff --check e595a148a..HEAD` passed; the checkout remains unchanged.
+
+**VERDICT: DO-NOT-LAND**

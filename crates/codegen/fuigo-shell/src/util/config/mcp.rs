@@ -1840,6 +1840,36 @@ pub fn cli_known_mcp_server_names(cwd: &std::path::Path) -> std::collections::Ha
     names
 }
 
+/// Why managed policy refuses `fuigo mcp add <name>` (P169, Grok 4.7 #3). Checked before the config write.
+/// `project_scope` is true for `--scope project`.
+pub fn cli_mcp_add_refusal(
+    cwd: &std::path::Path,
+    name: &str,
+    config: &McpServerConfig,
+    project_scope: bool,
+) -> Option<String> {
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    match config.to_acp_mcp_server(name) {
+        Some(server) => crate::extensions::mcp::cli_add_refusal(ms, cwd, &server, project_scope),
+        None => crate::extensions::mcp::cli_enable_refusal(ms, cwd, name, None),
+    }
+}
+
+/// Why managed policy refuses `fuigo mcp enable <name>` (P169, Grok 4.7 #3). Checked before any config write.
+pub fn cli_mcp_enable_refusal(cwd: &std::path::Path, name: &str) -> Option<String> {
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    let registry = load_cli_plugin_registry(cwd);
+    let compat = CompatConfig::default();
+    let definitions = crate::session::managed_mcp::discover_mcp_definitions_ignoring_disable(
+        &crate::session::managed_mcp::McpDiscoveryInputs {
+            cwd,
+            plugin_registry: Some(&registry),
+            compat: &compat,
+        },
+    );
+    crate::extensions::mcp::cli_enable_refusal(ms, cwd, name, definitions.get(name))
+}
+
 /// Plugin registry for one-shot CLI discovery (matches mcp doctor gating).
 ///
 /// Resolves the same cwd-effective `[plugins]` table as session startup (`resolve_effective_plugins_config`).

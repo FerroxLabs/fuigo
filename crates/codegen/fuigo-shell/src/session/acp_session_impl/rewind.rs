@@ -381,6 +381,39 @@ impl SessionActor {
             });
         }
 
+        // The journal the rewrite below writes before its durable copy names the conversation this rewind saves (P164,
+        // K19), so that a load after Fuigo is killed in the middle of the rewind can tell whether it went through. The
+        // fingerprint is of the bytes the save writes; a conversation that cannot be written that way could not be
+        // saved either, so the rewind is refused here with nothing changed.
+        // The RewindMarker's timestamp is chosen now and named in the journal too: that marker, and no other, shows
+        // this rewind went through.
+        let marker_created_at = chrono::Utc::now().to_rfc3339();
+        let conversation_commit = match &planned_conversation {
+            None => None,
+            Some(plan) => match crate::session::storage::ContentFingerprint::of_jsonl(&plan.conversation) {
+                Ok(after) => Some(crate::session::storage::RewindConversation {
+                    after,
+                    marker_created_at: marker_created_at.clone(),
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, target_index, "rewind refused: the rewound conversation cannot be written");
+                    return Ok(RewindResponse {
+                        success: false,
+                        target_prompt_index: target_index,
+                        mode,
+                        reverted_files: vec![],
+                        clean_files: vec![],
+                        conflicts: vec![],
+                        prompt_text: None,
+                        error: Some(format!(
+                            "Rewind to prompt #{target_index} was not started: the rewound conversation cannot be \
+                             written ({error}). Nothing was changed."
+                        )),
+                    });
+                }
+            },
+        };
+
         // Execute file revert. A file that cannot be restored or deleted is reported, never counted as reverted (DI-02).
         let mut reverted_files = Vec::new();
         let mut failed_files: Vec<(String, String)> = Vec::new();
@@ -479,7 +512,7 @@ impl SessionActor {
         let conversation_note = if wants_conversation_rewind { " The conversation was not rewound." } else { "" };
         let mut points_kept = None;
         if let Some(rewrite) = rewrite {
-            match self.rewrite_rewind_points_for_rewind(rewrite).await {
+            match self.rewrite_rewind_points_for_rewind(rewrite, conversation_commit).await {
                 Ok(kept) => points_kept = Some(kept),
                 Err(error) => {
                     tracing::warn!(%error, target_index, "rewind: rewind_points.jsonl could not be rewritten");
@@ -500,6 +533,10 @@ impl SessionActor {
                     });
                 }
             }
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(killed) = self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::AfterPointsRewrite) {
+            return Ok(killed);
         }
 
         // Execute conversation rewind
@@ -555,6 +592,13 @@ impl SessionActor {
                 });
             }
 
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(killed) =
+                self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::AfterConversationSaved)
+            {
+                return Ok(killed);
+            }
+
             // Store for edit-and-retry detection in the next prompt() call
             if let Ok(mut pending) = self.rewind_pending_prompt.lock() {
                 *pending = prompt_text.clone();
@@ -572,7 +616,7 @@ impl SessionActor {
                 snap.last_compaction_prompt_index = new_marker;
                 self.chat_state_handle.restore_snapshot(snap);
             }
-            self.finish_conversation_rewind(target_index).await;
+            self.finish_conversation_rewind(target_index, marker_created_at).await;
         }
 
         // The rewind went through: the in-memory snapshots follow what rewind_points.jsonl now holds.
@@ -583,6 +627,10 @@ impl SessionActor {
             // ConversationOnly: files are untouched but the conversation is rewound.
             self.file_state_tracker.merge_and_remove_from(target_index).await;
         }
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(killed) = self.killed_by_seam(crate::session::storage::rewind_crash_seam::Stage::BeforeCleanup) {
+            return Ok(killed);
+        }
         // Done: the durable copy kept during the rewind goes, and the rewind points locks are released. A failure here
         // changes nothing the rewind did (the copy is only left behind).
         // If the End never ran (the persistence queue was stuck behind another process's lock and the request was
@@ -592,14 +640,11 @@ impl SessionActor {
             && let Err(error) = self.end_rewind_points_for_rewind(undo, false).await
         {
             tracing::warn!(%error, target_index, "rewind: rewind_points.jsonl.pre-rewind was not removed by the queue");
-            let copy = crate::session::storage::rewind_points_pre_rewind_copy(
-                &crate::session::persistence::session_dir(&self.session_info).join("rewind_points.jsonl"),
-            );
-            // No-follow: a link at that path is removed as a link, a missing path is already done.
-            if copy.symlink_metadata().is_ok()
-                && let Err(error) = std::fs::remove_file(&copy)
-            {
-                tracing::warn!(%error, target_index, path = %copy.display(), "rewind: rewind_points.jsonl.pre-rewind could not be removed");
+            let points = crate::session::persistence::session_dir(&self.session_info).join("rewind_points.jsonl");
+            // No-follow: a link at that path is removed as a link, a missing path is already done. The journal goes
+            // after the copy (P164).
+            if let Err(error) = crate::session::storage::jsonl::rewind_reconcile::remove_copy_then_journal(&points) {
+                tracing::warn!(%error, target_index, path = %points.display(), "rewind: rewind_points.jsonl.pre-rewind could not be removed");
             }
         }
         drop(rewind_points_lock);
@@ -695,13 +740,12 @@ impl SessionActor {
                     );
                     // Do NOT fall back to truncation: the post-compaction conversation has wrong user-message counts
                     // Raw replay without a checkpoint produces an oversized conversation that will exceed the context window
-                    // Return a clear error so the user can rewind to a different (post-compaction) prompt instead
+                    // Return a clear error so the user can pick a prompt that does not need the unreadable checkpoint
+                    // P172: replay fails only when the target's own base checkpoint is unreadable; the error names it,
+                    // gives the prompt range it covers and the prompts that still work
                     return Ok(Err(format!(
-                        "Cannot rewind to prompt #{}: compaction checkpoint data is \
-                         unavailable ({e}). Nothing was changed: no file was reverted and the \
-                         conversation was not rewound. Try rewinding to a prompt after the \
-                         compaction point instead.",
-                        target_index,
+                        "Cannot rewind to prompt #{target_index}: {e}. Nothing was changed: no file was \
+                         reverted and the conversation was not rewound."
                     )));
                 }
             }
@@ -721,7 +765,7 @@ impl SessionActor {
 
     /// The bookkeeping after the conversation was replaced by a rewind to `target_index`: compaction suppression, MCP
     /// failure reminders, the transcript's `RewindMarker`, the turn summary and recap, and the title-refresh watermark.
-    async fn finish_conversation_rewind(&self, target_index: usize) {
+    async fn finish_conversation_rewind(&self, target_index: usize, marker_created_at: String) {
         // The conversation shrank: clear budget-based (size/schema) and stale per-turn suppression so compaction can run on the smaller context
         // Account-state suppression (credit/auth sets SUPPRESS_UNTIL_SUCCESS) isn't budget-related, so it persists until a successful model call
         if self
@@ -743,7 +787,7 @@ impl SessionActor {
         // Append a RewindMarker to updates.jsonl so replay can handle a branched timeline (updates.jsonl is append-only)
         self.persist_fuigo_update_only(FuigoSessionUpdate::RewindMarker {
             target_prompt_index: target_index,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: marker_created_at,
         });
 
         // The turn summary and recap describe turns the rewind just removed
@@ -834,11 +878,28 @@ impl SessionActor {
     async fn rewrite_rewind_points_for_rewind(
         &self,
         rewrite: crate::session::storage::RewindPointsRewrite,
+        conversation: Option<crate::session::storage::RewindConversation>,
     ) -> std::io::Result<crate::session::storage::RewindPointsUndo> {
         self.rewind_points_request("rewrite rewind_points.jsonl", |gate, respond_to| {
-            PersistenceMsg::RewriteRewindPointsAndAck { rewrite, gate, respond_to }
+            PersistenceMsg::RewriteRewindPointsAndAck { rewrite, conversation, gate, respond_to }
         })
         .await?
+    }
+
+    /// Test seam (P164): the answer of a rewind of this session that the seam stops at `stage`, as if Fuigo were
+    /// killed there. Nothing after it runs: no put-back, no cleanup.
+    #[cfg(any(test, feature = "test-support"))]
+    fn killed_by_seam(&self, stage: crate::session::storage::rewind_crash_seam::Stage) -> Option<RewindResponse> {
+        crate::session::storage::rewind_crash_seam::fires(&self.session_info.id.0, stage).then(|| RewindResponse {
+            success: false,
+            target_prompt_index: 0,
+            mode: RewindMode::All,
+            reverted_files: vec![],
+            clean_files: vec![],
+            conflicts: vec![],
+            prompt_text: None,
+            error: Some(format!("killed by the test seam at {stage:?}")),
+        })
     }
 
     /// The rewind is done; `put_back`: it did not go through, so `rewind_points.jsonl` gets back what it held. The

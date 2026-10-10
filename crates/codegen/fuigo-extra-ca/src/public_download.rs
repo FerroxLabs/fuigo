@@ -51,7 +51,7 @@ fn validate(url: &Url) -> Result<(), DownloadError> {
             "downloads require HTTPS or loopback HTTP",
         ));
     }
-    if crate::egress::guard_enabled() && url.host_str().is_some_and(crate::egress::is_blocked_host)
+    if url.host_str().is_some_and(crate::egress::is_refused_host)
     {
         return Err(DownloadError::Policy(
             "fuigo refuses to contact upstream vendor host",

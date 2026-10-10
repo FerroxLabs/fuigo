@@ -118,6 +118,53 @@
         )
     }
 
+    /// P165: a side-effecting tool prompt (scheduler, workflow, media) renders with its own title, never as a shell command.
+    #[test]
+    fn side_effecting_tool_prompt_renders_its_title() {
+        for (raw_input, acp_title, expected_title) in [
+            (
+                serde_json::json!({"variant": "SchedulerCreate", "prompt": "run the report", "interval": "5m", "recurring": true}),
+                "Create scheduled task (every 5m)",
+                "Allow Create scheduled task (every 5m)?",
+            ),
+            (
+                serde_json::json!({"variant": "Workflow", "source": {"type": "name", "name": "ship"}}),
+                "Workflow: ship",
+                "Allow Workflow: ship?",
+            ),
+            (
+                serde_json::json!({"variant": "ImageGen", "prompt": "a cat", "aspect_ratio": "1:1"}),
+                "imagine: a cat",
+                "Allow imagine: a cat?",
+            ),
+        ] {
+            let fields = acp::ToolCallUpdateFields::new()
+                .raw_input(Some(raw_input))
+                .title(Some(acp_title.to_owned()))
+                .kind(Some(acp::ToolKind::Other));
+            let req = acp::RequestPermissionRequest::new(
+                acp::SessionId::new(std::sync::Arc::from("s1")),
+                acp::ToolCallUpdate::new(acp::ToolCallId::new(std::sync::Arc::from("call-1")), fields),
+                vec![
+                    acp::PermissionOption::new(
+                        acp::PermissionOptionId::new(std::sync::Arc::from("allow-once")),
+                        "Yes, allow once".to_string(),
+                        acp::PermissionOptionKind::AllowOnce,
+                    ),
+                    acp::PermissionOption::new(
+                        acp::PermissionOptionId::new(std::sync::Arc::from("reject-once")),
+                        "No".to_string(),
+                        acp::PermissionOptionKind::RejectOnce,
+                    ),
+                ],
+            );
+            let (title, description, command) = build_permission_display(&req, None);
+            assert_eq!(title, expected_title);
+            assert_eq!(command, None, "{acp_title} is not a shell command");
+            assert!(description.is_empty(), "{acp_title}: {description:?}");
+        }
+    }
+
     #[test]
     fn hook_ask_is_the_first_description_line_on_every_prompt_shape() {
         let ask_line = "hook 'guard' asks: confirm this";

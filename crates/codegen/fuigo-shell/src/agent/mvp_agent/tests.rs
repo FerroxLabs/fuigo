@@ -1233,7 +1233,7 @@ fn make_test_handle(
         upload_queue: Arc::new(OnceLock::new()),
         upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context: crate::tools::ToolContext::new_local_context(
-            fuigo_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap(),
+            fuigo_paths::AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap(),
             std::sync::Arc::new(fuigo_workspace::file_system::LocalFs::new(
                 std::path::PathBuf::from("/tmp"),
             )),
@@ -3110,6 +3110,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
 }
 mod list_running_heal_tests;
 mod cold_load_deferred_marker_tests;
+mod sweep_mark_load_tests;
 mod deferred_reminder_order_tests;
 mod deferred_marker_delivery_tests;
 mod p81_relay_bridge_tests;
@@ -8886,4 +8887,53 @@ async fn a_leader_mode_model_switch_still_moves_the_helper_epoch() {
     });
     assert!(result.is_ok(), "{result:?}");
     assert_ne!(agent.models_manager.helper_epoch(), before, "the switch is visible to helper clients");
+}
+
+/// Follow-up D (audit NOTE 5): the REAL `authenticate` handler, given a runtime key, reaches
+/// `ModelsManager::note_successful_sign_in`: the URL-level 401 entry on disk is gone afterwards. Mock on 127.0.0.1 only.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn authenticate_with_a_runtime_key_clears_the_model_list_wait() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use crate::agent::auth_method::FUIGO_API_KEY_METHOD_ID;
+    use crate::auth::api_key_route_memory::RouteMemory;
+    use acp::Agent as _;
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _home = EnvGuard::set("FUIGO_HOME", home.path());
+    let _lockdown = EnvGuard::unset("FUIGO_DISABLE_API_KEY_AUTH");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://127.0.0.1:{}/v1", listener.local_addr().unwrap().port());
+    drop(listener);
+    let mem = RouteMemory::models_location().expect("memory on");
+    let now = crate::auth::api_key_route_memory::unix_now();
+    for k in 0..3 {
+        mem.note_models_401(&base, &[&format!("fuigo-test-not-a-key-{k}")], now);
+    }
+    let file = home.path().join("api-key-probe-state.json");
+    let held = |f: &std::path::Path| {
+        let v: serde_json::Value = serde_json::from_slice(&std::fs::read(f).unwrap_or_default()).unwrap_or_default();
+        v["models_401_url"].as_array().map_or(0, |a| a.len())
+    };
+    assert_eq!(held(&file), 1, "precondition: the URL-level entry exists");
+    // Every endpoint points at the closed loopback port: nothing can leave this machine.
+    let agent = {
+        use crate::agent::config::Config as AgentConfig;
+        use crate::auth::{AuthManager, FuigoComConfig};
+        let tmp = tempfile::tempdir().unwrap();
+        let auth_manager = std::sync::Arc::new(AuthManager::new(tmp.path(), FuigoComConfig::default()));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut cfg = AgentConfig::default();
+        cfg.endpoints.fuigo_api_base_url = base.clone();
+        MvpAgent::new(GatewaySender::new(tx), &cfg, auth_manager, None).expect("valid test config")
+    };
+    let mut meta = serde_json::Map::new();
+    meta.insert("fuigo/apiKey".into(), serde_json::json!({"key": "fuigo-test-not-a-key-signed-in"}));
+    agent
+        .authenticate(acp::AuthenticateRequest::new(FUIGO_API_KEY_METHOD_ID).meta(meta))
+        .await
+        .expect("authenticate with a runtime key succeeds");
+    assert_eq!(held(&file), 0, "authenticate cleared the URL-level wait through note_successful_sign_in");
 }

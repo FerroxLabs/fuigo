@@ -37,12 +37,12 @@ pub struct FixArgs {
 
 pub fn run(args: DoctorArgs) -> Result<()> {
     match args.command {
-        None => run_report(args.json, &mut std::io::stdout().lock()),
+        None => run_report(args.json, &mut fuigo_tty_utils::best_effort_stdout::display_stdout()),
         Some(DoctorCommand::Fix(fix)) => run_fix(
             fix,
             std::io::stdin().is_terminal(),
             &mut std::io::stdin().lock(),
-            &mut std::io::stdout().lock(),
+            &mut fuigo_tty_utils::best_effort_stdout::display_stdout(),
         ),
     }
 }

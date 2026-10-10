@@ -216,6 +216,12 @@ enum LockAttempt {
     Failed(io::Error),
 }
 
+/// Not `WouldBlock`: Windows surfaces contention (ERROR_LOCK_VIOLATION) as `Uncategorized`.
+fn lock_is_contended(e: &std::io::Error) -> bool {
+    let contended = fs2::lock_contended_error();
+    e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
+}
+
 fn try_acquire_once(lock_path: &Path) -> LockAttempt {
     let mut file = match open_lock_file(lock_path) {
         Ok(f) => f,
@@ -270,7 +276,7 @@ fn try_acquire_once(lock_path: &Path) -> LockAttempt {
             }
         }
 
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+        Err(e) if lock_is_contended(&e) => {
             #[cfg(test)]
             CONTENDED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             LockAttempt::Busy

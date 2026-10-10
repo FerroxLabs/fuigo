@@ -115,6 +115,12 @@ fn sync_cache_locked(
     }
 }
 
+/// Not `WouldBlock`: Windows surfaces contention (ERROR_LOCK_VIOLATION) as `Uncategorized`.
+fn lock_is_contended(e: &std::io::Error) -> bool {
+    let contended = fs2::lock_contended_error();
+    e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
+}
+
 fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, String> {
     let file = OpenOptions::new()
         .read(true)
@@ -127,7 +133,7 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            Err(e) if lock_is_contended(&e) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
                         "cache lock timeout after {}s for {}",
@@ -661,6 +667,17 @@ fn fetch_reset_cached_repo(repo_dir: &Path, branch: Option<&str>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_cache_lock_times_out_with_the_timeout_message_not_a_lock_error() {
+        use fs2::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("cache.lock");
+        let holder = File::create(&lock_path).unwrap();
+        holder.lock_exclusive().unwrap();
+        let err = acquire_cache_lock(&lock_path, Duration::from_millis(200)).unwrap_err();
+        assert!(err.starts_with("cache lock timeout after"), "unexpected error: {err}");
+    }
 
     #[test]
     fn cache_hash_is_deterministic() {

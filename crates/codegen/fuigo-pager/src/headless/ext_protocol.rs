@@ -253,6 +253,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             #[serde(default)]
             signature: Option<String>,
         },
+        RedactedThinking {
+            data: String,
+        },
         /// P188: only `retrying` with `discardEmitted` matters here; every other retry state is progress the
         /// headless formats do not print.
         RetryState {
@@ -342,6 +345,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         })),
         FuigoUpdate::ReasoningCompleted { signature } => {
             ExtEvent::Stream(Box::new(StreamEvent::ReasoningCompleted { signature }))
+        }
+        FuigoUpdate::RedactedThinking { data } => {
+            ExtEvent::Stream(Box::new(StreamEvent::RedactedThinking { data }))
         }
         FuigoUpdate::ResponseCompleted {
             message_id,

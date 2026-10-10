@@ -159,6 +159,14 @@ pub fn resolve_hints(
     user: Option<&TomlValue>,
     managed: Option<&TomlValue>,
 ) -> ResolvedHints {
+    // P183 round 8: an admin policy file that is broken with no validated copy could have pinned these preferences; the most
+    // conservative value (never open a worktree on its own) applies, not the default
+    if !fuigo_config::broken_admin_files().is_empty() {
+        return ResolvedHints {
+            new_session_worktree_mode: WorktreeHintMode::Never,
+            fork_worktree_mode: WorktreeHintMode::Never,
+        };
+    }
     let root = effective_config
         .cloned()
         .unwrap_or_else(|| merge_hints_config_layers(requirements, user, managed));
@@ -351,5 +359,26 @@ mod tests {
                 && !resolved.export_copy
         );
         unsafe { std::env::remove_var(ENV_CONTEXTUAL_HINTS) };
+    }
+}
+
+#[cfg(test)]
+mod admin_source_tests_p183r10 {
+    use super::*;
+    use crate::util::config::admin_seam_test_support as seam;
+
+    /// A broken admin file or MDM payload with no validated copy: the conservative hint value, not the user's.
+    #[test]
+    fn broken_admin_source_pins_worktree_hints_to_never_p183r10() {
+        let user: TomlValue = toml::from_str("[hints]\nfork_worktree_mode = \"always\"\n").unwrap();
+        for make in [seam::broken_file, seam::undecodable_mdm, seam::mdm_with_bad_overrides] {
+            let _seam = make();
+            let r = resolve_hints(None, None, Some(&user), None);
+            assert_eq!(r.fork_worktree_mode, WorktreeHintMode::Never);
+            assert_eq!(r.new_session_worktree_mode, WorktreeHintMode::Never);
+        }
+        let _ok = seam::healthy();
+        let r = resolve_hints(None, None, Some(&user), None);
+        assert_ne!(r.fork_worktree_mode, WorktreeHintMode::Never);
     }
 }

@@ -244,7 +244,7 @@ async fn mixed_permission_cancel_skips_exit_reverse_request() {
                 .await;
 
             let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
-                .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
+                .unwrap_or_else(|_| AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap());
             let (perms, _ev) = spawn_permission_manager(
                 actor.session_info.id.clone(),
                 fuigo_acp_lib::AcpAgentGatewaySender::new(gateway_tx),

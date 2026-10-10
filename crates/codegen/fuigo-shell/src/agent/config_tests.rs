@@ -392,6 +392,9 @@ fn new_from_toml_cfg_restores_web_search_and_session_summary_models() {
 }
 #[test]
 fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
+    // The session token is attached only to a trusted origin; the process-wide trust set is seeded by whichever test
+    // runs first, so a lone or early run saw an empty set and no token. Seed it (same set every caller installs).
+    crate::agent::config::Config::install_test_trusted_origins();
     let endpoints = EndpointsConfig::default();
     let resolved = resolve_web_search_sampling_config(
         crate::models::default_web_search_model(),
@@ -400,7 +403,7 @@ fn hidden_default_web_search_resolution_is_explicit_and_responses_only() {
         false,
         None,
         None,
-        &endpoints,
+        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("hidden default web search model should resolve");
     assert_eq!(resolved.model, crate::models::default_web_search_model());
@@ -469,6 +472,7 @@ fn resolve_aux_model_honors_fuigo_build_override() {
         false,
         None,
         None,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("override entry has an API key, so resolution succeeds");
     assert_eq!(resolved.model, "v9m-rl-learnability-tp8");
@@ -504,6 +508,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
             false,
             None,
             None,
+            &crate::agent::models::EffectiveAllowlist::Unrestricted,
         )
         .is_none(),
         "cold provider cache must not reroute the aux model through the Ferrox Labs proxy"
@@ -517,6 +522,7 @@ async fn aux_model_with_auth_provider_never_reroutes() {
         false,
         None,
         None,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("warm cache resolves");
     assert_eq!(resolved.base_url, "https://litellm.example/v1");
@@ -599,7 +605,7 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
             false,
             None,
             None,
-            &endpoints,
+            &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
         )
         .is_none(),
         "a cold provider cache must disable web search, not send an unauthenticated request"
@@ -612,7 +618,7 @@ async fn web_search_with_auth_provider_requires_warm_cache() {
         false,
         None,
         None,
-        &endpoints,
+        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("warm cache resolves");
     assert_eq!(resolved.api_key.as_deref(), Some("ws-token"));
@@ -831,7 +837,7 @@ fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
         true,
         None,
         None,
-        &endpoints,
+        &endpoints, &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("web search model should resolve");
     assert_eq!(
@@ -8694,6 +8700,7 @@ fn subscription_explicit_local_helper_keeps_its_route_and_a_default_one_does_not
         false,
         None,
         None,
+        &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("the helper resolves from the catalog");
     let active = SamplerConfig {
@@ -8782,7 +8789,7 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
         false,
         None,
         None,
-        HelperModelChoice::Explicit,
+        HelperModelChoice::Explicit, &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("an explicit keyless local helper resolves to its own route");
     assert_eq!(explicit.base_url, "http://127.0.0.1:11434/v1");
@@ -8814,7 +8821,7 @@ fn explicit_keyless_local_helper_keeps_its_own_route_without_a_credential() {
         false,
         None,
         None,
-        HelperModelChoice::Default,
+        HelperModelChoice::Default, &crate::agent::models::EffectiveAllowlist::Unrestricted,
     )
     .expect("a default falls through to the inference route");
     assert_ne!(default.base_url, "http://127.0.0.1:11434/v1");
@@ -9413,4 +9420,77 @@ fn p70a_model_extra_header_naming_the_first_party_key_is_not_resolved_from_the_s
     let sent = sampler.extra_headers.get("X-P70a-Key").cloned();
     set_stored_api_key(None, false);
     assert_eq!(sent.as_deref(), Some("Bearer ${FUIGO_API_KEY}"), "an extra_headers reference was resolved");
+}
+
+fn plugins_lenient(src: &str) -> (PluginsConfig, Vec<String>) {
+    let v: toml::Value = toml::from_str(src).expect("parse");
+    PluginsConfig::from_config_lenient(&v)
+}
+
+#[test]
+fn p157_malformed_paths_keeps_disabled_and_names_field() {
+    let (cfg, warnings) = plugins_lenient("[plugins]\npaths = \"not-a-list\"\ndisabled = [\"kept\"]\n");
+    assert_eq!(cfg.disabled, vec!["kept".to_owned()]);
+    assert!(cfg.paths.is_empty());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("paths"), "{warnings:?}");
+}
+
+#[test]
+fn p157_malformed_enabled_keeps_disabled_and_paths() {
+    let (cfg, warnings) =
+        plugins_lenient("[plugins]\nenabled = 7\npaths = [\"/p\"]\ndisabled = [\"kept\"]\n");
+    assert_eq!(cfg.disabled, vec!["kept".to_owned()]);
+    assert_eq!(cfg.paths, vec!["/p".to_owned()]);
+    assert!(cfg.enabled.is_empty());
+    assert!(warnings.iter().any(|w| w.contains("enabled")), "{warnings:?}");
+}
+
+#[test]
+fn p157_malformed_disabled_does_not_drop_other_fields() {
+    let (cfg, warnings) =
+        plugins_lenient("[plugins]\ndisabled = true\nenabled = [\"e\"]\nauto_discover = false\n");
+    assert_eq!(cfg.enabled, vec!["e".to_owned()]);
+    assert_eq!(cfg.auto_discover, Some(false));
+    assert!(warnings.iter().any(|w| w.contains("disabled")), "{warnings:?}");
+}
+
+#[test]
+fn p157_non_string_entry_is_skipped_not_fatal() {
+    let (cfg, warnings) = plugins_lenient("[plugins]\ndisabled = [\"a\", 3, \"b\"]\n");
+    assert_eq!(cfg.disabled, vec!["a".to_owned(), "b".to_owned()]);
+    assert!(warnings.iter().any(|w| w.contains("disabled")), "{warnings:?}");
+}
+
+#[test]
+fn p157_bad_auto_discover_is_named_and_ignored() {
+    let (cfg, warnings) = plugins_lenient("[plugins]\nauto_discover = \"no\"\ndisabled = [\"d\"]\n");
+    assert_eq!(cfg.auto_discover, None);
+    assert_eq!(cfg.disabled, vec!["d".to_owned()]);
+    assert!(warnings.iter().any(|w| w.contains("auto_discover")), "{warnings:?}");
+}
+
+#[test]
+fn p157_wellformed_and_absent_tables_have_no_warnings() {
+    let (cfg, w) = plugins_lenient("[plugins]\npaths = [\"/p\"]\ndisabled = [\"d\"]\nenabled = [\"e\"]\n");
+    assert!(w.is_empty());
+    assert_eq!((cfg.paths.len(), cfg.disabled.len(), cfg.enabled.len()), (1, 1, 1));
+    let (cfg, w) = plugins_lenient("x = 1\n");
+    assert!(w.is_empty() && cfg.disabled.is_empty());
+    let (_, w) = plugins_lenient("plugins = 3\n");
+    assert_eq!(w.len(), 1);
+}
+
+/// P183 round 7 (sweep): every `features.telemetry` string fuigo-config accepts as a pin parses as a mode here, and the
+/// strings it refuses do not (an unknown string was an ignored pin that env could override).
+#[test]
+fn config_telemetry_mode_strings_parse_p183r7() {
+    for s in fuigo_config::TELEMETRY_MODE_STRINGS {
+        assert!(TelemetryMode::parse(s).is_some(), "{s}");
+        assert!(TelemetryMode::parse(&s.to_ascii_uppercase()).is_some(), "{s}");
+    }
+    for s in ["offf", "session", "metrics", "", "2"] {
+        assert!(TelemetryMode::parse(s).is_none(), "{s}");
+        assert!(!fuigo_config::TELEMETRY_MODE_STRINGS.contains(&s), "{s}");
+    }
 }

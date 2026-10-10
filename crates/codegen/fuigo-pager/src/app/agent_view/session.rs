@@ -40,6 +40,18 @@ impl AgentView {
             self.clear_minimal_btw_lifecycle();
         }
         self.session.session_id = Some(session_id);
+        self.load_failed = false;
+    }
+    /// Take a new load attempt number for this agent; the load task echoes it on its result.
+    /// Only the latest attempt's result may change the tab, so a late result of an earlier one cannot undo a newer load.
+    pub(crate) fn begin_load_attempt(&mut self) -> u64 {
+        self.load_attempt += 1;
+        self.load_attempt
+    }
+    /// Whether a load result belongs to an attempt that a later one superseded.
+    /// `0` is the unstamped value that tests build by hand; no production load takes it.
+    pub(crate) fn load_result_is_stale(&self, attempt: u64) -> bool {
+        attempt != 0 && attempt != self.load_attempt
     }
     /// Advance the reconnect cursor forward-only. Stores the raw id and its parsed sequence together so later compares need not re-parse the string.
     ///
@@ -373,6 +385,8 @@ impl AgentView {
             rewind_suppress_deadline: None,
             pending_first_prompt: None,
             pending_fork_banner: None,
+            load_failed: false,
+            load_attempt: 0,
             loading_placeholder_id: None,
             pending_recap_entry: None,
             display_name: None,
@@ -563,6 +577,8 @@ impl AgentView {
     /// Open a reconnect reload window: stash the current transcript/tracker and point the live fields at fresh state for the `session/load` replay.
     /// The transcript is NOT cleared; it stays recoverable until [`finish_session_reload`](Self::finish_session_reload) decides the outcome.
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
+        // A reconnect load takes the agent over: a still-running `LoadSession` task of an earlier attempt is now stale
+        self.begin_load_attempt();
         self.dismiss_jump_picker();
         if let Some(prev) = self.session_reload.take() {
             tracing::warn!(
@@ -794,6 +810,12 @@ impl AgentView {
         running_prompt_id: Option<String>,
     ) -> bool {
         let finalized = self.finish_session_reload(generation, ok);
+        // The new leader never loaded this session: the tab must not stay bound to it,
+        // or `/resume` would call it open and the next submit would send into it
+        if finalized && !ok {
+            crate::app::dispatch::fail_agent_after_failed_reconnect(self);
+            return finalized;
+        }
         if finalized
             && let Some(pid) = running_prompt_id
             && self.should_adopt_running_prompt(&pid)

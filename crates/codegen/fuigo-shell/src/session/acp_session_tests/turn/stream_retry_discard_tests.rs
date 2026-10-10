@@ -26,6 +26,10 @@ enum Wire {
     Thought { text: String, mirror: bool },
     /// `_fuigo/session_notification` `retry_state`.
     Retry(RetryState),
+    /// `tool_call` (P201): a row the client now shows, with its status.
+    ToolCall { id: String, status: acp::ToolCallStatus },
+    /// `tool_call_update` (P201) carrying a status.
+    ToolUpdate { id: String, status: acp::ToolCallStatus },
 }
 
 type Captured = Arc<std::sync::Mutex<Vec<Wire>>>;
@@ -55,6 +59,16 @@ fn capture(
                             }),
                             _ => None,
                         },
+                        acp::SessionUpdate::ToolCall(call) => Some(Wire::ToolCall {
+                            id: call.tool_call_id.0.to_string(),
+                            status: call.status,
+                        }),
+                        acp::SessionUpdate::ToolCallUpdate(upd) => {
+                            upd.fields.status.map(|status| Wire::ToolUpdate {
+                                id: upd.tool_call_id.0.to_string(),
+                                status,
+                            })
+                        }
                         _ => None,
                     };
                     let _ = args.response_tx.send(Ok(()));
@@ -331,6 +345,218 @@ fn p188_empty_completed_output_uses_output_item_done_without_a_retry() {
                 actor.chat_state_handle.get_trailing_assistant_report().await.as_deref(),
                 Some("Hello there")
             );
+        })
+    });
+}
+
+// ── P201: hosted tools (web_search, x_search, code_interpreter) inside a failed attempt ──
+
+#[derive(Clone, Copy, Debug)]
+enum Hosted {
+    WebSearch,
+    CodeInterpreter,
+    XSearch,
+}
+
+impl Hosted {
+    /// The Responses frames of one hosted run: the start frame and (when `finished`) its `output_item.done`.
+    fn frames(self, id: &str, finished: bool) -> Vec<SseEvent> {
+        let (start, done) = match self {
+            Hosted::WebSearch => (
+                serde_json::json!({"type":"response.web_search_call.in_progress","sequence_number":10,
+                    "output_index":1,"item_id":id}),
+                serde_json::json!({"type":"web_search_call","id":id,"status":"completed",
+                    "action":{"type":"search","query":"q","sources":[]}}),
+            ),
+            Hosted::CodeInterpreter => (
+                serde_json::json!({"type":"response.code_interpreter_call.in_progress","sequence_number":10,
+                    "output_index":1,"item_id":id}),
+                serde_json::json!({"type":"code_interpreter_call","id":id,"status":"completed",
+                    "code":"print(1)","container_id":"cont_1","outputs":null}),
+            ),
+            Hosted::XSearch => (
+                serde_json::json!({"type":"response.custom_tool_call_input.done","sequence_number":10,
+                    "output_index":1,"item_id":id,"input":"{}"}),
+                serde_json::json!({"type":"custom_tool_call","call_id":"call_x","name":"x_keyword_search",
+                    "input":"{}","id":id}),
+            ),
+        };
+        let mut frames = vec![SseEvent::data(start.to_string())];
+        if finished {
+            frames.push(SseEvent::data(
+                serde_json::json!({"type":"response.output_item.done","sequence_number":11,
+                    "output_index":1,"item":done})
+                .to_string(),
+            ));
+        }
+        frames
+    }
+}
+
+/// `text`'s stream with `hosted` frames after `response.created`; `die` drops `response.completed` and `[DONE]`.
+/// An empty `text` keeps only the hosted frames.
+fn with_hosted(text: &str, hosted: Vec<SseEvent>, die: bool) -> ScriptedResponse {
+    let mut events = sse::responses_api_script_exact(text, "test");
+    if die {
+        events.truncate(events.len() - 2);
+    }
+    if text.is_empty() {
+        events.truncate(1);
+    }
+    let tail = events.split_off(1);
+    events.extend(hosted);
+    events.extend(tail);
+    ScriptedResponse::sse(events)
+}
+
+fn tool_ix(wire: &[Wire], want: &Wire) -> usize {
+    wire.iter().position(|w| w == want).unwrap_or_else(|| panic!("{want:?} missing in {wire:?}"))
+}
+
+fn count(wire: &[Wire], want: &Wire) -> usize {
+    wire.iter().filter(|w| *w == want).count()
+}
+
+/// Status each row ends on, in first-seen order: a spinning row is one whose last status is `InProgress`.
+fn spinning(wire: &[Wire]) -> Vec<String> {
+    let mut last: Vec<(String, acp::ToolCallStatus)> = Vec::new();
+    for w in wire {
+        let (id, status) = match w {
+            Wire::ToolCall { id, status } | Wire::ToolUpdate { id, status } => (id, status),
+            _ => continue,
+        };
+        match last.iter_mut().find(|(i, _)| i == id) {
+            Some(slot) => slot.1 = *status,
+            None => last.push((id.clone(), *status)),
+        }
+    }
+    last.into_iter()
+        .filter(|(_, s)| matches!(s, acp::ToolCallStatus::InProgress))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn call(id: &str, status: acp::ToolCallStatus) -> Wire {
+    Wire::ToolCall { id: id.into(), status }
+}
+
+fn update(id: &str, status: acp::ToolCallStatus) -> Wire {
+    Wire::ToolUpdate { id: id.into(), status }
+}
+
+async fn run_two_attempts(first: ScriptedResponse, second: ScriptedResponse) -> Vec<Wire> {
+    let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+        .await
+        .expect("mock inference server");
+    server.enqueue_response("/v1/responses", first);
+    server.enqueue_response("/v1/responses", second);
+    let policy = fuigo_sampler::RetryPolicy {
+        max_retries: fuigo_sampler::DEFAULT_MAX_RETRIES,
+        ..Default::default()
+    };
+    let (outcome, wire, _actor) = run(&server, policy).await;
+    assert!(outcome.is_ok(), "the second attempt completes the turn: {:?}", outcome.as_ref().err());
+    wire
+}
+
+/// Attempt 1 starts a hosted tool and dies with nothing else on screen; attempt 2 runs its own and answers.
+async fn hosted_row_only_case(kind: Hosted) {
+    let wire = run_two_attempts(
+        with_hosted("", kind.frames("h1", false), true),
+        with_hosted("A2", kind.frames("h2", true), false),
+    )
+    .await;
+    let d = discards(&wire);
+    assert_eq!(d.len(), 1, "exactly one retry notice with discardEmitted: {wire:?}");
+    let row = tool_ix(&wire, &call("h1", acp::ToolCallStatus::InProgress));
+    let closed = tool_ix(&wire, &update("h1", acp::ToolCallStatus::Failed));
+    let second = tool_ix(&wire, &call("h2", acp::ToolCallStatus::InProgress));
+    assert!(
+        row < d[0] && d[0] < closed && closed < second,
+        "order: hosted row, the discard notice, the row's terminal update, then the resend's rows: {wire:?}"
+    );
+    assert_eq!(count(&wire, &update("h1", acp::ToolCallStatus::Failed)), 1, "closed once: {wire:?}");
+    assert_eq!(texts(&wire), "A2", "the answer is shown once: {wire:?}");
+    assert!(spinning(&wire).is_empty(), "no row is left spinning: {wire:?}");
+}
+
+#[test]
+fn p201_web_search_row_of_a_failed_attempt_is_closed_after_the_discard() {
+    on_session_stack(|| run_paused(|| hosted_row_only_case(Hosted::WebSearch)));
+}
+
+#[test]
+fn p201_code_interpreter_row_of_a_failed_attempt_is_closed_after_the_discard() {
+    on_session_stack(|| run_paused(|| hosted_row_only_case(Hosted::CodeInterpreter)));
+}
+
+#[test]
+fn p201_x_search_row_of_a_failed_attempt_is_closed_after_the_discard() {
+    on_session_stack(|| run_paused(|| hosted_row_only_case(Hosted::XSearch)));
+}
+
+/// Row and text in the dead attempt: still one notice, every row closed, and the text voided.
+#[test]
+fn p201_hosted_row_and_text_in_a_failed_attempt_get_one_notice_and_all_rows_closed() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let wire = run_two_attempts(
+                with_hosted("A1", Hosted::WebSearch.frames("h1", false), true),
+                complete("A2"),
+            )
+            .await;
+            let d = discards(&wire);
+            assert_eq!(d.len(), 1, "one notice for the failed attempt: {wire:?}");
+            assert_eq!(
+                wire.iter().filter(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))).count(),
+                1,
+                "never told twice: {wire:?}"
+            );
+            let closed = tool_ix(&wire, &update("h1", acp::ToolCallStatus::Failed));
+            assert!(d[0] < closed, "the row is closed right after the notice that voids its attempt: {wire:?}");
+            assert!(index_of_text(&wire, "A1") < d[0] && d[0] < index_of_text(&wire, "A2"), "{wire:?}");
+            assert_eq!(visible_reply(&wire), "A2", "{wire:?}");
+            assert!(spinning(&wire).is_empty(), "{wire:?}");
+        })
+    });
+}
+
+/// Attempt 1 dies before any event: no discard, no terminal update (guards against over-marking).
+#[test]
+fn p201_a_failed_attempt_with_no_event_sends_no_discard_and_closes_nothing() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let wire = run_two_attempts(with_hosted("", vec![], true), complete("A2")).await;
+            assert!(wire.iter().any(|w| matches!(w, Wire::Retry(RetryState::Retrying { .. }))), "{wire:?}");
+            assert!(discards(&wire).is_empty(), "nothing was shown, nothing to discard: {wire:?}");
+            assert!(
+                !wire.iter().any(|w| matches!(w, Wire::ToolCall { .. } | Wire::ToolUpdate { .. })),
+                "no tool rows at all: {wire:?}"
+            );
+            assert_eq!(texts(&wire), "A2");
+        })
+    });
+}
+
+/// A hosted run that finished inside the failed attempt is already terminal: no second terminal update.
+#[test]
+fn p201_a_hosted_row_that_completed_in_the_failed_attempt_is_not_closed_again() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let wire = run_two_attempts(
+                with_hosted("", Hosted::WebSearch.frames("h1", true), true),
+                complete("A2"),
+            )
+            .await;
+            let d = discards(&wire);
+            assert_eq!(d.len(), 1, "the finished row is still on screen, so the notice discards: {wire:?}");
+            let terminal = wire
+                .iter()
+                .filter(|w| matches!(w, Wire::ToolUpdate { id, .. } if id == "h1"))
+                .count();
+            assert_eq!(terminal, 1, "exactly the run's own terminal update, none added: {wire:?}");
+            assert_eq!(count(&wire, &update("h1", acp::ToolCallStatus::Failed)), 0, "{wire:?}");
+            assert!(spinning(&wire).is_empty(), "{wire:?}");
         })
     });
 }

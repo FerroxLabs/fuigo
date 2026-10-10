@@ -106,6 +106,9 @@ pub struct HeadlessOptions {
 /// SIGINT/SIGTERM. `3` is the lowest free code; it avoids the shell's `126`/`127` ("cannot
 /// execute") and stays clear of the `128+n` signal range.
 pub const PERMISSION_DENIED_EXIT_CODE: i32 = 3;
+/// Display columns of the denial line's title and call-id fields (counted after delimiter escaping).
+const DENIAL_TITLE_MAX_COLUMNS: usize = 120;
+const DENIAL_ID_MAX_COLUMNS: usize = 64;
 
 /// Which rule refused a headless permission request.
 ///
@@ -245,9 +248,14 @@ impl HeadlessDenial {
         if self.is_budget() {
             return "the next model request".to_string();
         }
+        // Both fields are the agent's text: scrubbed strictly, each by itself, with every delimiter and look-alike
+        // escaped (one helper, `fuigo_tty_utils::curly_quoted` / `bracketed`) before they join the trusted line.
+        let call_id = fuigo_tty_utils::bracketed(&self.tool_call_id, DENIAL_ID_MAX_COLUMNS);
         match self.tool_title.as_deref() {
-            Some(title) if !title.is_empty() => format!("{title} (tool call {})", self.tool_call_id),
-            _ => format!("tool call {}", self.tool_call_id),
+            Some(title) if !title.is_empty() => {
+                format!("{} (tool call {call_id})", fuigo_tty_utils::curly_quoted(title, DENIAL_TITLE_MAX_COLUMNS))
+            }
+            _ => format!("tool call {call_id}"),
         }
     }
 
@@ -260,13 +268,13 @@ impl HeadlessDenial {
             let detail = self
                 .agent_message
                 .as_deref()
-                .map(|m| format!(" Agent message: {}", m.split_whitespace().collect::<Vec<_>>().join(" ")))
+                .map(|m| format!(" Agent message: {}", fuigo_tty_utils::Untrusted(m.split_whitespace().collect::<Vec<_>>().join(" "))))
                 .unwrap_or_default();
             return format!(
                 "fuigo: blocked — an execution budget refused {}. \
                  Denied by rule `{}`. Remedy: {}. Exiting {}.{detail}",
                 self.requested(),
-                self.rule.id(),
+                fuigo_tty_utils::Untrusted(self.rule.id()),
                 self.rule.remedy(),
                 self.exit_code(),
             );
@@ -275,7 +283,7 @@ impl HeadlessDenial {
             "fuigo: blocked — permission denied in headless mode: {}. \
              Denied by rule `{}`. Remedy: {}. Exiting {}.",
             self.requested(),
-            self.rule.id(),
+            fuigo_tty_utils::Untrusted(self.rule.id()),
             self.rule.remedy(),
             self.exit_code(),
         )
@@ -293,7 +301,7 @@ impl HeadlessDenial {
             "fuigo: a permission was denied in headless mode and the run continued: {}. \
              Denied by rule `{}`. Remedy: {}.",
             self.requested(),
-            self.rule.id(),
+            fuigo_tty_utils::Untrusted(self.rule.id()),
             self.rule.remedy(),
         )
     }
@@ -425,6 +433,9 @@ struct HeadlessEmitter {
     /// Where the wire output goes. Production is stdout; tests capture the bytes so the terminal
     /// document a machine consumer actually reads can be asserted on.
     out: Box<dyn std::io::Write + Send>,
+    /// Whether the bytes are display text for a terminal (plain format with stdout on a tty): the model's text is
+    /// untrusted, so it goes through the shared terminal filter. Every machine format and a piped stream stay exact.
+    scrub_terminal: bool,
     /// Latched once stdout is unwritable so later writes are dropped instead of panicking.
     output_closed: bool,
     /// First hard stdout IO error (not a broken pipe), surfaced so the process exits non-zero.
@@ -450,7 +461,12 @@ struct HeadlessEmitter {
 
 impl HeadlessEmitter {
     fn new(format: OutputFormat, parse_structured_output: bool) -> Self {
-        Self::with_writer(format, parse_structured_output, Box::new(std::io::stdout()))
+        use std::io::IsTerminal;
+        let mut emitter =
+            Self::with_writer(format, parse_structured_output, Box::new(std::io::stdout()));
+        emitter.scrub_terminal =
+            matches!(format, OutputFormat::Plain) && std::io::stdout().is_terminal();
+        emitter
     }
 
     fn with_writer(
@@ -474,6 +490,7 @@ impl HeadlessEmitter {
             reducer: reducer_for(format),
             prompt_started: None,
             out,
+            scrub_terminal: false,
             output_closed: false,
             write_error: None,
             permission_denial: None,
@@ -489,6 +506,13 @@ impl HeadlessEmitter {
             return Ok(());
         }
         use std::io::Write as _;
+        let scrubbed;
+        let bytes = if self.scrub_terminal {
+            scrubbed = fuigo_tty_utils::scrub_terminal_text(&String::from_utf8_lossy(bytes)).into_owned();
+            scrubbed.as_bytes()
+        } else {
+            bytes
+        };
         let mut result = self.out.write_all(bytes);
         if flush && result.is_ok() {
             result = self.out.flush();
@@ -639,7 +663,13 @@ impl HeadlessEmitter {
             return;
         }
         let pending = std::mem::take(&mut self.plain_pending);
-        let _ = self.write_out(pending.as_bytes(), true);
+        // On a terminal the whole response is scrubbed in one piece (every chunk already joined, so a sequence split
+        // across chunks is judged whole): model text cannot emit any escape sequence, only newline and tab layout.
+        let _ = if self.scrub_terminal {
+            self.write_out(fuigo_tty_utils::scrub_model_text(&pending).as_bytes(), true)
+        } else {
+            self.write_out(pending.as_bytes(), true)
+        };
     }
 
     /// Fold one event through the reducer and emit its lines; a no-op for `plain`/`json`.
@@ -1919,7 +1949,9 @@ async fn run_single_turn_inner(
     };
 
     if options.trust {
-        fuigo_workspace::folder_trust::grant_folder_trust(&cwd);
+        fuigo_workspace::folder_trust::report_cli_trust_grant(
+            &fuigo_workspace::folder_trust::grant_folder_trust(&cwd),
+        );
     }
 
     let cancel = CancellationToken::new();
@@ -2338,10 +2370,9 @@ async fn run_single_turn_inner(
     // A signal that lands while the awaits below run is reported by the wrapper once the turn is
     // finalized; one that landed after the race is left latched and the run finishes (completion wins).
     if connection_closed {
-        return Err(connection_closed_error(
-            emitter,
-            &mut std::io::stderr(),
-        ));
+        // One lock for the whole line: `Stderr::write` locks per call, and a long notice is written in chunks.
+        let mut err = std::io::stderr().lock();
+        return Err(connection_closed_error(emitter, &mut err));
     }
     let outcome = finish_turn(
         emitter,
@@ -2426,7 +2457,9 @@ fn connection_closed_error(
     w: &mut impl std::io::Write,
 ) -> anyhow::Error {
     if let Some(denial) = emitter.take_permission_denial() {
-        crate::best_effort_stderr::write_line(w, &denial.notice_line());
+        // The writer is the caller's, so the line gets the terminal filter here; the tool title in it is the agent's text
+        let line = denial.notice_line();
+        crate::best_effort_stderr::write_fuigo_line(w, &line);
     }
     anyhow::anyhow!("Connection closed unexpectedly")
 }
@@ -2575,7 +2608,37 @@ fn finish_turn(
                 // the denial's one line (D.2.3): a second line here would be two. A rule this build
                 // does not know has no remedy of its own, so the agent's message — which names the
                 // rule and its remedy — rides on that same line (`HeadlessDenial::agent_message`).
-                if emitter.format != OutputFormat::Plain {
+                let answer_completed = err
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("answer_completed"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                if emitter.format != OutputFormat::Plain && answer_completed {
+                    // P195 (K25, Grok r1): the answer COMPLETED and its spend then reached the goal's budget. The run
+                    // still ends with exit 3, but its one terminal document is the normal result carrying the answer
+                    // and the typed denial, as on the timeout path: never the `type:error` document without the text.
+                    if emitter.parse_structured_output
+                        && let Some(so) = err.data.as_ref().and_then(|d| d.get("answer_structured_output"))
+                    {
+                        emitter.structured_output = if let Some(v) = so.get("value") {
+                            Some(Ok(v.clone()))
+                        } else {
+                            so.get("error").and_then(|e| e.as_str()).map(|e| {
+                                Err(fuigo_telemetry::sent_credentials::scrub_owned(e.to_string()))
+                            })
+                        };
+                    }
+                    if emitter.format == OutputFormat::StreamingMessagesJson {
+                        // Grok r2: the Messages stream has no `permissionDenied` field, so the one `result`
+                        // line is the denial: `is_error`, `errors[]` the agent's text (as the no-answer path),
+                        // `stop_reason` null (empty), and `result` still the answer.
+                        let text = fuigo_shell::sampling::error::acp_error_text(&err);
+                        emitter.on_end("", session_id.0.as_ref(), "", Some(&text));
+                    } else {
+                        emitter.on_end("end_turn", session_id.0.as_ref(), "", None);
+                    }
+                } else if emitter.format != OutputFormat::Plain {
                     emitter.on_error(&fuigo_shell::sampling::error::acp_error_text(&err), None);
                 } else {
                     // P188 (Astra r1): the reply text held for the response still reaches stdout

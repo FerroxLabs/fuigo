@@ -16,22 +16,25 @@ use crate::permission::auto_mode::{
 use crate::permission::bash_command_splitting::{
     is_setup_command, try_parse_shell, try_parse_word_only_commands_sequence, unwrap_wrappers,
 };
+use crate::permission::branch_switch::{BranchSwitchPlan, GitTreeLister, TreeLister, plan_keeps_floor};
 use crate::permission::exec_risk::{
     AmbientScanPlan, SAFE_GIT_SUBCOMMANDS, ambient_exec_risk_from_plan,
-    ambient_scan_plan_from_segments, git_words_are_read_only_query,
+    ambient_scan_plan_from_segments, branch_switch_plan_with, git_words_are_read_only_query,
     git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
 };
-use crate::permission::gate_preflight::GatePreflight;
+use crate::permission::gate_preflight::{EditTargetSpellings, GatePreflight};
+use std::path::Path;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome, PromptOutcomeKind};
 use crate::permission::shell_access::{
     command_write_paths_split, edit_target_protection, is_creation_program, is_safe_write_sink,
-    script_has_cwd_change, tree_has_opaque_shell, words_are_opaque_shell,
+    tree_has_opaque_shell, words_are_opaque_shell,
 };
 use crate::permission::state::{PermissionState, persist_state, replace_state_on_disk};
 use crate::permission::types::{
-    AccessKind, ClientType, Decision, EditPolicy, PermissionCommand, PermissionEvent,
-    PermissionRequest, PermissionResolution, PromptPolicy,
+    AccessKind, ClientType, Decision, EditPolicy, EditTargets, PermissionCommand, PermissionEvent,
+    PermissionRequest, PermissionResolution, PromptPolicy, describe_edit_targets,
+    describe_read_targets,
 };
 use fuigo_mcp::servers::parse_mcp_qualified_name;
 use fuigo_paths::AbsPathBuf;
@@ -40,6 +43,40 @@ use fuigo_tools::implementations::fuigo_build::web_fetch::{
 };
 use fuigo_tools::types::resources::resolve_model_path;
 
+#[cfg(test)]
+mod apply_patch_target_tests;
+#[cfg(test)]
+mod read_target_tests;
+#[cfg(test)]
+mod p166_r7_tests;
+#[cfg(test)]
+mod p166_r7_sweep_tests;
+#[cfg(test)]
+mod p166_r8_tests;
+#[cfg(test)]
+mod p166_r8_sweep_tests;
+#[cfg(test)]
+mod p166_r8b_tests;
+#[cfg(test)]
+mod p166_r9_tests;
+#[cfg(test)]
+mod p166_r9_fp_tests;
+#[cfg(test)]
+mod p166_r10_tests;
+#[cfg(test)]
+mod p166_r11_tests;
+#[cfg(test)]
+mod p166_r12_tests;
+#[cfg(test)]
+mod p166_r12_fp_tests;
+#[cfg(test)]
+mod p166_r13_tests;
+#[cfg(test)]
+mod p166_r13b_tests;
+#[cfg(test)]
+pub(crate) mod p166_r13b_branch_tests;
+#[cfg(test)]
+mod p175_tests;
 mod bash_grants;
 pub mod reasons;
 mod request_classification;
@@ -590,10 +627,10 @@ struct BashEvaluation {
     redirect_write: bool,
     /// Raw segment word lists for ambient cwd tracking (git present, flags clean).
     ambient_segments: Option<Vec<Vec<String>>>,
-    /// `mkdir`/`touch` operands for the manager's protected-target floor.
-    creation_paths: Vec<String>,
-    /// Script has an in-scope `cd`/`pushd`/`popd`, so relative operands cannot be pinned.
-    has_cwd_change: bool,
+    /// Every write target (redirects, writer operands, `mkdir`/`touch` operands, directory-destination writes) with its
+    /// position and the script's cwd changes, for the manager's protected-target floor.
+    /// P166/S5: before, only `mkdir`/`touch` operands reached it, so `echo … > ~/.fuigo/mcp.json` was not a protected edit.
+    write_facts: crate::permission::shell_access::ShellWriteFacts,
 }
 
 fn unparseable_exec_risk(cmd: &str) -> bool {
@@ -624,6 +661,23 @@ fn raw_deny_rejection(cmd: &str, state: &PermissionState) -> Option<SegmentEvalu
         })
 }
 
+/// The protected-edit reason for a Bash request's write targets (P166/S5), resolved like the edit tools resolve paths.
+fn bash_protected_write_target(
+    evaluation: &BashEvaluation,
+    real_cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+    evaluation
+        .write_facts
+        .protection(real_cwd, |base, path| {
+            if base == real_cwd {
+                resolve_model_path(base, display_cwd, path)
+            } else {
+                resolve_model_path(base, None, path)
+            }
+        })
+}
+
 /// Parse and classify one Bash request once.
 /// Ordinary segment outcome stays separate from the script-level real-file-write and unsafe-environment floors.
 fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> BashEvaluation {
@@ -643,25 +697,31 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             assessment,
             redirect_write: true,
             ambient_segments: None,
-            creation_paths: Vec::new(),
-            has_cwd_change: false,
+            write_facts: Default::default(),
         };
     };
     let writes = command_write_paths_split(tree.root_node(), cmd);
-    let has_cwd_change = script_has_cwd_change(tree.root_node(), cmd);
+    let write_facts =
+        crate::permission::shell_access::ShellWriteFacts::from_tree(tree.root_node(), cmd);
     // An unextractable write-redirect target (`> $OUT`) is a write nothing can vouch for: it both counts as FileWrite and pins `redirect_write`
     let redirect_write = writes.unextracted_write_redirect
         || writes
             .redirect_paths
             .iter()
             .any(|path| !is_safe_write_sink(path));
+    // P166 r8B: a branch switch, `pull`, `stash pop`, ... rewrites unspecified working-tree files: the ordinary FileWrite floor
     if redirect_write
+        || writes.worktree_rewrite
         || writes
             .word_paths
             .iter()
             .any(|path| !is_safe_write_sink(path))
     {
         assessment.insert(Finding::FileWrite);
+    }
+    // P166 r9: `GIT_DIR=`/`GIT_WORK_TREE=`/`GIT_EXEC_PATH=`/... assignments are the same exec class as the matching flags.
+    if crate::permission::shell_access::tree_has_git_exec_env_assignment(tree.root_node(), cmd) {
+        assessment.insert(Finding::ExecOrAmbientGit);
     }
     let segments = try_parse_word_only_commands_sequence(&tree, cmd);
     if let Some(finding) = env_risk_finding(script_env_risk(
@@ -687,8 +747,8 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             assessment,
             redirect_write: true,
             ambient_segments: None,
-            creation_paths: Vec::new(),
-            has_cwd_change: false,
+            // The tree parsed, so its write targets are known even though word-level decomposition failed (`cd "$X" && …`).
+            write_facts,
         };
     };
     // Upgrade the raw-string compare with the dequoted single-command form now that the parse is available (see `whole_script_grant`)
@@ -738,8 +798,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
                 assessment: std::mem::take(&mut assessment),
                 redirect_write,
                 ambient_segments: None,
-                creation_paths: Vec::new(),
-                has_cwd_change: false,
+                write_facts: Default::default(),
             };
         }
 
@@ -819,8 +878,86 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         assessment,
         redirect_write,
         ambient_segments,
-        creation_paths: writes.creation_paths,
-        has_cwd_change,
+        write_facts,
+    }
+}
+
+/// The protected-target floor for one request: a direct edit of a protected path (`.git/hooks`, `.ssh`, shell
+/// startup files, Fuigo/Claude config, `/etc`, ...) or a `mkdir`/`touch` of one. Relative paths resolve against
+/// `real_cwd` (shown as `display_cwd`). Shared by the manager and the hub path so both see the same floor (P173).
+fn protected_target(
+    access: &AccessKind,
+    bash_evaluation: Option<&BashEvaluation>,
+    real_cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+    match access {
+        AccessKind::Edit(path) => {
+            edit_target_protection(&resolve_model_path(real_cwd, display_cwd, path))
+        }
+        AccessKind::Bash(_) => {
+            bash_evaluation.and_then(|e| bash_protected_write_target(e, real_cwd, display_cwd))
+        }
+        _ => None,
+    }
+}
+
+/// [`protected_target`] for a hub-routed call, which has no session grants: the bash command is classified against
+/// empty state, which only decides the protected floor here (P173).
+pub(crate) fn hub_protected_target(
+    access: &AccessKind,
+    cwd: &std::path::Path,
+) -> Option<crate::permission::shell_access::ProtectedEditReason> {
+    let evaluation = match access {
+        AccessKind::Bash(cmd) => Some(evaluate_bash(cmd, &PermissionState::default(), true)),
+        _ => None,
+    };
+    protected_target(access, evaluation.as_ref(), cwd, None)
+}
+
+/// What the local manager does, with no session grants, for a request that no rule denied or asked about and that is
+/// not protected (P173). `policy_allows`: a configured allow rule matched it. `true` means it would prompt (or, under
+/// dontAsk, refuse); `false` means it allows the request by itself: a read, a safe-listed command, or an allow rule
+/// that also clears the bash request floor. A fetch prompts unless a rule allows it (the built-in fetch allowlist is
+/// not consulted here, which only ever asks more).
+///
+/// Blocking: a command that may run git gets the local manager's ambient repository-config scan, anchored to `cwd`.
+pub(crate) fn hub_needs_default_prompt(
+    access: &AccessKind,
+    policy: Option<&CompiledPolicy>,
+    policy_allows: bool,
+    cwd: &std::path::Path,
+) -> bool {
+    match access {
+        AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => false,
+        AccessKind::Bash(cmd) => {
+            let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
+            // The same ambient git scan the manager runs before any grant or allow decision (`git status` in a repo
+            // whose config runs a program is not safe).
+            let mut branch_plan = BranchSwitchPlan::NotApplicable;
+            if let Some(raw) = evaluation.ambient_segments.take() {
+                branch_plan = branch_switch_plan_with(&raw, cwd, Some(&evaluation.write_facts));
+                if ambient_exec_risk_from_plan(&ambient_scan_plan_from_segments(&raw, cwd)) {
+                    evaluation
+                        .assessment
+                        .insert(ClassifierSecurityFinding::ExecOrAmbientGit);
+                }
+            }
+            let floor = bash_request_floor_requires_prompt(Some(&evaluation));
+            if policy_allows {
+                // P166 r13B: the same branch-switch check as the local manager (shared pair of functions).
+                let kept = floor
+                    && branch_switch_floor_kept_blocking(&branch_plan, &evaluation, policy, access, &GitTreeLister);
+                floor && !narrow_allow_clears_write_floor(Some(&evaluation), policy, access, kept)
+            } else {
+                floor || !matches!(evaluation.segments, SegmentEvaluation::AutoAllow { .. })
+            }
+        }
+        AccessKind::Edit(_)
+        | AccessKind::MCPTool { .. }
+        | AccessKind::WebFetch(_)
+        | AccessKind::AgentMessage { .. }
+        | AccessKind::Tool(_) => !policy_allows,
     }
 }
 
@@ -1113,7 +1250,20 @@ fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bo
 /// The writes are command-word operands rather than redirects (which word matching cannot see).
 /// Narrow allow rules authorize every segment (`Bash(*)` catch-alls stay floored).
 /// Auto mode instead routes floored commands to its classifier.
+///
+/// P166 r13B: `branch_floor_kept` is the branch-switch verdict (`branch_switch_floor_kept`): a tracked protected name in
+/// a tree the verb involves, or a tree that could not be determined, keeps the floor.
 fn narrow_allow_clears_write_floor(
+    evaluation: Option<&BashEvaluation>,
+    policy: Option<&CompiledPolicy>,
+    access: &AccessKind,
+    branch_floor_kept: bool,
+) -> bool {
+    !branch_floor_kept && narrow_allow_would_clear(evaluation, policy, access)
+}
+
+/// The preconditions of [`narrow_allow_clears_write_floor`] before the branch-switch check.
+fn narrow_allow_would_clear(
     evaluation: Option<&BashEvaluation>,
     policy: Option<&CompiledPolicy>,
     access: &AccessKind,
@@ -1121,6 +1271,46 @@ fn narrow_allow_clears_write_floor(
     evaluation.is_some_and(|e| e.assessment.is_file_write_only() && !e.redirect_write)
         && policy.is_some_and(|p| p.narrow_allow_authorizes(access))
 }
+
+/// P166 r13B: whether the branch-switch check keeps the floor. Git is asked only when ALL hold: the plan names a listed
+/// verb, the floor is the whole story (FileWrite-only), and a narrow allow is about to clear it.
+async fn branch_switch_floor_kept(
+    plan: &BranchSwitchPlan,
+    evaluation: Option<&BashEvaluation>,
+    policy: Option<&CompiledPolicy>,
+    access: &AccessKind,
+) -> bool {
+    match plan {
+        BranchSwitchPlan::NotApplicable => false,
+        _ if !narrow_allow_would_clear(evaluation, policy, access) => false,
+        BranchSwitchPlan::Undetermined => true,
+        BranchSwitchPlan::Probe(_) => {
+            let plan = plan.clone();
+            let work = tokio::task::spawn_blocking(move || plan_keeps_floor(&plan, &GitTreeLister));
+            match tokio::time::timeout(BRANCH_CHECK_TIMEOUT, work).await {
+                Ok(Ok(kept)) => kept,
+                _ => true,
+            }
+        }
+    }
+}
+
+/// Blocking form for the hub path (`hub_needs_default_prompt` is documented as blocking).
+fn branch_switch_floor_kept_blocking(
+    plan: &BranchSwitchPlan,
+    evaluation: &BashEvaluation,
+    policy: Option<&CompiledPolicy>,
+    access: &AccessKind,
+    lister: &dyn TreeLister,
+) -> bool {
+    match plan {
+        BranchSwitchPlan::NotApplicable => false,
+        _ if !narrow_allow_would_clear(Some(evaluation), policy, access) => false,
+        plan => plan_keeps_floor(plan, lister),
+    }
+}
+
+const BRANCH_CHECK_TIMEOUT: std::time::Duration = crate::permission::branch_switch::CHECK_TIMEOUT;
 
 /// A request has no static-analysis findings at all: the only case where a broad configured policy Allow may bypass the classifier.
 /// Non-Bash access has no Bash findings and is always clear here.
@@ -1288,12 +1478,113 @@ fn session_grant_pre_decision(
             yolo_pin,
             BashGrantOpts::PRE_CLASSIFIER,
         ),
+        // A side-effecting tool has no session grant: an edit grant or an "always" answer never pre-approves it (P165).
         AccessKind::Read(_)
         | AccessKind::Grep { .. }
         | AccessKind::WebSearch(_)
         | AccessKind::Edit(_)
-        | AccessKind::AgentMessage { .. } => None,
+        | AccessKind::AgentMessage { .. }
+        | AccessKind::Tool(_) => None,
     }
+}
+
+/// How long the manager waits to resolve one read target before judging it unresolved (P174).
+pub(crate) const READ_TARGET_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One read target in every spelling the reader opens, bounded by [`READ_TARGET_RESOLVE_TIMEOUT`]. A filesystem that
+/// does not answer cannot stall the caller: the target is then judged as spelled and as unresolved (refused). The
+/// local manager and the hub path both resolve through this, so they cannot drift (P198 r2).
+pub(crate) async fn resolve_read_target(
+    cwd: &Path,
+    display_cwd: Option<&Path>,
+    path: &str,
+    resolution: crate::permission::types::ReadResolution,
+) -> (Vec<String>, bool) {
+    match tokio::time::timeout(
+        READ_TARGET_RESOLVE_TIMEOUT,
+        read_target_spellings(cwd, display_cwd, path, resolution),
+    )
+    .await
+    {
+        Ok(resolved) => (resolved, true),
+        Err(_) => (vec![path.to_owned()], false),
+    }
+}
+
+/// Every spelling of the file a read target opens (P174), the model's spelling first: the file the tool resolves it to
+/// (for the Fuigo reader: `resolve_model_path`, symlinks, the Unicode-confusable fallback) and that path with symlinks
+/// followed literally (no separator rewriting, so a Unix name containing `\` is followed as the reader follows it). A
+/// deny or ask on any spelling binds (`GatePreflight::evaluate_read_targets`).
+pub(crate) async fn read_target_spellings(
+    cwd: &Path,
+    display_cwd: Option<&Path>,
+    path: &str,
+    resolution: crate::permission::types::ReadResolution,
+) -> Vec<String> {
+    use crate::permission::types::ReadResolution;
+    let opened = match resolution {
+        ReadResolution::ModelPath => {
+            fuigo_tools::implementations::fuigo_build::read_file::resolve_read_target(
+                cwd,
+                display_cwd,
+                path,
+            )
+            .await
+        }
+        ReadResolution::Literal => cwd.join(path),
+    };
+    // Off the actor thread, so the caller's timeout bounds it (a stalled filesystem blocks a blocking-pool thread).
+    let physical = {
+        let opened = opened.clone();
+        tokio::task::spawn_blocking(move || crate::permission::policy::resolve_following_symlinks(&opened))
+            .await
+            .ok()
+            .flatten()
+    };
+    let mut spellings = vec![path.to_owned()];
+    for spelling in std::iter::once(opened).chain(physical) {
+        let spelling = spelling.to_string_lossy().into_owned();
+        if !spellings.contains(&spelling) {
+            spellings.push(spelling);
+        }
+    }
+    spellings
+}
+
+/// The prompt for a multi-file edit names every target (P184): each one as a location, and in the title.
+fn with_edit_target_locations(
+    update: acp::ToolCallUpdate,
+    paths: &[String],
+) -> acp::ToolCallUpdate {
+    with_target_locations(update, paths, &describe_edit_targets(paths), "Apply patch")
+}
+
+/// The prompt for a multi-file read names every file (P174): each one as a location, and in the title.
+fn with_read_target_locations(
+    update: acp::ToolCallUpdate,
+    paths: &[String],
+) -> acp::ToolCallUpdate {
+    with_target_locations(update, paths, &describe_read_targets(paths), "Read")
+}
+
+fn with_target_locations(
+    mut update: acp::ToolCallUpdate,
+    paths: &[String],
+    listed: &str,
+    default_title: &str,
+) -> acp::ToolCallUpdate {
+    let title = match update.fields.title.take() {
+        Some(title) if !title.is_empty() => format!("{title}: {listed}"),
+        _ => format!("{default_title}: {listed}"),
+    };
+    update.fields.title = Some(title);
+    update.fields.locations = Some(
+        paths
+            .iter()
+            .map(|path| acp::ToolCallLocation::new(std::path::PathBuf::from(path)))
+            .collect(),
+    );
+    update
 }
 
 /// Spawns the permission manager actor, returning a handle and the telemetry event receiver.
@@ -1508,10 +1799,44 @@ fn spawn_permission_manager_with_pin(
                             subagent_type: request_subagent_type,
                             subagent_description: request_subagent_description,
                             hook_ask,
+                            edit_targets,
+                            read_targets,
                         },
                     mut respond_to,
                 } => {
                     let request_received = std::time::Instant::now();
+                    // P184: a multi-file edit (`apply_patch`) is judged per target. The prompt, the events and the
+                    // classifier see an `Edit` naming every target; the policy and the protected-edit floor judge
+                    // each target; a patch that does not parse (or writes nothing) is refused below.
+                    let (access, patch_targets, patch_refusal) = match edit_targets {
+                        None => (access, None, None),
+                        Some(EditTargets::Paths(paths)) if !paths.is_empty() => (
+                            AccessKind::Edit(describe_edit_targets(&paths)),
+                            Some(paths),
+                            None,
+                        ),
+                        Some(EditTargets::Paths(_)) => (
+                            access,
+                            None,
+                            Some("the patch has no file operations".to_owned()),
+                        ),
+                        Some(EditTargets::Unparseable(message)) => (access, None, Some(message)),
+                    };
+                    // P174: a tool that reads several files (or a tool that also opens local files) is judged per
+                    // file as a Read; the prompt names every file.
+                    let read_targets = read_targets
+                        .filter(|targets| patch_targets.is_none() && !targets.paths.is_empty());
+                    // A single-path read already names its file (Astra r2: every other read lists its files).
+                    let read_names_its_file = |targets: &crate::permission::types::ReadTargets| {
+                        matches!(&access, AccessKind::Read(Some(path)) if targets.paths == [path.clone()])
+                    };
+                    let tool_call_update = match (&patch_targets, &read_targets) {
+                        (Some(paths), _) => with_edit_target_locations(tool_call_update, paths),
+                        (None, Some(targets)) if !read_names_its_file(targets) => {
+                            with_read_target_locations(tool_call_update, &targets.paths)
+                        }
+                        _ => tool_call_update,
+                    };
                     let request_cwd = path_context
                         .as_ref()
                         .map(|context| context.real_cwd.as_path())
@@ -1541,6 +1866,7 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::AgentMessage { subagent_id } => {
                             ("agent_message".to_owned(), Some(subagent_id.clone()))
                         }
+                        AccessKind::Tool(name) => ("tool".to_owned(), Some(name.clone())),
                     };
 
                     let denials = std::cell::Cell::new(DenialCounters {
@@ -1616,6 +1942,20 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    if let Some(message) = patch_refusal {
+                        tracing::info!(tool = %tool_name, "apply_patch refused: the patch does not parse");
+                        let decision = Decision::PolicyDeny(format!(
+                            "the patch was refused because its target files could not be determined: {message}"
+                        ));
+                        let event =
+                            emit_event(&decision, false, false, None, Some(reasons::POLICY_DENY));
+                        let _ = respond_to.send(PermissionResolution {
+                            decision,
+                            event: Some(event),
+                        });
+                        continue;
+                    }
+
                     if matches!(
                         &access,
                         AccessKind::Bash(_) | AccessKind::MCPTool { .. } | AccessKind::WebFetch(_)
@@ -1623,11 +1963,13 @@ fn spawn_permission_manager_with_pin(
                     {
                         state.merge_grants_from(fresh);
                     }
+                    let mut branch_plan = BranchSwitchPlan::NotApplicable;
                     let bash_evaluation = match &access {
                         AccessKind::Bash(cmd) => {
                             let mut evaluation = evaluate_bash(cmd, &state, true);
                             if let Some(raw) = evaluation.ambient_segments.take() {
                                 let session_cwd = request_cwd.to_path_buf();
+                                branch_plan = branch_switch_plan_with(&raw, &session_cwd, Some(&evaluation.write_facts));
                                 let plan = ambient_scan_plan_from_segments(&raw, &session_cwd);
                                 let ambient_risk = match plan {
                                     AmbientScanPlan::FailClosed => true,
@@ -1663,50 +2005,66 @@ fn spawn_permission_manager_with_pin(
                         }
                         _ => None,
                     };
-                    let protected_edit = match (&access, path_context.as_ref()) {
-                        (AccessKind::Edit(path), Some(context)) => {
-                            let resolved = resolve_model_path(
-                                &context.real_cwd,
-                                context.display_cwd.as_deref(),
-                                path,
-                            );
-                            edit_target_protection(&resolved)
+                    // P184: each patch target as the tool writes it (`cwd.join(path)`, uncollapsed, as
+                    // `ApplyPatchTool` resolves it) and as the model spelled it.
+                    let patch_spellings: Option<Vec<EditTargetSpellings>> =
+                        patch_targets.as_ref().map(|paths| {
+                            paths
+                                .iter()
+                                .map(|path| EditTargetSpellings::new(request_cwd, path))
+                                .collect()
+                        });
+                    // P184: a multi-file edit is protected when any target is (the first one names the reason).
+                    // P173: every other access goes through the floor the hub path shares (`protected_target`).
+                    let protected_edit = match (&patch_spellings, path_context.as_ref()) {
+                        (Some(targets), _) => targets
+                            .iter()
+                            .find_map(|target| edit_target_protection(Path::new(&target.written))),
+                        (None, Some(context)) => protected_target(
+                            &access,
+                            bash_evaluation.as_ref(),
+                            &context.real_cwd,
+                            context.display_cwd.as_deref(),
+                        ),
+                        (None, None) => {
+                            protected_target(&access, bash_evaluation.as_ref(), cwd.as_path(), None)
                         }
-                        (AccessKind::Edit(path), None) => {
-                            let resolved = resolve_model_path(cwd.as_path(), None, path);
-                            edit_target_protection(&resolved)
-                        }
-                        (AccessKind::Bash(_), context) => bash_evaluation.as_ref().and_then(|e| {
-                            if e.has_cwd_change
-                                && e.creation_paths
-                                    .iter()
-                                    .any(|p| !std::path::Path::new(p).is_absolute())
-                            {
-                                return Some(
-                                    crate::permission::shell_access::ProtectedEditReason::Sensitive,
-                                );
-                            }
-                            e.creation_paths.iter().find_map(|path| {
-                                let resolved = match context {
-                                    Some(ctx) => resolve_model_path(
-                                        &ctx.real_cwd,
-                                        ctx.display_cwd.as_deref(),
-                                        path,
-                                    ),
-                                    None => resolve_model_path(cwd.as_path(), None, path),
-                                };
-                                edit_target_protection(&resolved)
-                            })
-                        }),
-                        _ => None,
                     };
 
-                    let preflight = GatePreflight::evaluate(
-                        compiled_policy.as_ref(),
-                        &access,
-                        request_cwd,
-                        auto_mode,
-                    );
+                    let preflight = match (&patch_spellings, &read_targets) {
+                        (Some(targets), _) => GatePreflight::evaluate_edit_targets(
+                            compiled_policy.as_ref(),
+                            targets,
+                            request_cwd,
+                        ),
+                        // No policy: nothing to judge, so no filesystem work in the actor (Astra r2).
+                        (None, Some(targets)) if compiled_policy.is_some() => {
+                            // Each file in every spelling of the file the tool opens.
+                            let display_cwd = path_context
+                                .as_ref()
+                                .and_then(|context| context.display_cwd.as_deref());
+                            let mut spellings: Vec<(Vec<String>, bool)> =
+                                Vec::with_capacity(targets.paths.len());
+                            for path in &targets.paths {
+                                spellings.push(
+                                    resolve_read_target(request_cwd, display_cwd, path, targets.resolution).await,
+                                );
+                            }
+                            GatePreflight::evaluate_read_targets(
+                                compiled_policy.as_ref(),
+                                &access,
+                                &spellings,
+                                request_cwd,
+                                auto_mode,
+                            )
+                        }
+                        (None, _) => GatePreflight::evaluate(
+                            compiled_policy.as_ref(),
+                            &access,
+                            request_cwd,
+                            auto_mode,
+                        ),
+                    };
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
                     let shell_forced_prompt = preflight.shell_forced_prompt();
@@ -2055,6 +2413,24 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
+                    // P166 r13B: git is asked (off the actor) only for a listed branch-moving verb whose floor a
+                    // narrow allow is about to clear.
+                    let branch_floor_kept = if matches!(policy_decision, Some(Decision::Allow))
+                        && protected_edit.is_none()
+                        && !auto_forced_prompt
+                        && !hook_forced_prompt
+                        && bash_request_floor_requires_prompt(bash_evaluation.as_ref())
+                    {
+                        branch_switch_floor_kept(
+                            &branch_plan,
+                            bash_evaluation.as_ref(),
+                            compiled_policy.as_ref(),
+                            &access,
+                        )
+                        .await
+                    } else {
+                        false
+                    };
                     match policy_decision {
                         Some(Decision::Ask) => {
                             tracing::info!(
@@ -2073,6 +2449,7 @@ fn spawn_permission_manager_with_pin(
                                     bash_evaluation.as_ref(),
                                     compiled_policy.as_ref(),
                                     &access,
+                                    branch_floor_kept,
                                 )) =>
                         {
                             tracing::info!(
@@ -2130,7 +2507,11 @@ fn spawn_permission_manager_with_pin(
                             (d, reason)
                         }),
                         AccessKind::Edit(_) => {
-                            if allow_edits_for_session && protected_edit.is_none() {
+                            // An Ask rule binds over the session edit grant (P184), as it does for reads and MCP.
+                            if allow_edits_for_session
+                                && protected_edit.is_none()
+                                && !policy_forced_prompt
+                            {
                                 Some((Decision::Allow, reasons::PERSISTED_GRANT))
                             } else {
                                 match state.edit_policy {
@@ -2176,7 +2557,8 @@ fn spawn_permission_manager_with_pin(
                                 )
                             }
                         }
-                        AccessKind::AgentMessage { .. } => None,
+                        // P165 (S1): side-effecting tools always reach the prompt (or prompt_policy) below.
+                        AccessKind::AgentMessage { .. } | AccessKind::Tool(_) => None,
                         AccessKind::WebFetch(url) => match url::Url::parse(url) {
                             Ok(parsed_url) => {
                                 if let Some(reject) =
@@ -2389,30 +2771,34 @@ fn spawn_permission_manager_with_pin(
                                 outcome = prompter.request(&access, &tool_call_update, protected_edit, hook_ask.as_ref()) => outcome,
                                 _ = respond_to.closed() => PromptOutcome::Cancelled,
                             };
-                            let prompt_outcome =
-                                if matches!(&access, AccessKind::AgentMessage { .. }) {
-                                    match prompt_outcome {
+                            // One call only: an "always" answer for an agent message or a side-effecting tool is an allow-once
+                            // (no grant exists for them), and must never flip the session edit grant.
+                            let prompt_outcome = if matches!(
+                                &access,
+                                AccessKind::AgentMessage { .. } | AccessKind::Tool(_)
+                            ) {
+                                match prompt_outcome {
+                                    PromptOutcome::AllowOnce
+                                    | PromptOutcome::AllowAlways
+                                    | PromptOutcome::AllowEditsForSession
+                                    | PromptOutcome::AllowAlwaysBashCommand(_)
+                                    | PromptOutcome::AllowAlwaysBashGlob(_)
+                                    | PromptOutcome::AllowAlwaysDomain(_)
+                                    | PromptOutcome::AllowAlwaysMcpTool(_)
+                                    | PromptOutcome::AllowAlwaysMcpServer(_) => {
                                         PromptOutcome::AllowOnce
-                                        | PromptOutcome::AllowAlways
-                                        | PromptOutcome::AllowEditsForSession
-                                        | PromptOutcome::AllowAlwaysBashCommand(_)
-                                        | PromptOutcome::AllowAlwaysBashGlob(_)
-                                        | PromptOutcome::AllowAlwaysDomain(_)
-                                        | PromptOutcome::AllowAlwaysMcpTool(_)
-                                        | PromptOutcome::AllowAlwaysMcpServer(_) => {
-                                            PromptOutcome::AllowOnce
-                                        }
-                                        PromptOutcome::RejectOnce
-                                        | PromptOutcome::RejectAlwaysBashCommand(_)
-                                        | PromptOutcome::RejectAlwaysMcpTool(_)
-                                        | PromptOutcome::RejectAlwaysDomain(_) => {
-                                            PromptOutcome::RejectOnce
-                                        }
-                                        other => other,
                                     }
-                                } else {
-                                    prompt_outcome
-                                };
+                                    PromptOutcome::RejectOnce
+                                    | PromptOutcome::RejectAlwaysBashCommand(_)
+                                    | PromptOutcome::RejectAlwaysMcpTool(_)
+                                    | PromptOutcome::RejectAlwaysDomain(_) => {
+                                        PromptOutcome::RejectOnce
+                                    }
+                                    other => other,
+                                }
+                            } else {
+                                prompt_outcome
+                            };
                             let mut effective_kind = prompt_outcome.kind();
                             let decision = match &prompt_outcome {
                                 PromptOutcome::AllowOnce => Decision::Allow,
@@ -4118,6 +4504,226 @@ mod tests {
                 ask_event.decision_reason.as_deref(),
                 Some(reasons::POLICY_ASK)
             );
+        }))
+        .await;
+    }
+
+    // ── P165 (S1/S2): side-effecting tools (scheduler, workflow, image/video generation) prompt ──
+
+    fn side_effecting_accesses() -> Vec<(&'static str, AccessKind)> {
+        crate::permission::types::tests::side_effecting_tool_inputs()
+            .iter()
+            .map(|(name, input)| (*name, AccessKind::from(input)))
+            .collect()
+    }
+
+    /// Before P165 every one of these mapped to `Read(None)` and was auto-allowed with `SAFE_COMMAND`, so the client never saw a prompt.
+    #[tokio::test]
+    async fn side_effecting_tools_prompt_instead_of_auto_allowing() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let client = RecordingClient::default();
+            let prompts = client.prompts.clone();
+            let (mgr, _events) =
+                manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+            let accesses = side_effecting_accesses();
+            for (i, (name, access)) in accesses.iter().enumerate() {
+                let decision = decide(&mgr, access.clone(), tool_call()).await;
+                assert!(
+                    matches!(decision, Decision::Reject(_)),
+                    "{name}: the user's reject must stand, got {decision:?}"
+                );
+                assert_eq!(prompts.borrow().len(), i + 1, "{name} must prompt the user");
+                let kinds: Vec<_> = prompts.borrow()[i].options.iter().map(|o| o.kind).collect();
+                assert_eq!(
+                    kinds,
+                    vec![
+                        acp::PermissionOptionKind::AllowOnce,
+                        acp::PermissionOptionKind::RejectOnce
+                    ],
+                    "{name}: a tool approval is one call only"
+                );
+            }
+        }))
+        .await;
+    }
+
+    /// No operator to answer (headless): the prompt cannot be satisfied, so the tool does not run.
+    #[tokio::test]
+    async fn side_effecting_tools_are_not_allowed_without_an_operator() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let (mgr, _events) = test_manager(&cwd, false, None);
+            for (name, access) in side_effecting_accesses() {
+                let decision = decide(&mgr, access, tool_call()).await;
+                assert_ne!(decision, Decision::Allow, "{name} must not run unasked");
+            }
+        }))
+        .await;
+    }
+
+    /// `prompt_policy = deny` (no prompting) refuses anything not pre-approved, as it does for edits.
+    #[tokio::test]
+    async fn prompt_policy_deny_refuses_side_effecting_tools() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let mut config = crate::permission::types::PermissionConfig::new(vec![]);
+            config.prompt_policy = PromptPolicy::Deny;
+            let (mgr, _events) = test_manager_with_config(&cwd, config, false);
+            for (name, access) in side_effecting_accesses() {
+                let decision = decide(&mgr, access, tool_call()).await;
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "{name}: got {decision:?}"
+                );
+            }
+        }))
+        .await;
+    }
+
+    /// S2: `deny = ["Edit"]` reaches the tools and is enforced before always-approve, like any deny rule.
+    #[tokio::test]
+    async fn edit_deny_rule_refuses_side_effecting_tools_even_in_yolo() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::RuleAction;
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let config = crate::permission::types::PermissionConfig::new(vec![
+                parse_permission_rule("Edit", RuleAction::Deny).unwrap(),
+            ]);
+            let (mgr, _events) = test_manager_with_config(&cwd, config, true);
+            for (name, access) in side_effecting_accesses() {
+                let decision = decide(&mgr, access, tool_call()).await;
+                assert!(
+                    matches!(decision, Decision::PolicyDeny(_)),
+                    "{name}: got {decision:?}"
+                );
+            }
+        }))
+        .await;
+    }
+
+    /// Always-approve mode still approves them (the user opted out of prompts), and a bare allow rule pre-approves one tool.
+    #[tokio::test]
+    async fn yolo_and_bare_allow_rules_still_approve_side_effecting_tools() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::RuleAction;
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let (yolo, _e) = test_manager(&cwd, true, None);
+            for (name, access) in side_effecting_accesses() {
+                assert_eq!(
+                    decide(&yolo, access, tool_call()).await,
+                    Decision::Allow,
+                    "{name} under always-approve"
+                );
+            }
+            let config = crate::permission::types::PermissionConfig::new(vec![
+                parse_permission_rule("scheduler_create", RuleAction::Allow).unwrap(),
+            ]);
+            let client = RecordingClient::default();
+            let prompts = client.prompts.clone();
+            let (mgr, _e) =
+                manager_with_recording_client(&cwd, Some(config), client, ClientType::Generic);
+            for (name, access) in side_effecting_accesses() {
+                let decision = decide(&mgr, access, tool_call()).await;
+                if name == "scheduler_create" {
+                    assert_eq!(decision, Decision::Allow, "allow rule pre-approves {name}");
+                } else {
+                    assert!(
+                        matches!(decision, Decision::Reject(_)),
+                        "{name}: got {decision:?}"
+                    );
+                }
+            }
+            assert_eq!(prompts.borrow().len(), side_effecting_accesses().len() - 1);
+        }))
+        .await;
+    }
+
+    /// An "always" answer from a client is one call only: it grants neither the next tool call nor edits for the session.
+    #[tokio::test]
+    async fn side_effecting_tool_approval_grants_nothing_further() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let transport = fake_hub(serde_json::json!({ "outcome": "always_approve" }));
+            let (mgr, mut events) = test_manager_with_hub(&cwd, transport.clone());
+            let (name, access) = side_effecting_accesses().remove(0);
+            for _ in 0..2 {
+                assert_eq!(
+                    decide(&mgr, access.clone(), tool_call()).await,
+                    Decision::Allow,
+                    "{name}"
+                );
+                // The "always" answer is recorded as what it is worth: one call.
+                let event = events.recv().await.expect("tool permission event");
+                assert_eq!(event.tool_name, name);
+                assert_eq!(event.access_kind, "tool");
+                assert_eq!(event.access_detail.as_deref(), Some(name));
+                assert!(event.user_prompted, "{name} must be prompted");
+                assert_eq!(event.prompt_outcome.as_deref(), Some("allow_once"));
+            }
+            assert_eq!(
+                decide(&mgr, AccessKind::Edit("src/main.rs".into()), tool_call()).await,
+                Decision::Allow
+            );
+            // The edit's "always" answer granted edits for the session; that grant must not cover the tool.
+            assert_eq!(
+                decide(&mgr, access.clone(), tool_call()).await,
+                Decision::Allow,
+                "{name}"
+            );
+            let seen = transport.seen.lock().unwrap();
+            assert_eq!(
+                seen.len(),
+                4,
+                "each tool call and the edit must each prompt; the edit grant does not cover the tool"
+            );
+            assert_eq!(seen[0]["tool_name"], name);
+            assert_eq!(seen[0]["scope"], "write");
+        }))
+        .await;
+    }
+
+    /// Auto mode treats them like other prompting kinds: the classifier decides, and a block prompts the user.
+    #[tokio::test]
+    async fn auto_mode_classifies_side_effecting_tools() {
+        use crate::permission::auto_mode::ClassifierVerdict;
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let client = RecordingClient::default();
+            let prompts = client.prompts.clone();
+            let (mgr, _events) =
+                manager_with_recording_client(&cwd, None, client, ClientType::FuigoPager);
+            mgr.set_auto_mode(true);
+            let (clf, seen) = capturing_classifier(ClassifierVerdict::Block);
+            mgr.set_classifier(Some(clf));
+            let (name, access) = side_effecting_accesses().remove(0);
+            let decision = decide(&mgr, access, tool_call()).await;
+            assert!(
+                matches!(decision, Decision::Reject(_)),
+                "{name}: got {decision:?}"
+            );
+            assert_eq!(
+                seen.lock().unwrap().len(),
+                1,
+                "{name} must reach the classifier"
+            );
+            assert_eq!(prompts.borrow().len(), 1, "a classifier block must prompt");
         }))
         .await;
     }
@@ -6141,6 +6747,11 @@ mod tests {
                     "/etc/hosts",
                     "/home/user/.fuigo/hooks/evil.json",
                     "/home/user/.fuigo/sandbox.toml",
+                    // P166/S5
+                    "/home/user/.fuigo/mcp.json",
+                    "/work/project/.fuigo/lsp.json",
+                    "/work/project/.mcp.json",
+                    "/home/user/.fuigo/sessions/ws/permission_fuigo-pager.toml",
                 ] {
                     let mut auto = crate::permission::types::PermissionConfig::new(vec![]);
                     auto.prompt_policy = PromptPolicy::Auto;
@@ -6235,6 +6846,687 @@ mod tests {
             .await;
     }
 
+    /// P166/S5, Astra r1/r2 MEDIUM: ordinary project writes stay unprotected, so an exact grant keeps working.
+    /// A relative write resolves against the cwds it can run in (only `cd`s that precede it in its scope);
+    /// `DIR/<name>` is a write only when `DIR` is a directory; only an unpinnable `cd` or a contents copy fails closed.
+    #[cfg(unix)]
+    #[test]
+    fn protected_write_target_resolution() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src").join("a.rs"), "a").unwrap();
+        std::fs::write(cwd.join("src").join("b.rs"), "b").unwrap();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        std::fs::create_dir_all(cwd.join("payload")).unwrap();
+        // Astra r3: a directory source whose tree holds a protected name.
+        std::fs::create_dir_all(cwd.join("kit").join("nested")).unwrap();
+        std::fs::write(cwd.join("kit").join("nested").join(".mcp.json"), "{}").unwrap();
+        std::fs::create_dir_all(cwd.join("drop")).unwrap();
+        std::fs::write(cwd.join("drop").join(".mcp.json"), "{}").unwrap();
+        for (cmd, expected) in [
+            // Ordinary writes: file-to-file copies (the destination file exists), moves into a plain directory.
+            ("cp src/a.rs src/b.rs", None),
+            ("mv src/a.rs src/b.rs", None),
+            ("cp src/a.rs out/", None),
+            ("cd src && cp a.rs b.rs", None),
+            ("cd src && mkdir -p build/out && touch notes.md", None),
+            ("pushd /tmp && echo x > out.txt", None),
+            // A write BEFORE a `cd` runs in the session cwd.
+            ("printf ok > build.log; cd /etc && cat os-release", None),
+            // Protected through the cwd chain or the source name.
+            ("cd src && cd .. && echo '{}' > .fuigo/lsp.json", Some(R::McpConfig)),
+            ("cd /etc && touch hosts", Some(R::Etc)),
+            ("cp payload/.mcp.json out/", Some(R::McpConfig)),
+            ("cp -t out payload/.claude.json", Some(R::McpConfig)),
+            ("cp -r --target-directory=.fuigo payload/.", Some(R::FuigoConfig)),
+            // Unknown: an unpinnable cwd before the write, or a contents copy.
+            ("cd - && cp a b", Some(R::Sensitive)),
+            ("cd \"$DIR\" && cp a b", Some(R::Sensitive)),
+            ("pushd src && popd && cp a b", Some(R::Sensitive)),
+            // Astra r3 HIGH: contents copies (GNU -T, BSD trailing slash, SRC/.) and whole-tree copies are judged by
+            // the source tree's names, not failed closed: an ordinary tree copies freely.
+            ("cp -rT drop out", Some(R::McpConfig)),
+            ("cp -R drop/ out", Some(R::McpConfig)),
+            ("cp -r drop/. out/", Some(R::McpConfig)),
+            ("cp -r kit out/", Some(R::McpConfig)),
+            ("mv kit out", Some(R::McpConfig)),
+            ("cp -r payload/. out/", None),
+            ("cp -r src out/", None),
+            ("cp -rT src out", None),
+            // Astra r3 MEDIUM: with a parsed `-t DIR` the last operand is a source, not the destination.
+            ("cp -t out .fuigo/lsp.json", None),
+            ("install -oroot -m 644 src/a.rs out/", None),
+            // `-oroot` is the owner, so the last operand stays the (protected) destination.
+            ("install -oroot -m 644 src/a.rs .fuigo/lsp.json", Some(R::McpConfig)),
+            // Astra r3 MEDIUM: a command's own redirect runs before its `cd`.
+            ("cd /etc > cd.log", None),
+            ("cd /etc 2> err.log && touch hosts", Some(R::Etc)),
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 Grok r4: link-following tree copies, archive/sync/in-place writers, and redirects on compound commands.
+    /// HIGH 2: `cp -RL` (and macOS `cp -r`) copy a symlinked directory's contents, so the walk follows directory links
+    /// (cycle-safe); a plain `cp -R` copies the link itself. HIGH 3: `tar`/`unzip`/`rsync`/`ditto`/`cpio`/`7z`/
+    /// `perl -i`/`ruby -i` destinations are write targets; an archive that may write outside them is `Sensitive`.
+    /// LOW 6: a redirect on a compound statement is opened before its body runs, so a `cd` inside does not move it.
+    #[cfg(unix)]
+    #[test]
+    fn grok_r4_protected_write_targets() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        let outside = tempfile::tempdir().unwrap();
+        let real = outside.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join(".mcp.json"), "{}").unwrap();
+        let payload = outside.path().join("payload");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::os::unix::fs::symlink(&real, payload.join("sub")).unwrap();
+        // A link cycle must not hang the walk.
+        let cyclic = outside.path().join("cyclic");
+        std::fs::create_dir_all(cyclic.join("a")).unwrap();
+        std::fs::write(cyclic.join("a").join("notes.md"), "x").unwrap();
+        std::os::unix::fs::symlink(&cyclic, cyclic.join("a").join("loop")).unwrap();
+        // A second link name to a directory already walked is still judged under its own name (`.git/hooks/…`).
+        let diamond = outside.path().join("diamond");
+        std::fs::create_dir_all(diamond.join("a").join("hooks")).unwrap();
+        std::fs::write(diamond.join("a").join("hooks").join("pre-commit"), "x").unwrap();
+        std::os::unix::fs::symlink(diamond.join("a"), diamond.join("b")).unwrap();
+        std::os::unix::fs::symlink(diamond.join("a"), diamond.join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        std::fs::create_dir_all(cwd.join("kit")).unwrap();
+        std::fs::write(cwd.join("kit").join(".mcp.json"), "{}").unwrap();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src").join("a.rs"), "a").unwrap();
+        let payload = payload.display();
+        let cyclic = cyclic.display();
+        let diamond = diamond.display();
+        let sub = format!("{payload}/sub");
+        for (cmd, expected) in [
+            // HIGH 2 (Grok's example): the copy dereferences `sub`, writing `./sub/.mcp.json`.
+            (format!("cp -RL {payload} ."), Some(R::McpConfig)),
+            (format!("cp -R --dereference {payload} out"), Some(R::McpConfig)),
+            (format!("cp -r {payload} out"), Some(R::McpConfig)),
+            (format!("cp -RH {sub} out"), Some(R::McpConfig)),
+            // No dereference: the link is copied as a link, and its name is not protected.
+            (format!("cp -R {payload} out"), None),
+            (format!("cp -RP {payload} out"), None),
+            (format!("cp -RL {cyclic} out"), None),
+            (format!("cp -RL {diamond} out"), Some(R::GitHooks)),
+            // HIGH 3(a): extraction directories and archive files are write targets.
+            ("tar -xf p.tar -C .fuigo".to_owned(), Some(R::FuigoConfig)),
+            ("tar xzf p.tgz -C .claude".to_owned(), Some(R::ClaudeSettings)),
+            ("tar --extract --file p.tar --directory=.cursor".to_owned(), Some(R::McpConfig)),
+            ("tar -czf .mcp.json src".to_owned(), Some(R::McpConfig)),
+            // Grok r5 MEDIUM 2: an extraction's members are not inspected, so it prompts even into a plain directory.
+            ("tar -xf p.tar -C out".to_owned(), Some(R::Sensitive)),
+            ("tar -xf p.tar".to_owned(), Some(R::Sensitive)),
+            ("tar -tf p.tar".to_owned(), None),
+            // Absolute member names write anywhere.
+            ("tar -xPf p.tar".to_owned(), Some(R::Sensitive)),
+            ("tar --absolute-names -xf p.tar -C out".to_owned(), Some(R::Sensitive)),
+            ("unzip p.zip -d .fuigo".to_owned(), Some(R::FuigoConfig)),
+            ("unzip -o p.zip -d.claude".to_owned(), Some(R::ClaudeSettings)),
+            ("unzip -: p.zip -d out".to_owned(), Some(R::Sensitive)),
+            ("unzip p.zip -d out".to_owned(), Some(R::Sensitive)),
+            ("unzip -l .fuigo.zip".to_owned(), None),
+            ("rsync -a kit/ out/".to_owned(), Some(R::McpConfig)),
+            ("rsync -a --exclude tmp src/ .fuigo/".to_owned(), Some(R::FuigoConfig)),
+            (format!("rsync -aL {payload}/ out/"), Some(R::McpConfig)),
+            (format!("rsync -a {payload}/ out/"), None),
+            ("rsync -a src/ out/".to_owned(), None),
+            ("rsync -a src/ host:.fuigo/".to_owned(), Some(R::FuigoConfig)),
+            ("ditto kit out".to_owned(), Some(R::McpConfig)),
+            ("ditto -x -k p.zip .fuigo".to_owned(), Some(R::FuigoConfig)),
+            ("cpio -i -D .fuigo --no-absolute-filenames".to_owned(), Some(R::FuigoConfig)),
+            ("cpio -idmv --no-absolute-filenames".to_owned(), Some(R::Sensitive)),
+            ("cpio -idmv".to_owned(), Some(R::Sensitive)),
+            ("7z x p.7z -o.fuigo".to_owned(), Some(R::FuigoConfig)),
+            ("7z x p.7z -oout".to_owned(), Some(R::Sensitive)),
+            ("7z a .mcp.json src".to_owned(), Some(R::McpConfig)),
+            ("perl -pi -e 's/a/b/' .mcp.json".to_owned(), Some(R::McpConfig)),
+            ("perl -i.bak -pe 's/a/b/' src/a.rs".to_owned(), None),
+            ("ruby -pi -e 'x' .fuigo/lsp.json".to_owned(), Some(R::McpConfig)),
+            // LOW 6: the redirect of a compound statement opens in the old cwd; a write inside still follows the cd.
+            ("{ cd /etc; } > cd.log".to_owned(), None),
+            ("if cd /etc; then :; fi > cd.log".to_owned(), None),
+            ("{ cd /etc; touch hosts; } > cd.log".to_owned(), Some(R::Etc)),
+            ("true && { cd /etc; } > cd.log".to_owned(), None),
+            // tree-sitter hangs this redirect on the whole list; bash opens it for `echo`, after the cd.
+            ("cd /etc && echo x > hosts".to_owned(), Some(R::Etc)),
+        ] {
+            let evaluation = evaluate_bash(&cmd, &state, true);
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 Grok r4 HIGH 3(a): archive extraction, sync and in-place interpreter edits are file writes, so a broad bash
+    /// grant (`allow_bash_execute`, a prefix grant, sandbox auto-allow) prompts instead of auto-allowing them.
+    /// Listing modes write nothing. Interpreter runs (`python3 -c`) stay unfloored by design (receipt: known limit).
+    #[test]
+    fn grok_r4_archive_and_in_place_writers_floor_broad_grants() {
+        let state = PermissionState::default();
+        for cmd in [
+            "tar -xf payload.tar",
+            "tar xf payload.tar",
+            "tar -C out -xzf payload.tgz",
+            "tar -czf out.tgz src",
+            "unzip payload.zip",
+            "unzip -o payload.zip -d out",
+            "rsync -a src/ out/",
+            "ditto src out",
+            "cpio -idmv",
+            "7z x payload.7z",
+            "7za x payload.7z -oout",
+            "perl -pi -e 's/a/b/' notes.md",
+            "ruby -i -pe 'x' notes.md",
+        ] {
+            let e = evaluate_bash(cmd, &state, true);
+            assert!(
+                e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+                "{cmd}: must be a FileWrite"
+            );
+            assert!(
+                bash_request_floor_requires_prompt(Some(&e)),
+                "{cmd}: a broad grant must prompt"
+            );
+        }
+        for cmd in [
+            "tar -tf payload.tar",
+            "tar --list -f payload.tar",
+            "unzip -l payload.zip",
+            "7z l payload.7z",
+            "rsync -a --list-only src/",
+            "perl -ne 'print' notes.md",
+        ] {
+            let e = evaluate_bash(cmd, &state, true);
+            assert!(
+                !e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+                "{cmd}: a listing writes nothing"
+            );
+        }
+    }
+
+    /// P166 Grok r4 HIGH 3(b): Fuigo never offers a prefix grant for an interpreter, so "Always allow" on `python3 -c …`
+    /// persists only the exact command the user saw, never `Bash(python3:*)`.
+    #[test]
+    fn grok_r4_interpreter_always_allow_pins_the_exact_command() {
+        for cmd in [
+            "python3 -c open('.mcp.json','w').write('{}')",
+            "node -e require('fs').writeFileSync('.mcp.json','{}')",
+            "perl -e print",
+            "ruby -e puts",
+            "python3.13 script.py",
+        ] {
+            let words: Vec<String> = cmd.split(' ').map(str::to_owned).collect();
+            assert_eq!(default_always_allow_scope(&words), words.len(), "{cmd}");
+            assert_eq!(minimum_always_allow_scope(&words), words.len(), "{cmd}");
+        }
+    }
+
+    /// P166 Grok r4 LOW 7: a tree over the walk cap still prompts (documented), it is not silently allowed.
+    #[cfg(unix)]
+    #[test]
+    fn grok_r4_copied_tree_over_the_cap_prompts() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        let big = cwd.join("big");
+        std::fs::create_dir_all(&big).unwrap();
+        for i in 0..10_001 {
+            std::fs::write(big.join(format!("f{i}")), "").unwrap();
+        }
+        std::fs::create_dir_all(cwd.join("small")).unwrap();
+        std::fs::write(cwd.join("small").join("f"), "").unwrap();
+        for (cmd, expected) in [
+            ("cp -R big /tmp/bak", Some(R::Sensitive)),
+            ("cp -R small /tmp/bak", None),
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert_eq!(bash_protected_write_target(&evaluation, cwd, None), expected, "{cmd}");
+        }
+    }
+
+    /// P166 Grok r5 HIGH 1 (Grok's five examples first): `patch`, `scp`, `pax` and the git worktree writers name or
+    /// imply their write targets, which run through the protected list. A git verb that rewrites the worktree without
+    /// literal file pathspecs (`git apply`, `git reset --hard`, `git merge`) fails closed to `Sensitive`; a branch switch,
+    /// `git pull` and `git stash pop` use the ordinary FileWrite floor instead (P166 r7, Grok r6 MEDIUM 6); r8B wires that FileWrite floor (`WritePathsSplit::worktree_rewrite`).
+    #[cfg(unix)]
+    #[test]
+    fn grok_r5_patch_scp_pax_git_write_targets() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src").join("a.rs"), "a").unwrap();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        std::fs::create_dir_all(cwd.join("kit")).unwrap();
+        std::fs::write(cwd.join("kit").join(".mcp.json"), "{}").unwrap();
+        std::fs::write(cwd.join("p.diff"), "").unwrap();
+        for (cmd, expected) in [
+            // Grok's examples.
+            ("patch -o .mcp.json p.diff", Some(R::McpConfig)),
+            ("git checkout -- .mcp.json", Some(R::McpConfig)),
+            ("git apply p.diff", Some(R::Sensitive)),
+            ("pax -rw payload .fuigo", Some(R::FuigoConfig)),
+            ("scp evil .mcp.json", Some(R::McpConfig)),
+            // patch: `-o`, the file operand, the reject file; no operand means the diff names the files.
+            ("patch .mcp.json p.diff", Some(R::McpConfig)),
+            ("patch --output=.fuigo/lsp.json src/a.rs p.diff", Some(R::McpConfig)),
+            ("patch -r .mcp.json src/a.rs p.diff", Some(R::McpConfig)),
+            ("patch -p1 < p.diff", Some(R::Sensitive)),
+            ("patch -p1 -i p.diff", Some(R::Sensitive)),
+            ("patch -o out/a.rs src/a.rs p.diff", None),
+            ("patch src/a.rs p.diff", None),
+            ("patch --dry-run -p1 < p.diff", None),
+            // scp: the local destination, the remote source's name, a remote tree; a remote destination is not local.
+            ("scp host:cfg/.mcp.json .", Some(R::McpConfig)),
+            ("scp -P 2222 host:x/lsp.json .fuigo/", Some(R::FuigoConfig)),
+            ("scp -r host:dir out", Some(R::Sensitive)),
+            ("scp -r kit out", Some(R::McpConfig)),
+            ("scp host:x/a.rs out/", None),
+            ("scp -i id src/a.rs host:.mcp.json", Some(R::McpConfig)),
+            // pax: `-r` extracts members (not inspected), `-rw` copies the operands' trees, `-w -f` writes an archive.
+            ("pax -r -f p.pax", Some(R::Sensitive)),
+            ("pax -rw kit out", Some(R::McpConfig)),
+            ("pax -w -f .mcp.json src", Some(R::McpConfig)),
+            ("pax -rw src out", None),
+            ("pax -f p.pax", None),
+            // git: literal pathspecs are write targets; worktree-wide rewrites fail closed.
+            ("git restore .mcp.json", Some(R::McpConfig)),
+            ("git checkout HEAD~1 -- .fuigo/lsp.json", Some(R::McpConfig)),
+            ("git checkout -- '*.json'", Some(R::Sensitive)),
+            ("git checkout -- .", Some(R::Sensitive)),
+            ("git checkout -- deleted.rs", Some(R::Sensitive)),
+            ("git checkout main", None),
+            ("git switch main", None),
+            ("git reset --hard", Some(R::Sensitive)),
+            ("git reset --hard HEAD~1", Some(R::Sensitive)),
+            ("git stash pop", None),
+            ("git stash apply stash@{1}", Some(R::Sensitive)),
+            ("git stash", Some(R::Sensitive)),
+            ("git am p.mbox", Some(R::Sensitive)),
+            ("git merge main", Some(R::Sensitive)),
+            ("git pull", None),
+            ("git cherry-pick abc123", Some(R::Sensitive)),
+            ("git revert abc123", Some(R::Sensitive)),
+            ("git rebase main", Some(R::Sensitive)),
+            ("git -C ../other checkout -- src/a.rs", Some(R::Sensitive)),
+            ("git restore --pathspec-from-file=list", Some(R::Sensitive)),
+            ("git checkout -- src/a.rs", None),
+            ("git checkout HEAD~1 -- src/a.rs", None),
+            ("git restore --source=HEAD src/a.rs", None),
+            ("git restore --staged .mcp.json", None),
+            ("git reset HEAD src/a.rs", None),
+            ("git reset --soft HEAD~1", None),
+            ("git switch -c topic", None),
+            ("git checkout -b topic", None),
+            ("git apply --check p.diff", None),
+            ("git apply --stat p.diff", None),
+            ("git apply --cached p.diff", None),
+            ("git stash list", None),
+            ("git status", None),
+            ("git diff", None),
+            ("git log -p", None),
+            ("git commit -m msg", None),
+            ("git fetch origin", None),
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 Grok r5 sweep: every common program that writes a file named on its command line. Each row is the decision
+    /// in the receipt's sweep table (classified, failed closed, or left to the interpreter-limit class).
+    #[cfg(unix)]
+    #[test]
+    fn grok_r5_writer_sweep_targets() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src").join("a.rs"), "a").unwrap();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        for (cmd, expected) in [
+            // curl / wget: output files, URL-named files, server-named files.
+            ("curl -o .mcp.json https://example.com/x", Some(R::McpConfig)),
+            ("curl -sSLo .fuigo/lsp.json https://example.com/x", Some(R::McpConfig)),
+            ("curl -O https://example.com/cfg/.mcp.json", Some(R::McpConfig)),
+            ("curl --output-dir .fuigo -O https://example.com/mcp.json", Some(R::McpConfig)),
+            ("curl -OJ https://example.com/x", Some(R::Sensitive)),
+            ("curl -D .mcp.json https://example.com/x", Some(R::McpConfig)),
+            ("curl -sSL https://example.com/x -o out/x", None),
+            ("curl -fsSL https://example.com/x", None),
+            ("curl -o - https://example.com/x", None),
+            ("wget -O .mcp.json https://example.com/x", Some(R::McpConfig)),
+            ("wget https://example.com/cfg/.mcp.json", Some(R::McpConfig)),
+            ("wget -P .fuigo https://example.com/lsp.json", Some(R::McpConfig)),
+            ("wget -r https://example.com/", Some(R::Sensitive)),
+            ("wget --content-disposition https://example.com/x", Some(R::Sensitive)),
+            ("wget -qO- https://example.com/x", None),
+            ("wget -q https://example.com/a.tar.gz", None),
+            // ln / truncate / touch (already classified; kept as regressions).
+            ("ln -s /tmp/evil .mcp.json", Some(R::McpConfig)),
+            ("truncate -s 0 .mcp.json", Some(R::McpConfig)),
+            ("touch .mcp.json", Some(R::McpConfig)),
+            // split / csplit: generated names starting with the prefix.
+            ("split -a1 -l1 in .mcp.jso", Some(R::Sensitive)),
+            ("csplit -f .fuigo/part in 1", Some(R::FuigoConfig)),
+            ("split -l 100 big.log out/part_", None),
+            ("split -l 100 big.log", None),
+            // decompressors write the operand minus its suffix.
+            ("gunzip .mcp.json.gz", Some(R::McpConfig)),
+            ("gzip -dk .fuigo/lsp.json.gz", Some(R::McpConfig)),
+            ("zstd -d a.zst -o .mcp.json", Some(R::McpConfig)),
+            ("gunzip -c .mcp.json.gz", None),
+            ("gunzip src.tar.gz", None),
+            // xargs / find: appended or substituted names are unknown, so a writing inner command fails closed.
+            ("echo .mcp.json | xargs touch", Some(R::Sensitive)),
+            ("ls | xargs -I{} cp {} .mcp.json", Some(R::McpConfig)),
+            ("find . -name '*.json' -exec touch {} +", Some(R::Sensitive)),
+            ("find /tmp -name x -exec cp {} .mcp.json ';'", Some(R::McpConfig)),
+            ("find . -fprint .mcp.json", Some(R::McpConfig)),
+            ("find . -name '*.rs' | xargs wc -l", None),
+            ("find . -name '*.rs' -exec grep -l foo {} +", None),
+            ("find . -name '*.o' -delete", None),
+            // Wrappers are peeled; one that moves the cwd fails closed.
+            ("env FOO=1 cp evil .mcp.json", Some(R::McpConfig)),
+            ("nice -n 5 tee .mcp.json", Some(R::McpConfig)),
+            ("timeout 5 cp evil .mcp.json", Some(R::McpConfig)),
+            ("command cp evil .mcp.json", Some(R::McpConfig)),
+            ("exec tee .mcp.json", Some(R::McpConfig)),
+            ("sudo cp evil .mcp.json", Some(R::McpConfig)),
+            ("sudo -u root tee .fuigo/lsp.json", Some(R::McpConfig)),
+            ("nohup cp evil .mcp.json", Some(R::McpConfig)),
+            ("env -C /tmp cp evil x", Some(R::Sensitive)),
+            ("sudo -D /tmp touch x", Some(R::Sensitive)),
+            ("sudo apt-get install -y jq", None),
+            // `sh -c` / `bash -c` literal scripts are judged like the outer script, in the outer cwd chain.
+            ("bash -c 'echo {} > .mcp.json'", Some(R::McpConfig)),
+            ("sh -c 'cd .fuigo && echo {} > lsp.json'", Some(R::McpConfig)),
+            ("cd .fuigo && sh -c 'echo {} > lsp.json'", Some(R::McpConfig)),
+            ("bash -lc 'cp evil .mcp.json'", Some(R::McpConfig)),
+            ("bash -c 'echo ok > out/log.txt'", None),
+            // Grok r5 LOW 4: sed `w`/`W` and the `s///w` flag write their file.
+            ("sed -n 'w .mcp.json' /dev/null", Some(R::McpConfig)),
+            ("sed -n '1,5w .fuigo/lsp.json' in", Some(R::McpConfig)),
+            ("sed 's/a/b/w .mcp.json' in", Some(R::McpConfig)),
+            ("sed -e 'W .mcp.json' in", Some(R::McpConfig)),
+            ("sed -n '/x/{w .mcp.json\n}' in", Some(R::McpConfig)),
+            ("sed -n 's/a/b/p' in", None),
+            ("sed 's/w/x/g' in", None),
+            ("sed -n '/wow/p' in", None),
+            ("sed 'y/abw/xyz/' in", None),
+            ("sed '1i\\\nwhat' in", None),
+            // awk's literal print redirect (a tripwire inside the interpreter-limit class).
+            ("awk 'BEGIN { print \"{}\" > \".mcp.json\" }'", Some(R::McpConfig)),
+            ("awk '$1 > \"2020\" { print }' in", None),
+            // yq rewrites its file operands in place with `-i`.
+            ("yq -i '.a = 1' .mcp.json", Some(R::McpConfig)),
+            ("yq '.a' .mcp.json", None),
+            // Compilers and converters write their `-o` file (mirrors `rustc`/`go -o`).
+            ("cc -o .git/hooks/pre-commit hook.c", Some(R::GitHooks)),
+            ("pandoc -o .mcp.json in.md", Some(R::McpConfig)),
+            ("openssl enc -d -in x -out .mcp.json", Some(R::McpConfig)),
+            ("xxd -r dump .mcp.json", Some(R::McpConfig)),
+            ("cc -o out/app main.c", None),
+            // Project build/run tools run project code: interpreter-limit class, no target.
+            ("make install", None),
+            ("npm install", None),
+            ("cargo build", None),
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 r6 sweep (grep of the writer programs the classifier does not name): editors, `sponge`, `zip`, `ar`, FIFO and
+    /// node makers, `rename`, `mogrify`, `ffmpeg`/`convert` outputs and `cp` into or out of a container write the file
+    /// they name.
+    #[cfg(unix)]
+    #[test]
+    fn p166_r6_sweep_remaining_named_file_writers() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let state = PermissionState::default();
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        for (cmd, expected) in [
+            ("sponge .mcp.json", Some(R::McpConfig)),
+            ("vim -es .mcp.json", Some(R::McpConfig)),
+            ("ed -s .fuigo/lsp.json", Some(R::McpConfig)),
+            ("ex -sc wq .mcp.json", Some(R::McpConfig)),
+            ("nano .mcp.json", Some(R::McpConfig)),
+            ("emacs --batch .mcp.json", Some(R::McpConfig)),
+            ("zip .mcp.json src", Some(R::McpConfig)),
+            ("zip -r .git/hooks/pre-commit src", Some(R::GitHooks)),
+            ("ar rcs .mcp.json a.o", Some(R::McpConfig)),
+            ("ar x lib.a", Some(R::Sensitive)),
+            ("mkfifo .mcp.json", Some(R::McpConfig)),
+            ("mknod .mcp.json p", Some(R::McpConfig)),
+            ("mogrify -resize 50% .mcp.json", Some(R::McpConfig)),
+            ("rename s/a/b/ .mcp.json", Some(R::McpConfig)),
+            ("ffmpeg -i in.mp4 .mcp.json", Some(R::McpConfig)),
+            ("ffmpeg -y -i in.mp4 -c copy .fuigo/lsp.json", Some(R::McpConfig)),
+            ("convert in.png .mcp.json", Some(R::McpConfig)),
+            ("docker cp ctr:/etc/x .mcp.json", Some(R::McpConfig)),
+            ("kubectl cp ns/pod:/x .fuigo/lsp.json", Some(R::McpConfig)),
+            ("zip out/a.zip src", None),
+            ("ar t lib.a", None),
+            ("ffmpeg -i in.mp4 out/o.mp4", None),
+            ("convert in.png out/o.png", None),
+            ("convert -version", None),
+            ("docker cp .mcp.json ctr:/x", None),
+            ("docker ps", None),
+            ("vim -es out/notes.txt", None),
+            ("sponge out/notes.txt", None),
+        ] {
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 Grok r5 MEDIUM 2: an archive extraction's members are not inspected, so the extraction prompts (`Sensitive`)
+    /// even under an exact grant or a narrow `Bash(tar:*)`; the user can still approve it. Archive creation and listings
+    /// stay silent.
+    #[cfg(unix)]
+    #[test]
+    fn grok_r5_archive_extraction_prompts_for_members() {
+        use crate::permission::shell_access::ProtectedEditReason as R;
+        let project = tempfile::tempdir().unwrap();
+        let cwd = project.path();
+        std::fs::create_dir_all(cwd.join("src")).unwrap();
+        std::fs::write(cwd.join("src").join("a.rs"), "a").unwrap();
+        std::fs::create_dir_all(cwd.join("out")).unwrap();
+        for (cmd, expected) in [
+            ("tar -xf payload.tar", Some(R::Sensitive)),
+            ("tar xzf payload.tgz -C out", Some(R::Sensitive)),
+            ("unzip payload.zip", Some(R::Sensitive)),
+            ("unzip -o payload.zip -d out", Some(R::Sensitive)),
+            ("7z x payload.7z", Some(R::Sensitive)),
+            ("7z e payload.7z -oout", Some(R::Sensitive)),
+            ("cpio -i --no-absolute-filenames < p.cpio", Some(R::Sensitive)),
+            ("ditto -x -k payload.zip out", Some(R::Sensitive)),
+            ("ditto -xk payload.zip out", Some(R::Sensitive)),
+            ("tar -tf payload.tar", None),
+            ("tar -czf out.tgz src", None),
+            ("unzip -l payload.zip", None),
+            ("7z l payload.7z", None),
+            ("ditto -c -k src out.zip", None),
+            ("ditto src out", None),
+        ] {
+            // An exact whole-command grant does not skip it.
+            let mut state = PermissionState::default();
+            state.allowed_bash_commands.insert(cmd.to_owned());
+            let evaluation = evaluate_bash(cmd, &state, true);
+            assert!(evaluation.exact_grant, "{cmd}: the grant must be exact");
+            assert_eq!(
+                bash_protected_write_target(&evaluation, cwd, None),
+                expected,
+                "{cmd}"
+            );
+        }
+    }
+
+    /// P166 Grok r5 HIGH 1: `patch`, `scp`, `pax`, `curl`/`wget` downloads, `split`, decompressors, `find -fprint` and
+    /// `sed w` are file writes, so a broad bash grant prompts instead of auto-allowing them.
+    #[test]
+    fn grok_r5_new_writers_floor_broad_grants() {
+        let state = PermissionState::default();
+        for cmd in [
+            "patch -p1 -i p.diff",
+            "patch -o out.rs a.rs p.diff",
+            "scp host:a.txt .",
+            "pax -r -f p.pax",
+            "pax -rw src out",
+            "curl -o out.txt https://example.com/x",
+            "curl -O https://example.com/a.txt",
+            "wget https://example.com/a.txt",
+            "split -l 1 in",
+            "gunzip a.gz",
+            "find . -fprint out.txt",
+            "sed -n 'w out.txt' in",
+        ] {
+            let e = evaluate_bash(cmd, &state, true);
+            assert!(
+                e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+                "{cmd}: must be a FileWrite"
+            );
+            assert!(
+                bash_request_floor_requires_prompt(Some(&e)),
+                "{cmd}: a broad grant must prompt"
+            );
+        }
+        for cmd in [
+            "curl -fsSL https://example.com/x",
+            "wget -qO- https://example.com/x",
+            "gunzip -c a.gz",
+            "sed -n 'p' in",
+            "patch --dry-run -p1 -i p.diff",
+            "pax -f p.pax",
+            "scp a.txt host:b.txt",
+            "rsync -a ./ host:proj/",
+        ] {
+            let e = evaluate_bash(cmd, &state, true);
+            assert!(
+                !e.assessment.contains(ClassifierSecurityFinding::FileWrite),
+                "{cmd}: writes no local file"
+            );
+        }
+    }
+
+    /// P166/S5: shell writes (redirects, `tee`, `cp`, `sort -o`) to a protected target carry the protected-edit prompt.
+    /// Before, only `mkdir`/`touch` operands reached the protected list, so auto mode sent `echo … > ~/.fuigo/mcp.json` to the classifier.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn protected_floor_covers_shell_write_targets() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for (cmd, kind) in [
+                    ("echo '{}' > /home/user/.fuigo/mcp.json", Some("mcp_config")),
+                    ("cat x >> /work/project/.fuigo/lsp.json", Some("mcp_config")),
+                    ("tee /work/project/.mcp.json", Some("mcp_config")),
+                    ("cp evil /work/project/.cursor/mcp.json", Some("mcp_config")),
+                    (
+                        "echo 'allow_bash_execute = true' > /home/user/.fuigo/sessions/ws/permission.toml",
+                        Some("fuigo_config"),
+                    ),
+                    (
+                        "sort -o /home/user/.fuigo/sessions/ws/permission_fuigo-pager.toml in",
+                        Some("fuigo_config"),
+                    ),
+                    ("echo evil > /home/user/.zshrc", Some("startup_file")),
+                    ("cd /tmp && echo '{}' > .mcp.json", Some("mcp_config")),
+                    // Astra r1 HIGH: directory destinations name the file only through the source.
+                    // The destination directory itself is protected (it holds the config).
+                    ("cp /tmp/mcp.json /home/user/.fuigo/", Some("fuigo_config")),
+                    ("cp /tmp/evil/.zshrc /home/user/", Some("startup_file")),
+                    ("cp -t /home/user /tmp/x/.claude.json", Some("mcp_config")),
+                    ("cp /tmp/x/.mcp.json .", Some("mcp_config")),
+                    (
+                        "cp -t /home/user/.fuigo/sessions/ws/ /tmp/permission.toml",
+                        Some("fuigo_config"),
+                    ),
+                    ("mv /tmp/grants /home/user/.fuigo/sessions/ws", Some("fuigo_config")),
+                    ("cp -r /tmp/payload /work/project/.fuigo", Some("fuigo_config")),
+                    ("cp -r /tmp/payload /work/project/.cursor", Some("mcp_config")),
+                    // Astra r2 HIGH: a contents copy into an explicit target directory.
+                    (
+                        "cp -r --target-directory=/home/user/.fuigo /tmp/payload/.",
+                        Some("fuigo_config"),
+                    ),
+                    // A relative target after a literal `cd` resolves against the new cwd.
+                    ("cd /home/user/.fuigo && echo '{}' > lsp.json", Some("mcp_config")),
+                    ("cd /home/user && cd .fuigo && echo '{}' > mcp.json", Some("mcp_config")),
+                    // An unpinnable `cd` still fails closed.
+                    ("cd \"$X\" && echo '{}' > notes.txt", Some("sensitive")),
+                    ("echo ok > /tmp/p166-notes.txt", None),
+                    ("cargo build > /dev/null", None),
+                    ("cd /tmp && cp a.rs b.rs", None),
+                    ("cp /tmp/a.rs /tmp/out/", None),
+                ] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let mut config = crate::permission::types::PermissionConfig::new(vec![]);
+                    config.prompt_policy = PromptPolicy::Auto;
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, _events) = manager_with_recording_client(
+                        &cwd,
+                        Some(config),
+                        client,
+                        ClientType::Generic,
+                    );
+                    let decision = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                    let prompts = prompts.borrow();
+                    let prompted_kind = prompts.first().and_then(|p| {
+                        p.meta
+                            .as_ref()
+                            .and_then(|m| m.get("kind"))
+                            .and_then(|k| k.as_str())
+                            .map(str::to_owned)
+                    });
+                    assert_eq!(prompted_kind.as_deref(), kind, "{cmd}: {decision:?}");
+                    if kind.is_some() {
+                        assert_eq!(prompts.len(), 1, "{cmd} must prompt (protected)");
+                        assert!(matches!(decision, Decision::Reject(_)), "{cmd}");
+                    }
+                }
+            })
+            .await;
+    }
+
     #[test]
     fn sandbox_auto_allow_respects_real_file_write_floor() {
         let state = PermissionState::default();
@@ -6254,6 +7546,73 @@ mod tests {
                 "sandbox control: {cmd}"
             );
         }
+    }
+
+    /// P166 r9 (b): `git checkout main` rewrites working-tree files (possibly tracked protected ones) without naming
+    /// them, so it carries the ordinary FileWrite floor. Pin what each shortcut ACTUALLY decides, not the flag:
+    /// `allow_bash_execute` prompts, sandbox auto-allow declines, auto mode sends it to the classifier with the
+    /// FileWrite finding, and a narrow `Bash(git:*)` rule allows it with no further check (reported as a finding).
+    #[tokio::test]
+    async fn p166_r9_git_checkout_main_end_to_end_per_shortcut() {
+        use crate::permission::auto_mode::ClassifierVerdict;
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::{PermissionConfig, RuleAction};
+        let cmd = "git checkout main";
+        let state = PermissionState::default();
+        let evaluation = evaluate_bash(cmd, &state, true);
+        assert!(evaluation.assessment.is_file_write_only(), "FileWrite is the whole assessment");
+        assert!(!sandbox_may_auto_allow_bash(Some(&evaluation), true), "sandbox auto-allow must decline");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let repo = || {
+                    let tmp = tempfile::tempdir().unwrap();
+                    git2::Repository::init(tmp.path()).unwrap();
+                    tmp
+                };
+                // 1. Narrow `Bash(git:*)` rule (P166 r13B): a repository that tracks no protected name: allowed,
+                //    no prompt, no classifier. One that tracks `.mcp.json` (or cannot be determined): the floor holds.
+                for (tracked, undetermined) in [(false, false), (true, false), (false, true)] {
+                    let tmp = if undetermined { repo() } else { super::p166_r13b_branch_tests::table_repo(tracked) };
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let rule = parse_permission_rule("Bash(git:*)", RuleAction::Allow).unwrap();
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, _e) = manager_with_recording_client(
+                        &cwd, Some(PermissionConfig::new(vec![rule])), client, ClientType::Generic);
+                    let d = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                    if tracked || undetermined {
+                        assert_eq!(prompts.borrow().len(), 1, "Bash(git:*): tracked={tracked} undetermined={undetermined}: prompts");
+                    } else {
+                        assert_eq!(d, Decision::Allow, "Bash(git:*): no protected name: allowed");
+                        assert_eq!(prompts.borrow().len(), 0, "Bash(git:*): no protected name: no prompt");
+                    }
+                }
+                // 2. `allow_bash_execute`: the FileWrite floor prompts.
+                let tmp = repo();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                persist_state(&cwd, &PermissionState { allow_bash_execute: true, ..Default::default() }, None).await;
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                let _ = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                assert_eq!(prompts.borrow().len(), 1, "allow_bash_execute: prompts");
+                // 3. Auto mode: the classifier runs once and sees the FileWrite finding; it is not a fast allow.
+                let tmp = repo();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let (mgr, _e) = manager_with_recording_client(&cwd, None, client, ClientType::FuigoPager);
+                mgr.set_auto_mode(true);
+                let (clf, seen) = capturing_classifier(ClassifierVerdict::Allow);
+                mgr.set_classifier(Some(clf));
+                let _ = decide(&mgr, AccessKind::Bash(cmd.into()), tool_call()).await;
+                assert_eq!(seen.lock().unwrap().len(), 1, "auto mode: classifier runs once");
+                assert!(
+                    seen.lock().unwrap()[0].security_findings.contains(ClassifierSecurityFinding::FileWrite),
+                    "auto mode: FileWrite visible to the classifier"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -7838,8 +9197,9 @@ mod tests {
         git2::Repository::init(tmp.path()).unwrap();
         std::fs::write(
             tmp.path().join(".git/config"),
-            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n\
-             [filter \"lfs\"]\n\tprocess = git-lfs filter-process\n",
+            // A local content filter is exec risk since P158 (upstream 75810042), so the clean
+            // fixture carries none (as upstream's)
+            "[core]\n\trepositoryformatversion = 0\n\tfsmonitor = true\n",
         )
         .unwrap();
         let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();

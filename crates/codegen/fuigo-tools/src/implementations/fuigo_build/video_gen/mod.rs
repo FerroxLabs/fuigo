@@ -910,6 +910,25 @@ struct VideoGenVideoInfo {
     url: Option<String>,
 }
 
+/// Whether an image reference is passed through without reading a file: a `data:image/` URL or an `https://` URL.
+fn is_inline_image_reference(value: &str) -> bool {
+    value.starts_with("data:image/") || value.starts_with("https://")
+}
+
+/// Every local file an `image_to_video` / `reference_to_video` call reads (P174), in order, each once: each image
+/// reference that is not a `data:` or `https://` URL, spelled as the tool opens it (relative paths resolve against the
+/// process cwd). The permission check judges each one as a Read.
+pub fn local_image_paths<'a>(images: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    images
+        .into_iter()
+        .map(|image| image.trim())
+        .filter(|image| !image.is_empty() && !is_inline_image_reference(image))
+        .map(str::to_owned)
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
 async fn resolve_image_reference(value: &str) -> Result<String, fuigo_tool_runtime::ToolError> {
     let value = value.trim();
     if value.is_empty() {
@@ -932,15 +951,19 @@ async fn resolve_image_reference(value: &str) -> Result<String, fuigo_tool_runti
         return Ok(value.to_owned());
     }
 
-    if value.starts_with("https://") {
+    if is_inline_image_reference(value) {
         return Ok(value.to_owned());
     }
 
-    let raw_bytes = tokio::fs::read(value).await.map_err(|e| {
-        fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-            "image reference not readable: {value} ({e})"
-        ))
-    })?;
+    // P166/S12: regular files only, capped, so a FIFO or device reference cannot hang or flood the call.
+    let cap = crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES;
+    let raw_bytes = crate::util::file_reader::read_regular_file(std::path::Path::new(value), Some(cap))
+        .await
+        .map_err(|e| {
+            fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                "image reference not readable: {value} ({e})"
+            ))
+        })?;
     if raw_bytes.is_empty() {
         return Err(fuigo_tool_runtime::ToolError::invalid_arguments(
             "image reference contained no data",
@@ -1534,6 +1557,16 @@ mod tests {
         assert_eq!(input.aspect_ratio, "16:9");
         assert_eq!(input.duration, Some(10));
         assert_eq!(input.resolution_name, DEFAULT_RESOLUTION);
+    }
+
+    /// P174: the local files a video call reads, for the permission check.
+    #[test]
+    fn local_image_paths_lists_every_file_the_tool_reads() {
+        let images: Vec<String> = ["data:image/png;base64,AAAA", "https://x.example/a.png", " rel.png ", "", "/abs.png", "/abs.png", "file:///t.png"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(local_image_paths(&images), vec!["rel.png", "/abs.png", "file:///t.png"]);
     }
 
     #[test]

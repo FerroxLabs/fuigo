@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::Path;
 
 use fuigo_fast_worktree::WorktreeStatus;
+use fuigo_tty_utils::untrusted;
 use unicode_width::UnicodeWidthStr;
 
 use super::{DiskUsageReport, Registration, RegistryState, WorktreeUsage};
@@ -23,13 +24,13 @@ pub fn print_report(
     out: &mut impl Write,
 ) -> std::io::Result<()> {
     let home_label = home_prefix_label(&report.fuigo_home);
-    writeln!(out, "Disk usage for {home_label}")?;
+    writeln!(out, "Disk usage for {}", untrusted(&home_label))?;
     for entry in &report.top_level_dirs {
         writeln!(
             out,
             "  {:>SIZE_WIDTH$}  {}",
             size_cell(entry.bytes),
-            entry.name
+            untrusted(&entry.name)
         )?;
     }
     if report.root_files_bytes > 0 {
@@ -138,14 +139,14 @@ pub fn print_report(
             writeln!(
                 out,
                 "  Worktree registry at {} could not be opened; rows show as untracked. Check its permissions.",
-                abbreviate(&report.registry_path, &report.fuigo_home, &home_label)
+                untrusted(abbreviate(&report.registry_path, &report.fuigo_home, &home_label))
             )?;
         }
         RegistryState::Corrupt => {
             writeln!(
                 out,
                 "  Worktree registry is damaged; rows show as untracked. Remove {} and run `fuigo worktree db rebuild` to recreate it.",
-                abbreviate(&report.registry_path, &report.fuigo_home, &home_label)
+                untrusted(abbreviate(&report.registry_path, &report.fuigo_home, &home_label))
             )?;
         }
     }
@@ -180,10 +181,10 @@ pub fn print_report(
                 out,
                 "  {:>SIZE_WIDTH$}  {} {:<AGE_WIDTH$} {} {}",
                 size_cell(wt.bytes),
-                pad_to_width(kind, kind_width),
+                untrusted(pad_to_width(kind, kind_width)),
                 age,
-                pad_to_width(&label, label_width),
-                abbreviate(&wt.path, &report.fuigo_home, &home_label),
+                untrusted(pad_to_width(&label, label_width)),
+                untrusted(abbreviate(&wt.path, &report.fuigo_home, &home_label)),
             )?;
         }
     }
@@ -211,7 +212,7 @@ pub fn print_missing_home(fuigo_home: &str, out: &mut impl Write) -> std::io::Re
     writeln!(
         out,
         "Nothing on disk yet at {}.",
-        home_prefix_label(fuigo_home)
+        untrusted(home_prefix_label(fuigo_home))
     )
 }
 

@@ -445,8 +445,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
             session_id_str.clone(),
         );
     }
+    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
+        attempt,
         session_id: session_id_str,
         session_cwd: Some(session_cwd),
         chat_kind: conversation_entry,
@@ -495,8 +497,10 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         parent_session_id.0.as_ref(),
         session_id_str.clone(),
     );
+    let attempt = app.agents.get_mut(&agent_id).map_or(0, |a| a.begin_load_attempt());
     vec![Effect::LoadSession {
         agent_id,
+        attempt,
         session_id: session_id_str,
         session_cwd: Some(cwd),
         chat_kind: conversation_entry,
@@ -513,8 +517,12 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished(TurnEnd::Aborted);
-        agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
+        // Only a tab with no session is refused; a bound one is a live session
+        if agent.session.session_id.is_none() {
+            agent.load_failed = true;
+            super::load::restore_prompts_held_during_load(agent);
+        }
         agent
             .scrollback
             .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {

@@ -1367,6 +1367,9 @@ pub(super) async fn run_session(
                                 });
                             }
                         }
+                        SessionCommand::ForgetConfigNotice { notice } => {
+                            told_config_notices.remove(&notice);
+                        }
                         SessionCommand::CopyFile { respond_to } => {
                             // Flush the actor-owned replay buffer first
                             // Buffered notifications must reach updates.jsonl before the persistence task snapshots the session directory

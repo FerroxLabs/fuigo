@@ -1614,6 +1614,16 @@ pub(super) fn dispatch_dashboard_peek_reply(
         }
         return vec![];
     }
+    if app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|agent| agent.load_failed)
+    {
+        if let Some(d) = app.dashboard.as_mut() {
+            d.set_error_toast(super::prompt::LOAD_FAILED_NOTICE);
+        }
+        return vec![];
+    }
 
     let prompt_state = app
         .dashboard

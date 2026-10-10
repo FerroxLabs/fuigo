@@ -149,3 +149,52 @@ fn script_cannot_smuggle_a_scheme_past_the_link_allowlist() {
         extract_osc8_links("\x1b]8;;https://x.ai\x1b]52;c;cHduZWQ=\x07ok\x1b]8;;\x07");
     assert!(smuggled.is_empty());
 }
+
+/// P181: a script's text drops tag characters, soft hyphens and line separators; none takes a column.
+#[test]
+fn script_text_drops_hidden_characters() {
+    let text = SanitizedText::new("a\u{e0041}b\u{00ad}c\u{2028}d");
+    let flat: String = text
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    assert_eq!(flat, "abcd");
+}
+
+/// P181 (Astra round 1): a joiner changes how wide the text measures, so link columns come from the text without it.
+#[test]
+fn link_columns_are_measured_on_the_text_that_is_painted() {
+    let input = "\u{1f469}\u{200d}\u{1f52c} \x1b]8;;https://x.example\x07DOC\x1b]8;;\x07";
+    let (clean, links) = extract_osc8_links(input);
+    assert_eq!(clean, "\u{1f469}\u{1f52c} DOC");
+    let start = u16::try_from(painted_width("\u{1f469}\u{1f52c} ")).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!((links[0].col_start, links[0].col_end), (start, start + 3));
+}
+
+/// P181 (Astra round 1): a hidden character in a link target refuses the link; deleting it would change the address.
+#[test]
+fn a_link_target_with_a_hidden_character_is_refused() {
+    for hidden in ["\u{00ad}", "\u{e0041}", "\u{200d}", "\u{2028}"] {
+        let input = format!("\x1b]8;;https://x{hidden}.example\x07click\x1b]8;;\x07");
+        let (clean, links) = extract_osc8_links(&input);
+        assert_eq!(clean, "click", "{hidden:?}");
+        assert!(links.is_empty(), "{hidden:?}");
+        // Also at the end, where a trim would have deleted it
+        let input = format!("\x1b]8;;https://x.example/a{hidden}\x07click\x1b]8;;\x07");
+        let (clean, links) = extract_osc8_links(&input);
+        assert_eq!(clean, "click", "{hidden:?}");
+        assert!(links.is_empty(), "{hidden:?}");
+    }
+}
+
+/// P181 (Grok round): a C1 control (CSI is U+009B) is a control, so it must not reach the ANSI parser; SGR via ESC still does.
+#[test]
+fn script_text_drops_c1_and_other_controls_but_keeps_sgr() {
+    let (clean, _) = extract_osc8_links("ok\u{9b}31mFAKE\u{85}\u{9d}x\ty\rz\x00w");
+    assert_eq!(clean, "ok31mFAKExyzw");
+    let (clean, _) = extract_osc8_links("a\x1b[31mred\x1b[0m\u{9b}b");
+    assert_eq!(clean, "a\x1b[31mred\x1b[0mb");
+}

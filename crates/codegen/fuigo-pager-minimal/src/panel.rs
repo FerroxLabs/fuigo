@@ -371,7 +371,11 @@ fn render_mcps(
                         if let Some(si) = row_data_indices[i] {
                             exp[i] = s.mcps_tools_expanded.contains(&si);
                             if let Some(srv) = servers.get(si) {
-                                if !srv.enabled {
+                                if srv.blocked_reason.is_some() {
+                                    // P169: a policy verdict is not a personal disable.
+                                    b[i] = "blocked by policy".to_string();
+                                    bc[i] = Some(theme.accent_error);
+                                } else if !srv.enabled {
                                     b[i] = "disabled".to_string();
                                     bc[i] = Some(theme.accent_error);
                                 } else {
@@ -383,7 +387,12 @@ fn render_mcps(
                                 }
                                 // P152 (Astra r2 #5): an unavailable server says why, as the full TUI does.
                                 rl[i] = if let Some(reason) = srv.status_reason.as_deref() {
-                                    format!("not connected: {reason}")
+                                    if minimal_api::mcp_status_needs_auth(&srv.status) {
+                                        // K7: the automatic token refresh was refused
+                                        format!("sign-in needed, refresh refused: {reason}")
+                                    } else {
+                                        format!("not connected: {reason}")
+                                    }
                                 } else if srv.tool_count == 1 {
                                     "1 tool".to_string()
                                 } else {
@@ -562,6 +571,7 @@ mod tests {
             plugin_name: None,
             is_managed_gateway: false,
             status_reason: None,
+            blocked_reason: None,
         }
     }
 
@@ -687,6 +697,37 @@ mod tests {
         assert_eq!(s.entry_non_selectable.len(), 3);
     }
 
+    /// P169 (S15): minimal mode lists a policy-blocked server with a "blocked by policy" badge, never as a personal
+    /// disable. Ported from upstream `mcps_panel_badges_policy_block_over_disabled`.
+    #[test]
+    fn mcps_panel_badges_policy_block_over_disabled() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
+        let mut denied = mcp_server("denied-srv", McpServerDisplayStatus::Unavailable, 0);
+        denied.enabled = false;
+        denied.blocked_reason = Some("matches deniedMcpServers".into());
+        let mut manual = mcp_server("manual-srv", McpServerDisplayStatus::Ready, 2);
+        manual.enabled = false;
+        let mut a = with_mcps(vec![denied, manual]);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 100, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        let text = buffer_text(&buf);
+        let row = |name: &str| {
+            text.lines()
+                .find(|l| l.contains(name))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no row for {name}:\n{text}"))
+        };
+        let denied_row = row("denied-srv");
+        assert!(denied_row.contains("blocked by policy"), "policy verdict must win:\n{denied_row}");
+        assert!(
+            !denied_row.contains("disabled"),
+            "policy-blocked row must not read as a personal disable:\n{denied_row}"
+        );
+        assert!(row("manual-srv").contains("disabled"), "personal disable keeps its badge:\n{text}");
+    }
+
     /// P152 (Astra r2 #5): the minimal `/mcps` list shows why a server is unavailable, on its collapsed row.
     #[test]
     fn mcps_panel_shows_the_unavailable_reason() {
@@ -700,6 +741,50 @@ mod tests {
         render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
         let text = buffer_text(&buf);
         assert!(text.contains("not connected: spawn failed"), "reason on the row:\n{text}");
+    }
+
+    /// K7: a server waiting on sign-in says why its automatic token refresh was refused.
+    #[test]
+    fn mcps_panel_shows_why_a_refresh_was_refused() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
+        // The reason arrives as the shell sent it and goes through the pager's list conversion, which filters it
+        use fuigo_pager::views::mcps_modal::{McpsListResponse, McpsServerEntry, McpsServerSession, convert_list_response};
+        let wire = McpsListResponse {
+            servers: vec![McpsServerEntry {
+                name: "cog".into(),
+                display_name: None,
+                source: Some("local".into()),
+                source_label: None,
+                config_type: Some("http".into()),
+                setup: None,
+                setup_values: None,
+                session: Some(McpsServerSession {
+                    enabled: true,
+                    status: None,
+                    tools: vec![],
+                    auth_required: true,
+                    setup_required: false,
+                    blocked_reason: None,
+                    unavailable_reason: Some(
+                        "refusing to send OAuth credentials to https://idp.example/token\x1b]0;pwned\x07".to_string(),
+                    ),
+                }),
+            }],
+        };
+        let converted = convert_list_response(wire);
+        let reason = converted[0].status_reason.clone().expect("reason kept");
+        assert!(!reason.chars().any(char::is_control), "control char survived: {reason:?}");
+        let mut a = with_mcps(converted);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 120, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        let text = buffer_text(&buf);
+        assert!(
+            text.contains("sign-in needed, refresh refused:"),
+            "reason on the row:\n{text}"
+        );
+        assert!(text.contains("refusing to send"), "reason text kept:\n{text}");
     }
 
     #[test]

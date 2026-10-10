@@ -213,7 +213,7 @@ async fn fetch_npm_tag(tag: &str, npm_registry: Option<&str>) -> Result<String> 
     };
     npm_view_version(&pkg_spec, npm_registry, None, NPM_VIEW_TIMEOUT)
         .await
-        .map_err(|e| anyhow::anyhow!("npm view @{tag} failed: {e:#}"))
+        .map_err(|e| anyhow::anyhow!("npm view {NPM_PACKAGE}@{tag} failed: {e:#}"))
 }
 
 /// Wall-clock bound on one `npm view` (P145). With the registry unreachable npm retried for about 70 s and then

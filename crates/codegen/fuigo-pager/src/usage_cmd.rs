@@ -15,7 +15,7 @@ pub struct UsageArgs {
 
 pub fn run(args: UsageArgs) -> Result<()> {
     let payload = load_payload(&args.session_id, args.turn)?;
-    let mut out = std::io::stdout().lock();
+    let mut out = fuigo_tty_utils::best_effort_stdout::display_stdout();
     writeln!(out, "{}", serde_json::to_string_pretty(&payload)?)?;
     Ok(())
 }

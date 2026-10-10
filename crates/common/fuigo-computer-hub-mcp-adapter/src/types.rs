@@ -6,6 +6,7 @@
 //! stays testable with in-memory mocks.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Map;
 
 /// Metadata returned by a successful MCP `initialize` handshake.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +44,10 @@ pub struct McpCallResult {
     /// When `true`, the tool signalled an application-level error.
     #[serde(default)]
     pub is_error: bool,
+    /// The tool's `_meta` object, read by hub clients.
+    /// The model never sees it.
+    #[serde(default, rename = "_meta", skip_serializing_if = "Map::is_empty")]
+    pub meta: Map<String, serde_json::Value>,
 }
 
 /// A single content block inside an [`McpCallResult`].
@@ -104,4 +109,32 @@ pub enum McpError {
     /// The response could not be decoded.
     #[error("decode error: {0}")]
     Decode(String),
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::McpCallResult;
+
+    /// P194 (U16): a tool result's `_meta` survives the wire both ways, and an absent one stays off the wire.
+    #[test]
+    fn call_result_keeps_meta_under_the_underscore_key() {
+        let wire = serde_json::json!({
+            "content": [],
+            "isError": false,
+            "_meta": {"app_name": "TextEdit"},
+        });
+        let result: McpCallResult = serde_json::from_value(wire.clone()).expect("decode");
+        assert_eq!(result.meta["app_name"], "TextEdit");
+        assert_eq!(serde_json::to_value(&result).expect("encode"), wire);
+
+        let bare: McpCallResult =
+            serde_json::from_value(serde_json::json!({"content": []})).expect("decode");
+        assert!(bare.meta.is_empty());
+        assert!(
+            serde_json::to_value(&bare)
+                .expect("encode")
+                .get("_meta")
+                .is_none()
+        );
+    }
 }

@@ -1,0 +1,16 @@
+VERDICT: LAND-OK — 0 BLOCKER, 0 HIGH, 1 residual LOW.
+
+Reviewed `7b72937a..60ab0ba9` on `strike/p179`.
+
+- **BLOCKER/HIGH:** None found; no missed cut-off match identified.
+- **LOW — R1 memory: NOT FIXED completely.** The retained table is bounded, but [scratch collection](/Volumes/Mando/WaylandBots/Fuigo/wt-p179/crates/codegen/fuigo-secrets/src/sent_credentials.rs:1046) still pushes one `u16` per eligible prefix before deduplication, including after overflow. A long repetitive spelling therefore requires unbounded temporary storage despite having one distinct pair. Deduplicate during collection with a fixed pair bitmap.
+- **R1 callback coverage: FIXED.** The differential now compares exact `(start, mark)` sequences, preserving order and multiplicity.
+- **R1 decoder coverage: FIXED.** The test-only switch disables both plain-copy paths; the differential includes escape-rich inputs spanning multiple windows.
+
+Overflow preserves coverage: bitmap accumulation continues after table disposal; hits enumerate every spelling; `always` is appended before short-input and bitmap-miss returns. Clearing scratch on `len < 2` cannot exclude that spelling. Registry limits keep the `u32` count safe.
+
+Both mark endpoints remain checked; candidate sorting/deduplication preserves callback behavior.
+
+No new functional regression versus `fbf53c96` or `de6ca7dd` identified in this delta. The residual P179 construction-memory overhead remains.
+
+Read-only source audit; `git diff --check` passed. Build-box and mutant results are supplied evidence, not independently rerun. No Cargo executed; worktree unchanged.

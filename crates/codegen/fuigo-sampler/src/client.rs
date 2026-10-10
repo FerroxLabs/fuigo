@@ -3260,7 +3260,7 @@ mod tests {
     ///
     /// Scope: logs only. The text of the errors RETURNED for a 401 or a transport failure still names the request
     /// URL exactly as before (P70b decides what happens to error text); this test does not look at it.
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no_body() {
         use tracing_subscriber::layer::SubscriberExt;
         use tracing_subscriber::util::SubscriberInitExt;
@@ -3348,6 +3348,9 @@ mod tests {
         let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(Capture(captured.clone()));
         let _guard = subscriber.set_default();
+        // The callsite interest cache is process-wide: a callsite first hit under another subscriber can be cached
+        // as disabled and hide this test's own records.
+        tracing::callsite::rebuild_interest_cache();
         let client_config = SamplerConfig {
             base_url: format!("http://{addr}/v1?key={}", SECRETS[0]),
             api_backend: ApiBackend::Responses,

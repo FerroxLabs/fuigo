@@ -22,4 +22,4 @@ pub mod tool;
 pub use apply::derive_new_contents;
 pub use errors::{ApplyPatchError, ParseError};
 pub use parser::{Hunk, ParsedPatch, UpdateFileChunk, parse_patch};
-pub use tool::{ApplyPatchInput, ApplyPatchTool};
+pub use tool::{ApplyPatchInput, ApplyPatchTool, patch_edit_targets, patch_target_paths};

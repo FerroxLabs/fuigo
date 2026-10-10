@@ -478,6 +478,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_forwards_call_text_response() {
         let call_result = McpCallResult {
+            meta: Default::default(),
             content: vec![McpContent::Text {
                 text: "found 3 results".into(),
             }],
@@ -522,6 +523,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_forwards_call_mcp_blocks_response() {
         let call_result = McpCallResult {
+            meta: Default::default(),
             content: vec![
                 McpContent::Text {
                     text: "result text".into(),
@@ -577,6 +579,7 @@ mod tests {
     #[tokio::test]
     async fn bridge_handles_mcp_error_response() {
         let call_result = McpCallResult {
+            meta: Default::default(),
             content: vec![McpContent::Text {
                 text: "permission denied".into(),
             }],
@@ -689,6 +692,7 @@ mod tests {
     #[test]
     fn translate_mcp_result_error_concatenates_text() {
         let result = McpCallResult {
+            meta: Default::default(),
             content: vec![
                 McpContent::Text {
                     text: "line 1".into(),
@@ -708,6 +712,7 @@ mod tests {
     #[test]
     fn translate_mcp_result_empty_content_returns_empty_text() {
         let result = McpCallResult {
+            meta: Default::default(),
             content: vec![],
             is_error: false,
         };
@@ -720,6 +725,7 @@ mod tests {
     #[test]
     fn translate_mcp_result_empty_error_content_returns_empty_text() {
         let result = McpCallResult {
+            meta: Default::default(),
             content: vec![],
             is_error: true,
         };
@@ -732,6 +738,7 @@ mod tests {
     #[test]
     fn translate_mcp_result_error_with_only_image_drops_content() {
         let result = McpCallResult {
+            meta: Default::default(),
             content: vec![McpContent::Image {
                 mime_type: "image/png".into(),
                 data: "base64data".into(),

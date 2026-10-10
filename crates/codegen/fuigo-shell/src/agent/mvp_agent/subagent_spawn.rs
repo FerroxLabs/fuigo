@@ -268,6 +268,7 @@ impl MvpAgent {
             parent_chat_state,
             parent_max_turns,
             available_models,
+            fleet_model_pin: crate::agent::models::effective_allowlist(&self.cfg.borrow()).is_fleet(),
             subagent_model_overrides,
             subagent_toggle,
             subagent_roles,

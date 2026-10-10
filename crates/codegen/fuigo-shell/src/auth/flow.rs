@@ -761,9 +761,9 @@ async fn persist_or_use_minted(auth_manager: &AuthManager, new_auth: FuigoAuth) 
 }
 /// Print the CLI "signed in" confirmation, clearing the spinner line first.
 pub(crate) fn report_signed_in(auth: &FuigoAuth) {
-    fuigo_tty_utils::cli_eprint!("\r\x1b[K");
+    fuigo_tty_utils::cli_eprint_trusted!("\r\x1b[K");
     match auth.email {
-        Some(ref email) => fuigo_tty_utils::cli_eprintln!("✓ Signed in as {email}"),
+        Some(ref email) => fuigo_tty_utils::cli_eprintln!("✓ Signed in as {}", fuigo_tty_utils::untrusted(&email)),
         None => fuigo_tty_utils::cli_eprintln!("✓ Signed in"),
     }
 }
@@ -800,7 +800,7 @@ pub async fn ensure_authenticated_with_override(
         let _ = auth_manager.remove_scope(LEGACY_AUTH_SCOPE);
     }
     if let Some(msg) = message_prefix {
-        fuigo_tty_utils::cli_eprintln!("{msg}");
+        fuigo_tty_utils::cli_eprintln!("{}", fuigo_tty_utils::untrusted(&msg));
     }
     let (auth, did_auth) = run_auth_flow(
         &auth_manager,
@@ -990,7 +990,7 @@ pub fn run_cli_logout(config: &crate::agent::config::Config) -> anyhow::Result<(
         return Ok(());
     }
     if let Some(email) = result.email {
-        fuigo_tty_utils::cli_eprintln!("Logged out (was signed in as {email})");
+        fuigo_tty_utils::cli_eprintln!("Logged out (was signed in as {})", fuigo_tty_utils::untrusted(&email));
     } else {
         fuigo_tty_utils::cli_eprintln!("Logged out");
     }

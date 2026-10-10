@@ -2,6 +2,7 @@ pub mod base64_images;
 pub mod binary;
 pub mod command_display;
 pub mod env;
+pub mod file_reader;
 pub mod fs;
 pub mod git_detect;
 pub mod fuigo_home;
@@ -9,7 +10,14 @@ pub mod hash;
 pub mod image_compress;
 pub mod image_validate;
 pub mod mcp_truncate;
+pub mod path_match;
 pub mod path_suggestions;
+pub mod read_deny;
+pub mod rg_json;
+#[cfg(test)]
+pub(crate) mod rg_json_tests;
+#[cfg(test)]
+mod search_proof_tests;
 pub(crate) mod query_tools;
 pub mod remap;
 pub mod serde_base64;

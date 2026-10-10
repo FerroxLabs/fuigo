@@ -670,6 +670,13 @@ pub(crate) async fn run_shell_child(
         && let Some(ref source_model) = source.model_id
         && effective_model_id.0.as_ref() != source_model.as_str()
     {
+        if let Some(refusal) = subagent_model_policy_refusal(source_model, &ctx) {
+            let msg = format!(
+                "Cannot resume from subagent '{}': source {refusal}.",
+                source.subagent_id,
+            );
+            return child_run_output(failure_result(&request, &msg), completion_data, None);
+        }
         if let Some(resolved) = resolve_model_override_to_config(source_model, &ctx) {
             tracing::info!(
                 subagent_id = %request.id,

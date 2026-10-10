@@ -110,18 +110,9 @@ pub enum ConsentState {
 fn sanitize_notice_text(raw: &str) -> String {
     raw.chars()
         .filter(|c| {
-            *c == '\n'
-                || !(crate::render::line_utils::is_unsafe_display_char(*c) || is_format_char(*c))
+            *c == '\n' || !crate::render::line_utils::is_unsafe_display_char(*c)
         })
         .collect()
-}
-
-/// The invisible characters the shared set misses: soft hyphen, line and paragraph separators, annotation marks.
-fn is_format_char(c: char) -> bool {
-    matches!(
-        c,
-        '\u{00ad}' | '\u{2028}' | '\u{2029}' | '\u{fff9}'..='\u{fffb}'
-    )
 }
 
 /// Every string the server supplies goes through here, so none can skip the cap or the sanitize.

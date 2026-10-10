@@ -1202,7 +1202,7 @@ pub struct ConfigWriteLock {
     _inode: Option<Box<ConfigWriteLock>>,
     /// Held only for its `flock`; the contents are never read or written.
     /// Declared before the queue places, so it is released before they are handed on.
-    _file: std::fs::File,
+    _file: HeldFlock,
     /// This process's place in the cross-process queue (`None` when the queue
     /// directory could not be used); dropped next, which lets the next process in.
     _ticket: Option<xq::Ticket>,
@@ -1346,11 +1346,43 @@ fn lock_config_for_write_within(
     lock_at_within(&config_lock_path(config_path), stall)
 }
 
+/// A lock file whose `flock` is released by an explicit `unlock` when this drops,
+/// before the handle closes. Closing alone is not enough: the lock belongs to
+/// the open file description, so a child that another thread forks
+/// (`Command::spawn`) between our open and its exec holds a copy of the
+/// descriptor and keeps the lock alive until it execs (R-flake-rewind; rows
+/// 190, 193, 194). Unlocking a handle that holds no lock is harmless.
+#[derive(Debug)]
+pub(crate) struct HeldFlock(std::fs::File);
+
+impl HeldFlock {
+    pub(crate) fn new(file: std::fs::File) -> Self {
+        Self(file)
+    }
+}
+
+impl std::ops::Deref for HeldFlock {
+    type Target = std::fs::File;
+    fn deref(&self) -> &std::fs::File {
+        &self.0
+    }
+}
+
+impl Drop for HeldFlock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
 /// Open (creating) a writer lock file. Its contents are irrelevant, but it sits beside the user's
 /// config and state (`config.toml.lock`, `~/.fuigo/locks/*`), so it is created owner-only (0600) on
 /// Unix like the files it guards (P150, D6), and one left looser by an older version is tightened
 /// (best effort: a filesystem without modes must not stop the write).
-pub(crate) fn open_lock_file(lock_path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_lock_file(lock_path: &Path) -> std::io::Result<HeldFlock> {
+    open_lock_file_raw(lock_path).map(HeldFlock::new)
+}
+
+fn open_lock_file_raw(lock_path: &Path) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     // truncate(false): the contents are irrelevant; it also silences clippy::suspicious_open_options.
     options.read(true).write(true).create(true).truncate(false);
@@ -1509,7 +1541,7 @@ mod turn {
         /// The turn holder is waiting for the helper's grant.
         waiting: bool,
         /// The helper's grant, handed to the waiting turn holder.
-        granted: Option<std::fs::File>,
+        granted: Option<super::HeldFlock>,
         /// The helper's failure, handed to the waiting turn holder.
         failed: Option<std::io::Error>,
     }
@@ -1628,7 +1660,7 @@ mod turn {
         key: &Path,
         lock_path: &Path,
         deadline: Instant,
-    ) -> Result<std::fs::File, Option<std::io::Error>> {
+    ) -> Result<super::HeldFlock, Option<std::io::Error>> {
         let mut guard = queues();
         {
             let queue = guard
@@ -1848,7 +1880,7 @@ mod xq {
     pub(super) struct Ticket {
         path: PathBuf,
         name: String,
-        file: Option<std::fs::File>,
+        file: Option<super::HeldFlock>,
     }
 
     impl Drop for Ticket {
@@ -1909,7 +1941,11 @@ mod xq {
             };
             // Locked BEFORE the ticket name exists, so a ticket name is never
             // seen unlocked while its writer is alive.
-            let linked = file.lock_exclusive().and_then(|()| {
+            // Guarded the moment the lock is taken, so even a panic below unlocks explicitly (a lock that is
+            // only closed can outlive the handle while a forked child holds a copy of the descriptor).
+            let locked = file.lock_exclusive();
+            let file = super::HeldFlock::new(file);
+            let linked = locked.and_then(|()| {
                 // Behind every ticket already there, whatever the clock says:
                 // a clock stepped back must not let a newcomer (or a writer
                 // re-queueing) sort ahead of writers already waiting.
@@ -2036,13 +2072,15 @@ mod xq {
     /// Whether the ticket at `path` belongs to a writer that is still there.
     /// One whose `flock` can be taken is a dead writer's, and is removed (its
     /// name is unique, so this never removes a newer ticket).
-    fn is_live(path: &Path) -> bool {
+    pub(super) fn is_live(path: &Path) -> bool {
         let Ok(file) = std::fs::File::open(path) else {
             // Gone (or, on Windows, being deleted).
             return false;
         };
         match fs2::FileExt::try_lock_shared(&file) {
             Ok(()) => {
+                // Unlocked explicitly on every path, not only by the close.
+                let _probe = super::HeldFlock::new(file);
                 let _ = std::fs::remove_file(path);
                 false
             }
@@ -2072,6 +2110,8 @@ mod xq {
                 && let Ok(file) = std::fs::File::open(entry.path())
                 && file.try_lock_exclusive().is_ok()
             {
+                // Unlocked explicitly on every path, not only by the close.
+                let _probe = super::HeldFlock::new(file);
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -3114,6 +3154,82 @@ mod tests {
             .expect("the helper's late grant must have been released");
         FileExt::unlock(&foreign).unwrap();
         drop(lock_config_for_write_within(&config, Duration::from_millis(500)).unwrap());
+    }
+
+    /// A late-granted `flock` is released even when another thread forks a
+    /// child at that moment (the child holds a copy of the descriptor until it
+    /// execs, and a lock that is only closed outlives our handle).
+    /// Linux only: the reproduction was made there, and the test forks inside the test process while other tests hold
+    /// locks of their own.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_late_grant_is_released_while_another_thread_keeps_forking_children() {
+        stress(50);
+    }
+
+    /// The same body at 300 iterations, the count of the red proof (about 65 s on the build box): RC checklist.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "RC checklist: run with --ignored"]
+    fn a_late_grant_is_released_while_another_thread_keeps_forking_children_300() {
+        stress(300);
+    }
+
+    /// Stops and joins the forking thread also when an assertion panics.
+    #[cfg(target_os = "linux")]
+    struct Forker(std::sync::Arc<std::sync::atomic::AtomicBool>, Option<std::thread::JoinHandle<()>>);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for Forker {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.1.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// Starts a thread that forks `true` in a loop until the returned guard drops.
+    #[cfg(target_os = "linux")]
+    fn forker() -> Forker {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread = {
+            let stop = std::sync::Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::process::Command::new("true").status();
+                }
+            })
+        };
+        Forker(stop, Some(thread))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stress(iterations: usize) {
+        let _forker = forker();
+        for _ in 0..iterations {
+            timed_out_cross_process_waits_share_one_helper_and_release_a_late_grant();
+        }
+    }
+
+    /// A shared probe lock taken by `is_live` is released while another thread forks children.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_probe_lock_is_released_while_another_thread_keeps_forking_children() {
+        use fs2::FileExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ticket");
+        let _forker = forker();
+        let started = std::time::Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            std::fs::write(&path, b"").unwrap();
+            let watcher = std::fs::File::open(&path).unwrap();
+            assert!(!xq::is_live(&path), "nobody holds the ticket");
+            watcher
+                .try_lock_exclusive()
+                .expect("the probe's shared lock must be released, not outlive it in a forked child");
+            fs2::FileExt::unlock(&watcher).unwrap();
+        }
     }
 
     // ---- P49: edit_locked ----

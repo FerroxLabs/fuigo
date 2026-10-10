@@ -235,3 +235,24 @@ fn saving_into_a_deleted_persona_is_refused() {
     assert!(err.contains("no longer exists"), "{err}");
     assert!(!path.exists());
 }
+
+/// P181 (Astra round 1): persona text holds no hidden character once wrapped.
+#[test]
+fn word_wrap_lines_drops_hidden_characters() {
+    assert_eq!(word_wrap_lines("ab\u{e0041}c\u{00ad} d\u{2028}e", 80), ["abc d e"]);
+}
+
+/// P181 (Grok round): the window title carries the persona name from a file, so it is scrubbed as a title.
+#[test]
+fn window_title_and_name_never_paint_an_unsafe_character() {
+    let _theme = crate::theme::cache::pin_theme();
+    let theme = Theme::current();
+    let (_directory, _path, mut state) = editable_state();
+    state.name = "re\u{2028}viewer\u{e0041}\u{00ad}".to_string();
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    render_persona_detail(&mut buf, area, &mut state, &theme, false);
+    let text: String = buf.content.iter().map(|c| c.symbol()).collect();
+    assert!(!text.chars().any(fuigo_tty_utils::is_unsafe_display_char), "{text:?}");
+    assert!(text.contains("persona: reviewer"), "{text}");
+}

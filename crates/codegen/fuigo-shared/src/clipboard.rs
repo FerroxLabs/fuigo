@@ -1611,14 +1611,35 @@ mod platform {
     }
 
     #[cfg(target_os = "linux")]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum X11PrimaryTool {
+        Xclip,
+        Xsel,
+    }
+
+    /// Which X11 tool `spec` is. `XCLIP_SPEC`/`XSEL_SPEC` are `const`, so `&XCLIP_SPEC` has no stable
+    /// address and pointer identity is meaningless; compare the stable `name` field instead.
+    #[cfg(target_os = "linux")]
+    fn x11_primary_tool_kind(spec: &ToolSpec) -> X11PrimaryTool {
+        if spec.name == XCLIP_SPEC.name {
+            X11PrimaryTool::Xclip
+        } else {
+            debug_assert_eq!(spec.name, XSEL_SPEC.name);
+            X11PrimaryTool::Xsel
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn x11_primary_tool_available(spec: &ToolSpec) -> bool {
         static XCLIP_DISCOVERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
         static XSEL_DISCOVERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        if std::ptr::eq(spec, &XCLIP_SPEC) {
-            cache_successful_probe(&XCLIP_DISCOVERED, || tool_available(&XCLIP_SPEC))
-        } else {
-            debug_assert!(std::ptr::eq(spec, &XSEL_SPEC));
-            cache_successful_probe(&XSEL_DISCOVERED, || tool_available(&XSEL_SPEC))
+        match x11_primary_tool_kind(spec) {
+            X11PrimaryTool::Xclip => {
+                cache_successful_probe(&XCLIP_DISCOVERED, || tool_available(&XCLIP_SPEC))
+            }
+            X11PrimaryTool::Xsel => {
+                cache_successful_probe(&XSEL_DISCOVERED, || tool_available(&XSEL_SPEC))
+            }
         }
     }
 
@@ -2167,6 +2188,14 @@ mod platform {
     #[cfg(all(test, target_os = "linux"))]
     mod linux_tests {
         use super::*;
+
+        /// The X11 primary-selection probe must pick the tool the spec names, for both specs.
+        /// (Regression: `ptr::eq` on `const` specs misclassified xclip, panicking in debug.)
+        #[test]
+        fn x11_primary_tool_kind_follows_the_spec() {
+            assert_eq!(x11_primary_tool_kind(&XCLIP_SPEC), X11PrimaryTool::Xclip);
+            assert_eq!(x11_primary_tool_kind(&XSEL_SPEC), X11PrimaryTool::Xsel);
+        }
 
         /// R077: the values that turn on wayland-backend's raw-print protocol trace stand the
         /// in-process Wayland legs down, as the explicit kill switch does.

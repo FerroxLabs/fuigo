@@ -50,7 +50,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         }
     });
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-    let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -196,6 +196,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_skill: parking_lot::Mutex::new(None),
+        admin_policy_watch: Default::default(),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
