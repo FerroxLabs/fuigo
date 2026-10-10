@@ -17,6 +17,7 @@ pub mod export_github;
 pub mod file_system;
 pub mod folder_trust;
 pub mod fs_notify;
+pub(crate) mod git_content_filters;
 pub(crate) mod git_odb;
 pub mod handle;
 pub mod hub;

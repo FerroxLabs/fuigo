@@ -1,0 +1,27 @@
+# P177 Astra round 1 (gpt-6-astra, read-only). Brief: scratchpad astra-r1.txt; final answer below.
+
+**NOT FIXED.**
+
+Audited clean `strike/p177` at `770fdbafc` against `088fa6412`, v1.0.21 code `de6ca7dda`, and upstream `origin/main` at `2bdd1d6a`. All 63 upstream table entries are copied, but enforcement leaves executable-persistence gaps.
+
+1. **HIGH — Missing protected files and trees remain writable on Linux.** [home_write_deny.rs:175](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:175), [hook_write_deny.rs:445](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:445). With a profile granting `~/.cargo`, an existing `config.toml` is protected but an absent `config` can be created with a malicious `build.rustc-wrapper`. Cargo gives that new file precedence, executing the wrapper during a subsequent unsandboxed build. [Cargo configuration documentation](https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure). Missing `.bash_profile`, `.ssh`, and tool trees have equivalent creation gaps when their parents are writable. Avoiding placeholders is justified; silently permitting these writes violates requirements 1 and 2.
+
+2. **HIGH — A workspace inside a protected tree disables that tree’s protection.** [home_write_deny.rs:390](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:390). Starting an enforcing workspace session in `~/.ssh` permits rewriting `config` with a `ProxyCommand` or planting `rc`. With a broader home grant, even a workspace in a descendant exempts the entire ancestor tree. Upstream’s home entries have no such exception. Choosing a workspace does not satisfy the stated requirement to protect these paths in every enforcing profile.
+
+3. **HIGH — Hard-link aliases bypass protection for secret stores and tool trees.** [home_write_deny.rs:182](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:182), [home_write_deny.rs:445](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:445). Suppose `~/.ssh/config` already has a hard link at `~/project/ssh-alias`, and an enforcing profile grants home writes. `.ssh` receives a read-only bind, but its children are never checked for aliases. Writing `ssh-alias` changes the protected configuration through the writable mount. Toolchain binaries have the same exposure. Upstream performs a bounded scan of these trees; ignoring scan exhaustion is different from skipping the scan entirely.
+
+4. **HIGH — Special-file entries can be replaced with executable startup files.** [home_write_deny.rs:329](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:329). An existing FIFO at `~/.bashrc` is omitted from protection because it is neither a directory, regular file, nor symlink. With home writable, the sandboxed process can unlink it and create a regular `.bashrc` containing commands. This affects both backends. Protection must cover replacement of the protected name, regardless of its current storage type.
+
+5. **MEDIUM — Linux rejects hard links whose names are all protected.** [hook_write_deny.rs:396](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:396), [hook_write_deny.rs:105](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/hook_write_deny.rs:105). Hard-linking `.bashrc` and `.bash_profile` passes the new home scan, as its unit test expects. A home-writable session subsequently fails because `capture_path_identity` unconditionally rejects `nlink != 1`. The stated alias-accounting design therefore does not survive Linux plan construction.
+
+6. **MEDIUM — Harmless backup links can prevent unrelated sessions from starting.** [home_write_deny.rs:507](/Volumes/Mando/WaylandBots/Fuigo/wt-p177/crates/codegen/fuigo-sandbox/src/home_write_deny.rs:507). If `.bashrc` is hard-linked to a backup outside every writable root, the scan still refuses whenever a writable root such as `/tmp` shares its device. No writable alias is established. This conservative design introduces an availability regression for otherwise safe dotfile layouts.
+
+**NEW regressions compared with both `088fa6412` and `de6ca7dda`:** findings 5 and 6 newly reject previously working sandbox sessions. Findings 1–4 are existing home-protection gaps that P177 leaves unresolved, rather than protections removed from either baseline. Devbox’s exemption remains unchanged.
+
+The relocation additions and startup-directory binds are reasonable in principle. Not following symlinks *inside* protected trees matches upstream’s stated limitation. Neither justifies the separate bypasses above.
+
+No Cargo, builds, or tests were run; files remain unchanged. Cache paths are excluded from the new deny tables, but the supplied e2e uses filesystem probes—not an actual Cargo build—so requirement 3 lacks build-level proof here.
+
+**VERDICT: DO-NOT-LAND.**
+
+

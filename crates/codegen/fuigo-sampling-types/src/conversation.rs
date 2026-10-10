@@ -9,7 +9,7 @@ mod responses;
 pub mod responses_ptc;
 
 pub use chat_completions::{conversation_item_to_chat_message, conversation_to_chat_messages};
-pub use messages::build_messages_request;
+pub use messages::{build_messages_request, messages_response_to_items};
 pub use responses::{
     custom_tool_call, extra_tool_entries, patch_reasoning_text_types, response_to_conversation_items,
 };
@@ -1140,6 +1140,16 @@ impl ConversationResponse {
         })
     }
 
+    /// The encrypted signature of the LAST thinking block, which is the one the response-completed update reports.
+    pub fn last_reasoning_signature(&self) -> Option<&str> {
+        self.items.iter().rev().find_map(|item| match item {
+            ConversationItem::Reasoning(r) if !is_redacted_thinking_item(r) => {
+                r.encrypted_content.as_deref()
+            }
+            _ => None,
+        })
+    }
+
     /// Backend-executed tool calls (web search, X search, code interpreter) produced by this turn, in emission order.
     /// These are sibling items in `items` and must also be persisted to the conversation alongside the trailing `Assistant`.
     pub fn backend_tool_items(&self) -> impl Iterator<Item = &ConversationItem> {
@@ -1676,6 +1686,27 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
         }
     }
     parts.join("\n")
+}
+
+/// Sentinel `ReasoningItem.id` marking an Anthropic `redacted_thinking` block.
+/// The item carries the opaque `data` blob in `encrypted_content` and no summary; the Messages request builder
+/// replays it as a `redacted_thinking` block, and the other protocols skip it.
+pub const REDACTED_THINKING_ITEM_ID: &str = "fuigo:redacted_thinking";
+
+/// Wrap a `redacted_thinking` block's opaque `data` as a sibling reasoning item.
+pub fn redacted_thinking_item(data: impl Into<String>) -> rs::ReasoningItem {
+    rs::ReasoningItem {
+        id: REDACTED_THINKING_ITEM_ID.to_owned(),
+        summary: Vec::new(),
+        content: None,
+        encrypted_content: Some(data.into()),
+        status: None,
+    }
+}
+
+/// Whether `r` is a redacted-thinking item built by [`redacted_thinking_item`].
+pub fn is_redacted_thinking_item(r: &rs::ReasoningItem) -> bool {
+    r.id == REDACTED_THINKING_ITEM_ID
 }
 
 /// Construct an `rs::ReasoningItem` carrying a single `SummaryText` part.

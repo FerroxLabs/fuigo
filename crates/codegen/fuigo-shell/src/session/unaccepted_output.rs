@@ -20,6 +20,8 @@ struct State {
     message_id: Option<String>,
     /// `_meta.streamStartMs` of the attempt now streaming (`SamplingEvent::StreamStarted`).
     stream_start_ms: Option<i64>,
+    /// Hosted-tool rows (`call_id`, tool name) sent as `tool_call` `in_progress` and not yet completed. A resend closes them.
+    open_hosted: Vec<(String, String)>,
 }
 
 /// What a resend must void: the discarded response's provider id and the stream start its updates carried.
@@ -48,6 +50,27 @@ impl UnacceptedOutput {
         id
     }
 
+    /// A hosted-tool row went to clients as `in_progress`: it is visible output, and it must be closed if the attempt dies.
+    pub(crate) fn note_hosted_started(&self, call_id: &str, name: &str) {
+        let mut state = self.inner.lock();
+        state.emitted = true;
+        if !state.open_hosted.iter().any(|(id, _)| id == call_id) {
+            state.open_hosted.push((call_id.to_owned(), name.to_owned()));
+        }
+    }
+
+    /// A hosted-tool row reached a terminal status: nothing to close. It marks no output of its own: a row that was
+    /// shown already marked the attempt when it started, and a completion for a row never shown draws nothing.
+    pub(crate) fn note_hosted_finished(&self, call_id: &str) {
+        let mut state = self.inner.lock();
+        state.open_hosted.retain(|(id, _)| id != call_id);
+    }
+
+    /// The hosted-tool rows still `in_progress`, taken (cleared) so each is closed exactly once.
+    pub(crate) fn take_open_hosted(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.inner.lock().open_hosted)
+    }
+
     /// Whether visible output awaits acceptance (a resend now owes a discard).
     pub(crate) fn is_owed(&self) -> bool {
         self.inner.lock().emitted
@@ -74,6 +97,7 @@ impl UnacceptedOutput {
         let mut state = self.inner.lock();
         state.emitted = false;
         state.message_id = None;
+        state.open_hosted.clear();
     }
 }
 
@@ -108,5 +132,18 @@ mod tests {
         assert_eq!(out.claim_stream_start(42), 43);
         assert_eq!(out.claim_stream_start(40), 44);
         assert_eq!(out.claim_stream_start(100), 100);
+    }
+
+    /// P201 r2: a completion for a row this session never showed (no start) puts nothing on a client's screen, so it
+    /// owes no discard; a completion for a row it did show leaves the attempt marked.
+    #[test]
+    fn a_completion_without_a_shown_start_does_not_mark_the_attempt() {
+        let out = UnacceptedOutput::default();
+        out.note_hosted_finished("never-shown");
+        assert!(!out.is_owed(), "an unseen row is not visible output");
+        out.note_hosted_started("h1", "web_search");
+        out.note_hosted_finished("h1");
+        assert!(out.is_owed(), "the shown row stays visible output after it completes");
+        assert!(out.take_open_hosted().is_empty(), "a completed row is not closed again");
     }
 }

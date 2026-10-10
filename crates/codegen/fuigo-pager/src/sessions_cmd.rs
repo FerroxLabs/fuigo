@@ -102,7 +102,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                         Ok(Vec::new())
                     })
                     .unwrap_or_else(|e| {
-                        fuigo_tty_utils::cli_eprintln!("warning: remote session search failed: {e}");
+                        fuigo_tty_utils::cli_eprintln!("warning: remote session search failed: {}", fuigo_tty_utils::untrusted(e));
                         Vec::new()
                     })
                 }
@@ -111,7 +111,8 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             let resp = local_resp?;
             if let Some(by) = search.off_reason() {
                 fuigo_tty_utils::cli_eprintln!(
-                    "warning: local session search is off ({by}); searched remote sessions only."
+                    "warning: local session search is off ({}); searched remote sessions only.",
+                    fuigo_tty_utils::untrusted(by)
                 );
             }
             let local_ids: HashSet<&str> =
@@ -132,11 +133,11 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     .unwrap_or_default();
                 fuigo_tty_utils::cli_println!(
                     "{} (score: {:.2})  {}\n  {}\n  {}",
-                    hit.session_id,
+                    fuigo_tty_utils::untrusted(&hit.session_id),
                     hit.score,
-                    time,
-                    title,
-                    hit.snippet.as_deref().unwrap_or("")
+                    fuigo_tty_utils::untrusted(time),
+                    fuigo_tty_utils::untrusted(title),
+                    fuigo_tty_utils::untrusted(hit.snippet.as_deref().unwrap_or(""))
                 );
             }
 
@@ -170,7 +171,10 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     .collect();
                 fuigo_tty_utils::cli_println!(
                     "{} (remote)  {}\n  {}\n  {}",
-                    r.session_id, time, title, snippet
+                    fuigo_tty_utils::untrusted(&r.session_id),
+                    fuigo_tty_utils::untrusted(time),
+                    fuigo_tty_utils::untrusted(title),
+                    fuigo_tty_utils::untrusted(snippet)
                 );
                 remote_shown += 1;
             }
@@ -197,9 +201,9 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             .await?;
 
             if deletion.any_removed() {
-                fuigo_tty_utils::cli_println!("Deleted session {id}");
+                fuigo_tty_utils::cli_println!("Deleted session {}", fuigo_tty_utils::untrusted(&id));
             } else {
-                fuigo_tty_utils::cli_println!("No session found with id {id}.");
+                fuigo_tty_utils::cli_println!("No session found with id {}.", fuigo_tty_utils::untrusted(&id));
             }
         }
     }
@@ -232,7 +236,7 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
     // Labeled groups first (alphabetical), then unlabeled last.
     let none_group = groups.remove(&None);
     let print_group = |label_line: &str, members: &[&MergedSession]| {
-        fuigo_tty_utils::cli_println!("\n{label_line}");
+        fuigo_tty_utils::cli_println!("\n{}", fuigo_tty_utils::untrusted(label_line));
         fuigo_tty_utils::cli_println!("{header}");
         for s in members {
             let first_line;
@@ -251,7 +255,11 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
             let updated = &s.updated_at[..s.updated_at.len().min(10)];
             fuigo_tty_utils::cli_println!(
                 "{}  {}  {}  {}  {}",
-                s.session_id, created, updated, s.source, truncated
+                fuigo_tty_utils::untrusted(&s.session_id),
+                fuigo_tty_utils::untrusted(created),
+                fuigo_tty_utils::untrusted(updated),
+                fuigo_tty_utils::untrusted(&s.source),
+                fuigo_tty_utils::untrusted(truncated)
             );
         }
     };

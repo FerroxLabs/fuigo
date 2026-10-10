@@ -84,13 +84,14 @@ impl SessionActor {
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
             BuiltinAction::HooksTrust => {
                 let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
-                    Ok(root) => {
+                    Ok((root, note)) => {
                         fuigo_telemetry::session_ctx::log_event(
                             fuigo_telemetry::events::HookTrusted { success: true },
                         );
                         // The same reconciliation as the `/hooks` modal's Trust: the now-admitted repo hooks load without a restart
                         let reload_msg = self.reload_hooks_impl().await;
-                        format!("Trusted: {}.\n{reload_msg}", root.display())
+                        let note = note.map(|n| format!("{n}\n")).unwrap_or_default();
+                        format!("Trusted: {}.\n{note}{reload_msg}", root.display())
                     }
                     Err(e) => {
                         fuigo_telemetry::session_ctx::log_event(

@@ -3791,6 +3791,33 @@ fn explicit_fuigo_root_is_the_only_user_source() {
 /// No user-global `$FUIGO_HOME/config.toml` is seeded: `fuigo_home()` is `OnceLock`-cached.
 /// Under a shared-process harness (Bazel) such a seed is read non-deterministically.
 /// It is reliable only under nextest's process-per-test isolation.
+/// P157: a malformed `paths` or `enabled` in a project `[plugins]` table must not discard its `disabled`
+/// list (the old whole-table `try_into().ok()` fell back to default and re-enabled disabled plugins).
+#[test]
+#[serial_test::serial]
+fn resolve_effective_plugins_config_malformed_field_keeps_disabled() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let _env = EnvGuard::set("FUIGO_HOME", home.path());
+    let _flag = EnvGuard::unset("FUIGO_FOLDER_TRUST");
+    let _sim = simulate_release_build();
+    let repo = tempfile::tempdir().unwrap();
+    git2::Repository::init(repo.path()).unwrap();
+    let fuigo = repo.path().join(".fuigo");
+    std::fs::create_dir_all(&fuigo).unwrap();
+    std::fs::write(
+        fuigo.join("config.toml"),
+        "[plugins]\npaths = \"not-a-list\"\nenabled = 7\ndisabled = [\"noisy\"]\n",
+    )
+    .unwrap();
+    let cfg = resolve_effective_plugins_config(repo.path());
+    assert!(cfg.disabled.contains(&"noisy".to_string()), "disabled survives: {cfg:?}");
+    assert!(cfg.paths.is_empty() && cfg.enabled.is_empty(), "malformed fields ignored: {cfg:?}");
+}
+
 #[test]
 #[serial_test::serial]
 fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
@@ -4085,4 +4112,150 @@ fn campaign_patched_helper_models_are_not_explicit() {
         let cfg = ModelOverrideConfig::resolve_with_user_config(None, None, &effective, None, None);
         assert_eq!(cfg.explicit, ExplicitHelperModels::default());
     });
+}
+
+/// P169 (S16): `[models] allowed_models` in requirements.toml pins the selectable models; a malformed value fails
+/// closed. Ported from upstream 72a61251 `config/tests.rs` allowed_models cases.
+#[test]
+fn apply_requirements_pins_allowed_models() {
+    use crate::agent::config::AllowlistPin;
+    let source = RequirementSource::Requirements {
+        path: std::path::PathBuf::from("/etc/fuigo/requirements.toml"),
+    };
+    let cases: [(&str, Option<AllowlistPin>, Option<&str>); 5] = [
+        ("", None, None),
+        (
+            "[models]\nallowed_models = [\"grok-4*\", \"x\"]\n",
+            Some(AllowlistPin::List(vec!["grok-4*".into(), "x".into()])),
+            Some("grok-4*, x"),
+        ),
+        (
+            "[models]\nallowed_models = []\n",
+            Some(AllowlistPin::List(vec![])),
+            Some("(unrestricted)"),
+        ),
+        (
+            "[models]\nallowed_models = \"grok-4*\"\n",
+            Some(AllowlistPin::FailClosed),
+            Some("(invalid; nothing selectable)"),
+        ),
+        (
+            "[models]\nallowed_models = [\"ok\", 3]\n",
+            Some(AllowlistPin::FailClosed),
+            Some("(invalid; nothing selectable)"),
+        ),
+    ];
+    for (req, want_pin, want_reported) in cases {
+        let mut cfg = crate::agent::config::Config::new_from_toml_cfg(
+            &toml::from_str("[models]\nallowed_models = [\"user-*\"]\n").unwrap(),
+        )
+        .unwrap();
+        let requirements: toml::Value = toml::from_str(req).unwrap();
+        let enforced = apply_requirements_inner(&mut cfg, &requirements, &source);
+        assert_eq!(cfg.requirements.allowed_models.pin_ref(), want_pin.as_ref(), "{req}");
+        assert_eq!(
+            enforced
+                .iter()
+                .find(|e| e.path == "models.allowed_models")
+                .map(|e| e.value.as_str()),
+            want_reported,
+            "{req}"
+        );
+        // The user's own list is untouched; the pin replaces it at resolution time.
+        assert_eq!(cfg.models.allowed_models, Some(vec!["user-*".to_string()]));
+    }
+}
+
+/// P169: a requirements file that exists but does not parse would be skipped by the layer loader; policy fails closed.
+#[test]
+fn unreadable_requirements_file_fails_the_model_pin_closed() {
+    use crate::agent::config::AllowlistPin;
+    use fuigo_config::policy_sources::{PolicyLayerTier, PolicySource};
+    let mut cfg = crate::agent::config::Config::new_from_toml_cfg(&toml::Value::Table(Default::default()))
+        .unwrap();
+    let sources = vec![
+        PolicySource {
+            tier: PolicyLayerTier::SystemManaged,
+            ownership: PolicyLayerTier::SystemManaged.ownership(),
+            path: std::path::PathBuf::from("/etc/fuigo/managed_config.toml"),
+            policy: Err("broken".into()),
+        },
+        PolicySource {
+            tier: PolicyLayerTier::UserRequirements,
+            ownership: PolicyLayerTier::UserRequirements.ownership(),
+            path: std::path::PathBuf::from("/home/u/.fuigo/requirements.toml"),
+            policy: Ok(serde_json::json!({})),
+        },
+    ];
+    assert!(fail_closed_on_unreadable_requirements(&mut cfg, &sources).is_empty());
+    assert!(cfg.requirements.allowed_models.pin_ref().is_none(), "managed_config is not a requirements layer");
+    // P169 (Grok 4.7 C / P183): a broken user-home requirements.toml warns and is skipped; it never pins the model
+    // allowlist closed (the reader drops it, and this backstop ignores a user-tier Err too).
+    let sources = vec![PolicySource {
+        tier: PolicyLayerTier::UserRequirements,
+        ownership: PolicyLayerTier::UserRequirements.ownership(),
+        path: std::path::PathBuf::from("/home/u/.fuigo/requirements.toml"),
+        policy: Err("TOML parse error".into()),
+    }];
+    assert!(fail_closed_on_unreadable_requirements(&mut cfg, &sources).is_empty());
+    assert!(cfg.requirements.allowed_models.pin_ref().is_none(), "a broken user file pins nothing");
+    let sources = vec![PolicySource {
+        tier: PolicyLayerTier::SystemRequirements,
+        ownership: PolicyLayerTier::SystemRequirements.ownership(),
+        path: std::path::PathBuf::from("/etc/fuigo/requirements.toml"),
+        policy: Err("TOML parse error".into()),
+    }];
+    let enforced = fail_closed_on_unreadable_requirements(&mut cfg, &sources);
+    assert_eq!(enforced.len(), 1);
+    // Astra r2: a broken MDM layer fails the model pin closed too.
+    let mut mdm_cfg = crate::agent::config::Config::new_from_toml_cfg(&toml::Value::Table(Default::default()))
+        .unwrap();
+    let mdm = vec![PolicySource {
+        tier: PolicyLayerTier::Mdm,
+        ownership: PolicyLayerTier::Mdm.ownership(),
+        path: std::path::PathBuf::from("ai.x.grok:requirements_toml_base64"),
+        policy: Err("not base64".into()),
+    }];
+    assert_eq!(fail_closed_on_unreadable_requirements(&mut mdm_cfg, &mdm).len(), 1);
+    assert_eq!(mdm_cfg.requirements.allowed_models.pin_ref(), Some(&AllowlistPin::FailClosed));
+    assert_eq!(cfg.requirements.allowed_models.pin_ref(), Some(&AllowlistPin::FailClosed));
+    assert_eq!(
+        cfg.requirements.allowed_models.source().and_then(|s| s.path()),
+        Some(std::path::Path::new("/etc/fuigo/requirements.toml"))
+    );
+}
+
+/// P169 (Astra r3): under a marketplace restriction the post-install auto-enable persists the install's own plugin id,
+/// so a same-named plugin from another source is not enabled by the name; unrestricted keeps the bare name.
+#[test]
+fn post_install_auto_enable_names_the_install_under_a_restriction() {
+    use fuigo_agent::plugins::install_registry::{InstallKind, InstalledRepo, RepoPlugin};
+    let mut plugins = std::collections::HashMap::new();
+    plugins.insert("demo".to_string(), RepoPlugin { subdir: None, version: None });
+    // A real checkout directory: since Round 8 a plugin id exists only for a root that canonicalizes
+    // (`InstalledRepo::plugin_root`), as it does for every real install.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let checkout = tmp.path().join("demo-repo");
+    std::fs::create_dir_all(&checkout).unwrap();
+    let repo = InstalledRepo {
+        kind: InstallKind::Git {
+            url: "https://github.com/ok/repo.git".into(),
+            git_ref: None,
+            commit: "0".repeat(40),
+            subdir: None,
+        },
+        installed_at: String::new(),
+        updated_at: String::new(),
+        path: checkout,
+        plugins,
+        marketplace: None,
+    };
+    assert_eq!(auto_enable_target(false, &repo, "demo").as_deref(), Some("demo"));
+    let id = auto_enable_target(true, &repo, "demo").expect("restricted: the install id");
+    assert!(id.starts_with("user/") && id.ends_with("/demo") && id.len() > "user//demo".len(), "{id}");
+    assert_eq!(Some(id), crate::plugin::installed_plugin_id(&repo, "demo"));
+    // P169 (Grok 4.7 #6): with no install id for the name, a restricted auto-enable persists nothing (never the bare
+    // name, which would enable every plugin of that name).
+    assert_eq!(auto_enable_target(true, &repo, "not-in-repo"), None);
+    assert_eq!(auto_enable_target(false, &repo, "not-in-repo").as_deref(), Some("not-in-repo"));
 }

@@ -50,10 +50,17 @@
 //!     println!("Got response: {}", response);
 //! }
 //! ```
+mod act_on;
 mod client;
 #[cfg(feature = "test-support")]
 pub mod in_process;
 mod lock;
+mod peer_check;
+#[cfg(all(test, windows))]
+mod starter_identity_tests;
+mod peer_auth;
+#[cfg(all(test, windows))]
+mod peer_auth_tests;
 pub mod protocol;
 mod server;
 #[cfg(test)]
@@ -95,6 +102,9 @@ const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the SAME live fuigo flock-holder may stay unconnectable before
 /// `connect_or_spawn` treats it as a "zombie leader" and evicts it.
 const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
+/// How long `connect_or_spawn` keeps asking a too-old leader that holds the lock to vacate before it gives up.
+/// Same kind and size as [`ZOMBIE_EVICT_DEADLINE`]; it must exceed the leader's own relaunch grace (10 s).
+const VACATE_WAIT_TIMEOUT: Duration = ZOMBIE_EVICT_DEADLINE;
 /// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
 /// Unparseable versions (e.g. dev `"unknown"`) return `false`, so they are left alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
@@ -1184,6 +1194,16 @@ impl LeaderConnection {
             .await
             .map_err(ConnectionError::Client)
     }
+    /// Windows: the OS-reported pid of the server end of this connection's pipe.
+    #[cfg(windows)]
+    pub(crate) fn os_server_pid(&self) -> Option<u32> {
+        self.client.os_server_pid()
+    }
+    /// Windows: the OS-reported pid of the server end of this connection's pipe, asked again now.
+    #[cfg(windows)]
+    pub(crate) fn os_server_pid_now(&self) -> Option<u32> {
+        self.client.os_server_pid_now()
+    }
     /// Returns the negotiated registration metadata for this connection.
     pub fn registration(&self) -> &LeaderRegistration {
         self.client.registration()
@@ -1456,6 +1476,20 @@ impl LeaderReconnector {
         watch::channel(ConnectionStatus::Connected { generation: 0 })
     }
 }
+/// Poll until the eviction target is no longer alive or `timeout` elapses (liveness through the target's own handle on Windows).
+async fn wait_for_exit(target: &act_on::ActTarget, timeout: Duration) {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if !target.is_alive() {
+            return;
+        }
+        tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
+    }
+    debug!(
+        pid = target.pid(),
+        "Evicted leader still alive after grace; reclaiming socket anyway"
+    );
+}
 /// Poll until `pid` is no longer alive or `timeout` elapses.
 async fn wait_for_pid_exit(pid: u32, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
@@ -1481,7 +1515,8 @@ fn should_evict_conn(conn: &LeaderConnection) -> bool {
 /// Ask a stale leader to vacate so it releases the flock: graceful `RelaunchForUpdate` if relaunch-capable (the leader dedupes concurrent requests
 /// and re-checks the directional guard, so this is idempotent and never downgrades), else SIGTERM its pid.
 /// Best-effort and non-waiting; the caller retries the spawn loop, where the replacement is created under the flock.
-async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
+async fn request_leader_vacate(conn: &LeaderConnection, target: Option<&act_on::ActTarget>) {
+    let pid = target.map(act_on::ActTarget::pid);
     let leader_version = conn.registration().leader_binary_version.clone();
     let (method, outcome) = if conn.registration().supports_relaunch() {
         let outcome = match conn
@@ -1500,11 +1535,11 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
         };
         ("relaunch", outcome)
     } else {
-        let outcome = match pid {
-            Some(pid) => match crate::util::kill_process_by_pid(pid) {
+        let outcome = match target {
+            Some(target) => match target.terminate() {
                 Ok(()) => "signaled",
                 Err(e) => {
-                    warn!(error = %e, pid, "Failed to signal stale leader to exit");
+                    warn!(error = %e, pid = target.pid(), "Failed to signal stale leader to exit");
                     "signal_failed"
                 }
             },
@@ -1524,26 +1559,130 @@ async fn request_leader_vacate(conn: &LeaderConnection, pid: Option<u32>) {
         })),
     );
 }
+/// Longest wait for the leader's own answer to `GetLeaderInfo` when its pid is wanted.
+const LEADER_PID_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// The pid the leader REPORTS about itself over the pipe. Windows display and telemetry only: whoever serves the pipe wrote
+/// it, so it is never passed to a signal or a kill (see [`leader_target_to_act_on`]).
+async fn leader_pid_reported_over_pipe(conn: &LeaderConnection) -> Option<u32> {
+    let answer = tokio::time::timeout(
+        LEADER_PID_QUERY_TIMEOUT,
+        conn.send_control(ControlCommand::GetLeaderInfo),
+    )
+    .await
+    .ok()?;
+    match answer {
+        Ok(Ok(ControlPayload::LeaderInfo { pid, .. })) => Some(pid),
+        _ => None,
+    }
+}
+/// The pid of the live leader on `conn` TO SHOW (telemetry, logs). Windows: the leader's own claim over the pipe, `None` when it
+/// gives none. Elsewhere: the pid in the lock file, exactly as before. Never use it to signal or kill.
+async fn leader_pid_to_show(conn: &LeaderConnection, lock: &LeaderLock) -> Option<u32> {
+    if cfg!(windows) {
+        leader_pid_reported_over_pipe(conn).await
+    } else {
+        lock.read_pid()
+    }
+}
+/// The leader process an eviction may signal or terminate, or `None` (then nothing is signalled; the caller behaves as when no
+/// pid is known). Windows: the OS-reported owner of the server end of `conn`'s own pipe, kept only if its image is a Fuigo binary,
+/// as an open handle that is also the handle the kill goes through. Elsewhere: the pid in the lock file, as before.
+async fn leader_target_to_act_on(conn: &LeaderConnection, lock: &LeaderLock) -> Option<act_on::ActTarget> {
+    #[cfg(windows)]
+    {
+        let _ = lock;
+        // The pid recorded at connect is re-asked right before the process is opened; any failure or change means no action.
+        let pid = act_on::pid_to_act_on(conn.os_server_pid(), conn.os_server_pid_now());
+        match pid.and_then(act_on::ActTarget::from_os_server_pid) {
+            Some(target) => Some(target),
+            None => {
+                warn!("Not signalling the pipe's leader: the OS server pid is unknown, gone, or not a Fuigo process");
+                None
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = conn;
+        lock.read_pid().map(act_on::ActTarget::from_lock_pid)
+    }
+}
+/// What `fuigo leader kill` may do for one discovered leader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaderKillPlan {
+    /// Windows: connect and act only on the OS-reported owner of that connection's pipe ([`kill_leader_by_connection`]).
+    ViaPipeConnection,
+    /// Elsewhere: terminate this pid (the verified live pid, else the lock-file pid), as before.
+    ByPid(u32),
+    /// Nothing is terminated: the process cannot be identified safely.
+    CannotIdentify,
+}
+/// The kill decision. On Windows a pid from a pipe payload or a lock file is never terminated: only a leader that answered
+/// over the pipe (`pipe_answers`) is acted on, through its own connection. Elsewhere the pid is used unchanged.
+pub fn leader_kill_plan(windows: bool, pipe_answers: bool, pid: Option<u32>) -> LeaderKillPlan {
+    match (windows, pipe_answers, pid) {
+        (true, true, _) => LeaderKillPlan::ViaPipeConnection,
+        (true, false, _) => LeaderKillPlan::CannotIdentify,
+        (false, _, Some(pid)) => LeaderKillPlan::ByPid(pid),
+        (false, _, None) => LeaderKillPlan::CannotIdentify,
+    }
+}
+/// Result of [`kill_leader_by_connection`].
+#[cfg(windows)]
+#[derive(Debug)]
+pub enum KillByConnection {
+    Killed(u32),
+    /// Nothing answered on the pipe.
+    NotAnswering,
+    /// The pipe's owner could not be established, is not a Fuigo program, or changed: nothing was terminated.
+    Refused,
+    Failed(String),
+}
+/// Windows: connect to the leader at `socket_path` and terminate the process the OS reports as serving that connection's
+/// pipe, only if it is a Fuigo image (same handle for check and kill). No pid from a payload or a lock file is used.
+#[cfg(windows)]
+pub async fn kill_leader_by_connection(socket_path: &Path) -> KillByConnection {
+    let connect = LeaderClient::connect(
+        socket_path.to_path_buf(),
+        "fuigo-pager-leader-cli",
+        ClientMode::Stdio,
+        ClientCapabilities::default(),
+    );
+    let client = match tokio::time::timeout(Duration::from_secs(10), connect).await {
+        Ok(Ok(client)) => client,
+        Ok(Err(ClientError::PeerRefused)) => return KillByConnection::Refused,
+        Ok(Err(_)) | Err(_) => return KillByConnection::NotAnswering,
+    };
+    let pid = act_on::pid_to_act_on(client.os_server_pid(), client.os_server_pid_now());
+    let Some(target) = pid.and_then(act_on::ActTarget::from_os_server_pid) else {
+        return KillByConnection::Refused;
+    };
+    match target.terminate() {
+        Ok(()) => KillByConnection::Killed(target.pid()),
+        Err(e) => KillByConnection::Failed(e.to_string()),
+    }
+}
 /// Evict a below-floor leader that holds the socket but NOT the flock (the caller
 /// MUST hold the flock, so this teardown is serialized against other clients).
 /// Signals it to vacate, waits for the pid to exit, then re-sends SIGTERM if it
 /// overran the grace window, so the caller can reclaim the socket and respawn.
 async fn evict_leader(conn: LeaderConnection, lock: &LeaderLock) {
-    let pid = lock.read_pid();
+    let target = leader_target_to_act_on(&conn, lock).await;
+    let pid = target.as_ref().map(act_on::ActTarget::pid);
     let leader_version = conn.registration().leader_binary_version.clone();
-    request_leader_vacate(&conn, pid).await;
+    request_leader_vacate(&conn, target.as_ref()).await;
     drop(conn);
     let wait_start = std::time::Instant::now();
-    let outcome = if let Some(pid) = pid {
-        wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
-        if !crate::util::is_process_alive(pid) {
+    let outcome = if let Some(target) = target.as_ref() {
+        wait_for_exit(target, EVICT_WAIT_TIMEOUT).await;
+        if !target.is_alive() {
             "exited"
-        } else if let Err(e) = crate::util::kill_process_by_pid(pid) {
-            warn!(error = %e, pid, "Failed to re-signal (SIGTERM) stale leader");
+        } else if let Err(e) = target.terminate() {
+            warn!(error = %e, pid = target.pid(), "Failed to re-signal (SIGTERM) stale leader");
             "timed_out"
         } else {
-            wait_for_pid_exit(pid, EVICT_WAIT_TIMEOUT).await;
-            if crate::util::is_process_alive(pid) {
+            wait_for_exit(target, EVICT_WAIT_TIMEOUT).await;
+            if target.is_alive() {
                 "timed_out"
             } else {
                 "resignaled_sigterm"
@@ -1724,7 +1863,10 @@ fn is_connect_level_failure(error: &ConnectionError) -> bool {
 }
 /// Policy refusals that can never succeed on reconnect retry (not zombie-evictable).
 fn is_terminal_refusal(error: &ConnectionError) -> bool {
-    matches!(error, ConnectionError::SandboxConfinement(_))
+    matches!(
+        error,
+        ConnectionError::SandboxConfinement(_) | ConnectionError::Client(ClientError::PeerRefused)
+    )
 }
 /// Evict a suspected zombie leader (holds the flock but is not connectable).
 /// SIGTERM, wait, then escalate to SIGKILL if it overran the grace window.
@@ -1787,6 +1929,23 @@ pub async fn connect_or_spawn(
     env_urls: &LeaderEnvUrls,
     capabilities: ClientCapabilities,
 ) -> Result<LeaderConnection, ConnectionError> {
+    connect_or_spawn_with_vacate_budget(
+        client_type,
+        mode,
+        env_urls,
+        capabilities,
+        VACATE_WAIT_TIMEOUT,
+    )
+    .await
+}
+/// [`connect_or_spawn`] with the vacate budget injected, so a test can reach the bound without waiting out the real one.
+async fn connect_or_spawn_with_vacate_budget(
+    client_type: &str,
+    mode: ClientMode,
+    env_urls: &LeaderEnvUrls,
+    capabilities: ClientCapabilities,
+    vacate_budget: Duration,
+) -> Result<LeaderConnection, ConnectionError> {
     if let Some(profile) = fuigo_sandbox::requested_confinement_profile() {
         return Err(ConnectionError::SandboxConfinement(profile));
     }
@@ -1830,16 +1989,20 @@ pub async fn connect_or_spawn(
     let mut zombie_timer: ZombieTimer = None;
     let mut evict_attempts: Option<(u32, u32)> = None;
     let mut self_spawn_attempts: u32 = 0;
+    let mut vacate_since: Option<std::time::Instant> = None;
     loop {
         match lock.try_acquire() {
             Ok(true) => {
+                // Windows: the lock file cannot be read while a live process holds it, and a dead leader leaves no pipe, so an
+                // answering pipe is the proof of life. Elsewhere the pid in the file is checked first, as before.
                 if crate::leader::transport::listener_is_ready(&sock_path)
-                    && lock.read_pid().is_some_and(crate::util::is_process_alive)
+                    && (cfg!(windows) || lock.read_pid().is_some_and(crate::util::is_process_alive))
                     && let Ok(conn) =
                         connect_to_leader(&sock_path, client_type, mode, capabilities.clone()).await
                 {
                     if !evict_leader_conn(&conn) {
                         note_adopted_leader(&conn);
+                        let leader_pid = leader_pid_to_show(&conn, &lock).await;
                         if let Err(e) = lock.release() {
                             warn!(error = %e, "Failed to release lock after adopting leader");
                         }
@@ -1852,7 +2015,7 @@ pub async fn connect_or_spawn(
                             "leader.spawn.sibling_adopted",
                             None,
                             Some(serde_json::json!({
-                                "leader_pid": lock.read_pid(),
+                                "leader_pid": leader_pid,
                                 "leader_version": conn
                                     .registration()
                                     .leader_binary_version
@@ -1931,7 +2094,24 @@ pub async fn connect_or_spawn(
                     );
                     return Ok(conn);
                 }
-                request_leader_vacate(&conn, lock.read_pid()).await;
+                let since = *vacate_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= vacate_budget {
+                    // Nothing asked of the old leader made it let go of the lock (it does not advertise `relaunch_v1`
+                    // and no signal reached it, or it ignores the signal): stop asking instead of looping forever.
+                    return Err(ConnectionError::SpawnFailed(format!(
+                        "could not replace the old Fuigo leader (version {}) that holds the lock: it did not exit \
+                         within {} seconds. Close the other Fuigo windows and try again.",
+                        fuigo_tty_utils::untrusted(
+                            conn.registration()
+                                .leader_binary_version
+                                .as_deref()
+                                .unwrap_or("unknown")
+                        ),
+                        vacate_budget.as_secs()
+                    )));
+                }
+                let leader_target = leader_target_to_act_on(&conn, &lock).await;
+                request_leader_vacate(&conn, leader_target.as_ref()).await;
                 drop(conn);
                 replacing_stale = true;
                 tokio::time::sleep(SPAWN_POLL_INTERVAL).await;
@@ -2153,6 +2333,17 @@ pub(crate) async fn wait_for_socket_connectable(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn g_leader_kill_never_terminates_a_pid_from_a_payload_or_lock_file_on_windows() {
+        // Windows: only a leader that answered on the pipe is acted on, through its own connection.
+        assert_eq!(leader_kill_plan(true, true, Some(4242)), LeaderKillPlan::ViaPipeConnection);
+        assert_eq!(leader_kill_plan(true, false, Some(4242)), LeaderKillPlan::CannotIdentify);
+        assert_eq!(leader_kill_plan(true, false, None), LeaderKillPlan::CannotIdentify);
+        // Elsewhere: unchanged.
+        assert_eq!(leader_kill_plan(false, true, Some(4242)), LeaderKillPlan::ByPid(4242));
+        assert_eq!(leader_kill_plan(false, false, Some(4242)), LeaderKillPlan::ByPid(4242));
+        assert_eq!(leader_kill_plan(false, false, None), LeaderKillPlan::CannotIdentify);
+    }
     use super::*;
     use crate::leader::test_support::{
         FakeLeaderBehavior, FakeVersions, fake_caps, spawn_fake_leader,
@@ -2577,6 +2768,87 @@ mod tests {
             drop(conn);
             fake.cancel();
         }
+    }
+    /// The pid the eviction acts on (signals or terminates), taken from `conn` and `lock` by the production rule.
+    async fn act_on_pid_of(conn: &LeaderConnection, lock: &LeaderLock) -> Option<u32> {
+        leader_target_to_act_on(conn, lock).await.map(|target| target.pid())
+    }
+    /// Packet 2 round 2 (audit HIGH): on Windows the pid inside the `GetLeaderInfo` payload comes from whoever serves the pipe
+    /// and must never be acted on. The fake claims pid 7777; the process that really serves the pipe is this test process.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[serial_test::serial(FUIGO_LEADER_SOCKET)]
+    async fn the_pid_from_the_pipe_payload_is_never_the_pid_to_act_on() {
+        const CLAIMED: u32 = 7777;
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("leader-r2.sock");
+        let fake = spawn_fake_leader(
+            sock_path.clone(),
+            FakeLeaderBehavior::ClaimsPid { claimed_pid: CLAIMED },
+        )
+        .await;
+        let lock = LeaderLock::from_paths(sock_path.with_extension("lock"), sock_path.clone());
+        let conn = connect_to_leader(&sock_path, "test", ClientMode::Stdio, ClientCapabilities::default())
+            .await
+            .expect("connect to the fake");
+        let acted = act_on_pid_of(&conn, &lock).await;
+        fake.cancel();
+        assert_ne!(acted, Some(CLAIMED), "the payload pid must never be acted on");
+        assert_eq!(acted, Some(std::process::id()), "the pid to act on is the OS pid of the pipe server");
+    }
+    /// Packet 2: a too-old leader that holds the lock, does not advertise `relaunch_v1` and never vacates must not keep the
+    /// client in the vacate loop forever: the call returns the "could not replace" error once the budget is spent.
+    #[tokio::test]
+    #[serial_test::serial(FUIGO_LEADER_SOCKET)]
+    async fn a_too_old_leader_that_never_vacates_ends_in_an_error_within_the_budget() {
+        let env_urls = LeaderEnvUrls {
+            fuigo_ws_url: "wss://test.invalid/p2-vacate".into(),
+            fuigo_ws_origin: "https://test.invalid".into(),
+        };
+        let temp = TempDir::new().unwrap();
+        let sock_path = temp.path().join("leader.sock");
+        let fake = spawn_fake_leader(
+            sock_path.clone(),
+            FakeLeaderBehavior::NormalPerClient {
+                versions: FakeVersions {
+                    protocol_version: Some(LEADER_PROTOCOL_VERSION),
+                    binary_version: Some("0.0.0-p2-vacate".to_string()),
+                },
+                caps: fake_caps(false, false),
+            },
+        )
+        .await;
+        // Another holder of the lock: the fake never lets go of it.
+        let mut holder = LeaderLock::from_paths(sock_path.with_extension("lock"), sock_path.clone());
+        assert!(holder.try_acquire().unwrap(), "the test holds the lock");
+        // SAFETY: serialised on FUIGO_LEADER_SOCKET; restored below.
+        unsafe { std::env::set_var(LEADER_SOCKET_ENV, &sock_path) };
+        let started = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(20),
+            connect_or_spawn_with_vacate_budget(
+                "test",
+                ClientMode::Stdio,
+                &env_urls,
+                ClientCapabilities::default(),
+                Duration::from_secs(2),
+            ),
+        )
+        .await;
+        unsafe { std::env::remove_var(LEADER_SOCKET_ENV) };
+        let elapsed = started.elapsed();
+        fake.cancel();
+        let outcome = outcome.expect("the vacate loop must end within the budget, not spin");
+        match outcome {
+            Err(ConnectionError::SpawnFailed(message)) => {
+                assert!(message.contains("0.0.0-p2-vacate"), "{message}");
+                assert!(message.contains("Close the other Fuigo windows"), "{message}");
+            }
+            Err(other) => panic!("wrong error: {other}"),
+            Ok(_) => panic!("must not adopt a too-old leader"),
+        }
+        assert!(elapsed >= Duration::from_secs(2), "{elapsed:?}");
+        drop(holder);
     }
     /// P124 r1 #2: only an explicit request that installed something strictly older than the running binary is a downgrade.
     #[test]

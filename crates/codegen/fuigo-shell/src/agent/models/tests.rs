@@ -2868,3 +2868,154 @@ async fn a_session_model_switch_does_not_look_like_a_catalog_reload() {
     mgr.apply_config(config::Config::default());
     assert!(reloads.has_changed().unwrap(), "a real reload still wakes the watcher");
 }
+
+/// FLUX-TRAFFIC part B: a 401 on `/v1/models` must stop the background refresh from asking again every minute.
+mod auth_reject {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A server that answers every `/v1/models` request with 401 (until `accept` is set, then 200). It counts requests.
+    struct RejectingEndpoint {
+        calls: Arc<AtomicUsize>,
+        accept: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl ModelsEndpoint for RejectingEndpoint {
+        fn fetch_models(
+            &self,
+            _endpoints: config::EndpointsConfig,
+            _auth: Option<FuigoAuth>,
+            _fetch_auth: ModelFetchAuth,
+        ) -> ModelsFetchFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { None })
+        }
+        fn fetch_models_outcome(
+            &self,
+            _endpoints: config::EndpointsConfig,
+            _auth: Option<FuigoAuth>,
+            _fetch_auth: ModelFetchAuth,
+        ) -> ModelsOutcomeFuture {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let ok = self.accept.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if ok {
+                    ModelsFetchOutcome::Fetched(make_prefetched(&["grok-4"]))
+                } else {
+                    ModelsFetchOutcome::AuthRejected
+                }
+            })
+        }
+    }
+
+    fn rejecting_manager() -> (ModelsManager, Arc<AtomicUsize>, Arc<std::sync::atomic::AtomicBool>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let accept = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mgr = cold_manager(
+            config::Config::default(),
+            Arc::new(RejectingEndpoint { calls: calls.clone(), accept: accept.clone() }),
+        );
+        (mgr, calls, accept)
+    }
+
+    /// The reported cadence: the refresh watcher is woken every 65 s, on top of the startup retry ladder.
+    /// Returns the number of `/v1/models` requests made in `minutes` of virtual time.
+    async fn requests_in(minutes: u64) -> usize {
+        let (mgr, calls, _accept) = rejecting_manager();
+        let notify = Arc::new(tokio::sync::Notify::new());
+        mgr.start_auth_refresh_watcher(notify.clone());
+        mgr.spawn_background_refresh_inner(/*remote_fetch_enabled*/ true);
+        let end = tokio::time::Instant::now() + std::time::Duration::from_secs(minutes * 60);
+        while tokio::time::Instant::now() < end {
+            notify.notify_one();
+            tokio::time::sleep(std::time::Duration::from_secs(65)).await;
+        }
+        let n = calls.load(Ordering::SeqCst);
+        eprintln!("auth_reject: {minutes} minutes of virtual time -> {n} requests");
+        n
+    }
+
+    /// Backoff after a 401 is 1, 2, 4, 8, 16, then 30 minutes. Earliest request times: 0, 1, 3, 7, 15, 31, 61 minutes,
+    /// then every 30 minutes.
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn ten_minutes_of_401_make_at_most_four_requests() {
+        let _api_key = api_key_env_unset();
+        let n = requests_in(10).await;
+        assert!(n <= 4, "10 minutes against a 401 server made {n} requests; the table allows 4");
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_day_of_401_makes_at_most_fifty_two_requests() {
+        let _api_key = api_key_env_unset();
+        let n = requests_in(24 * 60).await;
+        assert!(n <= 52, "24 hours against a 401 server made {n} requests; the table allows 52");
+    }
+
+    /// The user hears about it once, however many times the refresh is woken afterwards.
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn the_sign_in_again_note_is_sent_once() {
+        let _api_key = api_key_env_unset();
+        let (mgr, _calls, _accept) = rejecting_manager();
+        let mut rx = mgr.subscribe_auth_notice();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let counter = seen.clone();
+        let last = Arc::new(parking_lot::Mutex::new(String::new()));
+        let last_w = last.clone();
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                if let Some(n) = rx.borrow_and_update().clone() {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    *last_w.lock() = n;
+                }
+            }
+        });
+        let notify = Arc::new(tokio::sync::Notify::new());
+        mgr.start_auth_refresh_watcher(notify.clone());
+        mgr.spawn_background_refresh_inner(true);
+        for _ in 0..(3 * 60 * 60 / 65) {
+            notify.notify_one();
+            tokio::time::sleep(std::time::Duration::from_secs(65)).await;
+        }
+        assert_eq!(seen.load(Ordering::SeqCst), 1, "exactly one note for the whole rejection run");
+        assert_eq!(last.lock().as_str(), AUTH_REJECTED_NOTICE);
+        assert!(AUTH_REJECTED_NOTICE.contains("sign") && AUTH_REJECTED_NOTICE.contains("401"));
+    }
+
+    /// A new key lifts the wait at once; a 200 after that restores the normal refresh and re-arms the note.
+    #[tokio::test(start_paused = true)]
+    #[serial]
+    async fn a_new_credential_resets_the_wait_and_a_200_restores_the_refresh() {
+        let _api_key = api_key_env_unset();
+        let _key = EnvGuard::set("FUIGO_API_KEY", "fuigo-test-not-a-key");
+        let (mgr, calls, accept) = rejecting_manager();
+        let rx = mgr.subscribe_auth_notice();
+
+        mgr.fetch_and_apply_inner(true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(rx.borrow().is_some(), "the 401 raised the note");
+        // Same key, a minute later is still inside the 1 minute wait: nothing is sent.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        mgr.fetch_and_apply_inner(true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the same rejected key waits");
+
+        // A different key: the next fetch happens at once.
+        drop(_key);
+        let _key2 = EnvGuard::set("FUIGO_API_KEY", "fuigo-test-not-a-key-2");
+        mgr.fetch_and_apply_inner(true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "a credential change resets the wait");
+
+        // The server now accepts: after the wait, one fetch succeeds and the normal refresh is back.
+        accept.store(true, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_secs(3 * 60)).await;
+        mgr.fetch_and_apply_inner(true).await;
+        assert!(mgr.has_fetched_real_catalog());
+        assert!(rx.borrow().is_none(), "a good fetch clears the note");
+        mgr.fetch_and_apply_inner(true).await;
+        mgr.fetch_and_apply_inner(true).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 5, "no wait after a 200: every refresh fetches");
+    }
+}
+
+mod persist_401;

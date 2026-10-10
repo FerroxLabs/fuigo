@@ -248,7 +248,7 @@ pub fn notices_from(cursor: usize) -> Vec<String> {
 /// deduplicate.
 pub fn announce_notice(message: &str) {
     record_notice(message);
-    fuigo_tty_utils::best_effort_stderr::eprint_line(message);
+    fuigo_tty_utils::best_effort_stderr::eprint_line(&fuigo_tty_utils::scrub_unsafe_display(message, Some(' ')));
 }
 
 /// How many entries of [`NOTICES`] a host has already shown again ([`replay_notices_since_last_replay`]).

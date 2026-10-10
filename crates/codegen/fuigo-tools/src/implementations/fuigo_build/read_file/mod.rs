@@ -62,6 +62,81 @@ pub const MAX_LINES_READ: usize = 20_000;
 /// so one read never floods the context. Past it the read is truncated at a
 /// line boundary and the result names the next offset to continue from.
 pub const MAX_READ_BYTES: usize = 40 * 1024;
+/// Largest source file `read_file` loads (P166/S12): the whole file is read before windowing, so an unbounded
+/// source (a huge or growing log) must not be pulled into memory. Over it the read errs with a pointer to the shell.
+pub const MAX_READ_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+/// Acquire a read tool's source bytes: regular files only, at most [`MAX_READ_SOURCE_BYTES`], on every backend that
+/// can bound a read (the local one). A backend that cannot (an ACP client's file system) keeps its own read.
+pub(crate) async fn read_tool_source(
+    fs: &dyn crate::computer::types::AsyncFileSystem,
+    path: &std::path::Path,
+) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+    if fs.supports_bounded_read() {
+        fs.read_file_bounded(path, MAX_READ_SOURCE_BYTES).await
+    } else {
+        fs.read_file(path).await
+    }
+}
+/// P166/S7: whether `.gitignore` refuses a path, judged on BOTH the logical path the model named (before any symlink in
+/// it resolves) and its physical target. Every read and edit tool that honours `.gitignore` goes through this one
+/// check (Grok r4 MEDIUM 5: `search_replace`, the codex and OpenCode reads had the physical check or none).
+/// A dead policy worker fails closed.
+pub(crate) async fn gitignore_refuses(
+    filter: GitignoreFilter,
+    logical: std::path::PathBuf,
+    physical: std::path::PathBuf,
+) -> bool {
+    tokio::task::spawn_blocking(move || {
+        filter.is_logical_path_ignored(&logical) || filter.is_ignored(&physical)
+    })
+    .await
+    .unwrap_or(true)
+}
+/// The `.gitignore` filter a read tool honours: present and `RespectGitignore` on (reads default to off).
+pub(crate) async fn read_gitignore_filter(resources: &SharedResources) -> Option<GitignoreFilter> {
+    let res = resources.lock().await;
+    if res.get::<RespectGitignore>().is_some_and(|r| r.0) {
+        res.get::<GitignoreFilter>().cloned()
+    } else {
+        None
+    }
+}
+/// P166 Grok r5 MEDIUM 3: whether `.gitignore` refuses a path a tool is about to read, judged on the logical path and
+/// its canonical target (the target itself when it does not exist yet). `edit` picks the edit default (on unless
+/// `RespectGitignore` turns it off, as `search_replace` does) over the read default (off unless turned on).
+pub(crate) async fn tool_path_refused_by_gitignore(
+    resources: &SharedResources,
+    logical: &std::path::Path,
+    edit: bool,
+) -> bool {
+    let filter = if edit {
+        let res = resources.lock().await;
+        res.get::<RespectGitignore>()
+            .is_none_or(|r| r.0)
+            .then(|| res.get::<GitignoreFilter>().cloned())
+            .flatten()
+    } else {
+        read_gitignore_filter(resources).await
+    };
+    let Some(filter) = filter else {
+        return false;
+    };
+    let physical = crate::util::fs::try_canonicalize(logical)
+        .await
+        .unwrap_or_else(|_| logical.to_path_buf());
+    gitignore_refuses(filter, logical.to_path_buf(), physical).await
+}
+/// The reader's message for a FIFO, device, socket or other special file, when `error` is one.
+fn not_regular_file_message(error: &crate::computer::types::ComputerError) -> Option<&str> {
+    match error {
+        crate::computer::types::ComputerError::IOError(msg, Some(std::io::ErrorKind::InvalidInput))
+            if msg.starts_with(crate::util::file_reader::NOT_REGULAR_FILE) =>
+        {
+            Some(msg)
+        }
+        _ => None,
+    }
+}
 /// Tail of the truncation hint a cut read ends with; a multi-file call treats
 /// a cut file as having exhausted the shared budget.
 pub(crate) const READ_CUT_MARKER: &str = "KB per-call cap); continue with ";
@@ -383,11 +458,10 @@ pub(crate) async fn run_read_file(
     streamable_out: Option<&mut bool>,
     invoking_param_names: &crate::types::resources::InvokingToolParamNames,
 ) -> Result<ReadFileOutput, fuigo_tool_runtime::ToolError> {
-    let mut entries: Vec<ReadFileEntry> = input.files.take().unwrap_or_default();
-    entries.retain(|e| !e.path.trim().is_empty());
-    let single_path = !input.path.trim().is_empty();
+    // P174: the same plan `read_target_paths` reports to the permission check, so only judged paths are read.
+    let entries = planned_entries(&mut input);
     if entries.is_empty() {
-        if !single_path {
+        if input.path.trim().is_empty() {
             let target_param = invoking_param_names.resolve("target_file");
             return Ok(ReadFileOutput::FileReadError(format!(
                 "Provide {target_param} (one file) or files (a list of {{path, offset?, limit?}}) to read."
@@ -404,19 +478,6 @@ pub(crate) async fn run_read_file(
         )
         .await;
     }
-    if single_path {
-        entries.insert(
-            0,
-            ReadFileEntry {
-                path: std::mem::take(&mut input.path),
-                offset: input.offset.take(),
-                limit: input.limit.take(),
-            },
-        );
-    }
-    // Same path twice in one call reads once.
-    let mut seen = std::collections::HashSet::new();
-    entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
     let mut remaining = MAX_READ_BYTES;
     let mut content = String::new();
     let mut content_concise = String::new();
@@ -547,6 +608,87 @@ pub(crate) async fn run_read_file(
         extracted_images,
     }))
 }
+/// The entries a multi-file call reads, in order: `target_file` first when it is set, then every non-blank
+/// `files[].path`, each `(path, offset, limit)` once (the same path twice in one call reads once). Empty for the
+/// single-file form (no non-blank `files`), which reads `target_file` alone. Takes `files` (and `target_file` when it
+/// joins the list) out of `input`.
+fn planned_entries(input: &mut ReadFileInput) -> Vec<ReadFileEntry> {
+    let mut entries: Vec<ReadFileEntry> = input.files.take().unwrap_or_default();
+    entries.retain(|e| !e.path.trim().is_empty());
+    if entries.is_empty() {
+        return entries;
+    }
+    if !input.path.trim().is_empty() {
+        entries.insert(
+            0,
+            ReadFileEntry {
+                path: std::mem::take(&mut input.path),
+                offset: input.offset.take(),
+                limit: input.limit.take(),
+            },
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert((e.path.clone(), e.offset, e.limit)));
+    entries
+}
+/// Every path a call reads, in order, each once (P174): `target_file` for the single-file form, else `target_file`
+/// (when set) and every `files[].path`, as the model spelled them (each is resolved against the session cwd like a
+/// single read). The permission check judges each one as a Read; `run_read_file` reads from the same plan, so it reads
+/// no other path.
+pub fn read_target_paths(input: &ReadFileInput) -> Vec<String> {
+    let mut input = input.clone();
+    let entries = planned_entries(&mut input);
+    let paths: Vec<String> = if entries.is_empty() {
+        Some(input.path)
+            .filter(|p| !p.trim().is_empty())
+            .into_iter()
+            .collect()
+    } else {
+        entries.into_iter().map(|e| e.path).collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(p.clone())).collect()
+}
+/// The file a resolved (`resolve_model_path`) read path opens: canonicalized (symlinks followed), or, when it does not
+/// exist, the unique Unicode-confusable sibling the reader falls back to (with its note).
+async fn resolve_joined_read_path(joined_path: std::path::PathBuf) -> (std::path::PathBuf, Option<String>) {
+    match crate::util::fs::try_canonicalize(&joined_path).await {
+        Ok(p) => (p, None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            match crate::util::try_resolve_unicode_filename(&joined_path).await {
+                Some(m) => (m.resolved_path, Some(m.note)),
+                None => (joined_path, None),
+            }
+        }
+        Err(_) => (joined_path, None),
+    }
+}
+/// The file `read_file` opens for the model's `path` in a session whose cwd is `cwd` (and model-facing cwd
+/// `display_cwd`), resolved exactly as the reader resolves it (P174): `resolve_model_path`, then symlinks followed, or the
+/// Unicode-confusable fallback for a name that does not exist. The permission check judges this file as a Read.
+pub async fn resolve_read_target(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    path: &str,
+) -> std::path::PathBuf {
+    resolve_joined_read_path(resolve_model_path(cwd, display_cwd, path))
+        .await
+        .0
+}
+/// The file `read_file` opens for `path` when it exists: `resolve_model_path`, symlinks followed, and nothing else.
+/// `None` when the file does not exist (or cannot be resolved). Unlike [`resolve_read_target`] it never runs the
+/// Unicode-confusable fallback, which lists the whole parent directory: callers that only need the file of a read that
+/// will succeed (read-dedupe) use this, so a missing file costs one `canonicalize`, not a directory scan.
+pub async fn resolve_existing_read_target(
+    cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+    path: &str,
+) -> Option<std::path::PathBuf> {
+    crate::util::fs::try_canonicalize(&resolve_model_path(cwd, display_cwd, path))
+        .await
+        .ok()
+}
 /// Read one file. `byte_budget` caps the formatted content; when the window
 /// exceeds it the read is cut at the last whole line that fits and a hint
 /// names the next offset (a single line that alone exceeds the budget is a
@@ -573,34 +715,24 @@ async fn run_read_one(
     }
     let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.path);
     let is_skill_markdown = is_skill_markdown(&joined_path);
-    let (path, _unicode_note) = match crate::util::fs::try_canonicalize(&joined_path).await {
-        Ok(p) => (p, None),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            match crate::util::try_resolve_unicode_filename(&joined_path).await {
-                Some(m) => (m.resolved_path, Some(m.note)),
-                None => (joined_path, None),
-            }
-        }
-        Err(_) => (joined_path, None),
-    };
+    let (path, _unicode_note) = resolve_joined_read_path(joined_path.clone()).await;
     let version = ReadFileVersion::from_contract(contract_version);
     let is_legacy = version.is_legacy();
     let skip_gitignore = is_legacy && versions::legacy_0_4_10::allows_gitignored_reads();
-    if !skip_gitignore {
-        let res = resources.lock().await;
-        let respect_gitignore = res.get::<RespectGitignore>().is_some_and(|r| r.0);
-        if respect_gitignore
-            && let Some(filter) = res.get::<GitignoreFilter>()
-            && filter.is_ignored(&path)
-        {
-            let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
-            return Ok(ReadFileOutput::FileReadError(format!(
-                "Error: {} is ignored by .gitignore and cannot be read.",
-                display_dcwd.join(&input.path).display()
-            )));
-        }
+    // P166/S7 (upstream 4247f661): deny when EITHER the logical path the model named or the physical target is ignored.
+    // The physical check alone let an ignored `secret/` symlinked outside the repo read freely.
+    if !skip_gitignore
+        && let Some(filter) = read_gitignore_filter(&resources).await
+        && gitignore_refuses(filter, joined_path.clone(), path.clone()).await
+    {
+        let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
+        return Ok(ReadFileOutput::FileReadError(format!(
+            "Error: {} is ignored by .gitignore and cannot be read.",
+            display_dcwd.join(&input.path).display()
+        )));
     }
-    let mut file_bytes = match fs.read_file(&path).await {
+    // P166/S12: regular files only, at most MAX_READ_SOURCE_BYTES.
+    let mut file_bytes = match read_tool_source(fs.as_ref(), &path).await {
         Ok(bytes) => bytes,
         Err(e) => {
             tracing::debug!(?e, "Failed to read file");
@@ -646,6 +778,19 @@ async fn run_read_one(
                 Some(std::io::ErrorKind::PermissionDenied) => ReadFileOutput::PermissionDenied(
                     format!("Permission denied: {}", display_path.display()),
                 ),
+                // A FileReadError, not FileTooLarge: a multi-file call defers FileTooLarge as "over this call's budget".
+                Some(std::io::ErrorKind::FileTooLarge) => ReadFileOutput::FileReadError(format!(
+                    "Error: {} is larger than the read tool's {} MiB byte read limit. Read part of it with a shell command such as `head`, `tail` or `sed -n`.",
+                    display_path.display(),
+                    MAX_READ_SOURCE_BYTES / (1024 * 1024)
+                )),
+                Some(std::io::ErrorKind::InvalidInput) if not_regular_file_message(&e).is_some() => {
+                    ReadFileOutput::FileReadError(format!(
+                        "Error: {} is {}. The read tool reads regular files only.",
+                        display_path.display(),
+                        not_regular_file_message(&e).unwrap_or_default()
+                    ))
+                }
                 _ => ReadFileOutput::FileReadError(format!(
                     "Failed to read file: {}, {e}",
                     display_path.display()
@@ -1621,6 +1766,44 @@ mod tests {
         }
     }
 
+    /// P174: the permission check judges `read_target_paths`; the tool reads exactly those files, in that order, and
+    /// nothing else (one `==> path <==` header per file read).
+    #[tokio::test]
+    async fn reads_exactly_the_target_paths() {
+        let tmp = TempDir::new().unwrap();
+        for name in ["t.rs", "a.rs", "b.rs"] {
+            std::fs::write(tmp.path().join(name), format!("{name}\n")).unwrap();
+        }
+        let entry = |path: &str| ReadFileEntry { path: path.into(), offset: None, limit: None };
+        let input = ReadFileInput {
+            path: "t.rs".into(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: Some(vec![entry("a.rs"), entry(" "), entry("b.rs"), entry("a.rs")]),
+        };
+        let targets = read_target_paths(&input);
+        assert_eq!(targets, vec!["t.rs", "a.rs", "b.rs"]);
+        let resources = test_resources(tmp.path());
+        let ReadFileOutput::FileContent(fc) =
+            fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input.clone()).await.unwrap()
+        else {
+            panic!("expected FileContent");
+        };
+        let headers: Vec<&str> = fc
+            .content
+            .lines()
+            .filter_map(|line| line.strip_prefix("==> ").and_then(|l| l.strip_suffix(" <==")))
+            .collect();
+        assert_eq!(headers, targets.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let single = ReadFileInput { files: Some(vec![entry("")]), ..input.clone() };
+        assert_eq!(read_target_paths(&single), vec!["t.rs"]);
+        let none = ReadFileInput { path: " ".into(), files: None, ..input };
+        assert!(read_target_paths(&none).is_empty());
+    }
+
     #[tokio::test]
     async fn files_plus_target_file_reads_target_first_and_errors_when_both_absent() {
         let tmp = TempDir::new().unwrap();
@@ -2033,6 +2216,174 @@ mod tests {
                     other
                 )
             }
+        }
+    }
+    async fn p166_read(resources: Resources, path: &str) -> ReadFileOutput {
+        let input = ReadFileInput {
+            path: path.to_string(),
+            offset: None,
+            limit: None,
+            pages: None,
+            format: None,
+            files: None,
+        };
+        fuigo_tool_runtime::Tool::run(&ReadFileTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap()
+    }
+    fn p166_gitignore_resources(root: &std::path::Path, patterns: &[&str]) -> Resources {
+        let mut resources = test_resources(root);
+        let canonical = dunce::canonicalize(root).unwrap();
+        let gi = build_gitignore(&canonical, patterns);
+        resources.insert(GitignoreFilter::new(gi, canonical));
+        resources.insert(RespectGitignore(true));
+        resources
+    }
+    fn p166_assert_ignored(output: ReadFileOutput, what: &str) {
+        match output {
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("ignored by .gitignore"), "{what}: {msg}")
+            }
+            other => panic!("{what}: expected the gitignore denial, got {other:?}"),
+        }
+    }
+    /// P166/S7 (upstream 4247f661): an ignored LOGICAL path is denied even when its symlink resolves outside the repo.
+    /// Before, only the canonical path was checked, so `secret/` -> /elsewhere made `secret/key.txt` readable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_denies_ignored_logical_path_behind_symlink() {
+        let repo = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::write(outside.path().join("key.txt"), "TOP SECRET\n").unwrap();
+        std::fs::write(outside.path().join("real.env"), "TOKEN=1\n").unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.path().join("secret")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("real.env"), repo.path().join(".env"))
+            .unwrap();
+        for path in ["secret/key.txt", ".env", "./secret/../.env"] {
+            let resources = p166_gitignore_resources(repo.path(), &["secret/", ".env"]);
+            p166_assert_ignored(p166_read(resources, path).await, path);
+        }
+        // Absolute spelling of the logical path, through a non-canonical repo alias when one exists.
+        let abs = repo.path().join("secret").join("key.txt");
+        let resources = p166_gitignore_resources(repo.path(), &["secret/", ".env"]);
+        p166_assert_ignored(p166_read(resources, abs.to_str().unwrap()).await, "absolute");
+    }
+    /// P166/S7: the session cwd is an alias of the repo (macOS `/var` -> `/private/var`, a symlinked checkout), so the
+    /// logical spelling does not start with the canonical git root; the prefix resolution must still see the ignored dir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_denies_ignored_logical_path_through_aliased_cwd() {
+        let tmp = TempDir::new().unwrap();
+        let real_repo = tmp.path().join("real-repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&real_repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("key.txt"), "TOP SECRET\n").unwrap();
+        std::os::unix::fs::symlink(&outside, real_repo.join("secret")).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real_repo, &alias).unwrap();
+        // Filter rooted at the physical repo; the session cwd is the alias.
+        let mut resources = test_resources(&alias);
+        let canonical = dunce::canonicalize(&real_repo).unwrap();
+        resources.insert(GitignoreFilter::new(
+            build_gitignore(&canonical, &["secret/"]),
+            canonical,
+        ));
+        resources.insert(RespectGitignore(true));
+        p166_assert_ignored(p166_read(resources, "secret/key.txt").await, "aliased cwd");
+    }
+    /// P166/S7, Astra r1 MEDIUM: `build/../README.md` names an unignored file; the ignored `build/` on the way does not deny it.
+    #[tokio::test]
+    async fn read_file_allows_unignored_file_spelled_through_ignored_dir() {
+        let repo = TempDir::new().unwrap();
+        let root = dunce::canonicalize(repo.path()).unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("README.md"), "readme text\n").unwrap();
+        let resources = p166_gitignore_resources(repo.path(), &["build/"]);
+        match p166_read(resources, "build/../README.md").await {
+            ReadFileOutput::FileContent(fc) => assert!(fc.raw_output.contains("readme text")),
+            other => panic!("unignored README.md must read, got {other:?}"),
+        }
+        let resources = p166_gitignore_resources(repo.path(), &["build/"]);
+        p166_assert_ignored(
+            p166_read(resources, "README.md/../build/x").await,
+            "ignored lexical target",
+        );
+    }
+    /// P166/S7: the physical check stays: a non-ignored link to an ignored target is still denied, and an ordinary link still reads.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_gitignore_checks_physical_target_and_allows_plain_links() {
+        let repo = TempDir::new().unwrap();
+        let root = dunce::canonicalize(repo.path()).unwrap();
+        std::fs::create_dir(root.join("build")).unwrap();
+        std::fs::write(root.join("build").join("out.txt"), "built\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "plain notes\n").unwrap();
+        std::os::unix::fs::symlink(root.join("build").join("out.txt"), root.join("link.txt"))
+            .unwrap();
+        std::os::unix::fs::symlink(root.join("notes.txt"), root.join("notes-link.txt")).unwrap();
+        let resources = p166_gitignore_resources(repo.path(), &["build/"]);
+        p166_assert_ignored(p166_read(resources, "link.txt").await, "link.txt");
+        let resources = p166_gitignore_resources(repo.path(), &["build/"]);
+        match p166_read(resources, "notes-link.txt").await {
+            ReadFileOutput::FileContent(fc) => assert!(fc.raw_output.contains("plain notes")),
+            other => panic!("plain link must read, got {other:?}"),
+        }
+    }
+    fn p166_assert_not_regular(output: ReadFileOutput, what: &str) {
+        match output {
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("not a regular file"), "{what}: {msg}")
+            }
+            other => panic!("{what}: expected a not-a-regular-file error, got {other:?}"),
+        }
+    }
+    /// P166/S12 (upstream 4247f661): a FIFO is refused at once, never opened for a blocking read.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_file_refuses_fifo_without_hanging() {
+        let tmp = TempDir::new().unwrap();
+        let fifo = tmp.path().join("pipe");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR)
+            .unwrap();
+        let resources = test_resources(tmp.path());
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            p166_read(resources, "pipe"),
+        )
+        .await;
+        let Ok(output) = read else {
+            // Unblock the reader stuck in open(2) so the runtime can shut down, then fail.
+            let _ = std::fs::OpenOptions::new().write(true).open(&fifo);
+            panic!("read_file hung on a FIFO");
+        };
+        p166_assert_not_regular(output, "fifo");
+    }
+    /// P166/S12: character devices and sockets are refused with a clear error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_file_refuses_devices_and_sockets() {
+        let tmp = TempDir::new().unwrap();
+        let resources = test_resources(tmp.path());
+        p166_assert_not_regular(p166_read(resources, "/dev/null").await, "/dev/null");
+        let sock = tmp.path().join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let resources = test_resources(tmp.path());
+        p166_assert_not_regular(p166_read(resources, "s.sock").await, "socket");
+    }
+    /// P166/S12: a source over the byte cap is refused before it is loaded (sparse, so the test allocates nothing).
+    #[tokio::test]
+    async fn read_file_refuses_source_over_byte_cap() {
+        let tmp = TempDir::new().unwrap();
+        let big = std::fs::File::create(tmp.path().join("big.log")).unwrap();
+        big.set_len(256 * 1024 * 1024 + 1).unwrap();
+        drop(big);
+        let resources = test_resources(tmp.path());
+        match p166_read(resources, "big.log").await {
+            ReadFileOutput::FileReadError(msg) => {
+                assert!(msg.contains("byte read limit"), "{msg}")
+            }
+            other => panic!("expected the byte-read-limit error, got {other:?}"),
         }
     }
     #[tokio::test]

@@ -96,6 +96,12 @@ where
     result
 }
 
+/// Not `WouldBlock`: Windows surfaces contention (ERROR_LOCK_VIOLATION) as `Uncategorized`.
+fn lock_is_contended(e: &std::io::Error) -> bool {
+    let contended = fs2::lock_contended_error();
+    e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
+}
+
 /// Non-blocking variant for signal handlers.
 fn try_with_locked_state<F, R>(root: &Path, mutate: F) -> io::Result<Option<R>>
 where
@@ -114,7 +120,7 @@ where
             let _ = lock_file.unlock();
             result.map(Some)
         }
-        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) if lock_is_contended(&e) => Ok(None),
         Err(e) => Err(e),
     }
 }
@@ -130,12 +136,16 @@ where
 }
 
 fn open_lock_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    let file = fuigo_config::owner_only_file_options(
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false),
+    )
+    .open(path)?;
+    fuigo_config::tighten_own_regular_file_owner_only(&file, path);
+    Ok(file)
 }
 
 fn read_data_file(path: &Path) -> io::Result<Vec<ActiveSession>> {
@@ -164,7 +174,21 @@ fn write_data_file_atomic(
 ) -> io::Result<()> {
     let json = serde_json::to_string_pretty(sessions)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    fs::write(tmp_path, json.as_bytes())?;
+    // Fresh 0600 temp (create_new: a stale or planted file is removed first, never reused or followed), then the
+    // rename replaces `active_sessions.json` with it, so an older wider-mode json is healed on its next write.
+    match fs::remove_file(tmp_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    {
+        use io::Write as _;
+        let mut tmp = fuigo_config::owner_only_file_options(
+            OpenOptions::new().write(true).create_new(true),
+        )
+        .open(tmp_path)?;
+        tmp.write_all(json.as_bytes())?;
+    }
     fs::rename(tmp_path, data_path).inspect_err(|_| {
         let _ = fs::remove_file(tmp_path);
     })
@@ -207,6 +231,15 @@ fn is_pid_alive(pid: u32) -> bool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn a_held_lock_makes_the_non_blocking_mutation_report_busy_not_an_error() {
+        let dir = TempDir::new().unwrap();
+        let holder = open_lock_file(&dir.path().join(LOCK_FILENAME)).unwrap();
+        holder.lock_exclusive().unwrap();
+        let out = try_with_locked_state(dir.path(), |_| ());
+        assert!(matches!(out, Ok(None)), "expected Ok(None) while another handle holds the lock, got {out:?}");
+    }
 
     fn make_session(id: &str, pid: u32) -> ActiveSession {
         ActiveSession {
@@ -273,5 +306,66 @@ mod tests {
         assert!(list_in(dir.path()).unwrap().is_empty());
         register_in(dir.path(), make_session("s1", std::process::id())).unwrap();
         assert_eq!(list_in(dir.path()).unwrap().len(), 1);
+    }
+
+    #[cfg(unix)]
+    mod modes {
+        use super::*;
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        fn mode(p: &Path) -> u32 {
+            fs::metadata(p).unwrap().permissions().mode() & 0o777
+        }
+        fn set(p: &Path, m: u32) {
+            fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+        }
+
+        #[test]
+        fn new_lock_and_json_are_owner_only() {
+            let dir = TempDir::new().unwrap();
+            register_in(dir.path(), make_session("a", 1)).unwrap();
+            assert_eq!(mode(&dir.path().join(LOCK_FILENAME)) & 0o077, 0, "lock");
+            assert_eq!(mode(&dir.path().join(DATA_FILENAME)) & 0o077, 0, "json");
+        }
+
+        #[test]
+        fn existing_wide_lock_and_json_are_tightened() {
+            let dir = TempDir::new().unwrap();
+            let lock = dir.path().join(LOCK_FILENAME);
+            let data = dir.path().join(DATA_FILENAME);
+            fs::write(&lock, b"").unwrap();
+            fs::write(&data, b"[]").unwrap();
+            set(&lock, 0o644);
+            set(&data, 0o644);
+            register_in(dir.path(), make_session("a", 1)).unwrap();
+            assert_eq!(mode(&lock), 0o600, "old lock");
+            assert_eq!(mode(&data), 0o600, "old json");
+        }
+
+        #[test]
+        fn stale_wide_tmp_file_does_not_leak_into_json() {
+            let dir = TempDir::new().unwrap();
+            let tmp = dir.path().join(TMP_FILENAME);
+            fs::write(&tmp, b"stale").unwrap();
+            set(&tmp, 0o644);
+            register_in(dir.path(), make_session("fu2-new-session", std::process::id())).unwrap();
+            let data = dir.path().join(DATA_FILENAME);
+            assert_eq!(mode(&data), 0o600);
+            let body = fs::read_to_string(&data).unwrap();
+            assert!(body.contains("fu2-new-session"), "new session id missing: {body}");
+            assert!(!body.contains("stale"), "stale temp content survived: {body}");
+        }
+
+        #[test]
+        fn lock_symlink_target_mode_is_not_changed() {
+            let dir = TempDir::new().unwrap();
+            let other = TempDir::new().unwrap();
+            let target = other.path().join("target");
+            fs::write(&target, b"").unwrap();
+            set(&target, 0o644);
+            symlink(&target, dir.path().join(LOCK_FILENAME)).unwrap();
+            register_in(dir.path(), make_session("a", 1)).unwrap();
+            assert_eq!(mode(&target), 0o644, "symlink target must be untouched");
+        }
     }
 }

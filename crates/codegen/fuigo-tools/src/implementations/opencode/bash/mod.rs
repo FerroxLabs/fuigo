@@ -204,7 +204,7 @@ impl TryFrom<ToolInput> for BashInput {
             ToolInput::Bash(b) => Ok(BashInput {
                 command: b.command,
                 timeout: b.timeout,
-                workdir: None,
+                workdir: b.workdir,
                 description: b.description,
             }),
             ToolInput::Dynamic(v) => {
@@ -222,6 +222,8 @@ impl From<BashInput> for ToolInput {
             timeout: value.timeout,
             description: value.description,
             is_background: false,
+            // Kept for the permission check: the command runs here (P173).
+            workdir: value.workdir,
         })
     }
 }

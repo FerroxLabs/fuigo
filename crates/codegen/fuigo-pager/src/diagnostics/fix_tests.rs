@@ -1252,3 +1252,16 @@ fn tmux_truecolor_fix_requires_a_reducing_client() {
         Err(FixError::TmuxNotApplicable)
     ));
 }
+
+/// P181 (Grok r3 L7): a path with a line separator or a bidi override is not printed in a doctor preview.
+#[test]
+fn preview_path_refuses_line_separators_and_bidi_controls() {
+    for hostile in ["a\u{2028}b", "a\u{202e}b", "a\u{2066}b", "a\x1b[2Jb"] {
+        assert_eq!(
+            super::preview_path(std::path::Path::new(hostile)),
+            "[path cannot be rendered safely]",
+            "{hostile:?}"
+        );
+    }
+    assert_eq!(super::preview_path(std::path::Path::new("/tmp/ok")), "`/tmp/ok`");
+}

@@ -8,6 +8,11 @@ use crate::permission::types::{
     AccessKind, Decision, PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
 };
 use fuigo_paths::normalize_lexically;
+pub(crate) use fuigo_tools::util::path_match::{
+    literal_dir_prefix, physical_alias_pattern_string,
+    RuleBase, absolute_normalized_path, is_tilde_path, path_has_parent_dir, path_match_forms, path_match_string,
+    resolve_following_symlinks,
+};
 use fuigo_tools::implementations::fuigo_build::web_fetch::domain::normalize_domain;
 
 /// A security-gate escalation with `Ask` provenance.
@@ -84,6 +89,10 @@ pub struct CompiledPolicy {
     /// Per-rule [`rule_is_catchall`] verdicts, index-aligned with `config.rules`/`matchers`.
     /// Precomputed so the auto-mode narrow-allow check doesn't re-probe every rule on every request.
     catchall: Vec<bool>,
+    /// Per rule: the literal absolute directory prefix of a Deny/Ask path pattern (P175c), index-aligned with `config.rules`.
+    /// `None` for allow rules, non-absolute patterns and patterns with no literal directory part, so a policy without
+    /// absolute deny/ask rules never touches the filesystem for this.
+    alias_prefix: Vec<Option<(String, String)>>,
 }
 
 impl CompiledPolicy {
@@ -114,6 +123,16 @@ impl CompiledPolicy {
                 && matches!(rule.tool, ToolFilter::Bash | ToolFilter::Any)
         });
         let catchall = config.rules.iter().map(rule_is_catchall).collect();
+        let alias_prefix: Vec<Option<(String, String)>> = config
+            .rules
+            .iter()
+            .map(|rule| match rule.action {
+                RuleAction::Deny | RuleAction::Ask => {
+                    rule.pattern.as_deref().and_then(literal_dir_prefix)
+                }
+                RuleAction::Allow => None,
+            })
+            .collect();
         Self {
             config,
             matchers,
@@ -121,7 +140,15 @@ impl CompiledPolicy {
             has_bash_command_restrictions,
             has_bash_allow_rules,
             catchall,
+            alias_prefix,
         }
+    }
+
+    /// P175c: the rule's pattern with its literal directory prefix replaced by that prefix's physical form, when the
+    /// prefix passes through a symlink. Used only to widen a deny/ask match, never an allow.
+    fn physical_alias_pattern(&self, index: usize) -> Option<glob::Pattern> {
+        let (prefix, rest) = self.alias_prefix.get(index)?.as_ref()?;
+        physical_alias_pattern_string(prefix, rest).and_then(|pattern| glob::Pattern::new(&pattern).ok())
     }
 
     /// Evaluate managed Bash/Any deny/ask command rules against every chained segment, not just the leading command.
@@ -231,35 +258,137 @@ impl CompiledPolicy {
         self.evaluate_with_cwd_details(access, cwd).0
     }
 
-    /// Lexical decision plus whether an unresolvable native symlink forces a prompt.
+    /// Direct rule decision plus whether an unresolvable native symlink forces a prompt.
     pub(crate) fn evaluate_with_cwd_details(
         &self,
         access: &AccessKind,
         cwd: Option<&Path>,
     ) -> (Option<Decision>, bool) {
-        let lexical = self.evaluate_lexical_with_cwd(access, cwd);
+        let base = cwd.map(RuleBase::new);
+        let direct = self.evaluate_rules_with_base(access, base.as_ref());
         let Some(path) = native_file_path(access) else {
-            return (lexical, false);
+            return (direct, false);
         };
         let Some(raw_absolute) = raw_absolute_tool_path(path, cwd) else {
-            return (lexical, false);
+            return (direct, false);
         };
         let lexical_abs = path_match_string(&absolute_normalized_path(path, cwd));
-        match follow_absolute_symlink(&raw_absolute, &lexical_abs) {
+        let follow = match follow_absolute_symlink(&raw_absolute, &lexical_abs) {
+            // A `..` path gets its physical-cwd forms only from this escalate-only re-check
+            SymlinkFollow::None if path_has_parent_dir(Path::new(path)) => {
+                SymlinkFollow::Target(lexical_abs)
+            }
+            follow => follow,
+        };
+        match follow {
             SymlinkFollow::Target(resolved) => {
-                let resolved_decision = match self
-                    .evaluate_lexical_with_cwd(&access_with_path(access, resolved), cwd)
-                {
-                    Some(decision @ (Decision::Reject(_) | Decision::Ask)) => Some(decision),
-                    _ => None,
+                let resolved_access = access_with_path(access, resolved.clone());
+                let resolved_decision =
+                    match self.evaluate_rules_with_base(&resolved_access, base.as_ref()) {
+                        Some(decision @ (Decision::Reject(_) | Decision::Ask)) => Some(decision),
+                        _ => None,
+                    };
+                // An allow granted to a path in the workspace does not carry through a link to a target outside the
+                // physical workspace that no allow covers, so a link out of the workspace prompts
+                let direct = match (direct, base.as_ref()) {
+                    (Some(Decision::Allow), Some(base))
+                        if self.allow_leaves_workspace(path, &resolved_access, &resolved, base) =>
+                    {
+                        None
+                    }
+                    (direct, _) => direct,
                 };
-                (combine_decisions(lexical, resolved_decision), false)
+                (combine_decisions(direct, resolved_decision), false)
             }
             SymlinkFollow::Unresolvable if self.native_path_restrictions_apply(access) => {
-                (combine_decisions(lexical, Some(Decision::Ask)), true)
+                (combine_decisions(direct, Some(Decision::Ask)), true)
             }
-            SymlinkFollow::Unresolvable | SymlinkFollow::None => (lexical, false),
+            SymlinkFollow::Unresolvable | SymlinkFollow::None => (direct, false),
         }
+    }
+
+    /// True when `path` lies in the workspace (written or physical cwd) but its followed target `resolved` lies outside
+    /// the physical workspace and no allow rule covers the target under any of its spellings.
+    /// The physical cwd is the workspace's real extent: a written cwd with `..` after a link can normalize to an ancestor.
+    /// A `..` in `path` only makes this stricter (it can drop an allow, never keep one), so it is not exempt.
+    fn allow_leaves_workspace(
+        &self,
+        path: &str,
+        resolved_access: &AccessKind,
+        resolved: &str,
+        base: &RuleBase<'_>,
+    ) -> bool {
+        let written = absolute_normalized_path(path, Some(base.lexical));
+        let physical = base.physical();
+        let in_workspace = written.starts_with(&base.lexical_normalized)
+            || physical.is_some_and(|physical| written.starts_with(physical));
+        if !in_workspace {
+            return false;
+        }
+        let root = physical.unwrap_or(&base.lexical_normalized);
+        let resolved = Path::new(resolved);
+        if resolved.starts_with(root) {
+            return false;
+        }
+        let root_base = RuleBase::new(root).without_physical();
+        if self.allow_rule_matches(resolved_access, &root_base) {
+            return false;
+        }
+        // The same target spelled through each symlinked ancestor of the written cwd (`/tmp/x` for `/private/tmp/x`):
+        // the ancestor resolves to the prefix, so the spelling names the same file, as v1.0.21 matched it
+        !base.lexical_normalized.ancestors().any(|ancestor| {
+            resolve_following_symlinks(ancestor)
+                .filter(|physical_ancestor| physical_ancestor != ancestor)
+                .and_then(|physical_ancestor| {
+                    resolved
+                        .strip_prefix(&physical_ancestor)
+                        .ok()
+                        .map(|rel| ancestor.join(rel))
+                })
+                .is_some_and(|alias| {
+                    self.allow_rule_matches(
+                        &access_with_path(resolved_access, path_match_string(&alias)),
+                        &root_base,
+                    )
+                })
+        })
+    }
+
+    /// P175c: a deny/ask rule written with an absolute path through a symlinked directory also applies to the
+    /// physical spelling of the same file (see [`Self::physical_alias_pattern`]). Never true for an allow rule.
+    fn alias_pattern_matches(
+        &self,
+        index: usize,
+        access: &AccessKind,
+        base: Option<&RuleBase<'_>>,
+    ) -> bool {
+        let Some(path) = native_file_path(access) else {
+            return false;
+        };
+        self.physical_alias_pattern(index).is_some_and(|alias| {
+            fuigo_tools::util::path_match::path_pattern_matches(path, &alias, base)
+        })
+    }
+
+    /// True if an allow rule matches this native access against `base`.
+    /// Used only to keep (never to grant) an allow when the access path is followed through a symlink.
+    fn allow_rule_matches(&self, access: &AccessKind, base: &RuleBase<'_>) -> bool {
+        self.config
+            .rules
+            .iter()
+            .zip(&self.matchers)
+            .any(|(rule, matcher)| {
+                rule.action == RuleAction::Allow
+                    && tool_filter_matches(access, &rule.tool)
+                    && pattern_matches(
+                        access,
+                        &CompiledRule {
+                            rule,
+                            matcher: matcher.as_ref(),
+                        },
+                        Some(base),
+                    )
+            })
     }
 
     /// True if any deny/ask rule applies to this access, including Grep-only rules the shell gate skips.
@@ -270,24 +399,33 @@ impl CompiledPolicy {
         })
     }
 
-    /// Lexical rule match only. Callers re-check symlink targets through this so follow cannot recurse.
-    pub(crate) fn evaluate_lexical_with_cwd(
+    /// Rule match without following the access path's symlinks, so the target re-check through it cannot recurse.
+    /// Deny/ask rules see the cwd's written and physical forms; allow rules see the written form only, so a symlinked
+    /// cwd can add matches to a restriction but never widens an allow.
+    pub(crate) fn evaluate_rules_with_base(
         &self,
         access: &AccessKind,
-        cwd: Option<&Path>,
+        base: Option<&RuleBase<'_>>,
     ) -> Option<Decision> {
         let mut matched_ask = false;
         let mut matched_allow = false;
+        let allow_base = base.map(RuleBase::without_physical);
 
-        for (rule, matcher) in self.config.rules.iter().zip(&self.matchers) {
-            if !tool_filter_matches(access, &rule.tool) {
+        for (index, (rule, matcher)) in self.config.rules.iter().zip(&self.matchers).enumerate() {
+            if !rule_reaches(access, rule) {
                 continue;
             }
             let cr = CompiledRule {
                 rule,
                 matcher: matcher.as_ref(),
             };
-            if !pattern_matches(access, &cr, cwd) {
+            let rule_base = match rule.action {
+                RuleAction::Allow => allow_base.as_ref(),
+                RuleAction::Deny | RuleAction::Ask => base,
+            };
+            if !pattern_matches(access, &cr, rule_base)
+                && !self.alias_pattern_matches(index, access, rule_base)
+            {
                 continue;
             }
             match rule.action {
@@ -581,6 +719,25 @@ pub(crate) fn shell_dash_c_script(words: &[ShellWord<'_>]) -> InlineShellScript 
     }
 }
 
+/// [`tool_filter_matches`], plus the one-way reach of `Edit` rules onto [`AccessKind::Tool`] (P165, S2).
+///
+/// A tool-wide `Edit` / `Edit(*)` (also spelled `Write`) deny or ask is a lockdown of side effects, so it also denies or asks
+/// for the side-effecting tools (scheduler, workflow, media generation); otherwise `deny = ["Edit"]` would be bypassed by them.
+/// It never allows one: an `Edit` allow (including the acceptEdits synthetic rule) leaves the tool to prompt. A path-scoped
+/// `Edit(src/**)` is a path, never compared to a tool id, so it does not reach a tool either.
+fn rule_reaches(access: &AccessKind, rule: &PermissionRule) -> bool {
+    if matches!(access, AccessKind::Tool(_)) && rule.tool == ToolFilter::Edit {
+        return matches!(rule.action, RuleAction::Deny | RuleAction::Ask)
+            && is_tool_wide_pattern(rule.pattern.as_deref());
+    }
+    tool_filter_matches(access, &rule.tool)
+}
+
+/// Bare `Edit` (no pattern) or `Edit(*)`. Any other pattern is a path glob.
+fn is_tool_wide_pattern(pattern: Option<&str>) -> bool {
+    matches!(pattern, None | Some("*"))
+}
+
 fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
     match filter {
         ToolFilter::Any => true,
@@ -735,7 +892,11 @@ pub fn bash_pattern_is_broad(pattern: &str) -> bool {
     pattern == "*" || !pattern.contains(char::is_whitespace)
 }
 
-fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
+fn pattern_matches(
+    access: &AccessKind,
+    cr: &CompiledRule<'_>,
+    base: Option<&RuleBase<'_>>,
+) -> bool {
     let pattern = match cr.rule.pattern.as_deref() {
         Some(p) => p,
         None => return true,
@@ -751,13 +912,13 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
-        AccessKind::Edit(path) => path_context_matches(path, cr, cwd),
+        AccessKind::Edit(path) => path_context_matches(path, cr, base),
         AccessKind::Read(path) => match path {
-            Some(p) => path_context_matches(p, cr, cwd),
+            Some(p) => path_context_matches(p, cr, base),
             None => false,
         },
         AccessKind::Grep { path, .. } => match path {
-            Some(p) => path_context_matches(p, cr, cwd),
+            Some(p) => path_context_matches(p, cr, base),
             None => false,
         },
         AccessKind::MCPTool { name, .. } => glob_matches(name, MatchContext::Freeform, cr.matcher),
@@ -772,6 +933,12 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             glob_matches(subagent_id, MatchContext::Freeform, cr.matcher)
                 || subagent_id.starts_with(pattern)
         }
+        // A bare rule names the tool by its id (`scheduler_create`, `image_*`). An `Edit` rule's pattern is a path, so it
+        // never matches a tool id here; only a tool-wide `Edit` reaches a tool, and that returned above (`*` / no pattern).
+        AccessKind::Tool(name) => {
+            cr.rule.tool != ToolFilter::Edit
+                && glob_matches(name, MatchContext::Freeform, cr.matcher)
+        }
     }
 }
 
@@ -779,61 +946,8 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
 /// Rooted patterns are self-containing: `..` never survives normalization, and cwd-relative spellings exist only for paths genuinely under the cwd.
 /// So `Read(./**)` / `Read(src/**)` cannot be escaped via traversal.
 /// Unrooted patterns (`*`, leading `**`) keep their documented any-depth meaning.
-fn path_context_matches(path: &str, cr: &CompiledRule<'_>, cwd: Option<&Path>) -> bool {
-    path_match_forms(path, cwd)
-        .iter()
-        .any(|text| glob_matches(text, MatchContext::Path, cr.matcher))
-}
-
-/// Normalized absolute form, plus cwd-relative and `./`-prefixed spellings when the path is under cwd (so `Read(./**)` matches bare `src/main.rs`).
-/// Normalization never leaves `.`/`..` in the forms, so a relative spelling is produced only for paths genuinely under the cwd.
-/// Tilde paths are matched literally only (see [`is_tilde_path`]).
-fn path_match_forms(path: &str, cwd: Option<&Path>) -> Vec<String> {
-    let abs = absolute_normalized_path(path, cwd);
-    let mut forms = vec![path_match_string(&abs)];
-
-    if let Some(cwd) = cwd {
-        if let Ok(rel) = abs.strip_prefix(normalize_lexically(cwd)) {
-            let rel_s = path_match_string(rel);
-            if rel_s.is_empty() || rel_s == "." {
-                forms.extend([".".to_owned(), "./".to_owned()]);
-            } else {
-                forms.push(format!("./{rel_s}"));
-                forms.push(rel_s);
-            }
-        }
-    } else if abs.is_relative() && !path_has_parent_dir(&abs) && !is_tilde_path(&abs) {
-        // No session cwd: still offer `./form` so `./**` matches bare relatives.
-        let lex_s = path_match_string(&abs);
-        if lex_s != "." && !lex_s.is_empty() {
-            forms.push(format!("./{lex_s}"));
-        }
-    }
-    forms
-}
-
-fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
-    let raw = Path::new(path);
-    if is_tilde_path(raw) {
-        // Kept raw: no cwd-join and no collapse; collapsing `~/../x` to `x` would make it look workspace-relative
-        return raw.to_path_buf();
-    }
-    let joined = match cwd {
-        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
-        _ => raw.to_path_buf(),
-    };
-    normalize_lexically(&joined)
-}
-
-/// A leading `~` component is expanded to the home directory by the tools (`resolve_model_path`) *after* this gate runs.
-/// Such a path must never be treated as cwd-relative.
-/// A manufactured `./~/…` spelling would satisfy workspace allows like `./**` while the tool escapes to the real home.
-/// Tilde paths are matched literally instead, exactly as patterns treat `~`.
-fn is_tilde_path(path: &Path) -> bool {
-    matches!(
-        path.components().next(),
-        Some(Component::Normal(first)) if first.to_string_lossy().starts_with('~')
-    )
+fn path_context_matches(path: &str, cr: &CompiledRule<'_>, base: Option<&RuleBase<'_>>) -> bool {
+    cr.matcher.is_some_and(|pat| fuigo_tools::util::path_match::path_pattern_matches(path, pat, base))
 }
 
 fn native_file_path(access: &AccessKind) -> Option<&str> {
@@ -872,14 +986,6 @@ fn raw_absolute_tool_path(path: &str, cwd: Option<&Path>) -> Option<String> {
     joined.is_absolute().then(|| path_match_string(&joined))
 }
 
-fn path_match_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-fn path_has_parent_dir(path: &Path) -> bool {
-    path.components().any(|c| matches!(c, Component::ParentDir))
-}
-
 /// True if any existing component of `absolute` is a symlink.
 fn path_has_symlink(absolute: &str) -> bool {
     let path = Path::new(absolute);
@@ -906,9 +1012,19 @@ fn resolve_symlink_target(absolute: &str) -> Option<String> {
     Some(path_match_string(&normalize_lexically(&resolved)))
 }
 
-/// Follow every symlink, including dangling leaves and missing trailing components.
-pub(crate) fn resolve_following_symlinks(path: &Path) -> Option<PathBuf> {
-    fn walk(path: &Path, depth: usize) -> Option<PathBuf> {
+// `resolve_following_symlinks` itself lives in `fuigo_tools::util::path_match` (moved there by P198 so the tools
+// and the policy share one matcher). The comparison variant below (P175 part B) keeps its own walk: it differs only
+// in treating `NotADirectory` as a candidate. Keep the two walks in step.
+/// [`resolve_following_symlinks`] for a path that is only being COMPARED with a directory (P175 part B round 3): a
+/// path below a regular file (`README.md/notes.txt`, `NotADirectory`) is returned as its resolved-parent spelling
+/// instead of `None`. Its ancestors are already resolved, so a path that really lands in the compared directory still
+/// matches; loops, the depth cap and unreadable links stay `None`. No other caller uses this variant.
+pub(crate) fn resolve_following_symlinks_for_comparison(path: &Path) -> Option<PathBuf> {
+    resolve_symlinks(path, true)
+}
+
+fn resolve_symlinks(path: &Path, not_a_directory_is_candidate: bool) -> Option<PathBuf> {
+    fn walk(path: &Path, depth: usize, enotdir: bool) -> Option<PathBuf> {
         const MAX_SYMLINK_DEPTH: usize = 40;
         if depth > MAX_SYMLINK_DEPTH {
             return None;
@@ -920,12 +1036,13 @@ pub(crate) fn resolve_following_symlinks(path: &Path) -> Option<PathBuf> {
         // Parent-first so a dangling or not-yet-created leaf still follows links.
         let parent = path.parent()?;
         let file_name = path.file_name()?;
-        let resolved_parent = walk(parent, depth + 1)?;
+        let resolved_parent = walk(parent, depth + 1, enotdir)?;
         let candidate = resolved_parent.join(file_name);
         // NotFound is a new path; any other metadata error fails closed.
         let metadata = match std::fs::symlink_metadata(&candidate) {
             Ok(metadata) => Some(metadata),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) if enotdir && error.kind() == std::io::ErrorKind::NotADirectory => return Some(candidate),
             Err(_) => return None,
         };
         if metadata.is_some_and(|metadata| metadata.file_type().is_symlink()) {
@@ -936,11 +1053,11 @@ pub(crate) fn resolve_following_symlinks(path: &Path) -> Option<PathBuf> {
             } else {
                 resolved_parent.join(target)
             };
-            return walk(&target, depth + 1);
+            return walk(&target, depth + 1, enotdir);
         }
         Some(candidate)
     }
-    walk(path, 0)
+    walk(path, 0, not_a_directory_is_candidate)
 }
 
 /// The result of following symlinks on an absolute path, used by the escalate-only re-checks.
@@ -1111,7 +1228,7 @@ mod tests {
             rule: &policy.config.rules[0],
             matcher: policy.matchers[0].as_ref(),
         };
-        pattern_matches(access, &cr, cwd)
+        pattern_matches(access, &cr, cwd.map(RuleBase::new).as_ref())
     }
 
     #[test]
@@ -1324,6 +1441,101 @@ mod tests {
         ]));
         assert!(allow_read.evaluate(&task).is_none());
         assert!(allow_read.evaluate(&edit).is_none());
+    }
+
+    /// P165 (S2): a tool-wide `Edit` / `Edit(*)` deny or ask also locks down the side-effecting tools.
+    /// A user with `deny = ["Edit"]` is not bypassed by scheduling, workflows or media generation.
+    #[test]
+    fn tool_wide_edit_deny_and_ask_reach_side_effecting_tools() {
+        use crate::permission::rules::parse_permission_rule;
+        for (name, input) in crate::permission::types::tests::side_effecting_tool_inputs() {
+            let access = AccessKind::from(&input);
+            for spelling in ["Edit", "Edit(*)", "Write"] {
+                let deny = CompiledPolicy::new(PermissionConfig::new(vec![
+                    parse_permission_rule(spelling, RuleAction::Deny).unwrap(),
+                ]));
+                assert!(
+                    matches!(deny.evaluate(&access), Some(Decision::Reject(_))),
+                    "deny {spelling} must reject {name}, got {:?}",
+                    deny.evaluate(&access)
+                );
+                let ask = CompiledPolicy::new(PermissionConfig::new(vec![
+                    parse_permission_rule(spelling, RuleAction::Ask).unwrap(),
+                ]));
+                assert_eq!(
+                    ask.evaluate(&access),
+                    Some(Decision::Ask),
+                    "ask {spelling} must ask for {name}"
+                );
+            }
+        }
+    }
+
+    /// P165 (S2): the reach is one-way and tool-wide only. An `Edit` allow (including the acceptEdits synthetic rule) never
+    /// allows a tool, and a path-scoped `Edit(...)` rule is a path, never compared to a tool id.
+    #[test]
+    fn edit_allow_and_path_rules_do_not_reach_side_effecting_tools() {
+        use crate::permission::rules::parse_permission_rule;
+        for (name, input) in crate::permission::types::tests::side_effecting_tool_inputs() {
+            let access = AccessKind::from(&input);
+            for spelling in ["Edit", "Edit(*)"] {
+                let allow = CompiledPolicy::new(PermissionConfig::new(vec![
+                    parse_permission_rule(spelling, RuleAction::Allow).unwrap(),
+                ]));
+                assert_eq!(
+                    allow.evaluate(&access),
+                    None,
+                    "allow {spelling} must not allow {name}"
+                );
+            }
+            for action in [RuleAction::Deny, RuleAction::Ask] {
+                for path_rule in ["Edit(src/**)", "Edit(**)", "Edit(scheduler_create)"] {
+                    let policy = CompiledPolicy::new(PermissionConfig::new(vec![
+                        parse_permission_rule(path_rule, action).unwrap(),
+                    ]));
+                    assert_eq!(
+                        policy.evaluate(&access),
+                        None,
+                        "{action:?} {path_rule} is a path rule and must not match tool {name}"
+                    );
+                }
+            }
+        }
+        // The path rule still fires on the path it names.
+        let deny = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("Edit(src/**)", RuleAction::Deny).unwrap(),
+        ]));
+        assert!(matches!(
+            deny.evaluate(&AccessKind::Edit("src/main.rs".into())),
+            Some(Decision::Reject(_))
+        ));
+    }
+
+    /// P165: a bare rule names a tool by its id, so a user can allow or deny one side-effecting tool on its own.
+    #[test]
+    fn bare_tool_id_rules_allow_or_deny_one_tool() {
+        use crate::permission::rules::parse_permission_rule;
+        let inputs = crate::permission::types::tests::side_effecting_tool_inputs();
+        let (_, scheduler) = inputs
+            .iter()
+            .find(|(name, _)| *name == "scheduler_create")
+            .expect("scheduler fixture");
+        let (_, image) = inputs
+            .iter()
+            .find(|(name, _)| *name == "image_gen")
+            .expect("image fixture");
+        let scheduler = AccessKind::from(scheduler);
+        let image = AccessKind::from(image);
+        let allow = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("scheduler_create", RuleAction::Allow).unwrap(),
+        ]));
+        assert_eq!(allow.evaluate(&scheduler), Some(Decision::Allow));
+        assert_eq!(allow.evaluate(&image), None);
+        let deny = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("image_*", RuleAction::Deny).unwrap(),
+        ]));
+        assert!(matches!(deny.evaluate(&image), Some(Decision::Reject(_))));
+        assert_eq!(deny.evaluate(&scheduler), None);
     }
 
     #[test]
@@ -2727,5 +2939,59 @@ mod tests {
             "expected Ask for mid-path cycle, got {decision:?}"
         );
         assert!(fail_closed);
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "policy_symlink_cwd_tests.rs"]
+mod symlink_cwd_tests;
+
+#[cfg(all(test, unix))]
+#[path = "policy_alias_rule_tests.rs"]
+mod alias_rule_tests;
+
+/// Windows and WSL spellings are untouched by the physical-cwd forms (P156): a cwd that does not resolve to a
+/// different absolute path adds nothing, so these paths match exactly as before.
+#[cfg(test)]
+mod windows_spelling_tests {
+    use super::*;
+
+    #[test]
+    fn windows_spelled_paths_get_no_physical_forms() {
+        for (cwd, path) in [
+            (r"C:\P156NoSuchDir\ws", r"C:\P156NoSuchDir\ws\secret\key"),
+            (r"C:\P156NoSuchDir\ws", r"secret\key"),
+            ("C:/P156NoSuchDir/ws", "C:/P156NoSuchDir/ws/secret/key"),
+            (r"\\?\C:\P156NoSuchDir\ws", r"\\?\C:\P156NoSuchDir\ws\secret\key"),
+            (r"\\wsl$\Ubuntu\home\p156", r"\\wsl$\Ubuntu\home\p156\secret\key"),
+        ] {
+            let base = RuleBase::new(Path::new(cwd));
+            assert_eq!(
+                path_match_forms(path, Some(&base)),
+                path_match_forms(path, Some(&base.without_physical())),
+                "cwd {cwd} path {path}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_relative_secret_deny_matches_backslash_and_slash_spellings() {
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![PermissionRule {
+            action: RuleAction::Deny,
+            tool: ToolFilter::Read,
+            pattern: Some("./secret/**".to_owned()),
+            pattern_mode: PatternMode::Glob,
+        }]));
+        let cwd = Path::new(r"C:\P156NoSuchDir\ws");
+        for path in [r"C:\P156NoSuchDir\ws\secret\key", r"secret\key", "secret/key"] {
+            assert!(
+                matches!(
+                    policy.evaluate_with_cwd(&AccessKind::Read(Some(path.to_owned())), Some(cwd)),
+                    Some(Decision::Reject(_))
+                ),
+                "{path}"
+            );
+        }
     }
 }

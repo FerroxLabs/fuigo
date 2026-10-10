@@ -42,6 +42,10 @@ pub(super) enum ContentBlock {
         thinking: String,
         signature: String,
     },
+    /// Encrypted reasoning the model chose to redact; `data` is its opaque blob, kept verbatim so the block replays unchanged.
+    RedactedThinking {
+        data: String,
+    },
     ToolUse {
         id: String,
         name: String,
@@ -323,6 +327,10 @@ pub(super) enum PartialBlock {
     Thinking {
         thinking: &'static str,
         signature: &'static str,
+    },
+    /// A `redacted_thinking` block in the partial stream; it carries its whole `data` blob at start, with no deltas.
+    RedactedThinking {
+        data: String,
     },
     ToolUse {
         id: String,

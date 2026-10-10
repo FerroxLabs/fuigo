@@ -91,13 +91,18 @@ impl SessionActor {
                 .map(|text| fuigo_tools::util::truncate_str(&text, 16 * 1024).to_owned()),
             None => None,
         };
-        let active_model = self
+        let session_model = self
             .chat_state_handle
             .get_sampling_config()
             .await
             .map(|config| config.model)
-            .filter(|model| !model.is_empty())
-            .unwrap_or_else(|| self.models_manager.current_model_id().0.to_string());
+            .filter(|model| !model.is_empty());
+        let Some(active_model) = session_model.or_else(|| {
+            self.models_manager
+                .selected_wire_model(&self.models_manager.current_model_id().0)
+        }) else {
+            return Err("no model the organization's policy admits".to_string());
+        };
         let session_id = self.session_info.id.to_string();
         let mut last_error = String::new();
         for _ in 0..2 {
@@ -1106,6 +1111,33 @@ impl SessionActor {
         ))
         .await;
         true
+    }
+
+    /// P195 (K25): the token-budget denial of an ACTIVE goal whose `--budget` the session's spend has reached, after stopping
+    /// the goal budget-limited (the transition [`Self::enforce_goal_token_budget`] makes at a turn's end). `None` when no
+    /// goal is active, it has no budget, or the budget is not spent.
+    pub(crate) async fn goal_budget_spent_denial(&self) -> Option<crate::acp_error::ExecutionBudgetDenial> {
+        let budget = {
+            let tracker = self.goal_tracker.lock();
+            if tracker.status() != Some(crate::session::goal_tracker::GoalStatus::Active) {
+                return None;
+            }
+            tracker.token_budget()?
+        };
+        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        // Stops the goal budget-limited when the spend has reached the budget, and says whether it did
+        if !self.enforce_goal_token_budget(current_tokens).await {
+            return None;
+        }
+        let (tokens_used, _) = self.goal_tokens(current_tokens);
+        Some(crate::acp_error::ExecutionBudgetDenial {
+            rule: crate::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+            total_token_limit: u64::try_from(budget).ok(),
+            total_tokens_used: u64::try_from(tokens_used).unwrap_or_default(),
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        })
     }
 
     async fn prepare_goal_continuation(&self, current_tokens: i64) -> Option<GoalContinuationPlan> {

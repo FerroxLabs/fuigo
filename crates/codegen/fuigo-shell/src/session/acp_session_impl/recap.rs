@@ -93,6 +93,37 @@ fn build_side_question_attempt(base: &ConversationRequest) -> ConversationReques
     request.x_fuigo_req_id = Some(format!("fuigo-btw-{}", uuid::Uuid::new_v4()));
     request
 }
+/// P195 (K25): the rule of a refusal by the SAMPLER's process-wide limits (`FUIGO_MAX_MODEL_CALLS`,
+/// `FUIGO_MAX_RUNTIME_SECS`) that `error` is, read the way the turn's request reads it: a status-less `api` failure whose
+/// message is exactly the sampler's own refusal text (never a substring, so a provider error that quotes it is not one).
+fn process_limit_refusal(error: &SamplingError) -> Option<crate::acp_error::ExecutionBudgetRule> {
+    let info = fuigo_sampler::SamplingErrorInfo::from(error);
+    if info.kind != fuigo_sampler::SamplingErrorKind::Api || info.status_code.is_some() {
+        return None;
+    }
+    crate::session::execution_state::process_limit_rule(&info.message)
+}
+
+/// P195 (K25): the side question's failure. A token-budget refusal its own admission recorded, or a refusal by the
+/// sampler's process-wide limits, is the typed denial (Contract D.4, P44) a refused prompt gets; anything else is the
+/// sampling failure it was. `state` supplies the token figures for a process-limit refusal when an execution is current.
+fn side_question_failure(
+    error: SamplingError,
+    admission_denial: Option<crate::acp_error::ExecutionBudgetDenial>,
+    state: Option<&crate::session::execution_state::Snapshot>,
+) -> SideQuestionError {
+    if let Some(denial) = admission_denial {
+        return SideQuestionError::BudgetDenied(denial);
+    }
+    match process_limit_refusal(&error) {
+        Some(rule) => SideQuestionError::BudgetDenied(match state {
+            Some(state) => crate::session::execution_state::budget_denial(state, rule),
+            None => crate::acp_error::ExecutionBudgetDenial::without_token_figures(rule),
+        }),
+        None => SideQuestionError::from(error),
+    }
+}
+
 impl SessionActor {
     /// Answers a `/btw` side question with one model call over the parent session's context.
     /// The exchange is saved to `btw_history.jsonl` under a new btw session ID.
@@ -205,10 +236,18 @@ impl SessionActor {
                 Ok(content)
             }
             Err(e) => {
-                let err = match admission.as_ref().and_then(|a| a.take_budget_denial()) {
-                    Some(denial) => SideQuestionError::BudgetDenied(denial),
-                    None => SideQuestionError::from(e),
+                let admission_denial = admission.as_ref().and_then(|a| a.take_budget_denial());
+                // P195 (K25): a refusal by the sampler's own process-wide counter or clock is read off the error, as the
+                // turn's request does (`turn_request_budget_denial`), with the execution's token figures when it has them.
+                let state = if admission_denial.is_none() && process_limit_refusal(&e).is_some() {
+                    match crate::session::execution_state::Execution::current(&parent_session_id) {
+                        Some(execution) => execution.snapshot().await.ok(),
+                        None => None,
+                    }
+                } else {
+                    None
                 };
+                let err = side_question_failure(e, admission_denial, state.as_ref());
                 // P70b: `btw_history.jsonl` is a persisted sink.
                 persist(
                     String::new(),
@@ -618,9 +657,21 @@ impl SessionActor {
             ConversationItem::user(user_msg),
         ];
 
-        let model = match model_override {
-            Some(m) => m.to_owned(),
-            None => "grok-4.6".to_owned(),
+        let session_model = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|c| c.model);
+        let Some(model) = self.models_manager.with_helper_catalog(|allowlist, models| {
+            crate::agent::models::ai_suggest_wire_model(
+                allowlist,
+                models,
+                model_override,
+                session_model.as_deref(),
+            )
+        }) else {
+            tracing::debug!("AI suggest: no model the organization's policy admits; skipping");
+            return None;
         };
 
         let request = ConversationRequest {
@@ -671,14 +722,18 @@ impl SessionActor {
             crate::util::config::prompt_suggest_reasoning_is_off(configured_reasoning_effort);
 
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let session_model = sampling_config.as_ref().map(|c| c.model.as_str());
+        let session_model_owned = sampling_config.as_ref().map(|c| c.model.clone());
+        let session_model = session_model_owned.as_deref();
         let pin = self.models_manager.prompt_suggest_model_pin();
         let Some(model) = prompt_suggest::effective_suggest_model(
             &pin,
             model_override,
             session_model,
             reasoning_is_off,
-            |m| self.models_manager.model_in_catalog(m),
+            |m| {
+                self.models_manager.model_in_catalog(m)
+                    && self.models_manager.helper_model_admitted(m)
+            },
         ) else {
             tracing::debug!(
                 pin = ?pin,
@@ -723,7 +778,18 @@ impl SessionActor {
             return None;
         }
         if sampling_config.subscription.is_none() {
-            sampling_config.model = model.clone();
+            let Some(wire_model) = self.models_manager.with_helper_catalog(|allowlist, models| {
+                crate::agent::models::suggest_prompt_wire_model(
+                    allowlist,
+                    models,
+                    &model,
+                    session_model,
+                )
+            }) else {
+                tracing::debug!("prompt suggest: no model the organization's policy admits; skipping request");
+                return None;
+            };
+            sampling_config.model = wire_model;
         }
         sampling_config.reasoning_effort = None;
         let suggest_reasoning = prompt_suggest::resolve_suggest_reasoning(
@@ -871,6 +937,63 @@ mod tests {
             retry_after_secs: None,
             should_retry,
             error_code: None,
+        }
+    }
+
+    /// P195 (K25): the sampler's own process-limit refusals are the typed denial for a side question, as for a turn.
+    #[test]
+    fn a_side_question_refused_by_a_process_limit_is_the_typed_denial() {
+        use crate::acp_error::{ExecutionBudgetDenial, ExecutionBudgetRule};
+        use fuigo_sampler::execution_budget::{CALL_LIMIT, WALL_LIMIT};
+        for (limit, rule) in [
+            (CALL_LIMIT, ExecutionBudgetRule::ModelCallLimit),
+            (WALL_LIMIT, ExecutionBudgetRule::RuntimeLimit),
+        ] {
+            match side_question_failure(SamplingError::InvalidConfiguration(limit), None, None) {
+                SideQuestionError::BudgetDenied(denial) => {
+                    assert_eq!(denial, ExecutionBudgetDenial::without_token_figures(rule), "{limit}");
+                }
+                other => panic!("`{limit}` must be the typed denial, got {other:?}"),
+            }
+        }
+    }
+
+    /// An admission denial the side question's own request recorded wins over reading the error.
+    #[test]
+    fn a_recorded_admission_denial_is_kept() {
+        use crate::acp_error::{ExecutionBudgetDenial, ExecutionBudgetRule};
+        let recorded = ExecutionBudgetDenial::without_token_figures(ExecutionBudgetRule::TotalTokensExhausted);
+        match side_question_failure(
+            SamplingError::InvalidConfiguration(fuigo_sampler::execution_budget::CALL_LIMIT),
+            Some(recorded.clone()),
+            None,
+        ) {
+            SideQuestionError::BudgetDenied(denial) => assert_eq!(denial, recorded),
+            other => panic!("expected the recorded denial, got {other:?}"),
+        }
+    }
+
+    /// Anything that is not exactly a process-limit refusal stays the sampling failure it was: another configuration
+    /// failure, a provider error that merely quotes the text, a status-carrying error.
+    #[test]
+    fn other_side_question_failures_are_not_relabelled_as_a_denial() {
+        use fuigo_sampler::execution_budget::{CALL_LIMIT, WALL_LIMIT};
+        for error in [
+            SamplingError::InvalidConfiguration("execution admission denied or could not be persisted"),
+            SamplingError::InvalidConfiguration("execution budget limits must be positive integers"),
+            api(500, CALL_LIMIT, Some(false)),
+            api(429, WALL_LIMIT, Some(false)),
+            SamplingError::StreamError {
+                error_type: "overloaded_error".into(),
+                message: format!("provider said: {CALL_LIMIT}"),
+                code: None,
+            },
+        ] {
+            let shown = format!("{error:?}");
+            match side_question_failure(error, None, None) {
+                SideQuestionError::Sampling(_) => {}
+                other => panic!("{shown} must stay a sampling failure, got {other:?}"),
+            }
         }
     }
 

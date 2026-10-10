@@ -412,49 +412,27 @@ pub(crate) fn merge_managed_mcp_servers_with_policy(
     merged.sort_by(|a, b| mcp_server_name(a).cmp(mcp_server_name(b)));
     // Drop an untrusted workspace's repo-local (project-scoped) servers before the managed-settings policy runs on the survivors
     let merged = crate::agent::folder_trust::filter_untrusted_project_mcp(cwd, merged);
-    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
-    apply_mcp_server_policy(merged, &disabled, allowlist)
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    // P169: the `enable_all_project_mcp_servers = false` pin judges the project-declared survivors.
+    let project = if ms.project_mcp.is_disabled() {
+        crate::agent::folder_trust::project_scoped_mcp_names(cwd)
+    } else {
+        std::collections::HashSet::new()
+    };
+    apply_mcp_server_policy(merged, &disabled, ms, &project)
 }
 
-#[derive(Debug, Clone)]
-pub(crate) enum McpDisabledReason {
-    Allowlist { source: std::path::PathBuf },
-    Denylist { source: std::path::PathBuf },
-}
+/// Why managed policy blocks an MCP server (P169: the workspace policy engine's attributed verdict).
+pub(crate) type McpDisabledReason = fuigo_workspace::permission::resolution::McpBlockReason;
 
-impl std::fmt::Display for McpDisabledReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Allowlist { source } => {
-                write!(f, "not in allowedMcpServers ({})", source.display())
-            }
-            Self::Denylist { source } => {
-                write!(f, "matches deniedMcpServers ({})", source.display())
-            }
-        }
-    }
-}
-
-impl McpDisabledReason {
-    /// The policy file by name only: user-facing refusals must not leak the full path.
-    pub(crate) fn user_facing_source(&self) -> String {
-        let (Self::Allowlist { source } | Self::Denylist { source }) = self;
-        source
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| source.display().to_string())
-    }
-    pub(crate) fn for_blocked_server(
-        policy: &fuigo_workspace::permission::resolution::McpServerAllowlist,
-        server: &acp::McpServer,
-    ) -> Self {
-        let source = policy.source_path.clone().unwrap_or_default();
-        if policy.is_server_denied(server) {
-            Self::Denylist { source }
-        } else {
-            Self::Allowlist { source }
-        }
+/// The policy verdict for `server` as a block reason, or `None` when policy allows it.
+pub(crate) fn mcp_block_reason(
+    policy: &fuigo_workspace::permission::resolution::McpServerPolicy,
+    server: &acp::McpServer,
+) -> Option<McpDisabledReason> {
+    match policy.verdict(server) {
+        fuigo_workspace::permission::resolution::McpVerdict::Allowed => None,
+        fuigo_workspace::permission::resolution::McpVerdict::Blocked(reason) => Some(reason),
     }
 }
 
@@ -463,14 +441,16 @@ pub(crate) struct McpServerWithPolicy {
     pub disabled_reason: Option<McpDisabledReason>,
 }
 
-/// Tag each merged MCP server with its managed-settings policy status and drop names disabled in config.toml.
+/// Tag each merged MCP server with its managed policy status and drop names disabled in config.toml.
 /// The public `merge_managed_mcp_servers` then drops every tagged server.
-/// Split out from `merge_managed_mcp_servers_with_policy` so the deny/allow enforcement chokepoint can be tested with an injected allowlist.
-/// The runtime path reads the process-wide managed-settings `OnceLock`, which a test can't populate.
+/// Split out from `merge_managed_mcp_servers_with_policy` so the enforcement chokepoint can be tested with injected
+/// settings; the runtime path reads the process-wide managed settings, which a test can't populate.
+/// `project` holds the project-declared names, judged by the `enable_all_project_mcp_servers = false` pin.
 fn apply_mcp_server_policy(
     merged: Vec<acp::McpServer>,
     disabled: &std::collections::HashSet<String>,
-    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    project: &std::collections::HashSet<String>,
 ) -> Vec<McpServerWithPolicy> {
     merged
         .into_iter()
@@ -478,21 +458,22 @@ fn apply_mcp_server_policy(
             if disabled.contains(mcp_server_name(&server)) {
                 return None;
             }
-            if !allowlist.is_server_allowed(&server) {
-                let reason = McpDisabledReason::for_blocked_server(allowlist, &server);
+            let reason = mcp_block_reason(&ms.mcp_allowlist, &server).or_else(|| {
+                project
+                    .contains(mcp_server_name(&server))
+                    .then(|| ms.mcp_project_pin_block(&server))
+                    .flatten()
+            });
+            if let Some(reason) = &reason {
                 tracing::warn!(
                     name = mcp_server_name(&server),
                     reason = %reason,
-                    "MCP server blocked by managed settings policy"
+                    "MCP server blocked by managed policy"
                 );
-                return Some(McpServerWithPolicy {
-                    server,
-                    disabled_reason: Some(reason),
-                });
             }
             Some(McpServerWithPolicy {
                 server,
-                disabled_reason: None,
+                disabled_reason: reason,
             })
         })
         .collect()
@@ -707,7 +688,7 @@ fn load_plugin_mcp_servers(
 fn plugin_manifest_label(plugin_root: &std::path::Path, plugin_name: &str) -> String {
     fuigo_agent::plugins::manifest::MANIFEST_PATHS
         .iter()
-        .map(|rel| plugin_root.join(rel))
+        .map(|rel| rel.split('/').fold(plugin_root.to_path_buf(), |path, part| path.join(part)))
         .find(|p| p.is_file())
         .map_or_else(|| format!("plugin {plugin_name} manifest"), |p| p.display().to_string())
 }
@@ -1279,8 +1260,17 @@ args = ["ok"]
         );
     }
 
+    /// Managed settings holding one MCP policy source (tests).
+    fn ms_of(
+        allowlist: fuigo_workspace::permission::resolution::McpServerAllowlist,
+    ) -> fuigo_workspace::permission::resolution::ManagedSettings {
+        let mut ms = fuigo_workspace::permission::resolution::ManagedSettings::default();
+        ms.mcp_allowlist = allowlist.into();
+        ms
+    }
+
     /// The merge chokepoint must actually DROP a server matching `deniedMcpServers`.
-    /// The drop must be classified as a `Denylist` hit (not a missing `allowlist` entry).
+    /// The drop must be classified as a `Deny` hit (not a missing `allowlist` entry).
     /// That reason is the user-visible payload for the toggle error and the `mcp doctor` detail.
     /// The runtime merge reads the process-wide managed-settings `OnceLock`.
     /// So we exercise the extracted `apply_mcp_server_policy` directly, with an injected allowlist built via the public `McpServerAllowlist::new`.
@@ -1308,7 +1298,8 @@ args = ["ok"]
                 ),
             ],
             &std::collections::HashSet::new(),
-            &allowlist,
+            &ms_of(allowlist),
+            &std::collections::HashSet::new(),
         );
 
         // Denied server is classified as a denylist hit, not a missing-allow.
@@ -1319,7 +1310,7 @@ args = ["ok"]
         assert!(
             matches!(
                 blocked.disabled_reason,
-                Some(McpDisabledReason::Denylist { .. })
+                Some(McpDisabledReason::Deny { .. })
             ),
             "expected Denylist reason, got {:?}",
             blocked.disabled_reason
@@ -1372,7 +1363,8 @@ args = ["ok"]
                 ),
             ],
             &std::collections::HashSet::new(),
-            &allowlist,
+            &ms_of(allowlist),
+            &std::collections::HashSet::new(),
         );
 
         let slack = tagged
@@ -1382,7 +1374,7 @@ args = ["ok"]
         assert!(
             matches!(
                 slack.disabled_reason,
-                Some(McpDisabledReason::Denylist { .. })
+                Some(McpDisabledReason::Deny { .. })
             ),
             "name-denied managed server must classify as Denylist, got {:?}",
             slack.disabled_reason
@@ -1428,12 +1420,13 @@ args = ["ok"]
             let tagged = apply_mcp_server_policy(
                 managed_server(runtime),
                 &std::collections::HashSet::new(),
-                &deny,
+                &ms_of(deny),
+                &std::collections::HashSet::new(),
             );
             assert!(
                 matches!(
                     tagged[0].disabled_reason,
-                    Some(McpDisabledReason::Denylist { .. })
+                    Some(McpDisabledReason::Deny { .. })
                 ),
                 "deny serverName {display:?} must block runtime {runtime:?}, got {:?}",
                 tagged[0].disabled_reason
@@ -1443,7 +1436,8 @@ args = ["ok"]
             let tagged = apply_mcp_server_policy(
                 managed_server(runtime),
                 &std::collections::HashSet::new(),
-                &allow,
+                &ms_of(allow),
+                &std::collections::HashSet::new(),
             );
             assert!(
                 tagged[0].disabled_reason.is_none(),
@@ -1451,6 +1445,71 @@ args = ["ok"]
                 tagged[0].disabled_reason
             );
         }
+    }
+
+    /// P169: `enable_all_project_mcp_servers = false` drops project-declared servers no admin grant covers, attributed
+    /// to the pin; user and client servers are untouched.
+    #[test]
+    fn project_pin_blocks_ungranted_project_servers() {
+        use fuigo_workspace::permission::resolution::{
+            AllowedMcpServer, ManagedSettings, McpBlockReason, McpServerAllowlist,
+            PolicyLayerOwnership, PolicyPin,
+        };
+        let pin_path = std::path::PathBuf::from("/etc/fuigo/requirements.toml");
+        let mut ms = ManagedSettings::default();
+        ms.project_mcp = PolicyPin::Disabled {
+            source: pin_path.clone(),
+            ownership: PolicyLayerOwnership::Admin,
+        };
+        ms.mcp_allowlist.sources.push(
+            McpServerAllowlist::new(
+                vec![AllowedMcpServer::Name {
+                    name: "granted".into(),
+                }],
+                vec![],
+                Some(pin_path.clone()),
+            )
+            .with_ownership(PolicyLayerOwnership::Admin),
+        );
+        let server = |name: &str| {
+            acp::McpServer::Http(
+                acp::McpServerHttp::new(name, "https://x.example.com/mcp").headers(vec![]),
+            )
+        };
+        let project: std::collections::HashSet<String> =
+            ["repo-server".to_string(), "granted".to_string()].into_iter().collect();
+        let tagged = apply_mcp_server_policy(
+            vec![server("repo-server"), server("granted"), server("user-server")],
+            &std::collections::HashSet::new(),
+            &ms,
+            &project,
+        );
+        let reason = |tagged: &[McpServerWithPolicy], name: &str| {
+            tagged
+                .iter()
+                .find(|s| mcp_server_name(&s.server) == name)
+                .and_then(|s| s.disabled_reason.clone())
+        };
+        assert_eq!(reason(&tagged, "granted"), None, "an admin grant carves the exception");
+        // The allow list itself binds every server first, so an ungranted one reads as NotGranted.
+        assert!(matches!(
+            reason(&tagged, "repo-server"),
+            Some(McpBlockReason::NotGranted { .. })
+        ));
+        // With the pin alone, a project server is blocked by the pin and a user server runs.
+        let mut pin_only = ManagedSettings::default();
+        pin_only.project_mcp = ms.project_mcp.clone();
+        let tagged = apply_mcp_server_policy(
+            vec![server("repo-server"), server("user-server")],
+            &std::collections::HashSet::new(),
+            &pin_only,
+            &project,
+        );
+        assert_eq!(
+            reason(&tagged, "repo-server"),
+            Some(McpBlockReason::ProjectPin { source: pin_path })
+        );
+        assert_eq!(reason(&tagged, "user-server"), None);
     }
 
     #[test]

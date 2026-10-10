@@ -109,6 +109,10 @@ pub struct ConfigFileWatcher {
     /// Also lets [`Self::unwatch_path`] drop the OS watches for a cwd no longer needed.
     /// That bounds inotify-watch accumulation as sessions churn across directories.
     watched_cwds: HashSet<PathBuf>,
+    /// The watch on the directory of a login that lives outside the fuigo home (`FUIGO_AUTH_PATH`).
+    /// It is a separate, auth-only watcher so nothing else in that directory reaches the generic arms, and it keeps
+    /// retrying on a bounded backoff when the directory does not exist yet. Held only so it lives as long as `self`.
+    _auth_dir_watch: Option<AuthDirWatch>,
 }
 
 impl ConfigFileWatcher {
@@ -125,6 +129,10 @@ impl ConfigFileWatcher {
         let debounce = debounce.unwrap_or(DEFAULT_DEBOUNCE);
         let (tx, rx) = mpsc::unbounded_channel();
         let fuigo_home_buf = fuigo_home.to_path_buf();
+        // The login file is wherever the auth manager keeps it (`FUIGO_AUTH_PATH` as given, else `<home>/auth.json`)
+        let auth_path = auth_watch_path(fuigo_home);
+        let auth_path_for_events = auth_path.clone();
+        let auth_tx = tx.clone();
         // `~/.claude.json` is consumed by **every** session (see `load_claude_json_mcp_servers_as_configs`)
         // A write to it must broadcast through the unit `McpServersChanged` arm, NOT the per-cwd `ProjectMcpServersChanged { cwd: $HOME }` arm
         // `cwd_matches` would silently filter the per-cwd arm for sessions outside `$HOME`
@@ -146,10 +154,9 @@ impl ConfigFileWatcher {
                 let name = path.file_name().and_then(|n| n.to_str());
                 let parent = path.parent();
 
+                let is_auth = is_auth_event(path, &auth_path_for_events);
                 let change = match name {
-                    Some("auth.json") if parent == Some(fuigo_home_buf.as_path()) => {
-                        Some(ConfigChangeEvent::AuthChanged)
-                    }
+                    _ if is_auth => Some(ConfigChangeEvent::AuthChanged),
                     Some("config.toml") if parent == Some(fuigo_home_buf.as_path()) => {
                         Some(ConfigChangeEvent::GlobalConfigChanged)
                     }
@@ -199,6 +206,21 @@ impl ConfigFileWatcher {
             })
             .ok()?;
 
+        // A login at a custom path usually lives outside the home directory watched above. Its directory gets its own
+        // auth-only watcher (P182): other files there are ignored, and a directory that does not exist yet is retried
+        let auth_dir_watch = auth_path
+            .parent()
+            .filter(|d| !paths_equal(d, fuigo_home))
+            .and_then(|auth_dir| {
+                AuthDirWatch::start(
+                    auth_dir.to_path_buf(),
+                    auth_path.clone(),
+                    debounce,
+                    auth_tx,
+                    AUTH_ARM_INITIAL_DELAY,
+                )
+            });
+
         for p in extra_paths {
             if let Some(parent) = p.parent() {
                 let _ = debouncer
@@ -233,6 +255,7 @@ impl ConfigFileWatcher {
             Self {
                 debouncer,
                 watched_cwds,
+                _auth_dir_watch: auth_dir_watch,
             },
             rx,
         ))
@@ -274,9 +297,137 @@ impl ConfigFileWatcher {
     }
 }
 
+/// First wait before re-trying the watch of a login directory that does not exist yet.
+const AUTH_ARM_INITIAL_DELAY: Duration = Duration::from_secs(1);
+/// The retry delay doubles up to this cap, so a directory that never appears costs one `stat`-sized attempt per 30 s.
+const AUTH_ARM_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Next retry delay: doubled, never above [`AUTH_ARM_MAX_DELAY`].
+fn next_arm_delay(current: Duration) -> Duration {
+    current.saturating_mul(2).min(AUTH_ARM_MAX_DELAY)
+}
+
+/// An auth-only watch on the directory of the login file.
+///
+/// Only events for the login file itself are forwarded as [`ConfigChangeEvent::AuthChanged`]; every other file in the
+/// directory is dropped. When the directory cannot be watched (typically because it does not exist yet) a helper
+/// thread retries on a doubling, capped backoff, and once the watch is attached it reports `AuthChanged` if the login
+/// file is already there (a login may have been written between the directory appearing and the watch attaching).
+/// Dropping this value stops the helper.
+enum AuthDirWatch {
+    Armed(#[allow(dead_code)] Debouncer<AccessFilteredWatcher>),
+    /// Dropping the sender wakes the helper thread, which then exits.
+    Retrying(#[allow(dead_code)] std::sync::mpsc::Sender<()>),
+}
+
+impl AuthDirWatch {
+    fn start(
+        auth_dir: PathBuf,
+        auth_path: PathBuf,
+        debounce: Duration,
+        tx: mpsc::UnboundedSender<ConfigChangeEvent>,
+        first_delay: Duration,
+    ) -> Option<Self> {
+        let handler_path = auth_path.clone();
+        let handler_tx = tx.clone();
+        let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
+            let Ok(events) = res else { return };
+            if events.iter().any(|e| is_auth_event(&e.path, &handler_path)) {
+                let _ = handler_tx.send(ConfigChangeEvent::AuthChanged);
+            }
+        })
+        .map_err(|e| tracing::warn!(error = %e, "failed to create the auth directory watcher"))
+        .ok()?;
+
+        match debouncer
+            .watcher()
+            .watch(&auth_dir, RecursiveMode::NonRecursive)
+        {
+            Ok(()) => return Some(Self::Armed(debouncer)),
+            Err(e) => log_watch_error(&e, "failed to watch the directory of the custom auth file"),
+        }
+
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+        let spawned = std::thread::Builder::new()
+            .name("auth-dir-watch".into())
+            .spawn(move || {
+                let mut delay = first_delay;
+                loop {
+                    // A timeout means "try again"; a wake or a disconnect means the owner is gone
+                    if !matches!(
+                        stop_rx.recv_timeout(delay),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        return;
+                    }
+                    match debouncer
+                        .watcher()
+                        .watch(&auth_dir, RecursiveMode::NonRecursive)
+                    {
+                        Ok(()) => break,
+                        Err(e) => {
+                            log_watch_error(
+                                &e,
+                                "retry: failed to watch the directory of the custom auth file",
+                            );
+                            delay = next_arm_delay(delay);
+                        }
+                    }
+                }
+                tracing::info!(path = %auth_dir.display(), "auth directory watch attached after retry");
+                if auth_path.exists() {
+                    let _ = tx.send(ConfigChangeEvent::AuthChanged);
+                }
+                // Keep the debouncer alive until the owner drops its end
+                let _ = stop_rx.recv();
+            });
+        match spawned {
+            Ok(_) => Some(Self::Retrying(stop_tx)),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to spawn the auth directory retry thread");
+                None
+            }
+        }
+    }
+}
+
 /// Answers "is `parent` the directory `dir`?" while tolerating symlink and canonicalization differences.
 /// A `notify`-delivered event path may be canonicalized while a `fuigo_dirs::home_dir()`-style reference is not.
 /// `dir` is expected to be already canonicalized (see `ConfigFileWatcher::start`).
+/// Absolute path of the login file for `fuigo_home`, from the auth manager's resolver.
+fn auth_watch_path(fuigo_home: &Path) -> PathBuf {
+    let p = crate::auth::auth_json_path(fuigo_home);
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().map(|d| d.join(&p)).unwrap_or(p)
+    }
+}
+
+/// Whether a watcher event path is the login file. `notify` backends may deliver a canonicalized parent (macOS
+/// FSEvents), so the parent is compared both raw and canonical.
+fn is_auth_event(event_path: &Path, auth_path: &Path) -> bool {
+    if event_path == auth_path {
+        return true;
+    }
+    let (Some(name), Some(auth_name)) = (event_path.file_name(), auth_path.file_name()) else {
+        return false;
+    };
+    if name != auth_name {
+        return false;
+    }
+    let (Some(ev_parent), Some(auth_parent)) = (event_path.parent(), auth_path.parent()) else {
+        return false;
+    };
+    match (
+        dunce::canonicalize(ev_parent),
+        dunce::canonicalize(auth_parent),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 fn parent_is_dir(parent: Option<&Path>, dir: &Path) -> bool {
     let Some(parent) = parent else {
         return false;
@@ -1583,5 +1734,234 @@ mod tests {
         assert!(!watcher.watched_cwds.contains(p));
         watcher.unwatch_path(p);
         assert!(!watcher.watched_cwds.contains(p));
+    }
+
+    /// P180: the login lives wherever `FUIGO_AUTH_PATH` says, often outside the home directory. A write there must reach
+    /// the reloader as `AuthChanged`; a write to `<home>/auth.json` must not (it is not the login in use).
+    #[test]
+    fn p180_watcher_reports_a_login_at_a_custom_auth_path() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::EnvGuard;
+        let home = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let auth_path = elsewhere.path().join("custom-auth.json");
+        fs::write(&auth_path, "{}").unwrap();
+        let _auth_env = EnvGuard::set("FUIGO_AUTH_PATH", &auth_path);
+
+        let (_w, mut rx) =
+            ConfigFileWatcher::start(home.path(), &[], None, Some(Duration::from_millis(50)))
+                .expect("watcher should start");
+        wait_ms(200);
+        while rx.try_recv().is_ok() {}
+
+        // Neither the default file nor a sibling of the custom file is the login in use
+        fs::write(home.path().join("auth.json"), "{}").unwrap();
+        fs::write(elsewhere.path().join("other.json"), "{}").unwrap();
+        wait_ms(400);
+        let mut seen = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            seen.push(evt);
+        }
+        assert!(
+            !seen.contains(&ConfigChangeEvent::AuthChanged),
+            "<home>/auth.json and a sibling file are not the login in use; got {seen:?}"
+        );
+
+        fs::write(&auth_path, "{\"changed\":true}").unwrap();
+        wait_ms(400);
+        let mut seen = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            seen.push(evt);
+        }
+        assert!(
+            seen.contains(&ConfigChangeEvent::AuthChanged),
+            "a write to the login at FUIGO_AUTH_PATH must fire AuthChanged; got {seen:?}"
+        );
+    }
+
+    /// P180: the default path still fires when no custom path is set.
+    #[test]
+    fn p180_watcher_still_reports_the_default_auth_path() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::EnvGuard;
+        let home = TempDir::new().unwrap();
+        let _auth_env = EnvGuard::unset("FUIGO_AUTH_PATH");
+        fs::write(home.path().join("auth.json"), "{}").unwrap();
+
+        let (_w, mut rx) =
+            ConfigFileWatcher::start(home.path(), &[], None, Some(Duration::from_millis(50)))
+                .expect("watcher should start");
+        wait_ms(200);
+        while rx.try_recv().is_ok() {}
+
+        fs::write(home.path().join("auth.json"), "{\"changed\":true}").unwrap();
+        wait_ms(400);
+        let mut seen = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            seen.push(evt);
+        }
+        assert!(seen.contains(&ConfigChangeEvent::AuthChanged), "got {seen:?}");
+    }
+
+    /// P180: `is_auth_event` matches the exact file, also through an aliased (symlinked or canonicalized) parent, and
+    /// never a different file in the same directory.
+    #[cfg(unix)]
+    #[test]
+    fn p180_is_auth_event_matches_the_exact_file_through_an_aliased_parent() {
+        let tmp = TempDir::new().unwrap();
+        let real = tmp.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let alias = tmp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let auth = real.join("login.json");
+
+        assert!(is_auth_event(&auth, &auth));
+        assert!(is_auth_event(&alias.join("login.json"), &auth), "aliased parent");
+        assert!(!is_auth_event(&real.join("other.json"), &auth), "sibling file");
+        assert!(!is_auth_event(&tmp.path().join("login.json"), &auth), "same name, other dir");
+    }
+
+    /// Drain `rx` until `want` shows up or `limit` passes; returns everything seen.
+    fn p182_collect_until(
+        rx: &mut mpsc::UnboundedReceiver<ConfigChangeEvent>,
+        want: &ConfigChangeEvent,
+        limit: Duration,
+    ) -> Vec<ConfigChangeEvent> {
+        let deadline = std::time::Instant::now() + limit;
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            while let Ok(evt) = rx.try_recv() {
+                seen.push(evt);
+            }
+            if seen.contains(want) {
+                break;
+            }
+            wait_ms(50);
+        }
+        seen
+    }
+
+    /// P182 (P180 MEDIUM): the custom auth directory (several levels deep) does not exist when the watcher starts. A
+    /// login that creates it later must still be reported, without a restart.
+    #[test]
+    fn p182_watcher_arms_an_auth_directory_created_after_start() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::EnvGuard;
+        let home = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let auth_dir = elsewhere.path().join("not-yet").join("secrets");
+        let auth_path = auth_dir.join("login.json");
+        let _auth_env = EnvGuard::set("FUIGO_AUTH_PATH", &auth_path);
+
+        let (_w, mut rx) =
+            ConfigFileWatcher::start(home.path(), &[], None, Some(Duration::from_millis(50)))
+                .expect("a missing auth directory must not stop the watcher starting");
+        wait_ms(200);
+        while rx.try_recv().is_ok() {}
+
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::write(&auth_path, "{}").unwrap();
+        // Keep writing: the watch is armed on a bounded backoff, so the first write may land before it is attached
+        let deadline = std::time::Instant::now() + Duration::from_secs(12);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline && !seen.contains(&ConfigChangeEvent::AuthChanged) {
+            wait_ms(300);
+            fs::write(&auth_path, "{\"again\":true}").unwrap();
+            seen.extend(p182_collect_until(
+                &mut rx,
+                &ConfigChangeEvent::AuthChanged,
+                Duration::from_millis(300),
+            ));
+        }
+        assert!(
+            seen.contains(&ConfigChangeEvent::AuthChanged),
+            "a login written into a directory created after start must fire AuthChanged; got {seen:?}"
+        );
+    }
+
+    /// P182 (P180 LOW): in a directory watched only because the login lives there, nothing but the login file may
+    /// produce an event. A `config.toml` / `.mcp.json` / `models_cache.json` beside it must not take the generic arms.
+    #[test]
+    fn p182_auth_only_directory_ignores_non_auth_files() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        use fuigo_test_support::EnvGuard;
+        let home = TempDir::new().unwrap();
+        let elsewhere = TempDir::new().unwrap();
+        let auth_path = elsewhere.path().join("login.json");
+        fs::write(&auth_path, "{}").unwrap();
+        let _auth_env = EnvGuard::set("FUIGO_AUTH_PATH", &auth_path);
+
+        let (_w, mut rx) =
+            ConfigFileWatcher::start(home.path(), &[], None, Some(Duration::from_millis(50)))
+                .expect("watcher should start");
+        wait_ms(200);
+        while rx.try_recv().is_ok() {}
+
+        fs::write(elsewhere.path().join("config.toml"), "x = 1\n").unwrap();
+        fs::write(elsewhere.path().join(".mcp.json"), "{}").unwrap();
+        fs::write(elsewhere.path().join(".claude.json"), "{}").unwrap();
+        fs::write(elsewhere.path().join("models_cache.json"), "{}").unwrap();
+        wait_ms(500);
+        let mut seen = Vec::new();
+        while let Ok(evt) = rx.try_recv() {
+            seen.push(evt);
+        }
+        assert!(
+            seen.is_empty(),
+            "non-auth files in an auth-only directory must be ignored; got {seen:?}"
+        );
+
+        fs::write(&auth_path, "{\"changed\":true}").unwrap();
+        let seen = p182_collect_until(&mut rx, &ConfigChangeEvent::AuthChanged, Duration::from_secs(3));
+        assert!(seen.contains(&ConfigChangeEvent::AuthChanged), "the login itself still fires; got {seen:?}");
+    }
+
+    /// P182: the retry delay doubles and is capped, so a missing directory is never polled tightly nor unboundedly slowly.
+    #[test]
+    fn p182_arm_delay_doubles_and_is_capped() {
+        let mut d = AUTH_ARM_INITIAL_DELAY;
+        let mut seen = vec![d];
+        for _ in 0..10 {
+            d = next_arm_delay(d);
+            seen.push(d);
+        }
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "never shrinks: {seen:?}");
+        assert_eq!(seen[1], AUTH_ARM_INITIAL_DELAY * 2);
+        assert_eq!(*seen.last().unwrap(), AUTH_ARM_MAX_DELAY, "capped: {seen:?}");
+        assert!(AUTH_ARM_INITIAL_DELAY >= Duration::from_millis(500), "not a tight poll");
+    }
+
+    /// P182: a login that is already on disk when the retry finally attaches the watch is reported at once: no later
+    /// write is needed. Drives `AuthDirWatch` directly with a short first delay.
+    #[test]
+    fn p182_retry_reports_a_login_that_appeared_before_the_watch_attached() {
+        let elsewhere = TempDir::new().unwrap();
+        let auth_dir = elsewhere.path().join("late");
+        let auth_path = auth_dir.join("login.json");
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _watch = AuthDirWatch::start(
+            auth_dir.clone(),
+            auth_path.clone(),
+            Duration::from_millis(50),
+            tx,
+            Duration::from_millis(400),
+        )
+        .expect("start");
+        // Created and written well before the first retry, and never touched again
+        fs::create_dir_all(&auth_dir).unwrap();
+        fs::write(&auth_path, "{}").unwrap();
+        let seen = p182_collect_until(&mut rx, &ConfigChangeEvent::AuthChanged, Duration::from_secs(5));
+        assert!(
+            seen.contains(&ConfigChangeEvent::AuthChanged),
+            "a login present when the watch attaches must be reported; got {seen:?}"
+        );
     }
 }

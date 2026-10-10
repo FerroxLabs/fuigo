@@ -373,12 +373,16 @@ impl AgentArgs {
                 Ok(_) => {
                     fuigo_tty_utils::cli_eprintln!(
                         "fuigo: --plugin-dir {}: not a directory; skipping",
-                        p.display()
+                        fuigo_tty_utils::untrusted(p.display())
                     );
                     None
                 }
                 Err(e) => {
-                    fuigo_tty_utils::cli_eprintln!("fuigo: --plugin-dir {}: {e}; skipping", p.display());
+                    fuigo_tty_utils::cli_eprintln!(
+                        "fuigo: --plugin-dir {}: {}; skipping",
+                        fuigo_tty_utils::untrusted(p.display()),
+                        fuigo_tty_utils::untrusted(e)
+                    );
                     None
                 }
             })
@@ -427,7 +431,7 @@ pub struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:2419")]
     pub bind: SocketAddr,
     /// Secret token for client authentication (auto-generated if not provided)
-    #[arg(long, env = "FUIGO_AGENT_SECRET")]
+    #[arg(long, env = "FUIGO_AGENT_SECRET", hide_env_values = true)]
     pub secret: Option<String>,
     /// Remote agent URL for proxy mode
     #[arg(long)]
@@ -782,7 +786,7 @@ pub struct PagerArgs {
     )]
     pub headless_timeout_secs: Option<u64>,
     /// Sandbox profile for filesystem and network access.
-    #[arg(long, env = "FUIGO_SANDBOX", value_name = "PROFILE")]
+    #[arg(long, env = "FUIGO_SANDBOX", value_name = "PROFILE", hide_env_values = true)]
     pub sandbox: Option<String>,
     /// Session storage mode: local or writeback.
     #[arg(long = "storage-mode", value_name = "MODE", hide = true)]
@@ -830,7 +834,7 @@ pub struct PagerArgs {
     #[arg(long = "fullscreen", conflicts_with = "minimal")]
     pub fullscreen: bool,
     /// Write sampling events to ~/.fuigo/logs/sampling.jsonl.
-    #[arg(long = "log-sampling", env = "FUIGO_LOG_SAMPLING", hide = true)]
+    #[arg(long = "log-sampling", env = "FUIGO_LOG_SAMPLING", hide = true, hide_env_values = true)]
     pub log_sampling: bool,
     /// Show the login screen even when credentials are already available.
     #[arg(long = "force-login", hide = true)]
@@ -864,6 +868,24 @@ pub enum SandboxStartup {
     /// Resume requested a profile that differs from the one the session was created with.
     /// Refused so resuming can't silently change the sandbox.
     Conflict { requested: String, saved: String },
+}
+
+/// Column cap of one sandbox profile name printed inside quotes.
+pub const SANDBOX_PROFILE_MAX_COLUMNS: usize = 128;
+
+/// The refusal line for [`SandboxStartup::Conflict`]. `saved` comes from the session's saved summary and `requested` from
+/// the command line or environment, so neither is Fuigo's text: both are scrubbed strictly before they join the sentence.
+pub fn sandbox_conflict_message(requested: &str, saved: &str) -> String {
+    // Each name sits between single quotes, so it goes through the delimiter-escaping helper (it cannot close its own quote).
+    let (requested, saved) = (
+        fuigo_tty_utils::single_quoted(requested, SANDBOX_PROFILE_MAX_COLUMNS),
+        fuigo_tty_utils::single_quoted(saved, SANDBOX_PROFILE_MAX_COLUMNS),
+    );
+    format!(
+        "error: cannot resume this session under sandbox profile {requested} — \
+         it was created with {saved}. Omit --sandbox to resume with {saved}, \
+         or start a new session to use {requested}."
+    )
 }
 /// How resume-selection flags resolve for sandbox profile lookup.
 /// Derived from [`PagerArgs::session_startup_intent`]; new-with-id is not a resume.
@@ -922,7 +944,21 @@ impl PagerArgs {
             .filter(|n| *n == "fuigo" || *n == "agent")
             .unwrap_or("fuigo")
             .to_owned();
-        Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
+        match Self::try_parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1))) {
+            Ok(args) => args,
+            Err(e) => {
+                // clap prints an offending value (and help prints env values) raw, so its error is rendered to a
+                // string, passed through the terminal line filter and written here; clap's exit code is kept.
+                let to_stderr = e.use_stderr();
+                let text = render_clap_error(&e);
+                if to_stderr {
+                    fuigo_tty_utils::cli_eprint!("{text}");
+                } else {
+                    fuigo_tty_utils::cli_print!("{text}");
+                }
+                std::process::exit(e.exit_code())
+            }
+        }
     }
     /// Apply launch-directory path anchoring and `--cwd` after early commands have been dispatched without filesystem or process initialization.
     pub fn apply_cwd(self) -> anyhow::Result<Self> {
@@ -1039,7 +1075,7 @@ impl PagerArgs {
             ref sandbox_profile,
         } = pinned
         {
-            fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", id);
+            fuigo_tty_utils::cli_eprintln!("Resuming session {} (matched by title)", fuigo_tty_utils::untrusted(id));
             self.pinned_resume_profile = Some(sandbox_profile.clone());
         }
         let Some(id) = pinned.id() else {
@@ -1148,6 +1184,10 @@ pub fn parse_headless_timeout_env(raw: Option<&str>) -> Option<u64> {
         }
     }
 }
+/// A clap error as plain text for the terminal; one implementation shared with the workspace server
+/// (`fuigo_tty_utils::render_clap_error`: LF/CR/TAB in echoed values flattened, raw or escape-stripped, then the line filter).
+pub(crate) use fuigo_tty_utils::render_clap_error;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1407,6 +1447,19 @@ mod tests {
             vec![dunce::canonicalize(&dir).unwrap()]
         );
     }
+    /// P181 (S3): the saved profile is session-file text; the refusal shows hostile bytes as inert characters.
+    #[test]
+    fn the_resume_conflict_line_carries_hostile_profile_names_as_inert_text() {
+        let hostile = "\x1b]52;c;c3RvbGVu\x07\x1b[2J\x1b[H\r\x1b[Kerror: fake\x1b[8m\nerror: forged";
+        let line = sandbox_conflict_message("read-only", hostile);
+        assert!(line.starts_with("error: cannot resume this session under sandbox profile 'read-only' \u{2014} it was created with '"));
+        assert!(line.ends_with("or start a new session to use 'read-only'."));
+        assert!(!line.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)), "{line:?}");
+        assert!(line.contains("]52;c;c3RvbGVu") && line.contains("[8m"), "{line:?}");
+        let line = sandbox_conflict_message(hostile, "workspace");
+        assert!(!line.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)), "{line:?}");
+    }
+
     #[test]
     fn resolve_startup_sandbox_cases() {
         use SandboxStartup::{Apply, Conflict};
@@ -1716,5 +1769,156 @@ mod tests {
             panic!("expected agent subcommand");
         };
         assert_eq!(agent.reasoning_effort.as_deref(), Some("max"));
+    }
+
+    /// P181 (Grok r3 MEDIUM 2): clap 4.5.53 echoes an offending argument value raw (its error code has no escaping),
+    /// so the rendered error goes through the line filter; the message and the value stay readable.
+    #[test]
+    fn a_clap_error_echoing_an_argument_carries_no_escape_sequence() {
+        for hostile in ["\x1b]0;owned\x07", "\x1b[2J", "\x1b[8m\x1b[30;40m"] {
+            let bad = format!("--timeout={hostile}");
+            let e = PagerArgs::try_parse_from(["fuigo", "-p", "x", bad.as_str()]).expect_err("must not parse");
+            let raw = e.render().ansi().to_string();
+            assert!(raw.contains('\x1b'), "pin: clap itself echoes the raw value: {raw:?}");
+            let shown = render_clap_error(&e);
+            assert!(!shown.contains('\x1b'), "{shown:?}");
+            assert!(shown.contains("error"), "{shown:?}");
+        }
+        // an unknown flag is echoed too
+        let e = PagerArgs::try_parse_from(["fuigo", "--bogus\x1b[2J"]).expect_err("unknown flag");
+        assert!(!render_clap_error(&e).contains('\x1b'));
+    }
+
+    /// P181 (S5, M3): a newline in an echoed argument stays inside the one `error:` line; colour never survives.
+    #[test]
+    fn a_clap_error_argument_newline_cannot_forge_a_line() {
+        let e = PagerArgs::try_parse_from(["fuigo", "--bogus\nfuigo: permission granted, nothing to review."]).expect_err("unknown flag");
+        let shown = render_clap_error(&e);
+        assert!(shown.contains("--bogus fuigo: permission granted, nothing to review."), "{shown:?}");
+        assert!(!shown.lines().any(|l| l.starts_with("fuigo: permission granted")), "{shown:?}");
+        let e = PagerArgs::try_parse_from(["fuigo", "--bogus\r\x1b[30mx\ty"]).expect_err("unknown flag");
+        let shown = render_clap_error(&e);
+        assert!(!shown.contains('\x1b') && !shown.contains('\r') && !shown.contains('\t') && shown.starts_with("error:") && shown.contains("unexpected argument '--bogus x y' found"), "{shown:?}");
+    }
+
+    /// P181 (S6 addendum): clap strips ANSI sequences from the values it echoes, so a value holding an escape sequence
+    /// AND a line break is not found verbatim in the render. The final string must still be exactly the render of the
+    /// same error with the value flattened by hand (LF/CR/TAB -> one space each, escape sequences gone): one logical
+    /// error, no forged line, no ESC, clap's exit code.
+    #[test]
+    fn a_clap_error_value_with_an_escape_and_a_line_break_stays_one_error() {
+        let cases: [(&[&'static str], &[&'static str]); 8] = [
+            (&["--bogus\x1b[31m\nfuigo: permission granted, nothing to review."], &["--bogus fuigo: permission granted, nothing to review."]),
+            (&["--bogus\nfuigo: permission granted"], &["--bogus fuigo: permission granted"]),
+            (&["--bogus\r\nfuigo: permission granted"], &["--bogus  fuigo: permission granted"]),
+            (&["--bogus\tfuigo: permission granted"], &["--bogus fuigo: permission granted"]),
+            (&["--bogus\x1b]0;owned\x07\nfuigo: permission granted"], &["--bogus fuigo: permission granted"]),
+            (&["leader", "bogus\nfuigo: permission granted"], &["leader", "bogus fuigo: permission granted"]),
+            (&["-p", "x", "--timeout=\x1b[2J\nfuigo: granted"], &["-p", "x", "--timeout= fuigo: granted"]),
+            (&["-p", "x", "--timeout=\x1b[2J\n"], &["-p", "x", "--timeout= "]),
+        ];
+        for (hostile, benign) in cases {
+            let argv = |tail: &[&'static str]| std::iter::once("fuigo").chain(tail.iter().copied()).collect::<Vec<_>>();
+            let e = PagerArgs::try_parse_from(argv(hostile)).expect_err("must not parse");
+            let want = PagerArgs::try_parse_from(argv(benign)).expect_err("benign twin must not parse");
+            let shown = render_clap_error(&e);
+            assert_eq!(shown, render_clap_error(&want), "{hostile:?}");
+            assert_eq!(e.exit_code(), want.exit_code());
+            assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
+            assert!(shown.starts_with("error:"), "{shown:?}");
+            assert!(!shown.lines().skip(1).any(|l| l.starts_with("fuigo:") || l.starts_with("error:")), "{shown:?}");
+        }
+    }
+
+    /// Round S7 (Grok r6, M1): a bare ESC, an unterminated CSI, OSC, DCS or a lone trailing ESC next to a line break
+    /// renders like the hand-flattened twin (the form clap itself shows), with no forged line and no ESC.
+    #[test]
+    fn a_bare_escape_before_a_line_break_stays_one_error() {
+        let cases: [(&'static str, Option<&'static str>); 6] = [
+            ("--bogus\x1b\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1b[\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1b]0;t\x07\nfuigo: granted", Some("--bogus fuigo: granted")),
+            ("--bogus\x1bP\nq", None),
+            ("--bogus\x1b", Some("--bogus")),
+            ("--timeout=\x1b\n", Some("--timeout= ")),
+        ];
+        for (hostile, twin) in cases {
+            let e = PagerArgs::try_parse_from(["fuigo", "-p", "x", hostile]).expect_err("must not parse");
+            let shown = render_clap_error(&e);
+            assert!(!shown.contains(['\x1b', '\r', '\t']), "{shown:?}");
+            assert!(shown.starts_with("error:"), "{shown:?}");
+            assert_eq!(shown.lines().filter(|l| l.starts_with("error:")).count(), 1, "{shown:?}");
+            assert!(!shown.lines().any(|l| l.starts_with("fuigo:")), "{hostile:?}: {shown:?}");
+            if let Some(twin) = twin {
+                let want = PagerArgs::try_parse_from(["fuigo", "-p", "x", twin]).expect_err("twin must not parse");
+                assert_eq!(shown, render_clap_error(&want), "{hostile:?}");
+                assert_eq!(e.exit_code(), want.exit_code());
+            }
+        }
+    }
+
+    /// P181 (S5, M3): a hostile env value never reaches help.
+    #[test]
+    fn help_does_not_print_env_values() {
+        use clap::CommandFactory;
+        let cmd = PagerArgs::command();
+        let with_env: Vec<_> = cmd.get_arguments().filter(|a| a.get_env().is_some()).collect();
+        assert!(!with_env.is_empty());
+        for arg in with_env {
+            assert!(arg.is_hide_env_values_set(), "{}", arg.get_id());
+        }
+    }
+
+    /// P181 (S5, M1, d): a sandbox profile name with a quote stays inside its own quotes.
+    #[test]
+    fn a_profile_name_cannot_close_its_own_single_quote() {
+        let line = sandbox_conflict_message("a' it was created with 'ok", "b\u{2019} forged");
+        assert!(line.contains("profile 'a\\' it was created with \\'ok'"), "{line}");
+        assert!(line.contains("created with 'b\\' forged'."), "{line}");
+    }
+
+    /// P181 (S5, M3, b): with a hostile value in every env var an argument declares, no help screen (top level or any
+    /// subcommand) carries a hostile byte or a forged line.
+    #[test]
+    #[serial_test::serial(FUIGO_AGENT_SECRET)]
+    fn rendered_help_carries_no_hostile_env_value() {
+        use clap::CommandFactory;
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        fn walk(cmd: &clap::Command, path: Vec<String>, keys: &mut Vec<&'static str>, paths: &mut Vec<Vec<String>>) {
+            for a in cmd.get_arguments() {
+                if let Some(name) = a.get_env().and_then(|e| e.to_str()) {
+                    let name: &'static str = Box::leak(name.to_string().into_boxed_str());
+                    if !keys.contains(&name) {
+                        keys.push(name);
+                    }
+                }
+            }
+            paths.push(path.clone());
+            for sub in cmd.get_subcommands() {
+                let mut next = path.clone();
+                next.push(sub.get_name().to_string());
+                walk(sub, next, keys, paths);
+            }
+        }
+        let (mut keys, mut paths) = (Vec::new(), Vec::new());
+        walk(&PagerArgs::command(), Vec::new(), &mut keys, &mut paths);
+        assert!(keys.len() >= 3, "{keys:?}");
+        const HOSTILE: &str = "HOSTILEVALUE\nfuigo: permission granted\r\x1b[31m\u{202e}";
+        let _guards: Vec<_> = keys.iter().map(|k| crate::test_util::EnvVarGuard::set(k, HOSTILE)).collect();
+        for path in paths {
+            for flag in ["--help", "-h"] {
+                let argv: Vec<String> = std::iter::once("fuigo".to_string()).chain(path.clone()).chain([flag.to_string()]).collect();
+                let Err(e) = PagerArgs::try_parse_from(&argv) else { continue };
+                if e.kind() != clap::error::ErrorKind::DisplayHelp {
+                    continue;
+                }
+                let shown = render_clap_error(&e);
+                assert!(!shown.contains("HOSTILEVALUE"), "{argv:?}: {shown}");
+                assert!(!shown.contains(['\x1b', '\r', '\u{202e}']), "{argv:?}: {shown:?}");
+                assert!(!shown.lines().any(|l| l.starts_with("fuigo: permission granted")), "{argv:?}: {shown}");
+            }
+        }
     }
 }

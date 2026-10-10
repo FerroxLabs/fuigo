@@ -347,7 +347,8 @@ pub(super) fn ipv6_loopback_unavailable(error: &std::io::Error) -> bool {
 
 fn listener_error(address: std::net::SocketAddr, error: &std::io::Error) -> SubscriptionError {
     fuigo_tty_utils::cli_eprintln!(
-        "Cannot bind subscription callback listener at {address}: {error}. Release this address before signing in."
+        "Cannot bind subscription callback listener at {address}: {}. Release this address before signing in.",
+        fuigo_tty_utils::untrusted(error)
     );
     SubscriptionError::Listener
 }
@@ -686,7 +687,7 @@ pub async fn cli_login(provider: SubscriptionProvider) -> Result<()> {
     fuigo_tty_utils::cli_eprintln!(
         "Sign in to {} for Fuigo. Credentials will be stored only by Fuigo.\n{}",
         provider.name(),
-        attempt.authorization_url()
+        fuigo_tty_utils::untrusted(&attempt.authorization_url())
     );
     if webbrowser::open(attempt.authorization_url()).is_err() {
         fuigo_tty_utils::cli_eprintln!("Open the URL above in your browser.");

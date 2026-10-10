@@ -15,7 +15,7 @@ use fuigo_computer_hub_sdk::ToolServerHandler;
 use fuigo_mcp::rmcp;
 use fuigo_mcp::servers::{
     MCP_TOOL_NAME_DELIMITER, McpClient, McpClientTimeoutOverrides, McpSpawnCtx, OauthInteractivity,
-    parse_mcp_qualified_name,
+    call_tool_cancel_aware, parse_mcp_qualified_name,
 };
 use fuigo_tool_protocol::{SessionId, ToolId};
 use fuigo_tool_runtime::{ToolCallContext, ToolStream, TypedToolOutput};
@@ -160,37 +160,50 @@ impl McpTransport for McpClientTransportAdapter {
                 Some(wrapper)
             }
         };
-        let result = service
-            .call_tool({
-                let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
-                params.arguments = args_object;
-                params
-            })
+        let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
+        params.arguments = args_object;
+        // No client-side timeout: the hub owns the deadline; only its Cancel ends a call the server never answers.
+        // Dropping this future (the hub's Cancel) now tells the server with `notifications/cancelled`.
+        let response = call_tool_cancel_aware(&service, params, None)
             .await
             .map_err(|e| fuigo_computer_hub_mcp_adapter::McpError::Transport(e.to_string()))?;
-
-        Ok(McpCallResult {
-            content: result
-                .content
-                .into_iter()
-                .map(|c| match c {
-                    rmcp::model::ContentBlock::Text(t) => McpContent::Text { text: t.text },
-                    rmcp::model::ContentBlock::Image(img) => McpContent::Image {
-                        mime_type: img.mime_type,
-                        data: img.data,
-                    },
-                    _ => McpContent::Text {
-                        text: "[unsupported content type]".to_string(),
-                    },
-                })
-                .collect(),
-            is_error: result.is_error.unwrap_or(false),
-        })
+        match response {
+            rmcp::model::CallToolResponse::Complete(result) => {
+                Ok(mcp_call_result_from_rmcp(result))
+            }
+            // This client never advertises elicitation or tasks, so a conforming server cannot
+            // answer with either; `CallToolResponse` is also `non_exhaustive`.
+            _ => Err(fuigo_computer_hub_mcp_adapter::McpError::Transport(
+                format!("MCP tool '{name}' returned an unsupported response kind"),
+            )),
+        }
     }
 
     async fn close(&self) -> Result<(), fuigo_computer_hub_mcp_adapter::McpError> {
         // No-op: cleanup happens when McpClient is dropped.
         Ok(())
+    }
+}
+
+/// Maps an rmcp result to the hub transport type, keeping the result's `_meta`.
+fn mcp_call_result_from_rmcp(result: rmcp::model::CallToolResult) -> McpCallResult {
+    McpCallResult {
+        content: result
+            .content
+            .into_iter()
+            .map(|c| match c {
+                rmcp::model::ContentBlock::Text(t) => McpContent::Text { text: t.text },
+                rmcp::model::ContentBlock::Image(img) => McpContent::Image {
+                    mime_type: img.mime_type,
+                    data: img.data,
+                },
+                _ => McpContent::Text {
+                    text: "[unsupported content type]".to_string(),
+                },
+            })
+            .collect(),
+        is_error: result.is_error.unwrap_or(false),
+        meta: result.meta.map(|m| m.0).unwrap_or_default(),
     }
 }
 
@@ -1237,6 +1250,29 @@ async fn owned_tool_ids(session: &WorkspaceSession) -> HashSet<ToolId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The computer-use helper sends the target app's identity in `_meta`.
+    #[test]
+    fn bridged_result_carries_meta() {
+        let app = serde_json::Map::from_iter([
+            ("app_name".into(), "TextEdit".into()),
+            ("bundle_id".into(), "com.apple.TextEdit".into()),
+        ]);
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]);
+        result.meta = Some(rmcp::model::MetaObject(app.clone()));
+        assert_eq!(mcp_call_result_from_rmcp(result).meta, app);
+    }
+
+    #[test]
+    fn bridged_result_maps_absent_meta_to_empty() {
+        for meta in [None, Some(rmcp::model::MetaObject::new())] {
+            let mut result =
+                rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]);
+            result.meta = meta;
+            assert!(mcp_call_result_from_rmcp(result).meta.is_empty());
+        }
+    }
 
     struct TestHandler;
 

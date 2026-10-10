@@ -2601,6 +2601,11 @@ impl PromptWidget {
         std::mem::take(&mut self.images)
     }
 
+    /// Whether the composer holds any attached image.
+    pub fn has_images(&self) -> bool {
+        !self.images.is_empty()
+    }
+
     /// Buffer text with `[Image #N]` chip placeholders removed.
     /// For text-only consumers (e.g. question/permission feedback) that must not leak image tokens onto the wire.
     pub(crate) fn text_without_image_chips(&self) -> String {

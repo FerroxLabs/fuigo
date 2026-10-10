@@ -111,13 +111,36 @@ fn compress_reference(
 
 /// Resolve a reference (filesystem path or `data:image/...;base64,...` URL)
 /// into a compressed data URL for the Imagine API.
-async fn resolve_to_data_url(value: &str) -> Result<String, fuigo_tool_runtime::ToolError> {
+/// The local file an `image` reference makes the tool read, spelled as the tool opens it (relative paths resolve
+/// against the process cwd), or `None` for a `data:` URL. `file://` URIs (e.g. an attachment's durable URI) name their
+/// underlying path. Attachment tokens are not references here: they are mapped to the user's attachment first.
+fn image_reference_local_path(value: &str) -> Option<&str> {
     let value = value.trim();
-    // Accept `file://` URIs (e.g. an attachment's durable URI) by reading
-    // the underlying path. Data URLs and bare paths are untouched.
+    let value = value.strip_prefix("file://").unwrap_or(value);
+    (!value.starts_with("data:image/")).then_some(value)
+}
+
+/// Every local file an `image_edit` call reads (P174), in order, each once: each `image` entry that is a filesystem
+/// path or `file://` URI. Attachment tokens (the user's own attachment) and `data:` URLs read no model-named file. The
+/// permission check judges each one as a Read.
+pub fn local_image_paths(images: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    images
+        .iter()
+        .filter(|image| parse_attachment_token(image).is_none())
+        .filter_map(|image| image_reference_local_path(image))
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+async fn resolve_to_data_url(value: &str) -> Result<String, fuigo_tool_runtime::ToolError> {
+    let local = image_reference_local_path(value);
+    let value = value.trim();
     let value = value.strip_prefix("file://").unwrap_or(value);
 
-    let raw_bytes = if value.starts_with("data:image/") {
+    let raw_bytes = if local.is_none() {
         let comma = value.find(',').ok_or_else(|| {
             fuigo_tool_runtime::ToolError::invalid_arguments(
                 "malformed data URL in image reference",
@@ -136,11 +159,16 @@ async fn resolve_to_data_url(value: &str) -> Result<String, fuigo_tool_runtime::
                 ))
             })?
     } else {
-        tokio::fs::read(value).await.map_err(|e| {
-            fuigo_tool_runtime::ToolError::invalid_arguments(format!(
-                "image reference not readable: {value} ({e})"
-            ))
-        })?
+        let path = local.unwrap_or(value);
+        // P166/S12: regular files only, capped, so a FIFO or device reference cannot hang or flood the call.
+        let cap = crate::implementations::fuigo_build::read_file::MAX_READ_SOURCE_BYTES;
+        crate::util::file_reader::read_regular_file(std::path::Path::new(path), Some(cap))
+            .await
+            .map_err(|e| {
+                fuigo_tool_runtime::ToolError::invalid_arguments(format!(
+                    "image reference not readable: {path} ({e})"
+                ))
+            })?
     };
 
     if raw_bytes.is_empty() {
@@ -647,6 +675,16 @@ mod tests {
         let (out, mime) = compress_reference(buf).unwrap();
         assert!(out.len() <= MAX_REF_RAW_BYTES);
         assert!(mime == "image/jpeg" || mime == "image/png");
+    }
+
+    /// P174: the local files an `image_edit` call reads, for the permission check.
+    #[test]
+    fn local_image_paths_lists_every_file_the_tool_reads() {
+        let images: Vec<String> = ["[Image #1]", "data:image/png;base64,AAAA", "file:///tmp/a.png", " rel.png ", "/abs.png", "/abs.png"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(local_image_paths(&images), vec!["/tmp/a.png", "rel.png", "/abs.png"]);
     }
 
     // ── resolve_to_data_url ──────────────────────────────────────────

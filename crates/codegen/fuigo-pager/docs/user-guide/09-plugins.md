@@ -321,6 +321,35 @@ Also in `managed-settings.json`. Each entry allows an HTTP address (with `*` wil
 
 The deployment can also send MCP servers to users directly. The allowlist bounds what any configuration, managed or personal, is allowed to run.
 
+### Set the same policy in Fuigo's own files
+
+The keys above also work at the top level of `managed_config.toml` (including the one your deployment's managed config keeps in sync) and `requirements.toml`, in either spelling (`allowedMcpServers` or `allowed_mcp_servers`). Every file that sets them counts, and the strictest wins: a deny in any file blocks the server, every file with an allow list must allow it, and a later file can add restrictions but never remove one.
+
+```toml
+# /etc/fuigo/requirements.toml
+allow_managed_mcp_servers_only = true   # only servers an allow list names may run
+enable_all_project_mcp_servers = false  # drop a repository's MCP servers unless an allow list names them
+allow_managed_hooks_only = true         # only hooks from managed policy run
+
+[[allowed_mcp_servers]]
+server_url = "https://mcp.example.com/*"
+
+[[denied_mcp_servers]]
+server_command = ["npx", "untrusted-mcp"]   # exact command and arguments
+
+[[strict_known_marketplaces]]
+source = "github"
+repo = "acme/approved-plugins"
+```
+
+- An empty `allowed_mcp_servers = []` or `strict_known_marketplaces = []` blocks everything. A value Fuigo cannot read (the wrong type, or an admin policy file that does not parse or that a non-root user can write) also blocks everything: policy fails closed. A `~/.fuigo/requirements.toml` or `managed_config.toml` that does not parse is skipped with a warning.
+- With `strict_known_marketplaces` set, only plugins installed from an allowed marketplace load, and only when enabled by their full plugin id. Project plugins, `[plugins].paths` and `--plugin-dir` plugins, and plugins named only in Claude's `enabledPlugins` do not load, so their hooks and MCP servers do not run.
+- In-process SDK MCP servers (registered by an SDK client) are checked too: they run only when an allow list names them by `server_name`.
+- An allow entry in a file a developer can edit (`~/.fuigo/...`) does not satisfy `allow_managed_mcp_servers_only` or `enable_all_project_mcp_servers = false` set by an admin file.
+- Policy is checked before anything is written: adding or enabling a blocked MCP server in `/mcps` or with `fuigo mcp add` / `fuigo mcp enable`, adding a marketplace, installing a plugin from a git URL or a local path, and enabling a plugin from a source the policy does not allow are all refused with the name of the policy file.
+- With `allow_managed_hooks_only = true`, user, project and plugin hooks are skipped and shown as disabled, and enabling or adding one is refused with a note. Hooks in `/etc/fuigo/managed_config.toml` and `/etc/fuigo/requirements.toml` still run.
+- `/mcps` (also in minimal mode) shows a blocked server as `blocked by policy` with the reason. `fuigo inspect` and `fuigo mcp doctor` list each policy file and what it enforces.
+
 ### Require pinned versions
 
 Refuse any remote plugin install or update that is not pinned to a full commit sha:

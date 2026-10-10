@@ -41,6 +41,7 @@ pub(super) fn dispatch_interject_on(
         // Hard-reset only; `text` may not be from the composer
         let _ = voice_stop_on_submit(app);
     }
+    let minimal = app.screen_mode.is_minimal();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -50,6 +51,17 @@ pub(super) fn dispatch_interject_on(
     agent.ephemeral_tip.clear_on_submit();
     agent.release_hook_block_hold();
 
+    if agent.load_failed {
+        give_back_consumed(agent, text, images, minimal);
+        return vec![];
+    }
+    // A session that is still opening may yet fail to open: hold the payload with the other held rows rather than send into it
+    // (a forced interject has already taken its queue row, so a failed open could not give it back)
+    if agent.session.loading_replay {
+        requeue_consumed(agent, text, images);
+        agent.show_toast("Still opening this session. Your message is held until it is open.");
+        return vec![];
+    }
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
@@ -90,6 +102,39 @@ pub(super) fn dispatch_interject_on(
     }]
 }
 
+/// Put a payload its producer already consumed back at the front of the queue.
+fn requeue_consumed(
+    agent: &mut crate::app::agent_view::AgentView,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) {
+    let queue_id = agent.session.next_queue_id;
+    agent.session.next_queue_id += 1;
+    agent
+        .session
+        .pending_prompts
+        .push_front(crate::app::agent::QueuedPrompt {
+            images,
+            ..crate::app::agent::QueuedPrompt::plain(
+                queue_id,
+                &text,
+                crate::app::agent::QueueEntryKind::Prompt,
+            )
+        });
+}
+
+/// A tab whose session never opened cannot send: the consumed payload returns to the composer, or is listed as not sent, with the notice.
+fn give_back_consumed(
+    agent: &mut crate::app::agent_view::AgentView,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+    minimal: bool,
+) {
+    requeue_consumed(agent, text, images);
+    super::session::load::restore_prompts_held_during_load(agent);
+    super::prompt::refuse_on_failed_tab(agent, minimal);
+}
+
 /// Cancel-and-send: send `text` (and images) as a fresh `sendNow` prompt so the shell cancels the running turn and runs it next.
 /// The user block paints at dispatch (the arm hides the queue echo; the adoption reuses the block).
 pub(super) fn dispatch_send_prompt_now(
@@ -103,6 +148,7 @@ pub(super) fn dispatch_send_prompt_now(
         return vec![];
     };
     let reconnect_pending = app.reconnect_pending;
+    let minimal = app.screen_mode.is_minimal();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -135,7 +181,19 @@ pub(super) fn dispatch_send_prompt_now(
     // Submitting retires any edit-contextual ephemeral tip.
     agent.ephemeral_tip.clear_on_submit();
 
+    // The producer already took the payload: a tab with no session gets it back, never a bare toast
+    if agent.load_failed {
+        give_back_consumed(agent, text, images, minimal);
+        return vec![];
+    }
+    // A session that is still opening may yet fail to open: hold the row with the others rather than send into it
+    if agent.session.loading_replay {
+        requeue_consumed(agent, text, images);
+        agent.show_toast("Still opening this session. Your message is held until it is open.");
+        return vec![];
+    }
     let Some(session_id) = agent.session.session_id.clone() else {
+        requeue_consumed(agent, text, images);
         agent.show_toast(NO_SESSION_NOTICE);
         return vec![];
     };

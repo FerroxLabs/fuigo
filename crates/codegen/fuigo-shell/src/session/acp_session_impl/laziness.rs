@@ -293,8 +293,9 @@ impl SessionActor {
     /// Debug mode adds logging; it does not bypass the production decision logic.
     pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
         let model_id_acp = self.models_manager.current_model_id();
-        let model_id = model_id_acp.0.to_string();
-        let cfg = self.models_manager.laziness_detector_for(&model_id);
+        let Some((model_id, cfg)) = self.models_manager.laziness_target(&model_id_acp.0) else {
+            return;
+        };
         let debug_mode = self.laziness_debug_log.is_some();
 
         // This gates the classifier fire only; the nudge cap check is inside `evaluate_laziness`

@@ -376,7 +376,7 @@ async fn prompt_and_poll(
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!("To sign in, open this URL in your browser:");
     fuigo_tty_utils::cli_eprintln!();
-    fuigo_tty_utils::cli_eprintln!("  {}", display_uri);
+    fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(&display_uri));
     fuigo_tty_utils::cli_eprintln!();
 
     if !open_browser_detached(display_uri).await {
@@ -391,12 +391,12 @@ async fn prompt_and_poll(
         fuigo_tty_utils::cli_eprintln!("Then enter this code:");
     }
     fuigo_tty_utils::cli_eprintln!();
-    fuigo_tty_utils::cli_eprintln!("  {}", device_code.user_code);
+    fuigo_tty_utils::cli_eprintln!("  {}", fuigo_tty_utils::untrusted(&device_code.user_code));
     fuigo_tty_utils::cli_eprintln!();
-    fuigo_tty_utils::cli_eprintln!(
-        "\x1b[90mOnly continue with a code you requested. \
-         Don't share it with anyone.\x1b[0m"
-    );
+    // Fuigo's own grey: the styling bytes are trusted literals around fixed text (the line filter passes no escape).
+    fuigo_tty_utils::cli_eprint_trusted!("\x1b[90m");
+    fuigo_tty_utils::cli_eprint!("Only continue with a code you requested. Don't share it with anyone.");
+    fuigo_tty_utils::cli_eprint_trusted!("\x1b[0m\n");
     fuigo_tty_utils::cli_eprintln!();
     fuigo_tty_utils::cli_eprintln!("Waiting for authorization...");
 
@@ -950,5 +950,20 @@ mod p70a_redacted_debug {
                 assert!(!out.contains(secret), "Debug holds {secret}: {out}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod p181_styled_sites {
+    /// P181 (S5, M4, c): the production styled sites still emit Fuigo's own bytes through the trusted path.
+    /// The device-code warning is grey (`ESC[90m` ... `ESC[0m`); the exact rendered bytes are pinned in
+    /// `fuigo-tty-utils` (`the_device_code_grey_renders_its_exact_bytes`), this pins that the call sites use them.
+    #[test]
+    fn production_styled_sites_use_the_trusted_literals() {
+        let device = include_str!("device_code.rs");
+        assert!(device.contains(concat!("cli_eprint_trusted!(\"", "\\x1b[90m\")")));
+        assert!(device.contains(concat!("cli_eprint_trusted!(\"", "\\x1b[0m\\n\")")));
+        let flow = include_str!("flow.rs");
+        assert!(flow.contains(concat!("cli_eprint_trusted!(\"", "\\r\\x1b[K\")")));
     }
 }

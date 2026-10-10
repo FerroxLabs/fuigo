@@ -205,3 +205,37 @@ fn metadata_validation_enforces_cwd_and_truncates_display_text() {
         Err(StoreError::CwdTooLong { max: MAX_CWD_BYTES })
     ));
 }
+
+#[test]
+fn session_id_rejects_every_widened_invisible_class() {
+    for c in [
+        '\u{00ad}', '\u{180e}', '\u{2028}', '\u{2029}', '\u{fff9}', '\u{fffb}', '\u{13430}',
+        '\u{1343f}', '\u{1bca0}', '\u{1bca3}', '\u{1d173}', '\u{1d17a}', '\u{e0001}',
+        '\u{e0020}', '\u{e0041}', '\u{e007f}',
+    ] {
+        assert!(
+            SessionId::new(format!("a{c}b")).is_err(),
+            "U+{:04X} must be rejected",
+            c as u32
+        );
+    }
+}
+
+#[test]
+fn session_id_rejects_every_character_of_the_widened_ranges() {
+    for (first, last) in [
+        ('\u{00ad}', '\u{00ad}'),
+        ('\u{180e}', '\u{180e}'),
+        ('\u{2028}', '\u{2029}'),
+        ('\u{fff9}', '\u{fffb}'),
+        ('\u{13430}', '\u{1343f}'),
+        ('\u{1bca0}', '\u{1bca3}'),
+        ('\u{1d173}', '\u{1d17a}'),
+        ('\u{e0001}', '\u{e0001}'),
+        ('\u{e0020}', '\u{e007f}'),
+    ] {
+        for c in first..=last {
+            assert!(SessionId::new(format!("a{c}b")).is_err(), "U+{:04X}", c as u32);
+        }
+    }
+}

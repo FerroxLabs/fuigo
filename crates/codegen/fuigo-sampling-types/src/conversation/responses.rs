@@ -588,6 +588,8 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 content,
             })]
         }
+        // An Anthropic `redacted_thinking` blob means nothing to this protocol
+        ConversationItem::Reasoning(r) if is_redacted_thinking_item(r) => Vec::new(),
         ConversationItem::Reasoning(r) => {
             vec![rs::InputItem::Item(rs::Item::Reasoning(
                 reasoning_item_for_input(r),

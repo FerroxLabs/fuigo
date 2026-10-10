@@ -39,6 +39,21 @@ impl AuthFileLock {
     }
 }
 
+/// The login store path: `$FUIGO_AUTH_PATH` when set, else `<fuigo_home>/auth.json`.
+/// The single resolver shared by [`super::AuthManager`] and the managed-config identity reads: a reader that bypasses it
+/// splits "who is signed in" between the two (P167: a login at a custom path made startup delete the org's policy).
+/// Exactly the auth manager's long-standing rule (`std::env::var`): a set value is used as given, even empty; an unset
+/// or non-UTF-8 value falls back to the default.
+pub fn auth_json_path(fuigo_home: &Path) -> PathBuf {
+    resolve_auth_json_path(std::env::var("FUIGO_AUTH_PATH").ok(), fuigo_home)
+}
+
+fn resolve_auth_json_path(fuigo_auth_path: Option<String>, fuigo_home: &Path) -> PathBuf {
+    fuigo_auth_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fuigo_home.join("auth.json"))
+}
+
 pub fn read_auth_json(auth_file: &Path) -> std::io::Result<AuthStore> {
     let mut file = File::open(auth_file)?;
     let mut contents = String::new();
@@ -692,5 +707,22 @@ mod write_fallback_tests {
         let _ = write_auth_json_in_place_with(&path, &sample_store(), fake_truncate_then_fail);
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "restored file must stay 0o600");
+    }
+}
+
+#[cfg(test)]
+mod p167_auth_path_tests {
+    use super::*;
+
+    #[test]
+    fn p167_auth_path_override_wins_as_given() {
+        let home = Path::new("/h/.fuigo");
+        assert_eq!(resolve_auth_json_path(None, home), home.join("auth.json"));
+        // As the auth manager always did: a set-but-empty override is not the default login.
+        assert_eq!(resolve_auth_json_path(Some(String::new()), home), PathBuf::new());
+        assert_eq!(
+            resolve_auth_json_path(Some("/elsewhere/creds.json".into()), home),
+            PathBuf::from("/elsewhere/creds.json")
+        );
     }
 }

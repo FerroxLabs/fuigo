@@ -38,6 +38,28 @@ pub(crate) fn prefetch_models_blocking(
     )
 }
 
+/// [`prefetch_models_blocking`], but a 401 is told apart from other failures.
+pub(crate) fn prefetch_models_outcome_blocking(
+    endpoints: &config::EndpointsConfig,
+    auth: Option<&FuigoAuth>,
+    fetch_auth: ModelFetchAuth,
+) -> ModelsFetchOutcome {
+    let prefetch = fetch_models_uncommitted(
+        endpoints,
+        auth,
+        fetch_auth,
+        crate::util::config::resolve_remote_fetch_enabled(),
+    );
+    match prefetch {
+        ModelsPrefetch::Rejected => ModelsFetchOutcome::AuthRejected,
+        ModelsPrefetch::Cached(models) => ModelsFetchOutcome::Cached(models),
+        other => match other.commit() {
+            Some(models) => ModelsFetchOutcome::Fetched(models),
+            None => ModelsFetchOutcome::Unavailable,
+        },
+    }
+}
+
 /// Outcome of the startup settings request. `Skipped` (no session auth) is a healthy
 /// no-auth boot, not a degraded start; only `Failed` counts as an attempted fetch that
 /// yielded nothing.
@@ -95,6 +117,8 @@ fn prefetch_models_blocking_gated(
 pub(in crate::agent::models) enum ModelsPrefetch {
     Cached(IndexMap<String, ModelEntry>),
     Fetched(ModelsCacheWrite),
+    /// The server answered 401.
+    Rejected,
     Unavailable,
 }
 
@@ -103,14 +127,14 @@ impl ModelsPrefetch {
         match self {
             Self::Cached(models) => Some(models),
             Self::Fetched(write) => Some(write.commit()),
-            Self::Unavailable => None,
+            Self::Unavailable | Self::Rejected => None,
         }
     }
 
     pub(in crate::agent::models) fn into_deferred_write(self) -> Option<ModelsCacheWrite> {
         match self {
             Self::Fetched(write) => Some(write),
-            Self::Cached(_) | Self::Unavailable => None,
+            Self::Cached(_) | Self::Unavailable | Self::Rejected => None,
         }
     }
 }
@@ -158,7 +182,33 @@ fn fetch_models_uncommitted(
     }
 
     let _timer = crate::instrumentation_timer!("startup.fetch_models_blocking");
-    match source.fetch(auth) {
+    // The one gate for every `GET /v1/models` (startup prefetch, catalog ladder, refresh watcher, etag refresh, login):
+    // serialised in this process so two racing paths cannot both send before the first 401 is recorded, and shared with
+    // every other process through the on-disk memory.
+    static ONE_FETCH_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_FETCH_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let memory = crate::auth::api_key_route_memory::RouteMemory::models_location();
+    let env_key = crate::agent::auth_method::read_fuigo_api_key_env().ok();
+    let credential: Vec<&str> = env_key.as_deref().into_iter().chain(auth.map(|a| a.key.as_str())).collect();
+    let url = source.cache_origin();
+    if let Some(m) = &memory
+        && let Some(wait) = m.models_wait(&url, &credential, crate::auth::api_key_route_memory::unix_now())
+    {
+        tracing::debug!(wait_secs = wait, "models fetch skipped: this credential was rejected recently");
+        return ModelsPrefetch::Rejected;
+    }
+    let fetched = source.fetch(auth);
+    if let Some(m) = &memory {
+        let now = crate::auth::api_key_route_memory::unix_now();
+        match &fetched {
+            Ok(_) => m.clear_models_401(&url, &credential, now),
+            Err(crate::remote::client::BackendError::RequestFailed { status: 401, .. }) => {
+                m.note_models_401(&url, &credential, now)
+            }
+            Err(_) => {}
+        }
+    }
+    match fetched {
         Ok(FetchModelsResult { models, etag }) if !models.is_empty() => {
             let api_base_url_override = match fetch_auth {
                 ModelFetchAuth::ApiKey => Some(endpoints.fuigo_api_base_url.clone()),
@@ -178,6 +228,10 @@ fn fetch_models_uncommitted(
         Ok(FetchModelsResult { .. }) => {
             tracing::warn!("Models endpoint returned empty list");
             ModelsPrefetch::Unavailable
+        }
+        Err(crate::remote::client::BackendError::RequestFailed { status: 401, .. }) => {
+            tracing::warn!("Failed to fetch models: the credential was rejected (401)");
+            ModelsPrefetch::Rejected
         }
         Err(e) => {
             tracing::warn!("Failed to fetch models: {:?}", e);

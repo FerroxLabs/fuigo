@@ -109,3 +109,11 @@ fn turn_timer_values() {
     assert_eq!(turn_timer(60 * 60), "1h00m");
     assert_eq!(turn_timer(194 * 60 + 4), "3h14m");
 }
+
+/// P181: a segment carries the user's own text (cwd, model name), which can hold hidden characters.
+#[test]
+fn a_segment_drops_hidden_characters() {
+    let dirty = "a\u{e0041}b\u{00ad}c\u{2028}d";
+    assert_eq!(StatusSegment::warn(dirty).text, "abcd");
+    assert_eq!(StatusSegment::dim(dirty).text, "abcd");
+}

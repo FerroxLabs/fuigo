@@ -46,7 +46,6 @@ jsonschema = { workspace = true }
 futures = { workspace = true }
 glob = { workspace = true }
 globset = { workspace = true }
-kanal = "0.1"
 loom = { workspace = true, optional = true }
 regex = { workspace = true }
 # rmcp 2.1 + reqwest 0.13 are quarantined inside `fuigo-mcp`. The remaining
@@ -195,11 +194,11 @@ fuigo-tool-types = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
-nix = { workspace = true }
+nix = { workspace = true, features = ["dir"] }
 
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 fuigo-secrets = { workspace = true, features = ["test-support"] }
@@ -284,6 +283,11 @@ required-features = ["test-support"]
 
 [[test]]
 name = "test_startup_prefetch_shared"
+required-features = ["test-support"]
+
+# P164: stops a rewind with the test seam (`session::storage::rewind_crash_seam`), which only test-support builds have.
+[[test]]
+name = "interrupted_rewind_resume_acp"
 required-features = ["test-support"]
 
 [lints]

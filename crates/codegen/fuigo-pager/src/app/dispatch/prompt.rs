@@ -166,6 +166,32 @@ pub(super) fn open_doctor_fix_question(
     agent.prompt.set_text("");
 }
 
+pub(in crate::app::dispatch) const LOAD_FAILED_NOTICE: &str =
+    "This session didn't open. Open it again with /resume, or start a new one with /new.";
+
+/// A tab whose session never opened has nothing to send to, so its prompt or command would queue forever.
+fn refuse_if_load_failed(app: &mut AppView, id: AgentId) -> bool {
+    let minimal = app.screen_mode.is_minimal();
+    app.agents
+        .get_mut(&id)
+        .is_some_and(|agent| refuse_on_failed_tab(agent, minimal))
+}
+
+/// Minimal mode shows no toasts, so the notice goes to the scrollback there.
+pub(super) fn refuse_on_failed_tab(agent: &mut AgentView, minimal: bool) -> bool {
+    if !agent.load_failed {
+        return false;
+    }
+    if minimal {
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(LOAD_FAILED_NOTICE.to_owned()));
+    } else {
+        agent.show_toast(LOAD_FAILED_NOTICE);
+    }
+    true
+}
+
 pub(super) fn dispatch_send_prompt(app: &mut AppView, text: String) -> Vec<Effect> {
     crate::unified_log::info(
         "prompt.enqueue",
@@ -424,6 +450,23 @@ fn maybe_show_send_now_tip(app: &mut AppView) {
     }
 }
 
+/// Queue text may come from a server broadcast or another client, and the system-note sink splits on newlines
+/// before it filters each row. So each line is filtered on its own and indented (the first too), and no row of it
+/// can start where Fuigo's own rows start. At most 20 rows; a last row written by Fuigo says how many were cut.
+fn queued_text_rows(text: &str) -> String {
+    const MAX_ROWS: usize = 20;
+    let mut rows: Vec<String> = text
+        .lines()
+        .take(MAX_ROWS)
+        .map(|line| format!("  {}", fuigo_tty_utils::untrusted(line)))
+        .collect();
+    let more = text.lines().count().saturating_sub(MAX_ROWS);
+    if more > 0 {
+        rows.push(format!("  \u{2026} ({more} more lines)"));
+    }
+    rows.join("\n")
+}
+
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume the prompt textarea after the command is processed.
 ///
 /// `consume_input = true` (Enter from the prompt) wipes the textarea, drains pending images into the queue, and inserts the text into up-arrow history.
@@ -461,6 +504,12 @@ pub(super) fn dispatch_send_prompt_inner(
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // A slash command is refused below only if it would queue, so `/new`, `/resume`, and `exit` still run
+    let runs_locally = !literal
+        && (text.trim().starts_with('/') || crate::slash::commands::exit::is_exit_alias(text.trim()));
+    if !runs_locally && refuse_if_load_failed(app, id) {
+        return vec![];
+    }
     // Capture app-level fields before the mut-borrow on `agent`.
     let coding_data_sharing_opt_out_from_app = app.coding_data_retention_opt_out;
     let coding_data_sharing_lock_from_app = app.coding_data_sharing_lock();
@@ -641,6 +690,17 @@ pub(super) fn dispatch_send_prompt_inner(
             }
         };
 
+        // A command that would queue, inject a skill or pass through to the agent has nowhere to go on a tab whose load failed
+        if matches!(
+            exec_result,
+            CommandResult::QueueCommand(_)
+                | CommandResult::InjectSkill { .. }
+                | CommandResult::PassThrough(_)
+                | CommandResult::Action(Action::SendBtw { .. })
+        ) && refuse_on_failed_tab(agent, app.screen_mode.is_minimal())
+        {
+            return effects;
+        }
         // Map CommandResult to pager behavior. (MRU persistence is queued off-thread inside `record_command_use` above.)
         match exec_result {
             CommandResult::Handled => {
@@ -688,6 +748,29 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
                 // The typed `/remember <text>` is the row already recorded above.
                 return super::notes::dispatch_send_remember_note_from_command(app, note);
+            }
+            // While the session is still opening (bound or not yet bound), a side question waits with the other held rows,
+            // images included, so a failed open returns it or lists it and a successful one sends it as a side question
+            CommandResult::Action(Action::SendBtw { question, .. })
+                if consume_input && agent.session.loading_replay =>
+            {
+                // With images the composer text carries their chips: keep the typed form so a returned row restores them
+                let (question, images, chips) = if agent.prompt.has_images() {
+                    let (typed, images, chips) = agent.prompt.stash().into_submission();
+                    let typed = typed.trim_start();
+                    let typed = typed.strip_prefix("/btw").unwrap_or(typed).trim_start();
+                    (typed.to_owned(), images, chips)
+                } else {
+                    (question, Vec::new(), Vec::new())
+                };
+                agent.session.enqueue_side_question(
+                    &question,
+                    images,
+                    chips,
+                    app.screen_mode.is_minimal(),
+                );
+                agent.prompt.set_text("");
+                return effects;
             }
             CommandResult::Action(mut action) => {
                 if consume_input {
@@ -968,6 +1051,9 @@ pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    if refuse_if_load_failed(app, id) {
+        return vec![];
+    }
     let leader_mode = app.leader_mode;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
@@ -1157,9 +1243,36 @@ pub(super) fn handle_prompt_response(
                         .map(|e| e.text.trim().to_string())
                         .filter(|t| !t.is_empty());
                     // "may not have": the request can have reached a leader that keeps running it (Astra r3 M3).
+                    // `message` is the bridge's answer but `is_transport_loss_error` matches by `contains`, so it can
+                    // carry outside text: filter it.
+                    let message = fuigo_tty_utils::untrusted(message);
                     let line = match text {
-                        Some(text) => format!("A queued message may not have been sent: {message}\n{text}"),
+                        Some(text) => format!(
+                            "A queued message may not have been sent: {message}\n{}",
+                            queued_text_rows(&text)
+                        ),
                         None => format!("A queued message may not have been sent: {message}"),
+                    };
+                    agent.scrollback.push_block(RenderBlock::system(line));
+                } else if let Err(message) = &result {
+                    // W3B item 3: any other error also meant the prompt never ran, and it vanished without a word
+                    // (for example an unknown session id after a failed re-init). Say so, and keep the text in the
+                    // line like the branch above: the queued text is not in the composer, so it cannot go back there.
+                    let detail = crate::app::error_display::format_request_failure(None, None, message).message();
+                    let detail = detail.trim_end().trim_end_matches('.');
+                    let text = agent
+                        .shared_queue
+                        .iter()
+                        .find(|e| e.id == response_pid)
+                        .map(|e| e.text.trim().to_string())
+                        .filter(|t| !t.is_empty());
+                    let line = match text {
+                        Some(text) => format!(
+                            "Your message was not sent: {}.\n{}",
+                            fuigo_tty_utils::untrusted(detail),
+                            queued_text_rows(&text)
+                        ),
+                        None => format!("Your message was not sent: {}.", fuigo_tty_utils::untrusted(detail)),
                     };
                     agent.scrollback.push_block(RenderBlock::system(line));
                 }

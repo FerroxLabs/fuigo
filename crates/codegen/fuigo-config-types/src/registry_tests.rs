@@ -225,3 +225,16 @@ fn off_reason_names_the_setting_that_turned_it_off() {
         Some("the default"),
     );
 }
+
+/// P183 round 5: fuigo-config refuses an admin requirements layer whose registry feature pin is not a bool, from its own list
+/// (it cannot depend on this crate). Every registry key must be on that list, or a mistyped pin would be silently ignored.
+#[test]
+fn every_registry_feature_is_a_requirements_bool_pin_p183r5() {
+    for spec in FEATURES {
+        assert!(
+            fuigo_config::REQUIREMENTS_BOOL_FEATURES.contains(&spec.key),
+            "{} missing from fuigo_config::REQUIREMENTS_BOOL_FEATURES",
+            spec.key
+        );
+    }
+}

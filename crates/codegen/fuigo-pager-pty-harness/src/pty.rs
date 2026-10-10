@@ -7,7 +7,9 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use fuigo_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+use fuigo_test_support::{TestProcessTree, TestSandbox};
+#[cfg(unix)]
+use fuigo_test_support::process_has_exited_without_reap;
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);

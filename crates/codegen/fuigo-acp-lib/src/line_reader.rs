@@ -27,7 +27,7 @@ use futures::{
 /// Prevents unbounded memory growth if a peer sends data without newlines.
 /// 64 MiB accommodates the largest legitimate ACP messages (e.g. a
 /// multi-megabyte file read response after JSON string escaping).
-const MAX_LINE_SIZE: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_LINE_SIZE: usize = 64 * 1024 * 1024;
 
 /// An [`AsyncRead`] that only yields complete `\n`-delimited lines.
 ///

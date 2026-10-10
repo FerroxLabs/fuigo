@@ -34,6 +34,7 @@ use crate::appearance::LayoutConfig;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
+use crate::views::elicitation_view::ElicitationViewState;
 use crate::views::extensions_modal::{ExtensionsModalState, StatusFilter};
 use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
 use crate::views::modal::CancelTurnViewState;
@@ -339,6 +340,21 @@ pub fn question_view(v: &AgentView) -> Option<&QuestionViewState> {
 /// `AgentView::question_view` (mutable: minimal clamps the scroll offset).
 pub fn question_view_mut(v: &mut AgentView) -> Option<&mut QuestionViewState> {
     v.question_view.as_mut()
+}
+
+/// `AgentView::elicitation_view`.
+pub fn elicitation_view(v: &AgentView) -> Option<&ElicitationViewState> {
+    v.elicitation_view.as_ref()
+}
+
+/// `AgentView::elicitation_view`, mutable because the renderer clamps the body scroll offset.
+pub fn elicitation_view_mut(v: &mut AgentView) -> Option<&mut ElicitationViewState> {
+    v.elicitation_view.as_mut()
+}
+
+/// [`AgentView::is_awaiting_user_answer`].
+pub fn is_awaiting_user_answer(v: &AgentView) -> bool {
+    v.is_awaiting_user_answer()
 }
 
 /// `AgentView::hovered_question_item`.
@@ -676,6 +692,11 @@ pub fn mcp_status_theme_color(status: &McpServerDisplayStatus, theme: &Theme) ->
     status.theme_color(theme)
 }
 
+/// Whether the server waits on sign-in.
+pub fn mcp_status_needs_auth(status: &McpServerDisplayStatus) -> bool {
+    matches!(status, McpServerDisplayStatus::NeedsAuth)
+}
+
 /// [`McpServerDisplayStatus::label`].
 pub fn mcp_status_label(status: &McpServerDisplayStatus) -> &'static str {
     status.label()
@@ -824,6 +845,29 @@ pub fn set_extensions_modal(v: &mut AgentView, val: Option<ExtensionsModalState>
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
     v.question_view = val;
+}
+
+/// Test-only: open a one-text-field form elicitation card from `server_name`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn open_test_elicitation(v: &mut AgentView, server_name: &str, message: &str) {
+    use fuigo_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    v.elicitation_view = Some(ElicitationViewState::from_request(
+        McpElicitExtRequest {
+            session_id: "s".to_owned(),
+            tool_call_id: "mcp-elicit-test".to_owned(),
+            server_name: server_name.to_owned(),
+            message: message.to_owned(),
+            mode: McpElicitModeFields::Form {
+                requested_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "title": { "type": "string", "title": "Ticket title" } },
+                    "required": ["title"]
+                })),
+            },
+        },
+        None,
+        None,
+    ));
 }
 
 /// Test-only setter for `AgentView::plan_mode_active`.

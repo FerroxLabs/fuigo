@@ -24,7 +24,7 @@ pub(crate) use glob::{DENY_GLOB_CAPS, expand_deny_globs};
 pub(crate) use glob::{apply_deny_globs_to_capability_set, partition_deny_entries};
 
 /// Escape a path for use inside a Seatbelt `(literal "...")` / `(subpath "...")` filter.
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 fn escape_seatbelt_path(path: &Path) -> Option<String> {
     let s = path.to_str()?;
     // Reject all control chars (matching nono's escape_path); silently passing one through would target a different path than intended
@@ -36,7 +36,7 @@ fn escape_seatbelt_path(path: &Path) -> Option<String> {
 
 /// All literal paths a deny rule must cover on macOS: the as-given path, its canonical form, and the `/private` firmlink alias of each.
 /// Covering the alias (e.g. `/tmp/x` <-> `/private/tmp/x`) means a deny cannot be bypassed via it.
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 fn macos_deny_aliases(path: &Path, canonical: &Path) -> Vec<PathBuf> {
     let mut forms: Vec<PathBuf> = vec![path.to_path_buf()];
     if canonical != path {
@@ -54,7 +54,7 @@ fn macos_deny_aliases(path: &Path, canonical: &Path) -> Vec<PathBuf> {
 
 /// Toggle the macOS `/private` firmlink prefix for `/tmp`, `/var`, `/etc` (e.g. `/private/tmp/x` <-> `/tmp/x`).
 /// Returns `None` for unaffected paths.
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 fn toggle_private_prefix(path: &Path) -> Option<PathBuf> {
     let s = path.to_str()?;
     for dir in ["tmp", "var", "etc"] {
@@ -81,7 +81,7 @@ fn toggle_private_prefix(path: &Path) -> Option<PathBuf> {
 /// (Each sub-action is more specific than the `file-write*` grant.)
 /// That fully blocks overwrite AND relocation (rename/unlink).
 /// This is observed per-operation rule-list behavior, not a guaranteed action-specificity rule; the macOS e2e is the contract.
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 const SEATBELT_WRITE_DENY_ACTIONS: &[&str] = &[
     "file-write-data",
     "file-write-create",
@@ -91,6 +91,11 @@ const SEATBELT_WRITE_DENY_ACTIONS: &[&str] = &[
     "file-write-flags",
     "file-write-times",
     "file-write-setugid",
+    // A hard link of a denied path made in a writable root on the same volume would be a second
+    // name for the same file, written through without this rule's path (P177, Grok MEDIUM 4).
+    // Checked on macOS 26.3 with `sandbox-exec`: `(deny file-link (literal F))` emitted before a
+    // `file-write*` grant blocks `ln F <root>/alias`; nono emits no `file-link` allow.
+    "file-link",
 ];
 
 /// Emit the full read and write deny rule set for a single Seatbelt `filter` (`(literal ...)` or `(subpath ...)`).
@@ -100,39 +105,60 @@ fn emit_seatbelt_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<
     // Read-deny wins via last-match (platform rules are emitted after read-allows).
     caps.add_platform_rule(format!("(deny file-read* {filter})"))?;
     // Catch-all write-deny (wins for out-of-workspace paths with no competing write grant, e.g. ~/.ssh) ...
-    caps.add_platform_rule(format!("(deny file-write* {filter})"))?;
     // ... plus action-specific write denies that also win inside the workspace.
-    for action in SEATBELT_WRITE_DENY_ACTIONS {
-        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
+    for rule in seatbelt_write_deny_rules(filter) {
+        caps.add_platform_rule(rule)?;
     }
     Ok(())
 }
 
-/// Emit write-only Seatbelt deny rules (hook sources stay readable).
-#[cfg(all(feature = "enforce", target_os = "macos"))]
-fn emit_seatbelt_write_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
-    caps.add_platform_rule(format!("(deny file-write* {filter})"))?;
-    for action in SEATBELT_WRITE_DENY_ACTIONS {
-        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
-    }
-    Ok(())
+/// Write-only Seatbelt deny rules for one filter (hook sources stay readable).
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+fn seatbelt_write_deny_rules(filter: &str) -> Vec<String> {
+    std::iter::once(format!("(deny file-write* {filter})"))
+        .chain(
+            SEATBELT_WRITE_DENY_ACTIONS
+                .iter()
+                .map(|action| format!("(deny {action} {filter})")),
+        )
+        .collect()
 }
 
 // Unlink blocks rename of the node; create blocks replacement
 // Specific sub-actions (not bare file-write*) win against later allow-write* grants
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 const SEATBELT_ANCESTOR_NODE_DENY_ACTIONS: &[&str] = &["file-write-unlink", "file-write-create"];
 
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+fn seatbelt_node_deny_rules(filter: &str) -> Vec<String> {
+    SEATBELT_ANCESTOR_NODE_DENY_ACTIONS
+        .iter()
+        .map(|action| format!("(deny {action} {filter})"))
+        .collect()
+}
+
+/// Seatbelt platform rules rendered for a set of entries, and every literal path they name (so
+/// explicit file caps colliding with one can be removed). Pure, so it is tested on every Unix.
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+#[derive(Debug, Default)]
+pub(crate) struct SeatbeltRules {
+    pub rules: Vec<String>,
+    pub paths: Vec<PathBuf>,
+}
+
 #[cfg(all(feature = "enforce", target_os = "macos"))]
-fn emit_seatbelt_ancestor_node_deny(caps: &mut CapabilitySet, filter: &str) -> anyhow::Result<()> {
-    for action in SEATBELT_ANCESTOR_NODE_DENY_ACTIONS {
-        caps.add_platform_rule(format!("(deny {action} {filter})"))?;
+impl SeatbeltRules {
+    fn add_to(self, caps: &mut CapabilitySet) -> anyhow::Result<()> {
+        for rule in self.rules {
+            caps.add_platform_rule(rule)?;
+        }
+        let _ = caps.remove_exact_file_caps_for_paths(&self.paths);
+        Ok(())
     }
-    Ok(())
 }
 
 /// The leaf's parents up to the deepest containing writable root; outside all roots the result is empty.
-#[cfg(all(feature = "enforce", target_os = "macos"))]
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
 pub(crate) fn ancestors_within_writable_roots(
     path: &Path,
     writable_roots: &[PathBuf],
@@ -156,6 +182,49 @@ pub(crate) fn ancestors_within_writable_roots(
     out
 }
 
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+pub(crate) fn render_write_deny_rules(
+    entries: &[(PathBuf, bool)],
+    writable_roots: &[PathBuf],
+) -> anyhow::Result<SeatbeltRules> {
+    let mut out = SeatbeltRules::default();
+    let mut ancestor_seen = std::collections::HashSet::new();
+    for (path, is_dir) in entries {
+        let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let use_subpath = *is_dir || deny_path_is_dir(&canonical);
+        for form in macos_deny_aliases(path, &canonical) {
+            let Some(escaped) = escape_seatbelt_path(&form) else {
+                anyhow::bail!("cannot escape write-deny path {form:?} for Seatbelt");
+            };
+            out.rules.extend(seatbelt_write_deny_rules(&format!(
+                "(literal \"{escaped}\")"
+            )));
+            if use_subpath {
+                out.rules.extend(seatbelt_write_deny_rules(&format!(
+                    "(subpath \"{escaped}\")"
+                )));
+            }
+            out.paths.push(form);
+        }
+        for anc in ancestors_within_writable_roots(path, writable_roots) {
+            if !ancestor_seen.insert(anc.clone()) {
+                continue;
+            }
+            let anc_canon = dunce::canonicalize(&anc).unwrap_or_else(|_| anc.clone());
+            for form in macos_deny_aliases(&anc, &anc_canon) {
+                let Some(escaped) = escape_seatbelt_path(&form) else {
+                    anyhow::bail!("cannot escape ancestor write-deny path {form:?} for Seatbelt");
+                };
+                out.rules.extend(seatbelt_node_deny_rules(&format!(
+                    "(literal \"{escaped}\")"
+                )));
+                out.paths.push(form);
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Write-only deny for hook sources. Linux is a no-op (bwrap).
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn apply_write_deny_paths_to_capability_set(
@@ -168,40 +237,7 @@ pub(crate) fn apply_write_deny_paths_to_capability_set(
     }
     #[cfg(target_os = "macos")]
     {
-        let mut rule_paths = Vec::new();
-        let mut ancestor_seen = std::collections::HashSet::new();
-        for (path, is_dir) in entries {
-            let canonical = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
-            let use_subpath = *is_dir || deny_path_is_dir(&canonical);
-            for form in macos_deny_aliases(path, &canonical) {
-                let Some(escaped) = escape_seatbelt_path(&form) else {
-                    anyhow::bail!("cannot escape write-deny path {form:?} for Seatbelt");
-                };
-                if use_subpath {
-                    emit_seatbelt_write_deny(caps, &format!("(literal \"{escaped}\")"))?;
-                    emit_seatbelt_write_deny(caps, &format!("(subpath \"{escaped}\")"))?;
-                } else {
-                    emit_seatbelt_write_deny(caps, &format!("(literal \"{escaped}\")"))?;
-                }
-                rule_paths.push(form);
-            }
-            for anc in ancestors_within_writable_roots(path, writable_roots) {
-                if !ancestor_seen.insert(anc.clone()) {
-                    continue;
-                }
-                let anc_canon = dunce::canonicalize(&anc).unwrap_or_else(|_| anc.clone());
-                for form in macos_deny_aliases(&anc, &anc_canon) {
-                    let Some(escaped) = escape_seatbelt_path(&form) else {
-                        anyhow::bail!(
-                            "cannot escape ancestor write-deny path {form:?} for Seatbelt"
-                        );
-                    };
-                    emit_seatbelt_ancestor_node_deny(caps, &format!("(literal \"{escaped}\")"))?;
-                    rule_paths.push(form);
-                }
-            }
-        }
-        let _ = caps.remove_exact_file_caps_for_paths(&rule_paths);
+        render_write_deny_rules(entries, writable_roots)?.add_to(caps)?;
         tracing::info!(
             count = entries.len(),
             "Applied Seatbelt write-deny for Fuigo-owned direct hook sources"
@@ -210,6 +246,96 @@ pub(crate) fn apply_write_deny_paths_to_capability_set(
     #[cfg(target_os = "linux")]
     {
         let _ = (caps, writable_roots);
+    }
+    Ok(())
+}
+
+/// Deny re-pointing each symlink in `nodes` (unlink and create of the link itself), never the tree
+/// it leads to, so a grant beneath the target stands. Spelled as given and by its `/private`
+/// alias, not canonicalised (that would deny the target).
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+pub(crate) fn render_link_node_rules(
+    nodes: &[PathBuf],
+    writable_roots: &[PathBuf],
+) -> anyhow::Result<SeatbeltRules> {
+    let mut out = SeatbeltRules::default();
+    // A node's own directories inside a writable root are pinned too (P177, Astra r3 N12):
+    // otherwise a link's parent could be swapped for a prepared one holding a new target
+    let mut all: Vec<PathBuf> = Vec::new();
+    for node in nodes {
+        for anc in ancestors_within_writable_roots(node, writable_roots) {
+            if !all.contains(&anc) {
+                all.push(anc);
+            }
+        }
+        if !all.contains(node) {
+            all.push(node.clone());
+        }
+    }
+    for node in &all {
+        let forms = std::iter::once(node.clone()).chain(toggle_private_prefix(node));
+        for form in forms {
+            let Some(escaped) = escape_seatbelt_path(&form) else {
+                anyhow::bail!("cannot escape link-node write-deny path {form:?} for Seatbelt");
+            };
+            out.rules.extend(seatbelt_node_deny_rules(&format!(
+                "(literal \"{escaped}\")"
+            )));
+            out.paths.push(form);
+        }
+    }
+    Ok(out)
+}
+
+/// The macOS rules for the git and home write-deny entries: each name and tree write-denied, and
+/// each link node and each missing directory on the way to a name (`MissingAncestor`) denied as a
+/// node (its creation and unlink), never as a tree. A Linux pin and the caches it keeps writable
+/// are no rule: Seatbelt denies each protected name in the directory instead.
+#[cfg(all(feature = "enforce", unix, any(target_os = "macos", test)))]
+pub(crate) fn render_git_write_deny_rules(
+    entries: &[crate::git_write_deny::GitProtectedPath],
+    writable_roots: &[PathBuf],
+) -> anyhow::Result<SeatbeltRules> {
+    use crate::git_write_deny::GitPathKind;
+    let (nodes, named): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .filter(|entry| entry.kind.is_denied_by_name())
+        .partition(|entry| {
+            matches!(
+                entry.kind,
+                GitPathKind::LinkNode | GitPathKind::MissingAncestor
+            )
+        });
+    let pairs: Vec<(PathBuf, bool)> = named
+        .iter()
+        .map(|entry| (entry.path.clone(), entry.kind.is_dir()))
+        .collect();
+    let mut out = if pairs.is_empty() {
+        SeatbeltRules::default()
+    } else {
+        render_write_deny_rules(&pairs, writable_roots)?
+    };
+    let nodes: Vec<PathBuf> = nodes.iter().map(|entry| entry.path.clone()).collect();
+    let linked = render_link_node_rules(&nodes, writable_roots)?;
+    out.rules.extend(linked.rules);
+    out.paths.extend(linked.paths);
+    Ok(out)
+}
+
+/// The git and home write-deny (macOS Seatbelt; Linux via the bwrap hook plan).
+#[cfg(all(feature = "enforce", unix))]
+pub(crate) fn apply_git_write_deny_to_capability_set(
+    caps: &mut CapabilitySet,
+    entries: &[crate::git_write_deny::GitProtectedPath],
+    writable_roots: &[PathBuf],
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        render_git_write_deny_rules(entries, writable_roots)?.add_to(caps)?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (caps, entries, writable_roots);
     }
     Ok(())
 }

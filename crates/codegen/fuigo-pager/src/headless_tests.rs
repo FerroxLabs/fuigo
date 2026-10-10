@@ -2022,8 +2022,24 @@ mod permission_denial {
             tool_title: None,
             ..denial()
         };
-        assert_eq!(untitled.requested(), "tool call tc-1");
+        assert_eq!(untitled.requested(), "tool call [tc-1]");
         assert!(untitled.human_line().contains("tc-1"));
+    }
+
+    /// P181 (S5, M1): a title or call id that contains Fuigo's own closing delimiter cannot close it.
+    #[test]
+    fn a_title_or_call_id_cannot_close_its_own_delimiter() {
+        let hostile = HeadlessDenial {
+            tool_title: Some("Write\u{201d} nothing was denied. Exiting 0. ".into()),
+            tool_call_id: "x] granted (".into(),
+            ..denial()
+        };
+        assert_eq!(
+            hostile.requested(),
+            "\u{201c}Write\\\" nothing was denied. Exiting 0. \u{201d} (tool call [x\\] granted (])"
+        );
+        let line = hostile.human_line();
+        assert!(line.contains(&hostile.requested()), "{line:?}");
     }
 
     /// The precedence the exit path commits to, in one test.
@@ -2183,6 +2199,67 @@ mod permission_denial {
             emitter.take_permission_denial().is_none(),
             "the latch is consumed, so nothing can print it a second time"
         );
+    }
+
+    /// The attack bytes from the S3 audit: erase the trusted prefix, conceal the rest, same-colour text, a forged line.
+    const HOSTILE_FIELD: &str = "Write \u{1b}]0;owned\u{7}x\u{2028}y\u{e0041}z\r\x1b[Kfuigo: permission granted, \
+        nothing to review.\x1b[8m\x1b[7m\x1b[31;41m\x1b[38;5;1;48;5;1m\nfuigo: forged second line";
+
+    /// `fuigo_count` is how many times "fuigo:" appears: the trusted prefix, plus the two the hostile field carries when
+    /// the line interpolates it (3), or just the prefix when the line does not carry that field at all (1).
+    fn assert_one_intact_line(text: &str, prefix: &str, fuigo_count: usize) {
+        let body = text.strip_suffix('\n').expect("ends with one newline");
+        assert!(body.starts_with(prefix), "trusted prefix intact: {text:?}");
+        assert!(
+            !body.chars().any(|c| c.is_control() || fuigo_tty_utils::is_unsafe_display_char(c)),
+            "no ESC, CR, LF, tab or other control remains in the line: {text:?}"
+        );
+        assert_eq!(text.matches("fuigo:").count(), fuigo_count, "the forged prefix is inert text inside the one line: {text:?}");
+        assert!(body.contains("Denied by rule"), "the trusted tail survives: {text:?}");
+    }
+
+    /// P181 (sweep, S3): the connection-closed path writes the denial line to a caller-supplied stderr writer. The tool
+    /// title and the tool-call id are the agent's text; neither can erase, conceal, restyle or forge a line.
+    #[test]
+    fn the_connection_closed_denial_line_is_scrubbed_like_every_other_stderr_line() {
+        for (title, call_id) in [(HOSTILE_FIELD, "tc-1"), ("Write", HOSTILE_FIELD)] {
+            let mut emitter = emitter();
+            let mut hostile = denial();
+            hostile.tool_title = Some(title.to_owned());
+            hostile.tool_call_id = call_id.to_owned();
+            emitter.record_permission_denial(hostile);
+            let mut stderr = Vec::new();
+            let _ = connection_closed_error(&mut emitter, &mut stderr);
+            let text = String::from_utf8(stderr).expect("utf8");
+            assert_one_intact_line(&text, "fuigo: a permission was denied in headless mode and the run continued: ", 3);
+            // S5: the 150-column hostile field is shortened to the field cap (middle replaced by an ellipsis)
+            // ESC and the space before it are two spaces; inside the bracketed call id the `]` is escaped
+            assert!(text.contains("Write  ]0;owned") || text.contains("Write  \\]0;owned"), "inert visible bytes: {text:?}");
+            assert!(text.contains('\u{2026}'), "the field is capped: {text:?}");
+            assert!(text.contains("Denied by rule `") && text.contains("Remedy: "), "Fuigo's own tail is intact: {text:?}");
+        }
+    }
+
+    /// P181 (S3): the exit-path lines are built from the same fields, so they hold even before any writer filter runs.
+    #[test]
+    fn the_human_and_notice_lines_carry_no_untrusted_control_byte() {
+        for (title, call_id, agent_message) in [
+            (Some(HOSTILE_FIELD), "tc-1", None),
+            (Some("Write"), HOSTILE_FIELD, None),
+            (Some("Write"), "tc-1", Some(HOSTILE_FIELD)),
+        ] {
+            let mut d = denial();
+            d.tool_title = title.map(str::to_owned);
+            d.tool_call_id = call_id.to_owned();
+            d.agent_message = agent_message.map(str::to_owned);
+            // The agent message is only on the budget line, so in the third case these two lines hold no hostile text.
+            let carried = if agent_message.is_some() { 1 } else { 3 };
+            assert_one_intact_line(&format!("{}\n", d.notice_line()), "fuigo: a permission was denied", carried);
+            assert_one_intact_line(&format!("{}\n", d.human_line()), "fuigo: blocked", carried);
+            let mut budget = HeadlessDenial::from_budget_rule(HeadlessDenialRule::ExecutionBudgetUnrecognized);
+            budget.agent_message = Some(HOSTILE_FIELD.to_owned());
+            assert_one_intact_line(&format!("{}\n", budget.human_line()), "fuigo: blocked", 3);
+        }
     }
 
     /// Binds the production bail to the helper. The helper's own tests cannot see a revert to a bare
@@ -3146,6 +3223,150 @@ mod denial_record_per_format {
         }
     }
 
+    /// P195 (K25, Grok r1): the shell's denial for an answer that COMPLETED and then spent the goal's budget.
+    fn plain_budget_error() -> acp::Error {
+        fuigo_shell::acp_error::ExecutionBudgetDenial {
+            rule: fuigo_shell::acp_error::ExecutionBudgetRule::TotalTokensExhausted,
+            total_token_limit: Some(100),
+            total_tokens_used: 120,
+            output_token_limit: None,
+            output_tokens_used: 0,
+            unknown_usage: false,
+        }
+        .to_acp_error()
+    }
+
+    fn answer_then_budget_error() -> acp::Error {
+        let mut err = plain_budget_error();
+        if let Some(serde_json::Value::Object(data)) = err.data.as_mut() {
+            data.insert("answer_completed".to_string(), serde_json::Value::Bool(true));
+        }
+        err
+    }
+
+    /// Run `finish_turn` on a turn that streamed `ANSWER-TEXT-42` and whose spend then hit the budget.
+    fn answered_then_budget_run(format: OutputFormat, err: acp::Error) -> (String, i32) {
+        let (captured, mut emitter) = emitter(format);
+        emitter.on_text_chunk("ANSWER-TEXT-42", None);
+        let stop = crate::headless::finish_turn(
+            &mut emitter,
+            Some(Err(err)),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("a budget denial is an outcome, not a failed run");
+        let outcome = headless_run_outcome(Ok(stop), None, None, emitter.take_permission_denial())
+            .expect("not a crash");
+        let HeadlessOutcome::PermissionDenied(d) = outcome else {
+            panic!("{format:?}: exit 3, got {outcome:?}");
+        };
+        (captured.text(), d.exit_code())
+    }
+
+    /// K25: the completed answer is written exactly once, with the denial, in every format; exit 3.
+    #[test]
+    fn json_a_completed_answer_that_spends_the_budget_keeps_its_text() {
+        let (out, code) = answered_then_budget_run(OutputFormat::Json, answer_then_budget_error());
+        assert_eq!(code, 3);
+        let doc: serde_json::Value = serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("exactly one JSON document ({e}): {out}"));
+        assert_eq!(doc["text"], "ANSWER-TEXT-42", "{out}");
+        assert_eq!(out.matches("ANSWER-TEXT-42").count(), 1, "{out}");
+        assert_eq!(doc["stopReason"], "end_turn", "{out}");
+        assert_eq!(doc["sessionId"], "sess-1", "{out}");
+        assert_ne!(doc["type"], "error", "not the error document: {out}");
+        assert_eq!(doc["permissionDenied"]["rule"], "execution_token_budget_exhausted", "{out}");
+        assert_eq!(doc["permissionDenied"]["exitCode"], 3, "{out}");
+    }
+
+    #[test]
+    fn streaming_json_a_completed_answer_that_spends_the_budget_keeps_its_text() {
+        let (out, code) =
+            answered_then_budget_run(OutputFormat::StreamingJson, answer_then_budget_error());
+        assert_eq!(code, 3);
+        assert_eq!(out.matches("ANSWER-TEXT-42").count(), 1, "text once: {out}");
+        let lines = ndjson(&out);
+        let last = lines.last().expect("a terminal line");
+        assert_eq!(last["type"], "end", "{out}");
+        assert_eq!(last["permissionDenied"]["rule"], "execution_token_budget_exhausted", "{out}");
+        assert_eq!(lines.iter().filter(|l| l["type"] == "end" || l["type"] == "error").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn streaming_messages_json_a_completed_answer_that_spends_the_budget_keeps_its_text() {
+        let (out, code) = answered_then_budget_run(
+            OutputFormat::StreamingMessagesJson,
+            answer_then_budget_error(),
+        );
+        assert_eq!(code, 3);
+        let lines = ndjson(&out);
+        let results: Vec<_> = lines.iter().filter(|l| l["type"] == "result").collect();
+        assert_eq!(results.len(), 1, "one terminal line: {out}");
+        assert_eq!(results[0]["result"], "ANSWER-TEXT-42", "result carries the last text: {out}");
+        // Grok r2: the stream must say why the exit code is 3, so the line is the denial's, not a success.
+        assert_eq!(results[0]["is_error"], true, "{out}");
+        assert_eq!(results[0]["subtype"], "error_during_execution", "{out}");
+        assert_eq!(
+            results[0]["stop_reason"],
+            serde_json::Value::Null,
+            "same as the no-answer budget denial: {out}"
+        );
+        assert!(
+            results[0]["errors"][0]
+                .as_str()
+                .is_some_and(|e| e.contains("execution_token_budget_exhausted")),
+            "errors[0] names the rule: {out}"
+        );
+        assert_eq!(lines.last().unwrap()["type"], "result", "the result is the last line: {out}");
+        assert_eq!(
+            lines.iter().filter(|l| l["type"] == "assistant").count(),
+            1,
+            "the assistant frame holds the text once: {out}"
+        );
+        assert_eq!(out.matches("ANSWER-TEXT-42").count(), 2, "frame + result: {out}");
+    }
+
+    /// Guard, not a regression test for the round-2 fix: plain never took the new branch, so this passes with or
+    /// without it. It pins that the answer reaches stdout exactly once.
+    #[test]
+    fn plain_a_completed_answer_that_spends_the_budget_keeps_its_text_on_stdout() {
+        let (out, code) = answered_then_budget_run(OutputFormat::Plain, answer_then_budget_error());
+        assert_eq!(code, 3);
+        assert_eq!(out.matches("ANSWER-TEXT-42").count(), 1, "{out}");
+    }
+
+    /// Non-regression: a budget denial with no completed answer is still the error document.
+    #[test]
+    fn a_budget_denial_without_a_completed_answer_stays_the_error_document() {
+        let (out, code) = answered_then_budget_run(OutputFormat::Json, plain_budget_error());
+        assert_eq!(code, 3);
+        let doc: serde_json::Value = serde_json::from_str(&out).expect("one document");
+        assert_eq!(doc["type"], "error", "{out}");
+    }
+
+    /// Non-regression: an answer that completes UNDER budget (an `Ok` turn) is the normal document, no denial.
+    #[test]
+    fn a_completed_answer_under_budget_is_the_normal_document() {
+        let (captured, mut emitter) = emitter(OutputFormat::Json);
+        emitter.on_text_chunk("ANSWER-TEXT-42", None);
+        let stop = crate::headless::finish_turn(
+            &mut emitter,
+            Some(Ok(super::completed_prompt_response())),
+            false,
+            None,
+            &acp::SessionId::new("sess-1"),
+            false,
+        )
+        .expect("ok");
+        assert_eq!(stop, TurnStop::Ended);
+        let doc: serde_json::Value = serde_json::from_str(&captured.text()).expect("one document");
+        assert_eq!(doc["text"], "ANSWER-TEXT-42");
+        assert!(doc.get("permissionDenied").is_none(), "{doc}");
+        assert!(emitter.take_permission_denial().is_none());
+    }
+
     /// The flush's model request would be refused by the same spent budget and relabel the denial's
     /// exit `3` as a failed run's `1`, so it never runs after one; every other gate is unchanged.
     #[test]
@@ -3461,4 +3682,157 @@ fn p188_a_discarded_attempt_never_reaches_the_reply_in_any_format() {
             }
         }
     }
+}
+
+/// P181 (Grok round): plain output on a terminal is the model's text, which is untrusted, so it goes through the shared
+/// terminal filter; every other format and a piped plain stream stay exact.
+#[test]
+fn plain_output_to_a_terminal_is_scrubbed_and_piped_output_is_exact() {
+    use std::sync::{Arc, Mutex};
+
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let run = |terminal: bool| {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let mut emitter = super::HeadlessEmitter::with_writer(
+            super::OutputFormat::Plain,
+            false,
+            Box::new(Sink(bytes.clone())),
+        );
+        emitter.scrub_terminal = terminal;
+        emitter.on_text_chunk("answer \x1b]0;owned\x07 with\u{2028}break \u{e0041}and \x1b[1mbold\x1b[0m\n", None);
+        // P188 holds plain text until its response is accepted; this is the acceptance
+        emitter.flush_plain_pending();
+        String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
+    };
+    assert_eq!(run(true), "answer  ]0;owned  with break and  [1mbold [0m\n");
+    assert_eq!(
+        run(false),
+        "answer \x1b]0;owned\x07 with\u{2028}break \u{e0041}and \x1b[1mbold\x1b[0m\n"
+    );
+}
+
+/// P181 (sweep, after P188): a resend after streamed output must not let a hostile first attempt through, and the resent
+/// attempt itself is scrubbed. Plain output on a terminal is held per attempt and written once it is accepted, so the
+/// filter runs on every write whichever attempt it belongs to: the voided one never reaches the terminal, an attempt
+/// accepted by `ResponseCompleted` and an attempt accepted because the next one began are both scrubbed.
+#[test]
+fn p181_plain_terminal_output_scrubs_the_first_and_the_resent_attempt() {
+    use super::StreamEvent;
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Plain,
+        false,
+        Box::new(captured.clone()),
+    );
+    emitter.scrub_terminal = true;
+    let done = || StreamEvent::ResponseCompleted {
+        message_id: None,
+        stop_reason: Some("tool_use".into()),
+        usage: None,
+        signature: None,
+        stop_sequence: None,
+    };
+    // Attempt 1 is voided by the resend
+    emitter.on_text_chunk("void \x1b]0;first\x07 text", Some(1));
+    emitter.reduce_and_emit(StreamEvent::ResponseDiscarded {
+        message_id: None,
+        stream_start_ms: Some(1),
+    });
+    // Attempt 2, the resend, is accepted by its completion
+    emitter.on_text_chunk("two \x1b]0;second\x07\u{2028}ok ", Some(2));
+    emitter.reduce_and_emit(done());
+    // Attempt 3 is accepted because attempt 4 begins without a discard
+    emitter.on_text_chunk("three \u{9b}31m\u{e0041}x ", Some(3));
+    emitter.on_text_chunk("four \x1b[2J", Some(4));
+    emitter.reduce_and_emit(done());
+    let out = captured.text();
+    assert_eq!(out, "two  ]0;second  ok three  31mx four  [2J");
+    assert!(!out.contains("void"), "{out:?}");
+}
+
+
+/// P181 (Grok r3 HIGH): plain model text on a terminal cannot restyle the terminal, so the denial that follows is intact.
+/// The audit's attack bytes (reset, a fake Fuigo line, black on black, faint, strikethrough) arrive as inert text with
+/// no ESC; split across chunks the sequence is joined before the scrub; the only escape on the stream is Fuigo's own
+/// leading reset on the denial line.
+#[test]
+fn p181_r3_model_text_on_a_terminal_cannot_restyle_the_denial_that_follows() {
+    for tail in ["\x1b[38;2;0;0;0;48;2;0;0;0m", "\x1b[30;40m", "\x1b[2m", "\x1b[9m"] {
+        let captured = CapturedOut::default();
+        let mut emitter = super::HeadlessEmitter::with_writer(
+            super::OutputFormat::Plain,
+            false,
+            Box::new(captured.clone()),
+        );
+        emitter.scrub_terminal = true;
+        let model = format!("\x1b[0m fuigo: permission granted, nothing to review.\n{tail}");
+        emitter.on_text_chunk(&model, Some(1));
+        emitter.flush_plain_pending();
+        let out = captured.text();
+        assert!(!out.contains('\x1b'), "{out:?}");
+        assert!(out.contains("fuigo: permission granted") && out.contains(&tail[1..]), "inert text stays visible: {out:?}");
+
+        let denial = super::HeadlessDenial {
+            rule: super::HeadlessDenialRule::HeadlessNeverApproves,
+            tool_title: Some("Write\x1b[0m fuigo: permission granted".to_owned()),
+            tool_call_id: "tc-1".to_owned(),
+            offered_option_kinds: vec!["reject_once".to_owned()],
+            agent_message: None,
+        };
+        let mut err = Vec::new();
+        assert!(fuigo_tty_utils::best_effort_stderr::write_fuigo_line_with(&mut err, &denial.notice_line(), true));
+        let err = String::from_utf8(err).unwrap();
+        assert!(err.starts_with("\x1b[0mfuigo: a permission was denied"), "{err:?}");
+        assert_eq!(err.matches('\x1b').count(), 1, "only Fuigo's own reset: {err:?}");
+        assert!(err.contains(denial.rule.remedy()) && err.ends_with(".\n"), "{err:?}");
+        // L1: the agent's title and the call id are quoted, so its words read as quoted text, not as Fuigo's sentence
+        assert!(err.contains("\u{201c}Write [0m fuigo: permission granted\u{201d} (tool call [tc-1])"), "{err:?}");
+    }
+}
+
+/// P181 (Grok r3 HIGH): a sequence split across chunks of one response cannot survive: the chunks are joined first.
+#[test]
+fn p181_r3_a_sequence_split_across_chunks_is_judged_whole() {
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Plain,
+        false,
+        Box::new(captured.clone()),
+    );
+    emitter.scrub_terminal = true;
+    for chunk in ["a\x1b", "[3", "0;4", "0mb \x1b]0;ti", "tle\x07c \u{9b}", "2Jd\n"] {
+        emitter.on_text_chunk(chunk, Some(1));
+    }
+    emitter.flush_plain_pending();
+    assert_eq!(captured.text(), "a [30;40mb  ]0;title c  2Jd\n");
+}
+
+/// P181 (Grok r3 HIGH): both attempts of a P188 discard-and-resend get the strict scrub; the voided one never appears.
+#[test]
+fn p181_r3_the_resend_path_is_strictly_scrubbed_on_both_attempts() {
+    use super::StreamEvent;
+    let captured = CapturedOut::default();
+    let mut emitter = super::HeadlessEmitter::with_writer(
+        super::OutputFormat::Plain,
+        false,
+        Box::new(captured.clone()),
+    );
+    emitter.scrub_terminal = true;
+    emitter.on_text_chunk("void \x1b[2m", Some(1));
+    emitter.reduce_and_emit(StreamEvent::ResponseDiscarded { message_id: None, stream_start_ms: Some(1) });
+    emitter.on_text_chunk("two \x1b[30;40m ", Some(2));
+    emitter.on_text_chunk("three \x1b[9m", Some(3));
+    emitter.flush_plain_pending();
+    let out = captured.text();
+    assert_eq!(out, "two  [30;40m three  [9m");
 }

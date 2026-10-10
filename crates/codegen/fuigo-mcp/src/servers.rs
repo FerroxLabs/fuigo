@@ -1094,6 +1094,8 @@ const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// How long a stdio server gets to exit after its transport closes before its process group is killed.
 const STDIO_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// Bound on writing a dropped call's `notifications/cancelled`, so a child that stopped reading stdin cannot keep the service alive.
+const CANCEL_NOTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 const ANONYMOUS_ACCESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -1867,13 +1869,14 @@ impl McpErasedTool {
             .ensure_initialized()
             .await
             .map_err(|e| fuigo_tool_runtime::ToolError::custom("process_manager", e.to_string()))?;
+        // P194 (U16): `call_tool_cancel_aware` races the deadline itself and sends `notifications/cancelled`
+        // from a bounded task; `CancelOnDrop` does the same when the turn drops this future first.
         let result =
-            tokio::time::timeout(timeout_duration, mcp_service.call_tool_once(params.clone()))
-                .await;
+            call_tool_cancel_aware(&mcp_service, params.clone(), Some(timeout_duration)).await;
 
         match result {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(service_err))
+            Ok(response) => Ok(response),
+            Err(service_err)
                 if should_recover_service_error(
                     &service_err,
                     client.is_http(),
@@ -1892,11 +1895,7 @@ impl McpErasedTool {
                 )
                 .await
             }
-            Ok(Err(e)) => Err(fuigo_tool_runtime::ToolError::custom(
-                "process_manager",
-                e.to_string(),
-            )),
-            Err(_) => {
+            Err(ServiceError::Timeout { .. }) => {
                 *is_timeout = true;
                 // Reset for the next call but don't retry: a slow side-effecting tool must not run twice
                 if client.is_http() && !*reconnect_attempted {
@@ -1911,6 +1910,10 @@ impl McpErasedTool {
                     ),
                 ))
             }
+            Err(e) => Err(fuigo_tool_runtime::ToolError::custom(
+                "process_manager",
+                e.to_string(),
+            )),
         }
     }
 
@@ -2018,13 +2021,9 @@ impl McpErasedTool {
                 ));
             }
         };
-        match tokio::time::timeout(timeout_duration, mcp_service.call_tool_once(params)).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(retry_err)) => Err(fuigo_tool_runtime::ToolError::custom(
-                "process_manager",
-                retry_err.to_string(),
-            )),
-            Err(_) => {
+        match call_tool_cancel_aware(&mcp_service, params, Some(timeout_duration)).await {
+            Ok(response) => Ok(response),
+            Err(ServiceError::Timeout { .. }) => {
                 *is_timeout = true;
                 Err(fuigo_tool_runtime::ToolError::custom(
                     "process_manager",
@@ -2034,7 +2033,100 @@ impl McpErasedTool {
                     ),
                 ))
             }
+            Err(retry_err) => Err(fuigo_tool_runtime::ToolError::custom(
+                "process_manager",
+                retry_err.to_string(),
+            )),
         }
+    }
+}
+
+/// One `tools/call` that sends `notifications/cancelled` when the caller stops waiting for it.
+///
+/// The deadline is raced here, not inside rmcp: rmcp's own timeout awaits the cancel write before it returns, and a
+/// stdio server that stopped reading would hold the call (and the transport mutex) forever. On the deadline this
+/// returns [`ServiceError::Timeout`] at once and sends one `notifications/cancelled` (reason `request timeout`) from
+/// a spawned task bounded by [`CANCEL_NOTIFY_TIMEOUT`]; the stdio writer aborts a cancel write that outlives the same
+/// bound and closes the connection. A `None` timeout waits for the reply with no deadline.
+/// `CancelOnDrop` sends the notification (reason `client cancelled`) when this future is dropped first.
+/// Exactly one is sent per request id: the guard is disarmed before the timeout cancel is spawned.
+pub async fn call_tool_cancel_aware(
+    service: &McpService,
+    params: CallToolRequestParams,
+    timeout: Option<std::time::Duration>,
+) -> Result<rmcp::model::CallToolResponse, ServiceError> {
+    use rmcp::model::{CallToolRequest, CallToolResponse, ClientRequest, ServerResult};
+    use rmcp::service::PeerRequestOptions;
+
+    let handle = service
+        .peer()
+        .send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+            PeerRequestOptions::no_options(),
+        )
+        .await?;
+    let mut guard = CancelOnDrop {
+        service: service.clone(),
+        request_id: Some(handle.id.clone()),
+        reason: "client cancelled",
+    };
+    let response = match timeout {
+        None => handle.await_response().await,
+        Some(limit) => match tokio::time::timeout(limit, handle.await_response()).await {
+            Ok(response) => response,
+            Err(_) => {
+                // Disarm and cancel in one step: no await sits between them, so a drop cannot add a second note.
+                guard.reason = "request timeout";
+                drop(guard);
+                return Err(ServiceError::Timeout { timeout: limit });
+            }
+        },
+    };
+    // Settled either way; a cancel now would be noise.
+    guard.request_id = None;
+    match response? {
+        ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
+        ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
+        ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
+        _ => Err(ServiceError::UnexpectedResponse),
+    }
+}
+
+/// Sends `notifications/cancelled` for an in-flight request when its future is dropped before
+/// the reply arrived. Disarmed (`request_id = None`) once the request settles. Holds the service
+/// so a last-owner drop cannot end the rmcp loop before the notification is written.
+struct CancelOnDrop {
+    service: McpService,
+    request_id: Option<rmcp::model::RequestId>,
+    reason: &'static str,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        // Drop is synchronous; the notification goes out from a spawned task.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!(
+                ?request_id,
+                "MCP call dropped outside a runtime; cancel not sent"
+            );
+            return;
+        };
+        let service = self.service.clone();
+        let reason = self.reason;
+        runtime.spawn(async move {
+            let params = rmcp::model::CancelledNotificationParam::new(
+                Some(request_id.clone()),
+                Some(reason.to_owned()),
+            );
+            let sent =
+                tokio::time::timeout(CANCEL_NOTIFY_TIMEOUT, service.notify_cancelled(params)).await;
+            if !matches!(sent, Ok(Ok(()))) {
+                tracing::debug!(?request_id, ?sent, "notifications/cancelled not delivered");
+            }
+        });
     }
 }
 
@@ -2419,6 +2511,9 @@ where
     /// `Arc<Mutex<Option<…>>>` so `send` can return a `Send + 'static` future (the `Transport` contract) without borrowing `self`.
     /// It also lets `close` drop the writer; mirrors rmcp's own `AsyncRwTransport`.
     write: Arc<Mutex<Option<W>>>,
+    /// Set when a `notifications/cancelled` write did not finish within [`CANCEL_NOTIFY_TIMEOUT`]: the server has
+    /// stopped reading its stdin, and a half-written line may be on the wire. The connection is then closed.
+    broken: Arc<std::sync::atomic::AtomicBool>,
     server_name: String,
     event_writer: fuigo_session_events::EventWriter,
 }
@@ -2450,6 +2545,7 @@ where
         Self {
             read: BufReader::new(read),
             write: Arc::new(Mutex::new(Some(write))),
+            broken: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             server_name,
             event_writer,
         }
@@ -2492,19 +2588,58 @@ where
         item: TxJsonRpcMessage<RoleClient>,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let lock = self.write.clone();
+        let broken = self.broken.clone();
+        // P194 r2 (U16): rmcp offers no way to abort an in-flight notification write (its serve loop keeps the send
+        // task in a private `JoinSet`, rmcp 3.2.0 `service.rs:1527-1533`), so the bound lives here, in the writer.
+        let is_cancel = matches!(
+            &item,
+            rmcp::model::JsonRpcMessage::Notification(n)
+                if matches!(n.notification, rmcp::model::ClientNotification::CancelledNotification(_))
+        );
         async move {
+            use std::sync::atomic::Ordering;
+            let closed = || {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "MCP server stopped reading its stdin; connection closed",
+                )
+            };
+            if broken.load(Ordering::Acquire) {
+                return Err(closed());
+            }
             let mut bytes = serde_json::to_vec(&item).map_err(std::io::Error::other)?;
             bytes.push(b'\n');
-            let mut guard = lock.lock().await;
-            match guard.as_mut() {
-                Some(write) => {
-                    write.write_all(&bytes).await?;
-                    write.flush().await
+            let write_line = async {
+                let mut guard = lock.lock().await;
+                if broken.load(Ordering::Acquire) {
+                    drop(guard.take());
+                    return Err(closed());
                 }
-                None => Err(std::io::Error::new(
-                    std::io::ErrorKind::NotConnected,
-                    "transport is closed",
-                )),
+                match guard.as_mut() {
+                    Some(write) => {
+                        write.write_all(&bytes).await?;
+                        write.flush().await
+                    }
+                    None => Err(std::io::Error::new(
+                        std::io::ErrorKind::NotConnected,
+                        "transport is closed",
+                    )),
+                }
+            };
+            if !is_cancel {
+                return write_line.await;
+            }
+            match tokio::time::timeout(CANCEL_NOTIFY_TIMEOUT, write_line).await {
+                Ok(result) => result,
+                Err(_) => {
+                    // The aborted write released the mutex. Close the writer (the server sees EOF) so later
+                    // sends fail at once instead of queueing behind a pipe nobody reads.
+                    broken.store(true, Ordering::Release);
+                    if let Ok(mut guard) = lock.try_lock() {
+                        drop(guard.take());
+                    }
+                    Err(closed())
+                }
             }
         }
     }
@@ -5714,10 +5849,7 @@ fn client_safe_reason(raw: &str, trusted: Option<&str>) -> String {
 /// Keep a reason shown to a client to one readable line of bounded length.
 fn bounded_reason(text: &str) -> String {
     const MAX: usize = 600;
-    let flat: String = text
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
+    let flat = fuigo_tty_utils::scrub_unsafe_display(text, Some(' '));
     let flat = flat.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= MAX {
         flat
@@ -6040,3 +6172,11 @@ mod p133_tests;
 #[cfg(test)]
 #[path = "servers_p91_tests.rs"]
 mod p91_tests;
+
+#[cfg(test)]
+#[path = "servers_p194_tests.rs"]
+mod p194_tests;
+
+#[cfg(test)]
+#[path = "servers_p181_tests.rs"]
+mod p181_tests;

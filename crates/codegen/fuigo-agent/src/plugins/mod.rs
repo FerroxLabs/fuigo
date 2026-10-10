@@ -16,8 +16,8 @@ pub mod registry;
 pub mod trust;
 
 pub use discovery::{
-    DiscoveredPlugin, PluginOrigin, PluginScope, discover_plugins, project_plugin_dirs,
-    project_plugin_dirs_in,
+    DiscoveredPlugin, PluginOrigin, PluginScope, PluginSourceRestriction, discover_plugins,
+    project_plugin_dirs, project_plugin_dirs_in,
 };
 pub use hooks_adapter::parse_plugin_hooks;
 pub use install_registry::InstallRegistry;

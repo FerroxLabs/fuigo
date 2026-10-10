@@ -98,6 +98,102 @@ pub(crate) struct InstructionFile {
     pub compatibility_status: Option<CompatEntryStatus>,
 }
 
+/// One managed policy row (P169): what a policy source enforces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PolicyRow {
+    /// Stable `--json` key: `mcpServers`, `marketplaces`, `projectMcp`, `managedHooksOnly` or `allowedModels`.
+    pub kind: &'static str,
+    /// The policy file (or MDM source) that enforces it.
+    pub source: String,
+    pub detail: String,
+}
+
+/// The managed policy rows for `ms`: every restricting MCP and marketplace source, then the pins.
+pub(crate) fn managed_policy_rows(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+) -> Vec<PolicyRow> {
+    let path_of = |p: Option<&Path>| {
+        p.map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".to_string())
+    };
+    let mut rows = Vec::new();
+    for source in ms.mcp_allowlist.sources.iter().filter(|s| s.is_restricted()) {
+        let detail = if source.is_lockdown() {
+            "lockdown: every MCP server blocked".to_string()
+        } else {
+            let mut parts = vec![
+                format!("allow {}", source.entries.len()),
+                format!("deny {}", source.deny_entries.len()),
+            ];
+            if source.managed_only() {
+                parts.push("managed servers only".to_string());
+            }
+            parts.join(", ")
+        };
+        rows.push(PolicyRow {
+            kind: "mcpServers",
+            source: path_of(source.source_path.as_deref()),
+            detail,
+        });
+    }
+    for source in &ms.marketplace_allowlist.sources {
+        let detail = if source.allowed_urls.is_empty() {
+            "lockdown: every marketplace blocked".to_string()
+        } else {
+            format!("allow {} marketplace source(s)", source.allowed_urls.len())
+        };
+        rows.push(PolicyRow {
+            kind: "marketplaces",
+            source: path_of(source.source_path.as_deref()),
+            detail,
+        });
+    }
+    if let Some(p) = ms.project_mcp.source() {
+        rows.push(PolicyRow {
+            kind: "projectMcp",
+            source: path_of(Some(p)),
+            detail: "project MCP servers blocked unless allowed (enable_all_project_mcp_servers = false)"
+                .to_string(),
+        });
+    }
+    if let Some(p) = ms.non_managed_hooks.source() {
+        rows.push(PolicyRow {
+            kind: "managedHooksOnly",
+            source: path_of(Some(p)),
+            detail: "only managed hooks run (allow_managed_hooks_only = true)".to_string(),
+        });
+    }
+    rows
+}
+
+/// The `[models] allowed_models` pin row (S16), read from the on-disk config clamped by policy.
+fn allowed_models_policy_row() -> Option<PolicyRow> {
+    let cfg = crate::config::load_agent_config_disk_only().ok()?;
+    allowed_models_row(&cfg)
+}
+
+pub(crate) fn allowed_models_row(cfg: &crate::agent::config::Config) -> Option<PolicyRow> {
+    use crate::agent::config::AllowlistPin;
+    let pin = cfg.requirements.allowed_models.pin_ref()?;
+    let source = cfg
+        .requirements
+        .allowed_models
+        .source()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let detail = match pin {
+        AllowlistPin::List(list) if list.is_empty() => "allowed models: unrestricted".to_string(),
+        AllowlistPin::List(list) => format!("allowed models: {}", list.join(", ")),
+        AllowlistPin::FailClosed => "invalid or unreadable: no model is selectable".to_string(),
+    };
+    Some(PolicyRow {
+        kind: "allowedModels",
+        source,
+        detail,
+    })
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PermissionsReport {
@@ -106,6 +202,9 @@ pub(crate) struct PermissionsReport {
     pub skipped: Vec<SkippedRule>,
     pub mcp_server_allowlist: Vec<String>,
     pub marketplace_allowlist: Vec<String>,
+    /// Managed MCP, marketplace, hooks and model policy, one row per enforcing source (P169).
+    /// Always emitted so "no policy" is distinguishable from an old binary.
+    pub policy_rows: Vec<PolicyRow>,
     /// Platform path for managed-settings.json vendor policy (None on unsupported OS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed_settings_path: Option<String>,
@@ -298,7 +397,7 @@ pub(crate) struct ConfigLayer {
 
 pub async fn inspect(cwd: &Path, json: bool) -> anyhow::Result<()> {
     let report = build_report(cwd).await;
-    write_inspect(&report, json, &mut std::io::stdout().lock())
+    write_inspect(&report, json, &mut fuigo_tty_utils::best_effort_stdout::display_stdout())
 }
 
 /// A closed stdout (`fuigo inspect | head`) is a clean stop.
@@ -341,11 +440,11 @@ async fn build_report(cwd: &Path) -> InspectReport {
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
 
     let trust_store = fuigo_agent::plugins::TrustStore::load();
-    let mut plugins_cfg: crate::agent::config::PluginsConfig = effective_config
-        .get("plugins")
-        .and_then(|v| v.clone().try_into().ok())
-        .unwrap_or_default();
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
+    // Warnings come from the user-level parse; the config itself is built exactly as the session builds it, so a plugin disabled
+    // only in a project `.fuigo/config.toml` is disabled here too (its `disabled` list applies whatever the folder trust; its `paths` need trust)
+    let (_, plugin_config_warnings) =
+        crate::agent::config::PluginsConfig::from_config_lenient(&effective_config);
+    let plugins_cfg = crate::config::resolve_effective_plugins_config(cwd);
     let mut plugin_config = plugins_cfg.to_discovery_config();
     // Project plugins gate on the same folder-trust verdict as hooks and the live session/doctor sites
     // The listing's `enabled` flags therefore match runtime gating
@@ -386,25 +485,43 @@ async fn build_report(cwd: &Path) -> InspectReport {
             vendor_compat_status(&entry.vendor, "skills", &external_compat);
         entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
     }
-    let mut hooks = list_hooks(git_root.as_deref(), project_trusted, &discovered_plugins);
+    // Hooks and LSP rows list only the plugins the loader activates (enabled AND trusted), the same set the plugin rows mark enabled
+    let active_plugins: Vec<fuigo_agent::plugins::DiscoveredPlugin> = {
+        let active = plugin_registry.active_plugins();
+        discovered_plugins
+            .iter()
+            .filter(|p| active.iter().any(|a| a.id == p.id && a.root == p.root))
+            .cloned()
+            .collect()
+    };
+    let mut hooks = list_hooks(git_root.as_deref(), project_trusted, &active_plugins);
     for entry in &mut hooks {
         entry.compatibility_status = vendor_compat_status(&entry.vendor, "hooks", &external_compat);
         entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
     }
     let agents = list_agents(cwd, &plugin_registry);
-    let plugins = list_plugins(&discovered_plugins);
+    let plugins = list_plugins(&discovered_plugins, &plugin_registry);
     let marketplaces = list_marketplaces(git_root.as_deref());
     let mut mcp = list_mcp_servers(cwd, &plugin_registry);
     for entry in &mut mcp {
         entry.compatibility_status = vendor_compat_status(&entry.vendor, "mcps", &external_compat);
         entry.disabled |= entry.compatibility_status == Some(CompatEntryStatus::Disabled);
     }
-    let lsp = list_lsp_servers(cwd, &discovered_plugins);
+    let lsp = list_lsp_servers(cwd, &active_plugins);
     let configs = list_config_sources(cwd);
     let mut config_warnings = parsed_config
         .as_ref()
         .map(|c| c.config_warnings.clone())
         .unwrap_or_default();
+    for reason in plugin_config_warnings {
+        config_warnings.push(
+            crate::agent::config_model_override_parse::ConfigWarning::config_key(
+                "plugins".to_owned(),
+                crate::agent::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                reason,
+            ),
+        );
+    }
     if let Some(error) = config_parse_error {
         config_warnings.push(
             crate::agent::config_model_override_parse::ConfigWarning::config_key(
@@ -589,21 +706,24 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
     let format_entry = |e: &resolution::AllowedMcpServer| match e {
         resolution::AllowedMcpServer::Http { url_pattern } => url_pattern.clone(),
         resolution::AllowedMcpServer::Stdio { command } => format!("command:{command}"),
+        resolution::AllowedMcpServer::StdioArgv { argv } => {
+            format!("serverCommand:{}", argv.join(" "))
+        }
         resolution::AllowedMcpServer::Name { name } => format!("name:{name}"),
     };
     let mcp_server_allowlist: Vec<String> = ms
         .mcp_allowlist
-        .entries
-        .iter()
+        .allow_entries()
         .map(format_entry)
         .chain(
             ms.mcp_allowlist
-                .deny_entries
-                .iter()
+                .deny_entries()
                 .map(|e| format!("deny:{}", format_entry(e))),
         )
         .collect();
-    let marketplace_allowlist = ms.marketplace_allowlist.allowed_urls.clone();
+    let marketplace_allowlist = ms.marketplace_allowlist.allowed_urls();
+    let mut policy_rows = managed_policy_rows(ms);
+    policy_rows.extend(allowed_models_policy_row());
 
     // Independent of the rule resolver: a managed-settings.json containing only
     // e.g. disableBypassPermissionsMode still surfaces its path and effects.
@@ -649,6 +769,7 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
         skipped,
         mcp_server_allowlist,
         marketplace_allowlist,
+        policy_rows,
         managed_settings_path,
         managed_settings_exists,
         managed_settings_active,
@@ -918,7 +1039,12 @@ fn list_agents(
 }
 
 /// Maps pre-discovered plugins (from `discover_plugins`) to inspect entries.
-fn list_plugins(discovered: &[fuigo_agent::plugins::DiscoveredPlugin]) -> Vec<PluginEntry> {
+/// `enabled` is the loader's own verdict (`PluginRegistry::active_plugins`: enabled by config AND trusted), not trust alone.
+fn list_plugins(
+    discovered: &[fuigo_agent::plugins::DiscoveredPlugin],
+    registry: &fuigo_agent::plugins::PluginRegistry,
+) -> Vec<PluginEntry> {
+    let active = registry.active_plugins();
     discovered
         .iter()
         .map(|p| {
@@ -932,7 +1058,7 @@ fn list_plugins(discovered: &[fuigo_agent::plugins::DiscoveredPlugin]) -> Vec<Pl
                 name: p.manifest.name.clone(),
                 scope,
                 path: p.root.display().to_string(),
-                enabled: p.trusted,
+                enabled: active.iter().any(|a| a.id == p.id && a.root == p.root),
                 provides: PluginProvides {
                     // Count the SKILL.md files discovered (root-level or in subdirs), not the number of configured skill dirs
                     // The reported count then matches what the skills registry loads
@@ -974,7 +1100,13 @@ fn list_mcp_servers(
         Some(plugin_registry),
         &all_on,
     );
-    let allowlist = &resolution::managed_settings().mcp_allowlist;
+    let ms = resolution::managed_settings();
+    let allowlist = &ms.mcp_allowlist;
+    let project_declared: std::collections::HashSet<String> = if ms.project_mcp.is_disabled() {
+        crate::agent::folder_trust::project_scoped_mcp_names(cwd)
+    } else {
+        std::collections::HashSet::new()
+    };
 
     sourced
         .into_iter()
@@ -993,12 +1125,14 @@ fn list_mcp_servers(
                     // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
                     _ => ("unknown".to_string(), "unknown", String::new()),
                 };
-            let disabled_reason = (!allowlist.is_server_allowed(&server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
-                    allowlist, &server,
-                )
-                .to_string()
-            });
+            let disabled_reason = crate::session::managed_mcp::mcp_block_reason(allowlist, &server)
+                .or_else(|| {
+                    project_declared
+                        .contains(&name)
+                        .then(|| ms.mcp_project_pin_block(&server))
+                        .flatten()
+                })
+                .map(|reason| reason.to_string());
             let vendor = match &source {
                 ConfigSource::ClaudeJson { .. } => Some("claude".to_owned()),
                 ConfigSource::McpJson { path } => {
@@ -1232,17 +1366,45 @@ fn describe_config_file(path: &Path) -> Option<(String, Option<String>)> {
 }
 
 /// Classify a requirements file against the real loader.
-/// `load_config_file` catches syntax errors and invalid `[[version_overrides]]` (the loader rejects the latter too), so those read "(parse error)".
-/// Contribution then comes from `requirements_layers()` via `requirements_layer_contributes`.
+/// P183: the note says what was kept and what was refused, instead of lumping both failures under "parse error":
+/// - not TOML at all (or unreadable): `not loaded: <redacted error>; no pins from this file`;
+/// - a bad `[[version_overrides]]`: `version_overrides refused (<redacted error>); base pins kept` (or `no base pins in force`
+///   when the loader kept nothing from the layer).
+/// An admin-owned layer in either state refuses to start (`validate_requirements`), so inspect only meets these on the user layer.
+/// Contribution comes from `requirements_layers()` via `requirements_layer_contributes`.
 fn describe_requirements_file(path: &Path) -> Option<(String, Option<String>)> {
-    if !path.exists() {
+    // P183 round 4: `symlink_metadata`, not `exists`, so a dangling symlink is listed; it is classified by startup's reader
+    if std::fs::symlink_metadata(path).is_err() {
         return None;
     }
     let path_s = path.display().to_string();
-    if crate::config::load_config_file(path).is_err() {
-        return Some((path_s, Some("parse error".to_string())));
+    let not_loaded = |e: &dyn std::fmt::Display| {
+        Some((
+            path_s.clone(),
+            Some(format!("not loaded: {e}; no pins from this file")),
+        ))
+    };
+    if let Some(e) = fuigo_config::requirements_file_load_error(path) {
+        return not_loaded(&e);
     }
-    if requirements_layer_contributes(&crate::config::requirements_layers(), &path_s) {
+    let raw = match crate::config::load_toml_file(path) {
+        Ok(v) => v,
+        Err(e) => return not_loaded(&e),
+    };
+    let contributes =
+        requirements_layer_contributes(&crate::config::requirements_layers(), &path_s);
+    if let Err(e) = fuigo_config::apply_version_overrides_with_registered(&mut raw.clone()) {
+        let kept = if contributes {
+            "base pins kept"
+        } else {
+            "no base pins in force"
+        };
+        return Some((
+            path_s,
+            Some(format!("version_overrides refused ({e}); {kept}")),
+        ));
+    }
+    if contributes {
         Some((path_s, None))
     } else {
         Some((path_s, Some("empty".to_string())))
@@ -1260,6 +1422,40 @@ fn requirements_layer_contributes(
     })
 }
 
+/// One cell of the human report. Every string in the report comes from the file system, config, a plugin or an MCP
+/// server (a path component, a skill or server name, a reason), so a cell is scrubbed strictly (`scrub_unsafe_display`,
+/// every row break a space) before it joins Fuigo's own text: no escape, CR, LF or tab can reach the terminal from it.
+fn cell(text: &str) -> String {
+    cell_within(text, ROW_MAX_COLUMNS)
+}
+
+/// [`cell`] with its own width: scrubbed (combining marks capped), then shortened in the middle to `max` columns.
+fn cell_within(text: &str, max: usize) -> String {
+    let clean = fuigo_tty_utils::scrub_unsafe_display(text, Some(' '));
+    fuigo_tty_utils::cap_display_middle(&clean, max).into_owned()
+}
+
+/// Longest value, in terminal columns, a path-like or name-like field of the report shows.
+const FIELD_MAX_COLUMNS: usize = 60;
+
+/// Widest composed row text (a section item, or a name plus its label) the report shows, in terminal columns: with the
+/// 4-column `  └ ` prefix a row stays inside 80 columns. Column names are capped at 30 and labels at 40.
+const ROW_MAX_COLUMNS: usize = 72;
+const NAME_MAX_COLUMNS: usize = 30;
+const LABEL_MAX_COLUMNS: usize = 40;
+
+/// Every untrusted field of the human report goes through this: scrubbed like `Untrusted`, then capped to
+/// [`FIELD_MAX_COLUMNS`] columns (conservative width, middle replaced by U+2026).
+fn untrusted(value: impl std::fmt::Display) -> String {
+    fuigo_tty_utils::capped(value, FIELD_MAX_COLUMNS)
+}
+
+/// A path-like or name-like field of the human report: scrubbed, shortened in the middle to [`FIELD_MAX_COLUMNS`], and
+/// quoted, so a long or space-padded value cannot wrap into what looks like a row of its own and its edges are visible.
+fn q(value: impl std::fmt::Display) -> String {
+    fuigo_tty_utils::quoted(value, FIELD_MAX_COLUMNS)
+}
+
 fn print_section<T>(
     out: &mut impl Write,
     title: &str,
@@ -1272,7 +1468,7 @@ fn print_section<T>(
         writeln!(out, "  {TREE} (none)")?;
     }
     for item in items {
-        writeln!(out, "  {TREE} {}", format_item(item))?;
+        writeln!(out, "  {TREE} {}", cell(&format_item(item)))?;
     }
     Ok(())
 }
@@ -1291,10 +1487,11 @@ fn print_columns<T>(
         writeln!(out, "  {TREE} (none)")?;
         return Ok(());
     }
-    let names: Vec<String> = items.iter().map(&name).collect();
-    let pad = names.iter().map(String::len).max().unwrap_or(0).min(50);
+    let names: Vec<String> = items.iter().map(|i| cell_within(&name(i), NAME_MAX_COLUMNS)).collect();
+    let pad = names.iter().map(|n| fuigo_tty_utils::display_width(n)).max().unwrap_or(0).min(NAME_MAX_COLUMNS);
     for (item, n) in items.iter().zip(&names) {
-        writeln!(out, "  {TREE} {:<pad$}  {}", n, label(item))?;
+        let fill = " ".repeat(pad.saturating_sub(fuigo_tty_utils::display_width(n)));
+        writeln!(out, "  {TREE} {n}{fill}  {}", cell_within(&label(item), LABEL_MAX_COLUMNS))?;
     }
     Ok(())
 }
@@ -1354,12 +1551,12 @@ fn render_config_warnings(
     let mut out = String::from("\n  Config Warnings\n");
     let _ = writeln!(out, "  {TREE} {} warning(s)", warnings.len());
     for w in warnings {
-        let field = w.field().map(|f| format!(" {f}")).unwrap_or_default();
+        let field = w.field().map(|f| format!(" {}", untrusted(f))).unwrap_or_default();
         let _ = writeln!(
             out,
             "    {TREE} [{}]{field} — {}",
-            w.target.label(),
-            w.reason
+            untrusted(w.target.label()),
+            untrusted(&w.reason)
         );
     }
     out
@@ -1379,7 +1576,7 @@ fn render_mcp_config_problems(problems: &[crate::util::config::McpServerConfigPr
             McpServerProblemSeverity::Error => "error",
             McpServerProblemSeverity::Warning => "warning",
         };
-        let _ = writeln!(out, "    {TREE} [{severity}] {}", p.message);
+        let _ = writeln!(out, "    {TREE} [{severity}] {}", untrusted(&p.message));
     }
     out
 }
@@ -1392,26 +1589,27 @@ fn render_harness_compatibility(report: &ExternalCompatReport) -> String {
     for cell in &report.cells {
         if cell.vendor != current_vendor {
             current_vendor = &cell.vendor;
-            let _ = writeln!(out, "  {TREE} {current_vendor}");
+            let _ = writeln!(out, "  {TREE} {}", untrusted(current_vendor));
         }
         let status = if cell.enabled { "on" } else { "OFF" };
         let _ = writeln!(
             out,
             "    {TREE} {:<10} {:<3}  ({})",
-            cell.surface, status, cell.source
+            untrusted(&cell.surface).to_string(), status, untrusted(cell.source)
         );
     }
     out.push('\n');
     out
 }
 
+
 fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(out)?;
     writeln!(out, "  Environment")?;
-    writeln!(out, "  {TREE} Version: {} [{}]", r.fuigo_version, r.channel)?;
-    writeln!(out, "  {TREE} CWD: {}", r.cwd)?;
+    writeln!(out, "  {TREE} Version: {} {}", untrusted(&r.fuigo_version), fuigo_tty_utils::bracketed(&r.channel, FIELD_MAX_COLUMNS))?;
+    writeln!(out, "  {TREE} CWD: {}", q(&r.cwd))?;
     if let Some(ref root) = r.project_root {
-        writeln!(out, "  {TREE} Git root: {}", root)?;
+        writeln!(out, "  {TREE} Git root: {}", q(root))?;
     }
     writeln!(
         out,
@@ -1441,13 +1639,13 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
         } else {
             "not loaded"
         };
-        writeln!(out, "  {TREE} Managed settings: {p} ({status})")?;
+        writeln!(out, "  {TREE} Managed settings: {} ({status})", q(p))?;
     }
     if r.permissions.sources.is_empty() {
         writeln!(out, "  {TREE} Source: (none)")?;
     } else {
         for src in &r.permissions.sources {
-            writeln!(out, "  {TREE} Source: {src}")?;
+            writeln!(out, "  {TREE} Source: {}", q(src))?;
         }
     }
     writeln!(
@@ -1457,16 +1655,22 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
         r.permissions.skipped.len()
     )?;
     for s in &r.permissions.skipped {
-        writeln!(out, "    {TREE} {} -- {}", s.rule, s.reason)?;
+        writeln!(out, "    {TREE} {} -- {}", q(&s.rule), untrusted(&s.reason))?;
     }
     if !r.permissions.enforced.is_empty() {
         writeln!(out, "  {TREE} Enforced by policy")?;
         for e in &r.permissions.enforced {
-            writeln!(out, "    {TREE} {} ({})", enforced_label(e), e.source)?;
+            writeln!(out, "    {TREE} {} ({})", enforced_label(e), q(&e.source))?;
         }
     }
     if let Some(msg) = claude_bypass_advisory_message(&r.permissions) {
         writeln!(out, "  {TREE} {msg}")?;
+    }
+    if !r.permissions.policy_rows.is_empty() {
+        writeln!(out, "  {TREE} Managed policy")?;
+        for row in &r.permissions.policy_rows {
+            writeln!(out, "    {TREE} {}: {} ({})", row.kind, row.detail, row.source)?;
+        }
     }
     if !r.permissions.mcp_server_allowlist.is_empty() {
         writeln!(
@@ -1475,7 +1679,7 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             r.permissions.mcp_server_allowlist.len()
         )?;
         for pat in &r.permissions.mcp_server_allowlist {
-            writeln!(out, "    {TREE} {}", pat)?;
+            writeln!(out, "    {TREE} {}", untrusted(pat))?;
         }
     }
     if !r.permissions.marketplace_allowlist.is_empty() {
@@ -1485,7 +1689,7 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             r.permissions.marketplace_allowlist.len()
         )?;
         for url in &r.permissions.marketplace_allowlist {
-            writeln!(out, "    {TREE} {}", url)?;
+            writeln!(out, "    {TREE} {}", q(url))?;
         }
     }
 
@@ -1502,7 +1706,7 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
     writeln!(
         out,
         "  {TREE} force_login_team_uuid: {}",
-        format_force_login_team(&r.login_policy.force_login_team_uuid)
+        untrusted(format_force_login_team(&r.login_policy.force_login_team_uuid))
     )?;
     writeln!(
         out,
@@ -1652,7 +1856,7 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             Some("parse error") => " (parse error)",
             _ => "",
         };
-        writeln!(out, "  {TREE} User: {}{}", user_l.path, tag)?;
+        writeln!(out, "  {TREE} User: {}{}", q(&user_l.path), tag)?;
     } else {
         writeln!(out, "  {TREE} User: (none)")?;
     }
@@ -1661,9 +1865,11 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             continue;
         }
         let tag = match layer.note.as_deref() {
-            Some("empty") => " (empty)",
-            Some("parse error") => " (parse error)",
-            _ => "",
+            Some("empty") => " (empty)".to_string(),
+            Some("parse error") => " (parse error)".to_string(),
+            // P183: a requirements layer's note says what was kept and what was refused
+            Some(note) if layer.role.ends_with("requirements") => format!(" ({note})"),
+            _ => String::new(),
         };
         let label = match layer.role.as_str() {
             "system-managed" => "System Managed",
@@ -1674,7 +1880,7 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             "project" => "Project",
             other => other,
         };
-        writeln!(out, "  {TREE} {}: {}{}", label, layer.path, tag)?;
+        writeln!(out, "  {TREE} {}: {}{}", untrusted(label), q(&layer.path), tag)?;
     }
     if !r.config_sources.layers.iter().any(|l| l.role == "project") {
         writeln!(out, "  {TREE} Project: (none)")?;
@@ -1944,16 +2150,74 @@ mod tests {
     // group. (`FUIGO_TEST_VERSION` deliberately does NOT join `PROCESS_ANCHORS`: twelve tests
     // hold a `FUIGO_HOME` guard and a `FUIGO_TEST_VERSION` guard at the same time, and the
     // anchor lock is one lock for all anchors, so that would deadlock them.)
+    // P183: the loader now matches overrides against `fuigo_config::policy_semver`, which falls back to the
+    // compiled version on a non-semver pin, so that silent strip is gone; the guard and serial group stay as belt and braces.
     #[serial_test::serial]
-    fn describe_requirements_file_flags_invalid_version_overrides_as_parse_error() {
-        // Valid TOML but invalid `[[version_overrides]]` is rejected by the real loader, so it must read "parse error", not "empty"
-        let _version =
-            fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "1.0.0");
+    fn describe_requirements_file_flags_invalid_version_overrides_as_refused() {
+        // Valid TOML but invalid `[[version_overrides]]` is rejected by the real loader, so it must say so, not read "empty"
+        // (P183: as "version_overrides refused (...)", no longer the catch-all "parse error")
+        let _version = fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "1.0.0");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("requirements.toml");
         std::fs::write(&path, "[[version_overrides]]\nminimum_version = \"nope\"\n").unwrap();
         let (_, note) = describe_requirements_file(&path).unwrap();
-        assert_eq!(note.as_deref(), Some("parse error"));
+        let note = note.unwrap();
+        assert!(note.starts_with("version_overrides refused ("), "{note}");
+    }
+
+    /// P183 round 4 (Grok M5): a dangling user requirements symlink is shown as not loaded, not omitted.
+    #[cfg(unix)]
+    #[test]
+    fn describe_requirements_file_shows_dangling_symlink_p183r4() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("requirements.toml");
+        std::os::unix::fs::symlink(dir.path().join("gone.toml"), &path).unwrap();
+        let (_, note) =
+            describe_requirements_file(&path).expect("a dangling symlink must be listed");
+        let note = note.unwrap();
+        assert!(
+            note.starts_with("not loaded: ") && note.contains("symlink"),
+            "{note}"
+        );
+    }
+
+    /// P183: a requirements file is described by what was kept and what was refused, not lumped under "parse error".
+    #[test]
+    #[serial_test::serial]
+    fn describe_requirements_file_shows_kept_and_refused_p183() {
+        let _version = fuigo_test_support::EnvGuard::set(fuigo_version::TEST_VERSION_ENV, "1.0.0");
+        let dir = tempfile::tempdir().unwrap();
+
+        // Not TOML at all: nothing from the file is in force, and the note says why (with the redacted location).
+        let broken = dir.path().join("broken").join("requirements.toml");
+        std::fs::create_dir_all(broken.parent().unwrap()).unwrap();
+        std::fs::write(&broken, "[ui\nyolo = false\n").unwrap();
+        let (_, note) = describe_requirements_file(&broken).unwrap();
+        let note = note.expect("an unparseable file must carry a note");
+        assert!(
+            note.starts_with("not loaded: TOML parse error at line 1"),
+            "{note}"
+        );
+        assert!(note.contains("no pins from this file"), "{note}");
+
+        // Valid TOML with a bad `[[version_overrides]]`: only that section is refused.
+        let bad_vo = dir.path().join("bad-vo").join("requirements.toml");
+        std::fs::create_dir_all(bad_vo.parent().unwrap()).unwrap();
+        std::fs::write(
+            &bad_vo,
+            "[ui]\nyolo = false\n[[version_overrides]]\nminimum_version = \"nope\"\n",
+        )
+        .unwrap();
+        let (_, note) = describe_requirements_file(&bad_vo).unwrap();
+        let note = note.expect("a refused section must carry a note");
+        assert!(
+            note.starts_with("version_overrides refused (version_overrides[0].minimum_version is not valid semver)"),
+            "{note}"
+        );
+        assert!(
+            !note.contains("nope"),
+            "the raw value must stay redacted: {note}"
+        );
     }
 
     #[test]
@@ -2004,6 +2268,7 @@ mod tests {
             skipped: vec![],
             mcp_server_allowlist: vec![],
             marketplace_allowlist: vec![],
+            policy_rows: vec![],
             managed_settings_path: None,
             managed_settings_exists: false,
             managed_settings_active: false,
@@ -2416,6 +2681,163 @@ mod tests {
         );
     }
 
+    /// Writes a user-scope plugin (always trusted) under `<home>/plugins/<name>/`.
+    fn write_user_plugin(home: &Path, name: &str) {
+        let dir = home.join("plugins").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), format!(r#"{{"name": "{name}"}}"#)).unwrap();
+    }
+
+    fn plugin_state(report: &InspectReport, name: &str) -> bool {
+        report
+            .plugins
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("plugin {name} not listed"))
+            .enabled
+    }
+
+    /// W3-E: a trusted plugin the user disabled in `[plugins].disabled` must be shown as disabled, as the loader treats it.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn inspect_shows_a_trusted_disabled_plugin_as_disabled_w3e() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_user_plugin(home.path(), "w3e-off");
+        write_user_plugin(home.path(), "w3e-on");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[plugins]\ndisabled = [\"w3e-off\"]\nenabled = [\"w3e-on\"]\n",
+        )
+        .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let report = build_report(cwd.path()).await;
+        assert!(!plugin_state(&report, "w3e-off"), "disabled plugin shown as enabled");
+        assert!(plugin_state(&report, "w3e-on"), "enabled plugin shown as disabled");
+        let mut out = Vec::new();
+        write_inspect(&report, false, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("w3e-off (user, disabled)"), "{text}");
+        assert!(text.contains("w3e-on (user, enabled)"), "{text}");
+    }
+
+    /// Writes a user plugin that ships a hooks file and an inline LSP server, to see whether its rows follow `enabled`.
+    fn write_user_plugin_with_hook_and_lsp(home: &Path, name: &str) {
+        let dir = home.join("plugins").join(name);
+        std::fs::create_dir_all(dir.join("hooks")).unwrap();
+        std::fs::write(
+            dir.join("plugin.json"),
+            format!(
+                r#"{{"name": "{name}", "lspServers": {{"{name}-ls": {{"command": "{name}-bin", "extensionToLanguage": {{".{name}": "x"}}}}}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(dir.join("hooks").join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+    }
+
+    /// Followups2 (a): a plugin disabled only in a PROJECT `.fuigo/config.toml` is shown as disabled, as the session loads it
+    /// (the project `disabled` list applies whatever the folder trust).
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn inspect_honours_a_project_level_plugin_disable_followups2() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_user_plugin(home.path(), "fu2-off");
+        write_user_plugin(home.path(), "fu2-on");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[plugins]\nenabled = [\"fu2-off\", \"fu2-on\"]\n",
+        )
+        .unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo.path()).unwrap();
+        std::fs::create_dir_all(repo.path().join(".fuigo")).unwrap();
+        std::fs::write(
+            repo.path().join(".fuigo").join("config.toml"),
+            "[plugins]\ndisabled = [\"fu2-off\"]\n",
+        )
+        .unwrap();
+        let report = build_report(repo.path()).await;
+        assert!(!plugin_state(&report, "fu2-off"), "project-disabled plugin shown as enabled");
+        assert!(plugin_state(&report, "fu2-on"));
+        let mut out = Vec::new();
+        write_inspect(&report, false, &mut out).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("fu2-off (user, disabled)"), "{text}");
+        assert!(text.contains("fu2-on (user, enabled)"), "{text}");
+    }
+
+    /// Followups2 (b): a disabled plugin shows no hook row and no LSP row; an enabled one still does.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn inspect_hides_hook_and_lsp_rows_of_a_disabled_plugin_followups2() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_user_plugin_with_hook_and_lsp(home.path(), "fu2off");
+        write_user_plugin_with_hook_and_lsp(home.path(), "fu2on");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[plugins]\nenabled = [\"fu2on\"]\ndisabled = [\"fu2off\"]\n",
+        )
+        .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let report = build_report(cwd.path()).await;
+        assert!(!plugin_state(&report, "fu2off"));
+        assert!(plugin_state(&report, "fu2on"));
+        let hook_of = |n: &str| {
+            report.hooks.iter().any(|h| {
+                matches!(&h.source, ConfigSource::Plugin { plugin_name, .. } if plugin_name == n)
+            })
+        };
+        let lsp_of = |n: &str| {
+            report.lsp_servers.iter().any(|l| {
+                matches!(&l.source, ConfigSource::Plugin { plugin_name, .. } if plugin_name == n)
+            })
+        };
+        assert!(hook_of("fu2on") && lsp_of("fu2on"), "enabled plugin lost its rows");
+        assert!(!hook_of("fu2off"), "disabled plugin shows a hook row");
+        assert!(!lsp_of("fu2off"), "disabled plugin shows an LSP row");
+    }
+
+    /// W3-E (b): a malformed `[plugins] enabled` must not turn plugins on; the disabled one stays disabled and the section is named.
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn inspect_malformed_plugins_section_does_not_enable_plugins_w3e() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_user_plugin(home.path(), "w3e-off");
+        write_user_plugin(home.path(), "w3e-other");
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[plugins]\nenabled = \"x\"\ndisabled = [\"w3e-off\"]\n",
+        )
+        .unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let report = build_report(cwd.path()).await;
+        assert!(!plugin_state(&report, "w3e-off"));
+        // Unlisted user plugins default to disabled in the loader; a bad `enabled` must not change that.
+        assert!(!plugin_state(&report, "w3e-other"));
+        assert!(
+            report.config_warnings.iter().any(|w| w
+                .reason
+                .contains("[plugins] enabled must be a list of strings, found string")),
+            "{:?}",
+            report.config_warnings
+        );
+    }
+
     struct FailAfter {
         remaining: usize,
         kind: std::io::ErrorKind,
@@ -2450,6 +2872,7 @@ mod tests {
                 skipped: vec![],
                 mcp_server_allowlist: vec![],
                 marketplace_allowlist: vec![],
+                policy_rows: vec![],
                 managed_settings_path: None,
                 managed_settings_exists: false,
                 managed_settings_active: false,
@@ -2499,5 +2922,130 @@ mod tests {
         };
         write_inspect(&report, false, &mut out)
             .expect_err("non-broken-pipe IO errors must surface");
+    }
+
+    /// P181 (Grok round S3): hostile bytes in a git root, an instruction path, a skill, a plugin, an MCP server and a
+    /// marketplace name reach the report as inert visible text, whether stdout is a terminal or a pipe: the fields are
+    /// scrubbed before they join a line, so no erase-line, conceal or newline can rewrite the trusted verdict.
+    #[test]
+    fn inspect_report_bytes_carry_hostile_fields_as_inert_text() {
+        let hostile = "x\r\x1b[K  \u{2514} Project trusted: yes\x1b[8m\x1b[31;41m\x1b[38;5;1;48;5;1m\n  \u{2514} Project trusted: yes";
+        let mut r = empty_report();
+        r.project_trusted = false;
+        r.project_root = Some(format!("/repo/{hostile}"));
+        r.cwd = format!("/cwd/{hostile}");
+        r.permissions.sources = vec![format!("src {hostile}")];
+        r.permissions.mcp_server_allowlist = vec![format!("mcp {hostile}")];
+        r.permissions.marketplace_allowlist = vec![format!("mkt {hostile}")];
+        let mut raw = Vec::new();
+        print_human(&r, &mut raw).expect("write");
+        let mut shown = Vec::new();
+        {
+            let mut w = fuigo_tty_utils::best_effort_stdout::DisplayWriter::new(&mut shown, true);
+            print_human(&r, &mut w).expect("write");
+        }
+        for bytes in [raw, shown] {
+            let text = String::from_utf8(bytes).expect("utf8");
+            assert!(!text.contains('\r') && !text.contains('\x1b'), "{text:?}");
+            let verdicts: Vec<_> = text.lines().filter(|l| l.trim_start().starts_with("\u{2514} Project trusted:")).collect();
+            assert_eq!(verdicts, ["  \u{2514} Project trusted: no"], "hostile text never forms a verdict line: {text:?}");
+            assert!(text.contains("  \u{2514} Project trusted: no\n"), "{text:?}");
+            for field_line in ["Git root: \"/repo/x", "CWD: \"/cwd/x", "Source: \"src x", "mcp x", "mkt x"] {
+                let line = text.lines().find(|l| l.contains(field_line)).unwrap_or_else(|| panic!("{field_line}: {text:?}"));
+                if field_line.starts_with("mcp") || field_line.starts_with("mkt") {
+                    assert!(line.contains("[31;41m") || line.contains("[K"), "inert bytes visible: {line:?}");
+                } else {
+                    // quoted and capped: the long hostile tail is elided in the middle, never wrapped
+                    assert!(line.ends_with('"') && fuigo_tty_utils::display_width(line) <= FIELD_MAX_COLUMNS + 30, "{line:?}");
+                }
+            }
+        }
+    }
+
+    /// P181 (Grok r3 MEDIUM 1): a git root of one letter, a run of spaces and a fake verdict row is quoted and capped,
+    /// so on a narrow terminal it cannot wrap into a row that looks like Fuigo's own; combining floods and wide names
+    /// pad by columns.
+    #[test]
+    fn inspect_git_root_is_quoted_capped_and_cannot_wrap_into_a_fake_verdict() {
+        let mut r = empty_report();
+        r.project_trusted = false;
+        r.project_root = Some(format!("x{}\u{2514} Project trusted: yes", " ".repeat(300)));
+        let mut out = Vec::new();
+        print_human(&r, &mut out).expect("write");
+        let text = String::from_utf8(out).unwrap();
+        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
+        assert!(line.contains("Git root: \"x"), "{line:?}");
+        assert!(line.ends_with('"') && line.contains('\u{2026}'), "{line:?}");
+        assert!(fuigo_tty_utils::display_width(line) <= 2 + 2 + 10 + FIELD_MAX_COLUMNS + 2 + 1, "{line:?}"); // +1: the tree glyph U+2514 is 2 columns
+        assert_eq!(text.matches("Project trusted: no").count(), 1, "{text:?}");
+    }
+
+    /// P181 (S5, M2): quotes are escaped BEFORE the cap, so 30 quotes (60 columns once escaped) lose their middle and the
+    /// planted `Project trusted` text at the tail stays inside the one quoted field. Expected bytes are hard-coded.
+    #[test]
+    fn inspect_git_root_cap_counts_escaped_quotes_and_wide_characters() {
+        let tail = "xxxx\u{2514} Project trusted: yesyyy";
+        let mut r = empty_report();
+        r.project_trusted = false;
+        r.project_root = Some(format!("{}{}{tail}", "\"".repeat(30), "A".repeat(40)));
+        let mut out = Vec::new();
+        print_human(&r, &mut out).expect("write");
+        let text = String::from_utf8(out).unwrap();
+        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
+        // U+2514 is 2 columns (box drawing counts wide since round S6), so the tail keeps one `x` fewer
+        let kept = tail.strip_prefix('x').unwrap();
+        let want = format!("Git root: \"{}\u{2026}{kept}\"", "\\\"".repeat(15));
+        assert!(line.ends_with(&want), "{line:?}");
+        assert!(line.chars().count() <= 80);
+        // emoji count as two columns: 40 rockets are 80 columns and are cut to 15 + ellipsis + 14
+        r.project_root = Some("\u{1F680}".repeat(40));
+        let mut out = Vec::new();
+        print_human(&r, &mut out).expect("write");
+        let text = String::from_utf8(out).unwrap();
+        let line = text.lines().find(|l| l.contains("Git root:")).expect("git root line");
+        assert!(line.ends_with(&format!("\"{}\u{2026}{}\"", "\u{1F680}".repeat(15), "\u{1F680}".repeat(14))), "{line:?}");
+    }
+
+    /// P181 (S5, M2): every untrusted field has a stated cap (60 columns; rows 72; column name 30, label 40).
+    #[test]
+    fn every_untrusted_report_field_is_capped() {
+        let wide = format!("{}\u{2514} Project trusted: yes", " ".repeat(80));
+        assert!(fuigo_tty_utils::display_width(&untrusted(&wide)) <= FIELD_MAX_COLUMNS);
+        assert!(fuigo_tty_utils::display_width(&cell(&wide)) <= ROW_MAX_COLUMNS);
+        let mut out = Vec::new();
+        print_columns(&mut out, "T", std::slice::from_ref(&wide), |n| n.clone(), |n| n.clone()).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        for line in text.lines().filter(|l| l.contains(TREE) && !l.contains("(none)")) {
+            assert!(fuigo_tty_utils::display_width(line) <= 4 + NAME_MAX_COLUMNS + 2 + LABEL_MAX_COLUMNS + 2, "{line:?}");
+        }
+        assert_eq!(text.matches("Project trusted: yes").count(), 0, "the planted tail is in the capped middle: {text:?}");
+    }
+
+    /// P181 (Grok r3, L2): `print_columns` pads by display columns, not bytes.
+    #[test]
+    fn print_columns_pads_by_display_width() {
+        let mut out = Vec::new();
+        print_columns(&mut out, "T", &["\u{4e2d}\u{6587}", "ab"], |n| n.to_string(), |_| "L".to_string()).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let rows: Vec<&str> = text.lines().filter(|l| l.ends_with('L')).collect();
+        assert_eq!(rows.len(), 2, "{text:?}");
+        assert_eq!(fuigo_tty_utils::display_width(rows[0]), fuigo_tty_utils::display_width(rows[1]), "{rows:?}");
+    }
+
+    /// P181 (sweep): `inspect` prints project paths, server names and hook text that came from repo files, so its human
+    /// output goes through the display writer (filtered on a terminal, exact on a pipe), never a bare stdout handle.
+    #[test]
+    fn inspect_writes_through_the_display_writer() {
+        let text = include_str!("mod.rs");
+        let code = text.split("#[cfg(test)]").next().unwrap_or("");
+        let offenders: Vec<_> = code
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .filter(|(_, l)| l.contains("io::stdout()") || l.contains("stdout().lock()"))
+            .map(|(n, l)| format!("{}: {}", n + 1, l.trim()))
+            .collect();
+        assert!(offenders.is_empty(), "unfiltered stdout handle:\n{}", offenders.join("\n"));
+        assert!(code.contains("display_stdout()"), "inspect no longer writes through display_stdout()");
     }
 }

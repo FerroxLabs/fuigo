@@ -999,6 +999,37 @@ mod sanitize_rename_title_tests {
     }
 
     #[test]
+    fn valid_flag_tags_survive_and_loose_tags_are_dropped() {
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        assert_eq!(sanitize_rename_title(scotland).as_ref(), scotland);
+        let mixed = format!("go {scotland} x\u{e0041}\u{e0042} y\u{e0001}");
+        assert_eq!(
+            sanitize_rename_title(&mixed).as_ref(),
+            format!("go {scotland} x y")
+        );
+        // A flag with tag text hidden after it keeps only the black flag
+        assert_eq!(
+            sanitize_rename_title("\u{1f3f4}\u{e0069}\u{e0067}\u{e006e}\u{e0020}\u{e0061}").as_ref(),
+            "\u{1f3f4}"
+        );
+    }
+
+    #[test]
+    fn cap_that_cuts_a_flag_leaves_no_partial_tags() {
+        use crate::session::persistence::{MAX_TITLE_SCALARS, sanitize_and_cap_title};
+        let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+        let title = format!("{}{scotland}", "a".repeat(MAX_TITLE_SCALARS - 3));
+        let out = sanitize_and_cap_title(&title).unwrap();
+        assert!(
+            !out.chars().any(|c| ('\u{e0020}'..='\u{e007f}').contains(&c)),
+            "partial tags survived: {out:?}"
+        );
+        // A flag that fits whole is kept
+        let fits = format!("{}{scotland}", "a".repeat(MAX_TITLE_SCALARS - 7));
+        assert_eq!(sanitize_and_cap_title(&fits).unwrap(), fits);
+    }
+
+    #[test]
     fn control_only_title_becomes_blank() {
         assert!(sanitize_rename_title("\u{1b}\u{07}\n\t\u{9b}").is_empty());
     }

@@ -234,6 +234,7 @@ pub(crate) fn test_app() -> AppView {
         welcome_privacy_banner_terms_rect: None,
         welcome_privacy_banner_policy_rect: None,
         welcome_toast: None,
+        trust_error: None,
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
         welcome_changelog_cta_rect: None,

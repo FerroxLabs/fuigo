@@ -62,6 +62,25 @@ impl AsyncFileSystem for MockFs {
         })
     }
 
+    fn supports_bounded_read(&self) -> bool {
+        true
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let bytes = self.read_file(path).await?;
+        if bytes.len() > max_bytes {
+            return Err(ComputerError::io_with_kind(
+                format!("file exceeds the {max_bytes} byte read limit"),
+                std::io::ErrorKind::FileTooLarge,
+            ));
+        }
+        Ok(bytes)
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         self.files
             .write()

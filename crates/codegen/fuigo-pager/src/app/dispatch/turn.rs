@@ -497,6 +497,74 @@ pub(crate) fn reconcile_overdue_cancels(app: &mut AppView) -> Option<Vec<Effect>
     (!effects.is_empty()).then_some(effects)
 }
 
+/// Read-only twin of [`reconcile_overdue_cancels`]: whether any pane would re-send a cancel right now.
+/// The event loop uses it to let already-buffered ACP messages (a `prompt_complete` that would confirm the cancel) land first.
+pub(crate) fn cancel_resend_due(app: &AppView) -> bool {
+    stale_request_keys(app).iter().any(|k| k.kind == StaleKind::CancelResend)
+}
+
+/// Which stale-state handler a [`StaleRequestKey`] guards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum StaleKind {
+    CancelResend,
+    TurnEnd,
+}
+
+/// Identity of one overdue request: the handler, the pane (and subagent pane) and the instant the request was last
+/// (re)issued (`sent_at` of the cancel, `received_at` of the turn-end broadcast). A manual cancel resets `sent_at`, so
+/// a new request always has a new key (P196 round 4: the backlog fence is keyed to the request it guards).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct StaleRequestKey {
+    pub kind: StaleKind,
+    pub agent: usize,
+    pub subagent: Option<String>,
+    pub at: Instant,
+}
+
+fn overdue_cancel_at(agent: &AgentView) -> Option<Instant> {
+    if !(agent.any_cancel_pending()
+        && agent.session.session_id.is_some()
+        && agent.pending_turn_end_reconcile.is_none())
+    {
+        return None;
+    }
+    agent
+        .pending_cancel_resend
+        .as_ref()
+        .filter(|p| {
+            !p.confirmed
+                && p.attempts < CANCEL_RESEND_MAX_ATTEMPTS
+                && p.sent_at.elapsed() >= CANCEL_RESEND_GRACE
+        })
+        .map(|p| p.sent_at)
+}
+
+/// Every cancel-resend and turn-end reconcile that is due right now, one key per request.
+pub(crate) fn stale_request_keys(app: &AppView) -> Vec<StaleRequestKey> {
+    let mut keys = Vec::new();
+    for (id, a) in &app.agents {
+        if let Some(at) = overdue_cancel_at(a) {
+            keys.push(StaleRequestKey { kind: StaleKind::CancelResend, agent: id.0, subagent: None, at });
+        }
+        for (sub, c) in &a.subagent_views {
+            if let Some(at) = overdue_cancel_at(c) {
+                keys.push(StaleRequestKey {
+                    kind: StaleKind::CancelResend,
+                    agent: id.0,
+                    subagent: Some(sub.clone()),
+                    at,
+                });
+            }
+        }
+        if let Some(p) = a.pending_turn_end_reconcile.as_ref()
+            && p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE
+        {
+            keys.push(StaleRequestKey { kind: StaleKind::TurnEnd, agent: id.0, subagent: None, at: p.received_at });
+        }
+    }
+    keys
+}
+
 fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
     // A cancelled wake turn keeps the pane Idle (never adopted), so its cancelling phase lives on `running_wake_turn` instead of the state
     if !agent.any_cancel_pending() {
@@ -543,6 +611,15 @@ fn overdue_cancel_for_agent(agent: &mut AgentView) -> Option<Effect> {
 /// The healthy-path gap is milliseconds (the shell emits the broadcast just before writing the RPC response).
 /// An expiry means the response is genuinely lost, not merely slow.
 pub(crate) const TURN_END_RECONCILE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read-only twin of [`reconcile_overdue_turn_ends`]: whether any turn-end marker is past its grace right now.
+pub(crate) fn turn_end_reconcile_due(app: &AppView) -> bool {
+    app.agents.values().any(|a| {
+        a.pending_turn_end_reconcile
+            .as_ref()
+            .is_some_and(|p| p.received_at.elapsed() >= TURN_END_RECONCILE_GRACE)
+    })
+}
 
 /// Finish turns whose end was announced by `fuigo/session/prompt_complete` but whose `session/prompt` RPC response never arrived.
 ///

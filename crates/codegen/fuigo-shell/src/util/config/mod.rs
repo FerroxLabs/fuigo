@@ -3,6 +3,8 @@
 mod announcements;
 mod campaigns;
 mod consent;
+#[cfg(test)]
+pub(crate) mod admin_seam_test_support;
 mod hints;
 mod load;
 mod mcp;

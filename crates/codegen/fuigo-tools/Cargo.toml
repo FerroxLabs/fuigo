@@ -19,6 +19,8 @@ fuigo-tty-utils = { workspace = true }
 fuigo-secrets = { workspace = true }
 fuigo-auth = { workspace = true }
 fuigo-config = { path = "../fuigo-config" }
+fuigo-paths = { path = "../fuigo-paths" }
+glob = "0.3"
 fuigo-extra-ca = { workspace = true }
 fuigo-tools-api = { path = "../fuigo-tools-api" }
 fuigo-workspace-types = { path = "../fuigo-workspace-types" }

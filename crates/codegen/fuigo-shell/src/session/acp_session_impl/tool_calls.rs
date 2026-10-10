@@ -1689,6 +1689,10 @@ impl SessionActor {
                         path_context,
                         session_id: Some(self.session_info.id.0.to_string()),
                         hook_ask,
+                        // P184: a multi-file edit is judged per target, from the input that runs.
+                        edit_targets: fuigo_workspace::permission::edit_targets_for(&tool_input),
+                        // P174: every file a multi-file read reads, judged as a Read each.
+                        read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
                         ..PermissionRequest::new(access_kind.clone(), tool_call_update)
                     })
                     .await
@@ -1951,6 +1955,12 @@ impl SessionActor {
             is_read_only,
             rewriting_hook,
             additional_context: hook_additional_context,
+            judged_read_paths: match &tool_input {
+                ToolInput::ReadFile(_) | ToolInput::CodexReadFile(_) => {
+                    self.judged_read_files(&tool_input).await
+                }
+                _ => None,
+            },
         };
         Ok(Ok(prepared))
     }
@@ -3435,6 +3445,7 @@ mod plan_mode_edit_gate_tests {
                     timeout: None,
                     description: "write via bash".into(),
                     is_background: false,
+                    workdir: None,
                 })
             ),
             PlanEditGate::Allow,

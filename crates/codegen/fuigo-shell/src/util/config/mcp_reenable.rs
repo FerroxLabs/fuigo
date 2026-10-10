@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use agent_client_protocol as acp;
-use fuigo_workspace::permission::resolution::McpServerAllowlist;
+use fuigo_workspace::permission::resolution::McpServerPolicy;
 
 use crate::session::managed_mcp::{McpDiscoveryInputs, discover_mcp_definitions_ignoring_disable};
 
@@ -40,7 +40,7 @@ impl McpDefinitionIndex {
         &self,
         name: &str,
         in_catalog: bool,
-        allowlist: &McpServerAllowlist,
+        allowlist: &McpServerPolicy,
     ) -> DisabledStubVerdict {
         if in_catalog {
             return DisabledStubVerdict::HideAlreadyInCatalog;
@@ -66,7 +66,7 @@ impl McpDefinitionIndex {
         &self,
         disabled_names: &HashSet<String>,
         catalog_names: &HashSet<String>,
-        allowlist: &McpServerAllowlist,
+        allowlist: &McpServerPolicy,
     ) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for name in disabled_names {
@@ -127,18 +127,19 @@ mod tests {
     use fuigo_tools::types::compat::CompatConfig;
     use fuigo_workspace::permission::resolution::AllowedMcpServer;
 
-    fn unrestricted() -> McpServerAllowlist {
-        McpServerAllowlist::new(vec![], vec![], None)
+    fn unrestricted() -> McpServerPolicy {
+        McpServerPolicy::default()
     }
 
-    fn deny_name(name: &str) -> McpServerAllowlist {
-        McpServerAllowlist::new(
+    fn deny_name(name: &str) -> McpServerPolicy {
+        fuigo_workspace::permission::resolution::McpServerAllowlist::new(
             vec![],
             vec![AllowedMcpServer::Name {
                 name: name.to_string(),
             }],
             None,
         )
+        .into()
     }
 
     fn http(name: &str, url: &str) -> acp::McpServer {
@@ -191,7 +192,7 @@ mod tests {
         ]));
         let unrestricted = unrestricted();
         let deny_blocked = deny_name("blocked");
-        let cases: &[(&str, bool, &McpServerAllowlist, DisabledStubVerdict)] = &[
+        let cases: &[(&str, bool, &McpServerPolicy, DisabledStubVerdict)] = &[
             (
                 "local",
                 true,

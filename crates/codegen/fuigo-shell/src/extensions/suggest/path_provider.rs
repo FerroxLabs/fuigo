@@ -1,11 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 
 use super::shell_token::{CurrentToken, build_insert_token, parse_current_token};
-use super::{RankedSuggestion, SuggestContext, SuggestionSource, splice_token_into_line};
+use super::{
+    RankedSuggestion, RefreshGuard, SuggestContext, SuggestionSource, splice_token_into_line,
+};
 
 const CACHE_TTL: Duration = Duration::from_secs(60);
 const MAX_RESULTS: usize = 10;
@@ -111,14 +113,11 @@ async fn get_or_refresh_path_cache() -> Arc<PathCacheInner> {
         return current;
     }
 
-    if PATH_REFRESHING
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-        .is_err()
-    {
+    let Some(_refreshing) = RefreshGuard::try_acquire(&PATH_REFRESHING) else {
         return current;
-    }
+    };
 
-    let result = match tokio::task::spawn_blocking(scan_path_dirs).await {
+    match tokio::task::spawn_blocking(scan_path_dirs).await {
         Ok(executables) => {
             let new = Arc::new(PathCacheInner {
                 executables,
@@ -129,10 +128,7 @@ async fn get_or_refresh_path_cache() -> Arc<PathCacheInner> {
             new
         }
         Err(_) => current,
-    };
-
-    PATH_REFRESHING.store(false, Ordering::Release);
-    result
+    }
 }
 
 fn scan_path_dirs() -> Vec<String> {
@@ -397,5 +393,33 @@ mod tests {
         let path_var = format!("{}:{}", bin1.to_str().unwrap(), bin2.to_str().unwrap());
         let result = scan_path_from(&path_var);
         assert_eq!(result, vec!["shared_cmd"]);
+    }
+
+    /// A refresh dropped mid-scan (a cancelled completion) must free its flag, or every later refresh is skipped.
+    #[tokio::test]
+    async fn path_refresh_dropped_mid_scan_frees_its_flag() {
+        for _ in 0..200 {
+            // Make the cache stale so the call takes the refresh path
+            let stale = || PathCacheInner {
+                executables: Vec::new(),
+                updated_at: Instant::now() - CACHE_TTL - Duration::from_secs(1),
+                path_env: String::new(),
+            };
+            PATH_CACHE
+                .get_or_init(|| ArcSwap::from_pointee(stale()))
+                .store(Arc::new(stale()));
+            // Poll once: parked on its blocking scan, the refresh times out and is dropped
+            let outcome = tokio::time::timeout(Duration::ZERO, get_or_refresh_path_cache()).await;
+            if outcome.is_err() {
+                assert!(
+                    !PATH_REFRESHING.load(std::sync::atomic::Ordering::Acquire),
+                    "a dropped refresh left PATH_REFRESHING set"
+                );
+                return;
+            }
+            // Lost the race (the scan finished on the first poll, or another test holds the flag): retry
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("never caught the refresh mid-scan");
     }
 }

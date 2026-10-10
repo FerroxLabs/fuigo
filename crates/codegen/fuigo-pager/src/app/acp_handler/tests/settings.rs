@@ -235,6 +235,7 @@
         );
         crate::app::dispatch::dispatch(
             Action::TaskComplete(TaskResult::SessionLoaded {
+                attempt: 0,
                 agent_id: AgentId(0),
                 session_id: acp::SessionId::new("sess-loop-load"),
                 models: None,

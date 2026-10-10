@@ -1072,6 +1072,11 @@ pub enum SessionUpdate {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
     },
+    /// A `redacted_thinking` block finished: the model's encrypted reasoning, opaque to the client; `data` is its blob.
+    /// Rides the buffered chunk rail, so it is ordered with this response's thought chunks and `ReasoningCompleted` signatures.
+    /// Headless Messages framing writes it into the assistant frame as a `redacted_thinking` block, in place.
+    /// Messages backend only.
+    RedactedThinking { data: String },
     /// One completed model response, so headless can emit a Messages API assistant frame per response.
     /// Ordered with the response's chunks; a tool loop emits several.
     /// The durable outcome rides `TurnCompleted`.
@@ -2414,6 +2419,19 @@ mod tests {
         let json_str = serde_json::to_string(&update).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(update, parsed);
+    }
+
+    /// P195 (U17): the wire shape headless reads (`ext_protocol_tests::headless_redacted_thinking_parses_data`).
+    #[test]
+    fn redacted_thinking_serializes_snake_case_tag_and_data() {
+        let update = SessionUpdate::RedactedThinking {
+            data: "opaque-blob".into(),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["sessionUpdate"], "redacted_thinking");
+        assert_eq!(json["data"], "opaque-blob");
+        let parsed: SessionUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, update);
     }
 
     #[test]

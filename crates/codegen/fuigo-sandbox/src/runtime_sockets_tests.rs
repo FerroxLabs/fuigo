@@ -3,7 +3,7 @@ use crate::profiles::{ProfileConfig, ProfileName, SandboxConfig, SandboxProfile}
 use crate::test_util::{network_inheritance_config, skip_if_host_hook_write_deny_unresolvable};
 use serial_test::serial;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[test]
 fn deny_list_covers_system_rootless_and_per_user_endpoints() {
@@ -35,8 +35,40 @@ fn deny_list_covers_system_rootless_and_per_user_endpoints() {
     }
 }
 
-fn assert_no_auto_socket_denies(profile: &SandboxProfile) {
+/// P158 (upstream 48271133): the system/session bus and systemd private sockets are covered.
+#[test]
+fn dbus_deny_list_covers_system_and_per_user_endpoints() {
+    let paths = dbus_socket_deny_paths();
+    for literal in [
+        "/run/dbus/system_bus_socket",
+        "/var/run/dbus/system_bus_socket",
+        "/run/systemd/private",
+    ] {
+        assert!(
+            paths.contains(&PathBuf::from(literal)),
+            "missing {literal}: {paths:?}"
+        );
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid is always safe.
+        let uid = unsafe { libc::getuid() };
+        assert!(
+            paths.contains(&PathBuf::from(format!("/run/user/{uid}/bus"))),
+            "missing session bus: {paths:?}"
+        );
+        assert!(
+            paths.contains(&PathBuf::from(format!("/run/user/{uid}/systemd/private"))),
+            "missing per-user systemd private: {paths:?}"
+        );
+    }
+}
+
+fn assert_no_auto_socket_denies_except(profile: &SandboxProfile, except: &[PathBuf]) {
     for socket in runtime_socket_deny_paths() {
+        if except.iter().any(|p| p == &socket) {
+            continue;
+        }
         assert!(
             !profile.deny.contains(&socket),
             "{name} must not deny {socket:?}; got {:?}",
@@ -46,13 +78,27 @@ fn assert_no_auto_socket_denies(profile: &SandboxProfile) {
     }
 }
 
+fn assert_deny_eq_order_insensitive(profile: &SandboxProfile, expected: Vec<PathBuf>) {
+    let mut expected = expected;
+    let mut actual = profile.deny.clone();
+    expected.sort();
+    actual.sort();
+    assert_eq!(expected, actual, "{} deny mismatch", profile.name);
+}
+
+fn materialized_dbus_socket_denies() -> Vec<PathBuf> {
+    materialize_runtime_socket_deny_paths_from(dbus_socket_deny_paths())
+        .expect("dbus socket deny paths materialize")
+}
+
 fn assert_materialized_auto_socket_denies(profile: &SandboxProfile) {
-    let paths = materialize_runtime_socket_deny_paths().expect("socket deny paths materialize");
-    assert_eq!(
-        profile.deny, paths,
-        "{} must use the materialized socket policy",
-        profile.name
-    );
+    let mut expected = materialize_runtime_socket_deny_paths().expect("socket deny paths materialize");
+    for path in materialized_dbus_socket_denies() {
+        if !expected.contains(&path) {
+            expected.push(path);
+        }
+    }
+    assert_deny_eq_order_insensitive(profile, expected);
 }
 
 #[cfg(unix)]
@@ -350,13 +396,17 @@ fn restrict_network_profiles_deny_container_runtime_sockets() {
         assert!(profile.restrict_network, "{name}");
         assert_materialized_auto_socket_denies(&profile);
     }
-    for name in [ProfileName::Workspace, ProfileName::Devbox] {
-        let profile = name
-            .resolve_profile(&workspace, &config)
-            .expect("profile resolves");
-        assert!(!profile.restrict_network, "{name}");
-        assert_no_auto_socket_denies(&profile);
-    }
+    let workspace_profile = ProfileName::Workspace
+        .resolve_profile(&workspace, &config)
+        .expect("profile resolves");
+    assert!(!workspace_profile.restrict_network);
+    assert_deny_eq_order_insensitive(&workspace_profile, materialized_dbus_socket_denies());
+
+    let devbox = ProfileName::Devbox
+        .resolve_profile(&workspace, &config)
+        .expect("profile resolves");
+    assert!(!devbox.restrict_network);
+    assert!(devbox.deny.is_empty(), "devbox deny: {:?}", devbox.deny);
 }
 
 #[test]
@@ -372,13 +422,37 @@ fn custom_restrict_network_override_controls_auto_socket_denies() {
         .resolve_profile(&workspace, &config)
         .expect("custom resolves");
     assert!(!unrestricted.restrict_network);
-    assert_no_auto_socket_denies(&unrestricted);
+    assert_deny_eq_order_insensitive(&unrestricted, materialized_dbus_socket_denies());
 
     let restricted = ProfileName::Custom("workspace-restricted".to_string())
         .resolve_profile(&workspace, &config)
         .expect("custom resolves");
     assert!(restricted.restrict_network);
     assert_materialized_auto_socket_denies(&restricted);
+
+    let devbox_net = ProfileName::Custom("devbox-net".to_string())
+        .resolve_profile(
+            &workspace,
+            &SandboxConfig {
+                profiles: HashMap::from([(
+                    "devbox-net".to_string(),
+                    ProfileConfig {
+                        extends: Some("devbox".to_string()),
+                        restrict_network: Some(true),
+                        read_only: vec![],
+                        read_write: vec![],
+                        deny: vec![],
+                    },
+                )]),
+            },
+        )
+        .expect("devbox custom resolves");
+    assert!(devbox_net.restrict_network);
+    // Network-restricted devbox-based customs still mask container-runtime sockets; not D-Bus.
+    assert_deny_eq_order_insensitive(
+        &devbox_net,
+        materialize_runtime_socket_deny_paths().expect("socket deny paths materialize"),
+    );
 }
 
 #[test]
@@ -403,17 +477,135 @@ fn custom_user_socket_deny_kept_when_restrict_network_false() {
         .resolve_profile(&workspace, &config)
         .expect("custom resolves");
     assert!(!profile.restrict_network);
-    assert!(
-        profile
-            .deny
-            .iter()
-            .any(|p| p == Path::new("/var/run/docker.sock")),
-        "user deny must be kept: {:?}",
-        profile.deny
+    let user_sock = PathBuf::from("/var/run/docker.sock");
+    let mut expected = vec![user_sock.clone()];
+    for socket in materialized_dbus_socket_denies() {
+        if !expected.contains(&socket) {
+            expected.push(socket);
+        }
+    }
+    assert_deny_eq_order_insensitive(&profile, expected);
+    assert_no_auto_socket_denies_except(&profile, std::slice::from_ref(&user_sock));
+}
+
+#[test]
+#[cfg(unix)]
+fn materialized_dbus_candidates_skip_missing_keep_existing() {
+    let root = temp_runtime_root("dbus-materialize");
+    let present = root.join("run/dbus/system_bus_socket");
+    std::fs::create_dir_all(present.parent().unwrap()).unwrap();
+    std::fs::write(&present, b"").unwrap();
+    let missing = root.join("run/systemd/private");
+    let paths = materialize_runtime_socket_deny_paths_from([
+        present.clone(),
+        missing,
+        root.join("var/run/dbus/system_bus_socket"),
+    ])
+    .unwrap();
+    assert_eq!(paths, vec![present]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Astra r1 #10: the bus addresses the environment names are parsed for their socket paths.
+#[cfg(unix)]
+#[test]
+fn dbus_address_paths_are_parsed() {
+    assert_eq!(
+        dbus_address_socket_paths("unix:path=/tmp/dbus-abc,guid=1;unix:abstract=/tmp/x;tcp:host=h"),
+        vec![PathBuf::from("/tmp/dbus-abc")]
     );
     assert_eq!(
-        profile.deny,
-        vec![PathBuf::from("/var/run/docker.sock")],
-        "unrestricted profile must preserve only the lexical user deny"
+        dbus_address_socket_paths("unix:path=/run/a%20b/bus"),
+        vec![PathBuf::from("/run/a b/bus")]
     );
+    assert!(dbus_address_socket_paths("unix:path=relative").is_empty());
+    assert!(dbus_address_socket_paths("unix:path=/bad%zz").is_empty());
+    assert!(dbus_address_socket_paths("").is_empty());
+    assert_eq!(
+        dbus_address_socket_paths("unix:path=/tmp/bus%5B1%5D"),
+        vec![PathBuf::from("/tmp/bus[1]")]
+    );
+}
+
+/// Astra r2 N5: a socket path holding a glob metacharacter refuses (the deny list would read it
+/// as a pattern and mask other paths, not the socket); a plain one passes.
+#[test]
+fn a_glob_metacharacter_in_a_socket_path_refuses() {
+    let err = crate::profiles::refuse_glob_socket_paths(&[
+        PathBuf::from("/run/user/0/bus"),
+        PathBuf::from("/tmp/p158-bus[1]"),
+    ])
+    .expect_err("a glob-shaped socket path must refuse");
+    assert!(err.to_string().contains("glob metacharacter"), "{err}");
+    crate::profiles::refuse_glob_socket_paths(&[PathBuf::from("/run/user/0/bus")])
+        .expect("a plain socket path passes");
+}
+
+/// Astra r3 N5: a parent link materialized into a socket path can bring a glob metacharacter in;
+/// the materialized set is checked too.
+#[cfg(unix)]
+#[test]
+fn a_materialized_socket_path_with_a_metacharacter_refuses() {
+    let root = temp_runtime_root("glob-link");
+    let real = root.join("bus[1]");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("bus"), b"").unwrap();
+    std::os::unix::fs::symlink(&real, root.join("plain")).unwrap();
+    let candidate = root.join("plain/bus");
+    crate::profiles::refuse_glob_socket_paths(std::slice::from_ref(&candidate))
+        .expect("the spelling as named holds no metacharacter");
+    let materialized = materialize_runtime_socket_deny_paths_from([candidate]).unwrap();
+    assert!(
+        crate::profiles::refuse_glob_socket_paths(&materialized).is_err(),
+        "{materialized:?}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Grok G5a: a whole profile resolve refuses an env-named bus whose materialized path holds a
+/// glob metacharacter (a parent link brings `[` in), so the check on the materialized set in
+/// `resolve_profile_with_runtime_sockets` is locked, not only the predicate. The bus address is
+/// process env, so the resolve runs in a child test process that has it (this process's env is
+/// never mutated); the child prints a marker after asserting, so a filter miss cannot pass.
+#[cfg(unix)]
+#[test]
+fn a_profile_with_a_materialized_glob_bus_path_refuses() {
+    const CHILD: &str = "__FUIGO_P158_GLOB_BUS_CHILD";
+    const ASSERTED: &str = "P158-GLOB-BUS-CHILD-ASSERTED";
+    if let Some(workspace) = std::env::var_os(CHILD) {
+        let err = ProfileName::Workspace
+            .resolve_profile_with_runtime_sockets(Path::new(&workspace), &SandboxConfig::default())
+            .expect_err("a materialized glob-shaped bus path must refuse the profile");
+        assert!(err.to_string().contains("glob metacharacter"), "{err}");
+        println!("{ASSERTED}");
+        return;
+    }
+    let root = temp_runtime_root("glob-bus-profile");
+    let real = root.join("bus[1]");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("bus"), b"").unwrap();
+    std::os::unix::fs::symlink(&real, root.join("plain")).unwrap();
+    let workspace = root.join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let module = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let name = format!("{module}::a_profile_with_a_materialized_glob_bus_path_refuses");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([name.as_str(), "--exact", "--nocapture", "--test-threads=1"])
+        .env(CHILD, &workspace)
+        .env(
+            "DBUS_SESSION_BUS_ADDRESS",
+            format!("unix:path={}", root.join("plain/bus").display()),
+        )
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains(ASSERTED),
+        "child {:?}\n{stdout}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = std::fs::remove_dir_all(root);
 }

@@ -104,7 +104,7 @@ where
         .unwrap_or_else(|e| {
             fuigo_tty_utils::cli_eprintln!(
                 "[otel] Invalid FUIGO_OTEL_FILTER '{}': {}. Using default '{}'.",
-                otel_filter, e, DEFAULT_OTEL_FILTER
+                fuigo_tty_utils::untrusted(&otel_filter), fuigo_tty_utils::untrusted(e), DEFAULT_OTEL_FILTER
             );
             tracing_subscriber::filter::EnvFilter::try_new(DEFAULT_OTEL_FILTER)
                 .expect("default otel filter must parse")

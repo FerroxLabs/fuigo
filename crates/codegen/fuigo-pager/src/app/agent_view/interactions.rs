@@ -1248,7 +1248,9 @@ impl AgentView {
             if ev.is_url_waiting() {
                 return false;
             }
-            if let Some(mut ev) = self.elicitation_view.take() {
+            if let Some(mut ev) = self.take_unanswered_elicitation(
+                crate::app::agent_view::UnansweredElicitation::ClosedElsewhere,
+            ) {
                 let _ = ev.take_response_tx();
                 self.restore_elicitation_prompt(ev.stashed_prompt);
             }

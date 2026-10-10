@@ -46,8 +46,12 @@ mod managed_policy_gate_refusal_reaches_real_terminal;
 mod mcp_menu_loads_servers_in_non_project_dir;
 #[path = "pty_e2e/mcp_menu_loads_servers_in_project_dir.rs"]
 mod mcp_menu_loads_servers_in_project_dir;
+#[path = "pty_e2e/mcp_elicitation_decline_leaves_a_notice.rs"]
+mod mcp_elicitation_decline_leaves_a_notice;
 #[path = "pty_e2e/mcp_menu_unavailable_server_shows_reason.rs"]
 mod mcp_menu_unavailable_server_shows_reason;
+#[path = "pty_e2e/mcps_needs_auth_shows_why_the_refresh_was_refused.rs"]
+mod mcps_needs_auth_shows_why_the_refresh_was_refused;
 #[path = "pty_e2e/mid_text_skill_token_echo_styled_pty.rs"]
 mod mid_text_skill_token_echo_styled_pty;
 #[path = "pty_e2e/permission_prompt_hook_chimes_only_on_real_wait.rs"]

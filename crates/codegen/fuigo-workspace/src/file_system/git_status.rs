@@ -59,7 +59,19 @@ pub async fn git_status_short_pinned(
     // Held for the whole run to bound ODB contention.
     let _permit = crate::git_odb::try_acquire_odb();
 
+    // libgit2 config walk is blocking; keep it off the async scheduler.
+    let pin_cwd = working_directory.clone();
+    let filter_pins = tokio::task::spawn_blocking(move || {
+        crate::git_content_filters::content_filter_config_pins(&pin_cwd)
+    })
+    .await
+    .map_err(|e| FsError::Other(format!("git config pin task failed: {e}")))?
+    .ok_or_else(|| FsError::Other("unreadable git config".to_string()))?;
+
     let mut cmd = fuigo_tty_utils::git_command();
+    for pin in &filter_pins {
+        cmd.args(["-c", pin.as_str()]);
+    }
     cmd.args(["-c", fsmonitor.git_config_arg()]);
     cmd.args(["status", "--short", "--branch", "--untracked-files=normal"])
         .current_dir(&working_directory)
@@ -214,7 +226,13 @@ fn git_status_impl(working_directory: &Path) -> Result<String, FsError> {
 /// This function is called from background tasks (system prompt generation) and must never contend with foreground git operations.
 #[tracing::instrument(level = "debug", skip(cwd))]
 fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
-    let output = fuigo_tty_utils::git_command()
+    // Caller is already on a blocking pool (`git_status_impl`); do not nest spawn_blocking.
+    let filter_pins = crate::git_content_filters::content_filter_config_pins(cwd)?;
+    let mut cmd = fuigo_tty_utils::git_command();
+    for pin in &filter_pins {
+        cmd.args(["-c", pin.as_str()]);
+    }
+    let output = cmd
         .args(args)
         .current_dir(cwd)
         .stdout(std::process::Stdio::piped())
@@ -244,6 +262,198 @@ mod tests {
         assert!(!git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT - 1));
         assert!(git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT));
         assert!(git_status_exceeds_buffer(GIT_STATUS_BUFFER_LIMIT + 1));
+    }
+
+    #[cfg(unix)]
+    fn init_attributed_repo(tmp: &Path) -> git2::Repository {
+        let repo = git2::Repository::init(tmp).unwrap();
+        std::fs::write(tmp.join(".gitattributes"), "data.txt filter=Pwn\n").unwrap();
+        std::fs::write(tmp.join("data.txt"), "hello\n").unwrap();
+        // Commit before installing the filter so the commit itself does not run it.
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new(".gitattributes")).unwrap();
+        index.add_path(Path::new("data.txt")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = git2::Signature::now("t", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        repo
+    }
+
+    #[cfg(unix)]
+    fn write_filter_script(tmp: &Path, marker: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = tmp.join("pwn.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\nexec cat\n", marker.display()),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        script
+    }
+
+    /// Same length as the committed body, with the index's mtime: status re-hashes via clean.
+    #[cfg(unix)]
+    fn dirty_for_clean_filter(tmp: &Path) {
+        std::fs::write(tmp.join("data.txt"), "HELLO\n").unwrap();
+        let data = std::fs::File::open(tmp.join("data.txt")).unwrap();
+        let index = std::fs::File::open(tmp.join(".git/index")).unwrap();
+        let mtime = index.metadata().unwrap().modified().unwrap();
+        data.set_modified(mtime).unwrap();
+    }
+
+    /// A repo whose local config names a `clean` filter for a dirty file, and the marker it touches.
+    #[cfg(unix)]
+    fn filtered_repo() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let _repo = init_attributed_repo(tmp.path());
+        let marker = tmp.path().join("pwned");
+        let script = write_filter_script(tmp.path(), &marker);
+        let cfg_path = tmp.path().join(".git/config");
+        let mut cfg = std::fs::read_to_string(&cfg_path).unwrap();
+        cfg.push_str(&format!("\n[filter \"Pwn\"]\n\tclean = {}\n", script.display()));
+        std::fs::write(&cfg_path, cfg).unwrap();
+        dirty_for_clean_filter(tmp.path());
+        let _ = std::fs::remove_file(&marker);
+        fuigo_tty_utils::git_command()
+            .args(["status", "--short"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("unpinned status");
+        assert!(marker.exists(), "unpinned status must run the filter");
+        std::fs::remove_file(&marker).unwrap();
+        dirty_for_clean_filter(tmp.path());
+        (tmp, marker)
+    }
+
+    /// P158 (upstream 75810042): the session-triggered status pins repo-local content filters.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_status_short_does_not_run_content_filters() {
+        let (tmp, marker) = filtered_repo();
+        git_status_short_pinned(tmp.path(), FsmonitorOverride::Disabled)
+            .await
+            .expect("pinned status");
+        assert!(!marker.exists(), "pinned status must not run the filter");
+    }
+
+    /// P158: the background `run_git` queries pin them too.
+    #[cfg(unix)]
+    #[test]
+    fn run_git_does_not_run_content_filters() {
+        let (tmp, marker) = filtered_repo();
+        let _ = run_git(tmp.path(), &["status", "--short"]);
+        assert!(!marker.exists(), "run_git must not run the filter");
+    }
+
+    #[cfg(unix)]
+    fn git(dir: &Path, args: &[&str]) {
+        let out = fuigo_tty_utils::git_command()
+            .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "protocol.file.allow=always"])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git runs");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    /// Astra r1 #12: a populated submodule's own content filter runs on the parent's status too,
+    /// so its driver is pinned on the parent command (reaching the submodule through
+    /// `GIT_CONFIG_PARAMETERS`) and counts as exec risk.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_status_short_does_not_run_submodule_content_filters() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        drop(init_attributed_repo(&upstream));
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        git(&parent, &["init", "-q"]);
+        git(&parent, &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"]);
+        git(&parent, &["commit", "-qm", "add sub"]);
+        let sub = parent.join("sub");
+        let marker = tmp.path().join("pwned");
+        let script = write_filter_script(tmp.path(), &marker);
+        git(&sub, &["config", "filter.Pwn.clean", script.to_str().unwrap()]);
+        assert!(
+            crate::permission::exec_risk::local_repo_config_has_exec_risk(&parent),
+            "a submodule's filter is exec risk for the parent"
+        );
+        dirty_for_clean_filter_in(&sub);
+        let _ = std::fs::remove_file(&marker);
+        fuigo_tty_utils::git_command()
+            .args(["status", "--short"])
+            .current_dir(&parent)
+            .output()
+            .expect("unpinned status");
+        assert!(marker.exists(), "unpinned parent status must run the submodule filter");
+        std::fs::remove_file(&marker).unwrap();
+        dirty_for_clean_filter_in(&sub);
+        git_status_short_pinned(&parent, FsmonitorOverride::Disabled)
+            .await
+            .expect("pinned status");
+        assert!(!marker.exists(), "pinned parent status must not run the submodule filter");
+    }
+
+    /// Astra r2 N4: deleting `.gitmodules` does not hide an indexed, populated submodule's filter.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_status_short_pins_submodule_filters_without_gitmodules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let upstream = tmp.path().join("upstream");
+        std::fs::create_dir_all(&upstream).unwrap();
+        drop(init_attributed_repo(&upstream));
+        let parent = tmp.path().join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        git(&parent, &["init", "-q"]);
+        git(&parent, &["submodule", "add", "-q", upstream.to_str().unwrap(), "sub"]);
+        git(&parent, &["commit", "-qm", "add sub"]);
+        std::fs::remove_file(parent.join(".gitmodules")).unwrap();
+        let sub = parent.join("sub");
+        let marker = tmp.path().join("pwned");
+        let script = write_filter_script(tmp.path(), &marker);
+        git(&sub, &["config", "filter.Pw.n.clean", script.to_str().unwrap()]);
+        std::fs::write(sub.join(".gitattributes"), "data.txt filter=Pw.n\n").unwrap();
+        git(&sub, &["add", ".gitattributes"]);
+        git(&sub, &["-c", "filter.Pw.n.clean=", "commit", "-qm", "dotted filter"]);
+        assert!(
+            crate::permission::exec_risk::local_repo_config_has_exec_risk(&parent),
+            "the submodule filter is exec risk without .gitmodules"
+        );
+        dirty_for_clean_filter_in(&sub);
+        let _ = std::fs::remove_file(&marker);
+        fuigo_tty_utils::git_command()
+            .args(["status", "--short"])
+            .current_dir(&parent)
+            .output()
+            .expect("unpinned status");
+        assert!(marker.exists(), "unpinned parent status must run the dotted submodule filter");
+        std::fs::remove_file(&marker).unwrap();
+        dirty_for_clean_filter_in(&sub);
+        git_status_short_pinned(&parent, FsmonitorOverride::Disabled)
+            .await
+            .expect("pinned status");
+        assert!(!marker.exists(), "pinned parent status must not run the submodule filter");
+    }
+
+    /// `dirty_for_clean_filter` for a checkout whose index lives in its git directory.
+    #[cfg(unix)]
+    fn dirty_for_clean_filter_in(checkout: &Path) {
+        std::fs::write(checkout.join("data.txt"), "HELLO\n").unwrap();
+        let repo = git2::Repository::open(checkout).unwrap();
+        let index = std::fs::File::open(repo.path().join("index")).unwrap();
+        let mtime = index.metadata().unwrap().modified().unwrap();
+        std::fs::File::open(checkout.join("data.txt"))
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
     }
 
     /// Staged entries collapse the porcelain double space, while leading single spaces and ` -> ` are preserved.

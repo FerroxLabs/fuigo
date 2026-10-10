@@ -1349,14 +1349,17 @@ fn bump_rollback_floor_raises_when_verification_active() {
     );
     let floor = |home: &Path| read_managed_config_cache(home).map_or(0, |c| c.rollback_floor);
     let base = floor(home);
-    assert!(crate::signed_policy::verification_active());
-    let raised = base + 10_000;
-    bump_rollback_floor_with_now(home, raised);
-    assert_eq!(
-        floor(home),
-        raised,
-        "armed build: the tick must raise the floor"
-    );
+    // The tick reads the process-global kill-switch too: hold the lock across assert and tick.
+    crate::test_support::with_remote_disarm_lock(|| {
+        assert!(crate::signed_policy::verification_active());
+        let raised = base + 10_000;
+        bump_rollback_floor_with_now(home, raised);
+        assert_eq!(
+            floor(home),
+            raised,
+            "armed build: the tick must raise the floor"
+        );
+    });
 }
 
 /// Far-future `synced_at` is stale; modest forward skew stays fresh.

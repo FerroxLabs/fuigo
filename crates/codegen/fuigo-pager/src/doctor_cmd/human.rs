@@ -4,6 +4,7 @@ use crate::diagnostics::{
     ProbeStatus, RuntimeFact, VoiceFacts,
 };
 use crate::host::{DisplayServer, HostOs};
+use fuigo_tty_utils::untrusted;
 
 const LIVE_TUI_PROBE_CTA: &str = "Some checks only run in Fuigo. Start Fuigo and run /doctor.";
 
@@ -199,6 +200,8 @@ fn unavailable(out: &mut String, label: &str, value: &str) {
 }
 
 fn row(out: &mut String, marker: &str, label: &str, value: &str) {
+    let label = untrusted(label);
+    let value = untrusted(value);
     out.push_str(&format!("  {marker} {label:<28} {value}\n"));
 }
 
@@ -211,7 +214,7 @@ fn format_finding(out: &mut String, finding: &DiagnosticFinding) {
     if let Some(automatic) = finding.automatic_remediation {
         let command = crate::diagnostics::human_fix_command(automatic.fix_id)
             .unwrap_or_else(|| automatic.command.to_owned());
-        out.push_str(&format!("    → Automatic setup: `{command}`\n"));
+        out.push_str(&format!("    → Automatic setup: `{}`\n", untrusted(command)));
     }
     if let Some(remediation) = &finding.remediation {
         let instruction = match (&remediation.config_path, &finding.automatic_remediation) {
@@ -219,10 +222,10 @@ fn format_finding(out: &mut String, finding: &DiagnosticFinding) {
             (None, Some(_)) => format!("One-off: `{}`", remediation.fix),
             (None, None) => format!("Run: `{}`", remediation.fix),
         };
-        out.push_str(&format!("    → {instruction}\n"));
+        out.push_str(&format!("    → {}\n", untrusted(instruction)));
     }
     if let Some(note) = &finding.note {
-        out.push_str(&format!("      {note}\n"));
+        out.push_str(&format!("      {}\n", untrusted(note)));
     }
 }
 

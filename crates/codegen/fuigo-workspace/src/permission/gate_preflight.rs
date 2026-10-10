@@ -23,6 +23,43 @@ pub(crate) struct GatePreflight {
     defers_gate_ask: bool,
 }
 
+/// One `apply_patch` target in every spelling that names the file the tool writes (P184).
+pub(crate) struct EditTargetSpellings {
+    /// The path `ApplyPatchTool` writes: `cwd.join(path)`, not collapsed, so `..` after a symlink stays physical.
+    pub(crate) written: String,
+    /// The model's spelling (the patch header), when it differs from `written`.
+    pub(crate) raw: Option<String>,
+    /// `written` with every symlink followed literally (no separator rewriting); `None` when it cannot be resolved.
+    pub(crate) physical: Option<String>,
+    /// Whether an allow on `written` can be trusted. The policy reads `\` as a separator, so on Unix (where it is an
+    /// ordinary filename byte) a backslash spelling can match a rule written for a different file: such a target never
+    /// earns an allow (deny and ask still bind).
+    allow_trusted: bool,
+}
+
+impl EditTargetSpellings {
+    pub(crate) fn new(cwd: &Path, path: &str) -> Self {
+        let written_path = cwd.join(path);
+        let written = written_path.to_string_lossy().into_owned();
+        let physical = crate::permission::policy::resolve_following_symlinks(&written_path)
+            .map(|p| p.to_string_lossy().into_owned());
+        let allow_trusted = !(cfg!(unix) && written.contains('\\'));
+        Self {
+            raw: (path != written).then(|| path.to_owned()),
+            physical,
+            allow_trusted,
+            written,
+        }
+    }
+
+    /// The spellings other than `written`.
+    fn others(&self) -> impl Iterator<Item = &String> {
+        self.raw
+            .iter()
+            .chain(self.physical.iter().filter(|p| **p != self.written))
+    }
+}
+
 impl GatePreflight {
     /// `cwd` is the requesting session's execution cwd (not necessarily the manager's): path rules and shell-file operands anchor to it.
     pub(crate) fn evaluate(
@@ -56,6 +93,147 @@ impl GatePreflight {
             shell_file,
             native_symlink_fail_closed,
             defers_gate_ask,
+        }
+    }
+
+    /// One multi-file edit (`apply_patch`, P184) judged as an `Edit` of each target, the strictest result winning.
+    ///
+    /// Any deny refuses, otherwise any ask prompts; an allow rule covers the edit only when it covers every target (a
+    /// target no rule matches leaves the decision to the default flow, unlike [`combine_decisions`], where `None` is
+    /// neutral). A target behind an unresolvable symlink fails closed as it does for a single-file edit.
+    ///
+    /// Each target is judged in every spelling of the file the tool writes ([`EditTargetSpellings`]): a deny or ask on
+    /// any spelling binds, and only the written path earns an allow (as for a single-file edit, whose symlink re-check
+    /// is deny/ask only) - never a Unix spelling with a backslash, which the policy would read as a separator. A target whose physical path cannot be determined fails
+    /// closed to a prompt.
+    pub(crate) fn evaluate_edit_targets(
+        policy: Option<&CompiledPolicy>,
+        targets: &[EditTargetSpellings],
+        cwd: &Path,
+    ) -> Self {
+        let mut deny: Option<Decision> = None;
+        let mut ask = false;
+        let mut all_allow = !targets.is_empty();
+        let mut native_symlink_fail_closed = false;
+        let mut judge = |spelling: &str| match policy {
+            Some(policy) => {
+                let (decision, fail_closed) = policy
+                    .evaluate_with_cwd_details(&AccessKind::Edit(spelling.to_owned()), Some(cwd));
+                native_symlink_fail_closed |= fail_closed;
+                decision
+            }
+            None => None,
+        };
+        for target in targets {
+            let mut written = judge(&target.written);
+            let mut restrictive = None;
+            for other in target.others() {
+                if let Some(decision @ (Decision::Ask | Decision::Reject(_) | Decision::PolicyDeny(_))) =
+                    judge(other)
+                {
+                    restrictive = combine_decisions(restrictive, Some(decision));
+                }
+            }
+            if target.physical.is_none() {
+                restrictive = combine_decisions(restrictive, Some(Decision::Ask));
+            }
+            // Astra r2 H1 / r3 HIGH: a backslash spelling on Unix can match a rule for another file
+            if !target.allow_trusted && matches!(written, Some(Decision::Allow)) {
+                written = None;
+            }
+            match combine_decisions(written, restrictive) {
+                Some(Decision::Allow) => {}
+                Some(Decision::Ask) => {
+                    ask = true;
+                    all_allow = false;
+                }
+                Some(refusal @ (Decision::Reject(_) | Decision::PolicyDeny(_))) => {
+                    deny.get_or_insert(refusal);
+                    all_allow = false;
+                }
+                _ => all_allow = false,
+            }
+        }
+        let direct = deny
+            .or(ask.then_some(Decision::Ask))
+            .or(all_allow.then_some(Decision::Allow));
+        Self {
+            direct,
+            bash_command: None,
+            shell_file: None,
+            native_symlink_fail_closed,
+            defers_gate_ask: false,
+        }
+    }
+
+    /// A tool that reads several files (P174) judged as a `Read` of each, the strictest result winning.
+    ///
+    /// `targets` holds, per file, every spelling of the file the tool opens (the model's spelling first, then the
+    /// spelling the tool resolves it to); a deny or ask on any spelling binds, and only the first earns an allow. A
+    /// file that could not be resolved (`false`) is refused. Across
+    /// files any deny refuses, otherwise any ask prompts; for a read (`access` is `Read`) an allow rule covers the call
+    /// only when it covers every file. For any other access (an image tool that opens local files) the files add only
+    /// their deny or ask to the access's own result: reading a file never allows a side effect. The access's own
+    /// restrictive result always binds too. A file behind an unresolvable symlink fails closed as for a single read.
+    pub(crate) fn evaluate_read_targets(
+        policy: Option<&CompiledPolicy>,
+        access: &AccessKind,
+        targets: &[(Vec<String>, bool)],
+        cwd: &Path,
+        auto_mode: bool,
+    ) -> Self {
+        let base = Self::evaluate(policy, access, cwd, auto_mode);
+        let Some(policy) = policy else {
+            return base;
+        };
+        let mut deny: Option<Decision> = None;
+        let mut ask = false;
+        let mut all_allow = !targets.is_empty();
+        let mut native_symlink_fail_closed = base.native_symlink_fail_closed;
+        for (spellings, resolved) in targets {
+            // A target whose file could not be resolved in time is refused (Astra r3: an approvable prompt for the
+            // spelling would let the reader open a file nobody judged).
+            let mut decision = (!resolved).then(|| {
+                Decision::Reject(
+                    "the file a read target names could not be resolved in time to check it against Read rules"
+                        .to_owned(),
+                )
+            });
+            for (index, spelling) in spellings.iter().enumerate() {
+                let (judged, fail_closed) = policy
+                    .evaluate_with_cwd_details(&AccessKind::Read(Some(spelling.clone())), Some(cwd));
+                native_symlink_fail_closed |= fail_closed;
+                match judged {
+                    Some(Decision::Allow) if index > 0 => {}
+                    judged => decision = combine_decisions(decision, judged),
+                }
+            }
+            match decision {
+                Some(Decision::Allow) => {}
+                Some(Decision::Ask) => {
+                    ask = true;
+                    all_allow = false;
+                }
+                Some(refusal @ (Decision::Reject(_) | Decision::PolicyDeny(_))) => {
+                    deny.get_or_insert(refusal);
+                    all_allow = false;
+                }
+                _ => all_allow = false,
+            }
+        }
+        let is_read = matches!(access, AccessKind::Read(_));
+        let targets_decision = deny
+            .or(ask.then_some(Decision::Ask))
+            .or((is_read && all_allow).then_some(Decision::Allow));
+        let base_direct = match base.direct {
+            // A read's own path is one of `targets` (or it names none): only its refusal or ask still binds.
+            Some(Decision::Allow) if is_read => None,
+            direct => direct,
+        };
+        Self {
+            direct: combine_decisions(base_direct, targets_decision),
+            native_symlink_fail_closed,
+            ..base
         }
     }
 

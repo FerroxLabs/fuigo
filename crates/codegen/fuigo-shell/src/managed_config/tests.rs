@@ -611,3 +611,100 @@ fn a_squatting_marker_is_no_record_and_a_withdrawal_still_counts_as_a_change() {
         .collect();
     assert_eq!(backups, vec!["# mine p147 squat\n".to_owned()]);
 }
+
+/// P167 (S17): with the login at a custom `FUIGO_AUTH_PATH`, the startup orphan clear must see that team login and
+/// keep the organisation's policy files. Before the fix it read `$FUIGO_HOME/auth.json`, found nothing, and deleted
+/// Fuigo's synced `managed_config.toml` / `requirements.toml` on every start.
+#[test]
+fn p167_clear_orphan_keeps_policy_when_the_login_lives_at_a_custom_auth_path() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    use fuigo_test_support::EnvGuard;
+    let home = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let auth_path = elsewhere.path().join("custom-auth.json");
+    let _home = EnvGuard::set("FUIGO_HOME", home.path());
+    let _auth_path = EnvGuard::set("FUIGO_AUTH_PATH", &auth_path);
+    let _inline = EnvGuard::unset("FUIGO_AUTH");
+    let _deploy = EnvGuard::unset("FUIGO_DEPLOYMENT_KEY");
+    let _switch = EnvGuard::unset("FUIGO_MANAGED_CONFIG");
+
+    let team = crate::auth::FuigoAuth {
+        principal_type: Some("Team".into()),
+        team_id: Some("team-p167".into()),
+        expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(24)),
+        create_time: chrono::Utc::now(),
+        ..crate::auth::FuigoAuth::test_default()
+    };
+    let store: std::collections::BTreeMap<String, crate::auth::FuigoAuth> =
+        [("fuigo.com".to_owned(), team)].into_iter().collect();
+    std::fs::write(&auth_path, serde_json::to_string(&store).unwrap()).unwrap();
+    assert!(!home.path().join("auth.json").exists(), "no login at the default path");
+
+    // Fuigo's own synced copies (marker present): an orphan clear would delete them without a backup.
+    let policy = "[features]\n# org policy p167\n";
+    std::fs::write(home.path().join("managed_config.toml"), policy).unwrap();
+    std::fs::write(home.path().join("requirements.toml"), policy).unwrap();
+    std::fs::write(
+        home.path().join(fuigo_config::MANAGED_CONFIG_CACHE_FILE),
+        r#"{"had_managed_config":true,"had_requirements":true}"#,
+    )
+    .unwrap();
+
+    assert!(
+        team_principal_signed_in().unwrap(),
+        "the team login at FUIGO_AUTH_PATH is signed in"
+    );
+    assert_eq!(active_team_id_any_expiry().as_deref(), Some("team-p167"));
+    assert!(read_active_team_auth().is_some(), "the active team auth is read from FUIGO_AUTH_PATH");
+
+    clear_orphan();
+
+    for name in ["managed_config.toml", "requirements.toml"] {
+        assert_eq!(
+            std::fs::read_to_string(home.path().join(name)).ok().as_deref(),
+            Some(policy),
+            "{name} must survive startup when the login lives at a custom auth path"
+        );
+    }
+}
+
+#[cfg(unix)]
+mod lock_modes {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn mode(p: &std::path::Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn new_managed_config_lock_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let _l = try_lock_managed_config(dir.path()).expect("lock");
+        assert_eq!(mode(&dir.path().join("managed_config.lock")) & 0o077, 0);
+    }
+
+    #[test]
+    fn existing_wide_managed_config_lock_is_tightened() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("managed_config.lock");
+        std::fs::write(&p, b"").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let _l = try_lock_managed_config(dir.path()).expect("lock");
+        assert_eq!(mode(&p), 0o600);
+    }
+
+    #[test]
+    fn managed_config_lock_symlink_target_mode_is_not_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = other.path().join("target");
+        std::fs::write(&target, b"").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        symlink(&target, dir.path().join("managed_config.lock")).unwrap();
+        let _l = try_lock_managed_config(dir.path()).expect("lock");
+        assert_eq!(mode(&target), 0o644);
+    }
+}

@@ -33,6 +33,8 @@ fuigo-tools = { workspace = true }
 fuigo-config = { workspace = true, features = ["test-seams"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# P194: span-leak test needs an enabled subscriber so `Span::current().id()` is observable.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

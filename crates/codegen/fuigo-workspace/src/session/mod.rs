@@ -659,6 +659,9 @@ pub struct WorkspaceShared {
     pub(crate) hub_tools_snapshot: arc_swap::ArcSwap<Vec<ToolConfig>>,
     /// Server config stashed at construction time for deferred connect.
     pub(crate) hub_config: Option<HubConfig>,
+    /// Folder-trust verdict for the workspace root ([`WorkspaceConfig::project_lsp_trusted`](crate::config::WorkspaceConfig::project_lsp_trusted)).
+    /// Gates project-tier permission rules for hub-routed tool calls, as folder trust gates them for local sessions (P173).
+    pub(crate) project_permissions_trusted: bool,
     /// Auth provider for Ferrox Labs service calls.
     pub(crate) auth_provider: Option<fuigo_computer_hub_sdk::SharedAuthProvider>,
     /// Connection-level sink feeding the `ActivityTracker` (drained by `run_activity_feed`); not a network egress.

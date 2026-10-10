@@ -825,10 +825,10 @@ async fn handle_add_source(url: &str) -> fuigo_hooks_plugins_types::ActionOutcom
     // Local paths never match the git-URL allowlist, so a restricted strictKnownMarketplaces policy blocks them (intentionally fail-closed)
     let allowlist =
         &fuigo_workspace::permission::resolution::managed_settings().marketplace_allowlist;
-    if allowlist.is_restricted() && !allowlist.is_url_allowed(&identity) {
+    if let Some(reason) = allowlist.add_block_reason(&identity) {
         return ActionOutcome {
             status: OutcomeStatus::ValidationError,
-            message: format!("Marketplace source blocked: {}", allowlist.block_reason()),
+            message: format!("Marketplace source blocked: {reason}"),
             requires_reload: false,
             requires_restart: false,
         };
@@ -1266,6 +1266,12 @@ fn read_official_marketplace_auto_installed(config_path: &std::path::Path) -> bo
     read_marketplace_bool_flag(config_path, "official_marketplace_auto_installed")
 }
 
+/// Not `WouldBlock`: Windows surfaces contention (ERROR_LOCK_VIOLATION) as `Uncategorized`.
+fn lock_is_contended(e: &std::io::Error) -> bool {
+    let contended = fs2::lock_contended_error();
+    e.kind() == contended.kind() && e.raw_os_error() == contended.raw_os_error()
+}
+
 /// Acquire an advisory exclusive `flock` on `<fuigo_home>/.config-init.lock`, retrying briefly under contention.
 /// It serializes first-run auto-register across processes.
 /// Only `WouldBlock` retries; other I/O errors return early.
@@ -1283,7 +1289,7 @@ fn acquire_init_lock(fuigo_home: &std::path::Path) -> std::io::Result<std::fs::F
     for _ in 0..50 {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if lock_is_contended(&e) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(e) => return Err(e),
@@ -1426,6 +1432,21 @@ fn purge_default_skills_installs_impl(
 /// verified. Environment and remote feature flags may still invoke this compatibility hook, but
 /// it must not inspect or mutate any persisted marketplace state.
 pub(crate) fn ensure_official_marketplace_source(_fuigo_home: &std::path::Path) {}
+
+#[cfg(test)]
+mod init_lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_held_init_lock_is_waited_for_then_reports_the_timeout_not_a_lock_error() {
+        use fs2::FileExt;
+        let dir = tempfile::tempdir().unwrap();
+        let holder = std::fs::File::create(dir.path().join(".config-init.lock")).unwrap();
+        holder.lock_exclusive().unwrap();
+        let err = acquire_init_lock(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("timed out waiting for"), "unexpected error: {err}");
+    }
+}
 
 #[cfg(test)]
 mod official_source_tests {

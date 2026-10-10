@@ -183,6 +183,30 @@ enum FileChange {
     },
 }
 
+impl FileChange {
+    /// Every path this change writes or deletes.
+    fn written_paths(&self) -> Vec<&PathBuf> {
+        match self {
+            Self::Add { path, .. } | Self::Delete { path, .. } | Self::Update { path, .. } => {
+                vec![path]
+            }
+            Self::Move {
+                source_path,
+                dest_path,
+                ..
+            } => vec![source_path, dest_path],
+        }
+    }
+}
+
+/// The first path `changes` would write that is not one of the `judged` (approved) targets.
+fn first_unjudged_path<'a>(changes: &'a [FileChange], judged: &[PathBuf]) -> Option<&'a PathBuf> {
+    changes
+        .iter()
+        .flat_map(FileChange::written_paths)
+        .find(|path| !judged.contains(path))
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Create parent directories for a file path if they don't exist.
@@ -200,10 +224,52 @@ async fn ensure_parent_dirs(path: &std::path::Path) -> Result<(), fuigo_tool_run
     Ok(())
 }
 
+/// The files a parsed patch writes, as the model spelled them, in patch order without repeats: every Add, Update and
+/// Delete path, and both the source and the destination of a move.
+///
+/// The permission check judges exactly these, one `Edit` each (P184), at the path this tool writes (`cwd.join(path)`),
+/// and [`ApplyPatchTool`] refuses to write any path outside them.
+pub fn patch_target_paths(hunks: &[Hunk]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for hunk in hunks {
+        let (path, move_path) = match hunk {
+            Hunk::AddFile { path, .. } | Hunk::DeleteFile { path } => (path, None),
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => (path, move_path.as_ref()),
+        };
+        for target in std::iter::once(path).chain(move_path) {
+            let target = target.to_string_lossy().into_owned();
+            if !out.contains(&target) {
+                out.push(target);
+            }
+        }
+    }
+    out
+}
+
+/// Parse `patch` and return the files it writes ([`patch_target_paths`]), or the parser's message when it does not
+/// parse (the same text the tool returns for it).
+pub fn patch_edit_targets(patch: &str) -> Result<Vec<String>, String> {
+    parser::parse_patch(patch)
+        .map(|parsed| patch_target_paths(&parsed.hunks))
+        .map_err(|e| parse_error_message(&e))
+}
+
+fn parse_error_message(e: &ParseError) -> String {
+    match e {
+        ParseError::InvalidPatchError(m) => format!("Invalid patch: {m}"),
+        ParseError::InvalidHunkError {
+            message,
+            line_number,
+        } => format!("Invalid patch hunk on line {line_number}: {message}"),
+    }
+}
+
 /// Compute all file changes in memory without writing anything.
 /// Returns an error string if any hunk can't be applied.
 async fn compute_all_changes(
-    cwd: &std::path::Path,
+    resolve: &(dyn Fn(&std::path::Path) -> PathBuf + Sync),
     fs: &Arc<dyn AsyncFileSystem>,
     hunks: &[Hunk],
 ) -> Result<Vec<FileChange>, String> {
@@ -212,14 +278,14 @@ async fn compute_all_changes(
     for hunk in hunks {
         match hunk {
             Hunk::AddFile { path, contents } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve(path);
                 changes.push(FileChange::Add {
                     path: resolved,
                     content: contents.clone(),
                 });
             }
             Hunk::DeleteFile { path } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve(path);
                 let original_content = read_file_as_string(fs, &resolved)
                     .await
                     .map_err(|e| format!("Failed to read file: {}, {e}", resolved.display()))?;
@@ -233,7 +299,7 @@ async fn compute_all_changes(
                 move_path,
                 chunks,
             } => {
-                let resolved = cwd.join(path);
+                let resolved = resolve(path);
                 let original_content = read_file_as_string(fs, &resolved).await.map_err(|e| {
                     format!("Failed to read file to update: {}, {e}", resolved.display())
                 })?;
@@ -245,7 +311,7 @@ async fn compute_all_changes(
                     })?;
 
                 if let Some(dest) = move_path {
-                    let resolved_dest = cwd.join(dest);
+                    let resolved_dest = resolve(dest);
                     changes.push(FileChange::Move {
                         source_path: resolved,
                         dest_path: resolved_dest,
@@ -361,16 +427,7 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
         // ── Phase 1: Parse ───────────────────────────────────────
         let parsed = match parser::parse_patch(&input.patch) {
             Ok(p) => p,
-            Err(e) => {
-                let msg = match &e {
-                    ParseError::InvalidPatchError(m) => format!("Invalid patch: {m}"),
-                    ParseError::InvalidHunkError {
-                        message,
-                        line_number,
-                    } => format!("Invalid patch hunk on line {line_number}: {message}"),
-                };
-                return Ok(ApplyPatchOutput::ParseError(msg));
-            }
+            Err(e) => return Ok(ApplyPatchOutput::ParseError(parse_error_message(&e))),
         };
 
         if parsed.hunks.is_empty() {
@@ -380,10 +437,24 @@ impl fuigo_tool_runtime::Tool for ApplyPatchTool {
         }
 
         // ── Phase 2: Compute all changes in memory (no writes yet) ───
-        let changes = match compute_all_changes(&cwd, &fs, &parsed.hunks).await {
+        // Every path is the cwd join of the patch's spelling, which is the path the permission check judges (P184).
+        let resolve = |path: &std::path::Path| cwd.join(path);
+        let changes = match compute_all_changes(&resolve, &fs, &parsed.hunks).await {
             Ok(c) => c,
             Err(msg) => return Ok(ApplyPatchOutput::ApplicationError(msg)),
         };
+        // Write only what was judged: the permission request carried `patch_target_paths` of this same patch, so a
+        // change outside that list (a parser/apply drift) is refused before anything is written.
+        let judged: Vec<PathBuf> = patch_target_paths(&parsed.hunks)
+            .iter()
+            .map(|p| resolve(std::path::Path::new(p)))
+            .collect();
+        if let Some(unjudged) = first_unjudged_path(&changes, &judged) {
+            return Ok(ApplyPatchOutput::ApplicationError(format!(
+                "apply_patch refused: {} is not one of the files the patch was approved for",
+                unjudged.display()
+            )));
+        }
 
         // ── Phase 3: Apply all changes (write to filesystem) ─────
         let mut file_results = Vec::new();
@@ -755,6 +826,68 @@ mod tests {
             }
             other => panic!("Expected Success, got: {other:?}"),
         }
+    }
+
+    // ── P184: targets and path resolution ───────────────────────
+
+    /// The permission check judges `patch_target_paths`: every Add, Update and Delete path and both ends of a move, in
+    /// patch order, each once.
+    #[test]
+    fn patch_target_paths_lists_every_written_path_once() {
+        let patch = wrap_patch(
+            "*** Add File: a.txt\n+x\n*** Delete File: b.txt\n*** Update File: c.txt\n*** Move to: d/e.txt\n@@\n-o\n+n\n*** Update File: a.txt\n@@\n-x\n+y",
+        );
+        assert_eq!(
+            patch_edit_targets(&patch).unwrap(),
+            vec!["a.txt", "b.txt", "c.txt", "d/e.txt"]
+        );
+        let err = patch_edit_targets("not a valid patch").unwrap_err();
+        assert!(err.contains("Invalid patch"), "{err}");
+        assert_eq!(patch_edit_targets("*** Begin Patch\n*** End Patch").unwrap(), Vec::<String>::new());
+    }
+
+    /// The write-only-what-was-judged guard finds a change outside the approved list, including either end of a move.
+    #[test]
+    fn unjudged_change_is_found_before_any_write() {
+        let change = |src: &str, dest: Option<&str>| match dest {
+            Some(dest) => FileChange::Move {
+                source_path: PathBuf::from(src),
+                dest_path: PathBuf::from(dest),
+                original_content: String::new(),
+                new_content: String::new(),
+            },
+            None => FileChange::Add {
+                path: PathBuf::from(src),
+                content: String::new(),
+            },
+        };
+        let judged = vec![PathBuf::from("/w/a"), PathBuf::from("/w/b")];
+        let ok = [change("/w/a", None), change("/w/b", None)];
+        assert_eq!(first_unjudged_path(&ok, &judged), None);
+        let extra = [change("/w/a", None), change("/w/c", None)];
+        assert_eq!(first_unjudged_path(&extra, &judged), Some(&PathBuf::from("/w/c")));
+        let moved = [change("/w/a", Some("/w/.git/hooks/x"))];
+        assert_eq!(
+            first_unjudged_path(&moved, &judged),
+            Some(&PathBuf::from("/w/.git/hooks/x"))
+        );
+    }
+
+    /// The tool writes the cwd join of the patch's spelling, which is what the permission check judges: a name with a
+    /// quote is that file, not a quote-stripped neighbour.
+    #[tokio::test]
+    async fn literal_names_are_written_as_judged() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("report"), "keep\n").unwrap();
+        std::fs::write(tmp.path().join("report'"), "drop\n").unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+        let patch = wrap_patch("*** Delete File: report'");
+        let result = fuigo_tool_runtime::Tool::run(&ApplyPatchTool, test_ctx(shared), make_input(&patch))
+            .await
+            .unwrap();
+        assert!(matches!(result, ApplyPatchOutput::Success { .. }), "{result:?}");
+        assert!(!tmp.path().join("report'").exists());
+        assert_eq!(std::fs::read_to_string(tmp.path().join("report")).unwrap(), "keep\n");
     }
 
     // ── Parse error ──────────────────────────────────────────────

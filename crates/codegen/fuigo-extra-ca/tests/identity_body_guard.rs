@@ -27,7 +27,7 @@
 //! here, which forces it to be classified against the P54 rule (FluxRouter-operated: keep;
 //! configured by the user for exactly this data: keep and record; anything else: withhold or
 //! pseudonymise with `IdentityDisclosure::body_identity` / `body_key_for`) and the pin to be
-//! updated in the same change. On failure the test prints the actual table, ready to paste after
+//! updated in the same change (R-guard54 re-pinned three P193/U10 pager sites). On failure the test prints the actual table, ready to paste after
 //! review. The pin is a baseline: files outside the R063 site table (deserialisers, local state,
 //! tests, sampler header plumbing already gated by P30/P43) are counted so that a NEW use in them
 //! is caught too.
@@ -119,7 +119,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/actions.rs", 133),
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 5),
+    ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 6), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.
     ("crates/codegen/fuigo-pager/src/app/agent_view/paste.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/agent_view/shell_completion.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/agent_view/workflows_overlay.rs", 2),
@@ -132,7 +132,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/interject.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/notes.rs", 10),
     ("crates/codegen/fuigo-pager/src/app/dispatch/prompt.rs", 7),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/queue.rs", 4),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/queue.rs", 5), // R-guard54: +1 `agent_id: AgentId` parameter of `send_held_side_question` (d52be8ca, P193): the pager-local tab id, passed in-process to `start_side_question`; not the machine id. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9),
     ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 18),
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs", 5),
@@ -149,13 +149,13 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/dashboard.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/mod.rs", 3), // P77: +1 `hostname: None` fixture
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/notes.rs", 14), // P152: +2 `agent_id:` are the pager's local tab id in `TaskResult::FeedbackComplete` test literals (an in-process action, never a request body).
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 49), // P152: +2 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs", 50), // P152: +2, W3-B: +1 `agent_id:` are the pager's local tab id in test action literals (in-process, never a request body).
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/queue_release.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/rewind.rs", 21),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/router.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/fork.rs", 14),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/lifecycle.rs", 25), // P66 (97efd30a) deleted the dead local-workspace tests; pager-local fixtures, no body site (re-pinned by P54-K, R080 §11)
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 48),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/load.rs", 57), // R-guard54: +9 `agent_id:` fields of `TaskResult::SessionLoadFailed/SessionRestoreFailed/SessionCreated/ForkSessionFailed` test literals (P193: 8ef61a39, 7b190af9, e661ed68); pager-local tab id, no body. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs", 27),
@@ -207,6 +207,8 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/agent/subagent/handle_request.rs", 3),
     ("crates/codegen/fuigo-shell/src/agent/subagent/mod.rs", 2),
     ("crates/codegen/fuigo-shell/src/agent/subscription_check.rs", 7),
+    // FLUX-TRAFFIC A: two `user_id` fields inside MOCK RESPONSE bodies in tests (a fake /key/info answer); no request body.
+    ("crates/codegen/fuigo-shell/src/auth/api_key_probe.rs", 2),
     ("crates/codegen/fuigo-shell/src/auth/config.rs", 3),
     ("crates/codegen/fuigo-shell/src/auth/credential_provider.rs", 9),
     ("crates/codegen/fuigo-shell/src/auth/device_code.rs", 1),
@@ -238,7 +240,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-shell/src/managed_config/response.rs", 2),
     ("crates/codegen/fuigo-shell/src/managed_config/store.rs", 4),
     ("crates/codegen/fuigo-shell/src/managed_config/supervisor.rs", 4),
-    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 15), // P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends).
+    ("crates/codegen/fuigo-shell/src/managed_config/tests.rs", 16), // P147: +2 are `deployment_id: None` / `team_id: None` in a test `ManagedConfigResponse` (a FluxRouter response being parsed, not a body Fuigo sends). P167: +1 is the `team_id` of a local test login written to a temp `FUIGO_AUTH_PATH` file (read back, never sent).
     ("crates/codegen/fuigo-shell/src/relay/sync.rs", 14), // P77: the relay-sync `initialize` `_meta.hostname`, gated by `relay_initialize_meta` (parameter, key, removal), and its tests (`hostname` and "agentId" fixtures); 1 is the pre-P77 session-scoped "agentId"
     ("crates/codegen/fuigo-shell/src/remote/client.rs", 6),
     ("crates/codegen/fuigo-shell/src/remote/client_tests.rs", 17),
@@ -335,7 +337,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/common/fuigo-computer-hub-sdk/src/connection.rs", 3),
     ("crates/common/fuigo-computer-hub-sdk/src/connection_borrow.rs", 1),
     ("crates/common/fuigo-computer-hub-sdk/src/connection_tests.rs", 10), // P47: +1 mock hub reply in a test
-    ("crates/common/fuigo-computer-hub-sdk/src/harness.rs", 1),
+    ("crates/common/fuigo-computer-hub-sdk/src/harness.rs", 2), // P173 (R173 round 4): +1 is `"user_id": "test"` in the permission mock hub's hello ACK fixture (inbound, test only), like the leader/server_tests.rs mock; no body site
     ("crates/common/fuigo-computer-hub-sdk/src/oidc_provider.rs", 4),
     ("crates/common/fuigo-computer-hub-sdk/src/pool.rs", 1),
     ("crates/common/fuigo-message-delivery-core/src/envelope.rs", 3),

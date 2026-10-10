@@ -446,7 +446,7 @@ pub(crate) async fn spawn_session_actor(
                 "CLI --allow catch-all ignored: always-approve disabled by managed policy"
             );
             if startup_hints.non_interactive {
-                fuigo_tty_utils::cli_eprintln!("fuigo: --allow catch-all ignored: {reason}");
+                fuigo_tty_utils::cli_eprintln!("fuigo: --allow catch-all ignored: {}", fuigo_tty_utils::untrusted(&reason));
             }
         }
         if !cli_permission_rules.is_empty() {
@@ -1047,6 +1047,11 @@ pub(crate) async fn spawn_session_actor(
                 "Imported shared MCP clients from parent pool"
             );
         }
+        // P169 (Grok 4.7 #4): in-process SDK servers go through managed MCP policy like every other server.
+        let acp_mcp_servers = crate::session::acp_mcp::admit_acp_mcp_servers(
+            acp_mcp_servers,
+            &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist,
+        );
         if !acp_mcp_servers.is_empty() {
             let invoker = std::sync::Arc::new(crate::session::acp_mcp::GatewayAcpInvoker::new(
                 gateway.clone(),
@@ -1995,6 +2000,7 @@ pub(crate) async fn spawn_session_actor(
         active_agent_type: parking_lot::Mutex::new(initial_agent_type),
         queue_exit_reminder_on_approved_exit,
         active_skill: parking_lot::Mutex::new(None),
+        admin_policy_watch: Default::default(),
         current_prompt_mode: current_prompt_mode.clone(),
         turn_start_prompt_mode: parking_lot::Mutex::new(restored_prompt_mode),
         turn_prompt_mode: turn_prompt_mode.clone(),
@@ -2619,6 +2625,11 @@ pub(crate) async fn spawn_session_on_thread(
     // unlocked, and a load dropped during the wait leaves nothing behind. The wait is async (this runs on the agent's
     // `LocalSet`) and bounded; a recovery elsewhere that holds the session past the bound fails the load with a retry
     // message instead of waiting forever, and no actor is started.
+    #[cfg(test)]
+    crate::session::persistence::test_seam::run_before_turn_owner_lock(
+        &session_info.id.0,
+        &crate::session::persistence::session_dir(&session_info),
+    );
     let turn_owner_lock = crate::session::turn_owner_lock::TurnOwnerLock::acquire(
         &crate::session::persistence::session_dir(&session_info),
     )

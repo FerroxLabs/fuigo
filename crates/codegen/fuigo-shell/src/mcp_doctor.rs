@@ -25,6 +25,8 @@ pub enum ConfigSourceState {
     Found { server_count: usize },
     NotFound,
     Skipped { reason: String },
+    /// A managed policy row (P169): what the source enforces.
+    Policy { detail: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -98,7 +100,7 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     let mut plugins_cfg: crate::agent::config::PluginsConfig =
         crate::config::load_effective_config()
             .ok()
-            .and_then(|t| t.get("plugins").and_then(|v| v.clone().try_into().ok()))
+            .map(|t| crate::agent::config::PluginsConfig::from_config_warn(&t, "user config"))
             .unwrap_or_default();
     plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
     let mut plugin_config = plugins_cfg.to_discovery_config();
@@ -423,25 +425,58 @@ async fn check_server(
     }
 }
 
+// ── Managed policy rows (P169) ──────────────────────────────────
+
+/// One row per managed policy source that restricts MCP servers, plus the project-MCP pin. Every policy layer counts
+/// (`managed_config.toml`, `requirements.toml`, the Claude `managed-settings.json`); a source that could not be read
+/// shows as a lockdown.
+pub(crate) fn policy_source_rows(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+) -> Vec<ConfigSourceStatus> {
+    let mut rows = Vec::new();
+    for source in ms.mcp_allowlist.sources.iter().filter(|s| s.is_restricted()) {
+        let path = source
+            .source_path
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let mut parts = Vec::new();
+        if source.is_lockdown() {
+            parts.push("lockdown: every server blocked".to_string());
+        } else {
+            parts.push(format!("allow {}", source.entries.len()));
+            parts.push(format!("deny {}", source.deny_entries.len()));
+            if source.managed_only() {
+                parts.push("managed servers only".to_string());
+            }
+        }
+        rows.push(ConfigSourceStatus {
+            path: format!("MCP policy ({path})"),
+            status: ConfigSourceState::Policy {
+                detail: parts.join(", "),
+            },
+        });
+    }
+    if let Some(path) = ms.project_mcp.source() {
+        rows.push(ConfigSourceStatus {
+            path: format!("project MCP pin ({})", path.display()),
+            status: ConfigSourceState::Policy {
+                detail: "project servers blocked unless allowed (enable_all_project_mcp_servers = false)"
+                    .to_string(),
+            },
+        });
+    }
+    rows
+}
+
 // ── Entry point ─────────────────────────────────────────────────
 
 pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
     let (mut sources, discovered) = discover_servers(cwd);
 
-    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
-    if allowlist.is_restricted() {
-        let path = allowlist
-            .source_path
-            .as_deref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "managed-settings.json".to_string());
-        sources.push(ConfigSourceStatus {
-            path: format!("server allowlist ({})", path),
-            status: ConfigSourceState::Found {
-                server_count: allowlist.entries.len() + allowlist.deny_entries.len(),
-            },
-        });
-    }
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    let allowlist = &ms.mcp_allowlist;
+    sources.extend(policy_source_rows(ms));
 
     let all_server_names: Vec<String> = discovered
         .iter()
@@ -476,6 +511,13 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
             crate::agent::folder_trust::project_scoped_mcp_names(cwd)
         };
 
+    // P169: project-declared servers are judged by the `enable_all_project_mcp_servers = false` pin.
+    let project_declared: std::collections::HashSet<String> = if ms.project_mcp.is_disabled() {
+        crate::agent::folder_trust::project_scoped_mcp_names(cwd)
+    } else {
+        std::collections::HashSet::new()
+    };
+
     const PROBE_CONCURRENCY: usize = 8;
 
     use futures::StreamExt;
@@ -483,12 +525,14 @@ pub async fn run_doctor(cwd: &Path, name_filter: Option<&str>) -> DoctorReport {
         .map(|d| {
             let label = d.source.display_label();
             let name = mcp_servers::mcp_server_name(&d.server).to_string();
-            let block_detail = (!allowlist.is_server_allowed(&d.server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
-                    allowlist, &d.server,
-                )
-                .to_string()
-            });
+            let block_detail = crate::session::managed_mcp::mcp_block_reason(allowlist, &d.server)
+                .or_else(|| {
+                    project_declared
+                        .contains(&name)
+                        .then(|| ms.mcp_project_pin_block(&d.server))
+                        .flatten()
+                })
+                .map(|reason| reason.to_string());
             let disabled = disabled_names.contains(&name);
             let untrusted = untrusted_project.contains(&name);
             async move {
@@ -555,9 +599,11 @@ pub fn print_report(report: &DoctorReport) {
                 )
             }
             ConfigSourceState::NotFound => "not found".to_string(),
-            ConfigSourceState::Skipped { reason } => format!("skipped ({})", reason),
+            ConfigSourceState::Skipped { reason } => format!("skipped ({})", fuigo_tty_utils::untrusted(&reason)),
+            // P169's policy row: the detail is scrubbed with the whole status at the print below.
+            ConfigSourceState::Policy { detail } => detail.clone(),
         };
-        fuigo_tty_utils::cli_println!("    {:<40} {}", source.path, status);
+        fuigo_tty_utils::cli_println!("    {:<40} {}", fuigo_tty_utils::untrusted(&source.path), fuigo_tty_utils::untrusted(&status));
     }
     fuigo_tty_utils::cli_println!();
 
@@ -571,18 +617,18 @@ pub fn print_report(report: &DoctorReport) {
     for server in &report.servers {
         fuigo_tty_utils::cli_println!(
             "  {} ({}: {})",
-            server.name, server.transport, server.target
+            fuigo_tty_utils::untrusted(&server.name), fuigo_tty_utils::untrusted(&server.transport), fuigo_tty_utils::untrusted(&server.target)
         );
         for check in &server.checks {
             let icon = if check.passed { "\u{2713}" } else { "\u{2717}" };
             let detail = check.detail.as_deref().unwrap_or("");
             if detail.is_empty() {
-                fuigo_tty_utils::cli_println!("    {} {}", icon, check.label);
+                fuigo_tty_utils::cli_println!("    {} {}", icon, fuigo_tty_utils::untrusted(&check.label));
             } else {
-                fuigo_tty_utils::cli_println!("    {} {} ({})", icon, check.label, detail);
+                fuigo_tty_utils::cli_println!("    {} {} ({})", icon, fuigo_tty_utils::untrusted(&check.label), fuigo_tty_utils::untrusted(&detail));
             }
             if let Some(hint) = &check.hint {
-                fuigo_tty_utils::cli_println!("    \u{2192} {}", hint);
+                fuigo_tty_utils::cli_println!("    \u{2192} {}", fuigo_tty_utils::untrusted(&hint));
             }
         }
         fuigo_tty_utils::cli_println!();
@@ -639,5 +685,56 @@ mod tests {
         let check = format_mcp_error("ignored", &err);
         assert_eq!(check.label, "spawn failed");
         assert!(check.detail.as_deref().unwrap().contains("No such file"));
+    }
+
+    fn write_mcp_plugin(home: &std::path::Path, name: &str) {
+        let dir = home.join("plugins").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), format!(r#"{{"name": "{name}"}}"#)).unwrap();
+        std::fs::write(
+            dir.join(".mcp.json"),
+            format!(r#"{{"mcpServers":{{"{name}-srv":{{"command":"echo","args":["hi"]}}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    fn doctor_sees_plugin(home: &std::path::Path, config: &str, name: &str) -> bool {
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let (sources, _servers) = discover_servers(cwd.path());
+        sources.iter().any(|s| s.path == format!("plugin: {name}"))
+    }
+
+    /// W3-E (b): a well-formed `[plugins].disabled` keeps a trusted plugin's MCP server out of the doctor report.
+    #[test]
+    #[serial_test::serial]
+    fn doctor_skips_a_disabled_plugin_w3e() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_mcp_plugin(home.path(), "w3e-off");
+        write_mcp_plugin(home.path(), "w3e-on");
+        let cfg = "[plugins]\ndisabled = [\"w3e-off\"]\nenabled = [\"w3e-on\"]\n";
+        assert!(!doctor_sees_plugin(home.path(), cfg, "w3e-off"));
+        assert!(doctor_sees_plugin(home.path(), cfg, "w3e-on"));
+    }
+
+    /// W3-E (b): a malformed `[plugins] enabled` must not enable anything, and `disabled` is still honoured.
+    /// Today's doctor only logs the bad field (tracing), so there is no user-facing message to assert.
+    #[test]
+    #[serial_test::serial]
+    fn doctor_malformed_plugins_section_does_not_enable_plugins_w3e() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = tempfile::tempdir().unwrap();
+        let _env = fuigo_test_support::EnvGuard::set("FUIGO_HOME", home.path());
+        write_mcp_plugin(home.path(), "w3e-off");
+        write_mcp_plugin(home.path(), "w3e-other");
+        let cfg = "[plugins]\nenabled = \"x\"\ndisabled = [\"w3e-off\"]\n";
+        assert!(!doctor_sees_plugin(home.path(), cfg, "w3e-off"));
+        assert!(!doctor_sees_plugin(home.path(), cfg, "w3e-other"));
     }
 }

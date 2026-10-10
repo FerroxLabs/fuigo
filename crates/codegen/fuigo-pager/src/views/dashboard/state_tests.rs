@@ -6099,3 +6099,70 @@ fn note_page_flip_ignores_subagent_lease_on_parent_agent() {
             .is_none()
     );
 }
+
+/// A subdivision flag keeps its tags; loose tags and tag text hidden after a flag are dropped
+#[test]
+fn rename_keeps_flag_tags_and_drops_loose_ones() {
+    let scotland = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}";
+    let hidden_after_flag =
+        "\u{1f3f4}\u{e0069}\u{e0067}\u{e006e}\u{e0020}\u{e0061}\u{e006c}\u{e006c}";
+    let mut draft = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "");
+
+    let pasted = format!("go {scotland} team\u{e0068}\u{e0069} {hidden_after_flag}");
+    handle_rename_paste(&mut draft, &pasted);
+
+    assert_eq!(format!("go {scotland} team \u{1f3f4}"), draft.text());
+
+    // A cap that cuts the flag leaves the black flag without its partial tags
+    let near_cap = "a".repeat(MAX_RENAME_SCALARS - 3);
+    let mut full = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "");
+    handle_rename_paste(&mut full, &format!("{near_cap}{scotland}"));
+    assert_eq!(format!("{near_cap}\u{1f3f4}"), full.text());
+}
+
+/// Wire text (`set_text`) gets the same tag pass as a paste
+#[test]
+fn rename_set_text_applies_the_tag_pass() {
+    let england = "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}";
+    let draft = RenameDraft::new(
+        DashboardRowId::TopLevel(AgentId(0)),
+        format!("{england}x\u{e0041}\u{e0042}y"),
+    );
+    assert_eq!(format!("{england}xy"), draft.text());
+}
+
+/// Tags never enter a rename through typing, and the other widened classes are rejected on every path
+#[test]
+fn rename_rejects_widened_unsafe_characters_on_every_path() {
+    for c in ['\u{00AD}', '\u{2028}', '\u{2029}', '\u{180E}', '\u{FFF9}', '\u{13430}', '\u{1BCA0}', '\u{E0001}', '\u{E0041}'] {
+        let mut draft = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "ab");
+        handle_rename_key(&mut draft, &KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert_eq!(draft.text(), "ab", "typed U+{:04X}", c as u32);
+
+        let mut pasted = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), "");
+        handle_rename_paste(&mut pasted, &format!("a{c}b"));
+        assert_eq!(pasted.text(), "ab", "pasted U+{:04X}", c as u32);
+
+        let wired = RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), format!("a{c}b"));
+        assert_eq!(wired.text(), "ab", "wire U+{:04X}", c as u32);
+    }
+}
+
+/// A flag run must be 1 to 7 lowercase letters or digits then the cancel tag; anything else loses all its tags
+#[test]
+fn rename_flag_tag_run_bounds_are_exact() {
+    let seven = "\u{1f3f4}\u{e0061}\u{e0062}\u{e0063}\u{e0064}\u{e0065}\u{e0066}\u{e0067}\u{e007f}";
+    let eight = "\u{1f3f4}\u{e0061}\u{e0062}\u{e0063}\u{e0064}\u{e0065}\u{e0066}\u{e0067}\u{e0068}\u{e007f}";
+    let empty = "\u{1f3f4}\u{e007f}";
+    let uppercase = "\u{1f3f4}\u{e0041}\u{e007f}";
+    let no_cancel = "\u{1f3f4}\u{e0067}\u{e0062}";
+    let digits = "\u{1f3f4}\u{e0031}\u{e0039}\u{e007f}";
+    let text_of = |raw: &str| RenameDraft::new(DashboardRowId::TopLevel(AgentId(0)), raw).text().to_owned();
+
+    assert_eq!(text_of(seven), seven);
+    assert_eq!(text_of(digits), digits);
+    assert_eq!(text_of(eight), "\u{1f3f4}");
+    assert_eq!(text_of(empty), "\u{1f3f4}");
+    assert_eq!(text_of(uppercase), "\u{1f3f4}");
+    assert_eq!(text_of(no_cancel), "\u{1f3f4}");
+}

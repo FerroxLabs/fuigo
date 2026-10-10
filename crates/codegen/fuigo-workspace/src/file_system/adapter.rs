@@ -43,6 +43,27 @@ impl AsyncFileSystem for AcpFsAdapter {
         Ok(response.content.into_bytes())
     }
 
+    /// P166/S12: the client owns the file system (it decides what a regular file is) and returns the whole text in one
+    /// response, so the cap is enforced on what the tools accept: an over-cap response is refused, never processed.
+    fn supports_bounded_read(&self) -> bool {
+        true
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let bytes = self.read_file(path).await?;
+        if bytes.len() > max_bytes {
+            return Err(ComputerError::io_with_kind(
+                format!("file exceeds the {max_bytes} byte read limit"),
+                std::io::ErrorKind::FileTooLarge,
+            ));
+        }
+        Ok(bytes)
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         let content =
             String::from_utf8(data.to_vec()).map_err(|e| ComputerError::io(e.to_string()))?;
@@ -81,5 +102,42 @@ fn acp_error_to_io_kind(err: &acp::Error) -> Option<std::io::ErrorKind> {
         Some(std::io::ErrorKind::PermissionDenied)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P166/S12, Astra r1 HIGH: the ACP backend now takes the bounded path, and an over-cap client response is refused.
+    #[tokio::test]
+    async fn bounded_read_refuses_an_over_cap_response() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = AcpFsAdapter::new(GatewaySender::new(tx), acp::SessionId::new("p166"));
+        let client = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                if let fuigo_acp_lib::AcpClientMessage::ReadTextFile(args) = message {
+                    let _ = args
+                        .response_tx
+                        .send(Ok(acp::ReadTextFileResponse::new("abcdef")));
+                }
+            }
+        });
+        assert!(adapter.supports_bounded_read());
+        assert_eq!(
+            b"abcdef",
+            adapter
+                .read_file_bounded(Path::new("/x"), 6)
+                .await
+                .unwrap()
+                .as_slice()
+        );
+        let error = adapter
+            .read_file_bounded(Path::new("/x"), 5)
+            .await
+            .unwrap_err();
+        assert_eq!(Some(std::io::ErrorKind::FileTooLarge), error.io_error_kind());
+        drop(adapter);
+        client.abort();
     }
 }

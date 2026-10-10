@@ -456,6 +456,7 @@ pub(crate) mod inference_metrics;
 pub use fuigo_shared::session::info;
 pub mod interrupted_turn;
 pub(crate) mod turn_owner_lock;
+pub mod admin_policy_watch;
 pub mod managed_mcp;
 pub(crate) mod mcp_descriptors;
 pub(crate) mod mcp_dispatcher;

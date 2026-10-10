@@ -150,6 +150,7 @@ fn render_entry_to_ansi(
     let area = Rect::new(0, 0, FULL_VIEW_WIDTH, height);
     let mut buf = Buffer::empty(area);
     renderer.render(area, &mut buf);
+    fuigo_ratatui_inline::neutralize_buffer(&mut buf);
     buffer_to_ansi(&buf, out);
     // Blank line between blocks so the transcript breathes in the pager.
     out.push('\n');
@@ -448,6 +449,30 @@ mod tests {
             !lines[0].contains("  "),
             "trailing spaces not trimmed: {:?}",
             lines[0]
+        );
+    }
+
+    /// P181 (Grok round): the transcript view serializes a rendered cell buffer straight to ANSI text, so a hidden
+    /// character in a block must not survive into the bytes.
+    #[test]
+    fn transcript_ansi_never_carries_a_hidden_character() {
+        let _theme = fuigo_pager::theme::cache::pin_theme();
+        let theme = Theme::current();
+        let appearance = super::super::commit::committed_appearance(
+            &fuigo_pager::appearance::AppearanceConfig::default(),
+        );
+        let entry = ScrollbackEntry::new(RenderBlock::thinking(
+            "deep\u{2028}reasoning x\u{e0041}y\u{ad}z",
+        ));
+        fuigo_pager::appearance::cache::set_show_thinking_blocks(true);
+        let mut out = String::new();
+        render_entry_to_ansi(&entry, &theme, &appearance, test_cwd(), &mut out);
+        fuigo_pager::appearance::cache::set_show_thinking_blocks(false);
+        assert!(out.contains("reasoning"), "{out:?}");
+        assert!(
+            !out.chars()
+                .any(|c| c != '\n' && c != '\u{1b}' && fuigo_tty_utils::is_unsafe_display_char(c)),
+            "{out:?}"
         );
     }
 }

@@ -455,12 +455,13 @@ mod links {
 
     #[test]
     fn url_control_chars_sanitized() {
+        // P181 (Grok round): a target holding a control is refused whole, not edited into a different link; the cells draw unlinked
         let mut t = term(20, 3);
         let out = frame(&mut t, "AB", &[span(0, 2, "https://x\x07\x1b/y", None)]);
-        assert!(
-            out.contains("\x1b]8;id=1;https://x/y\x07"),
-            "url not sanitized: {out:?}"
-        );
+        // The empty-target close that follows an unlinked run is a no-op; no open with a target may remain
+        assert!(!out.replace("\x1b]8;;\x07", "").contains("\x1b]8;"), "a control-bearing url must open no hyperlink: {out:?}");
+        assert!(!out.contains("https://x"), "the url must not be edited into another target: {out:?}");
+        assert!(out.contains("AB"), "the cells still draw: {out:?}");
     }
 
     #[test]

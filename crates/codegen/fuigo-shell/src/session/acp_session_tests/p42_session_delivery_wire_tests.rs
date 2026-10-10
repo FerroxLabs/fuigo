@@ -363,7 +363,7 @@ fn p42_wire_aux_fallback_bearer_respects_the_destination() {
                 ..Default::default()
             };
             let resolved = crate::agent::config::resolve_aux_model_sampling_config(
-                "p42-aux-model", &models, &endpoints, Some(TOKEN), false, None, None,
+                "p42-aux-model", &models, &endpoints, Some(TOKEN), false, None, None, &crate::agent::models::EffectiveAllowlist::Unrestricted,
             );
             match resolved {
                 Some(cfg) => send_config(cfg).await,
@@ -576,7 +576,7 @@ fn p42_static_manager_api_key_is_not_treated_as_a_session_token() {
         };
         let aux = crate::agent::config::resolve_aux_model_sampling_config_for_held(
             "p42-aux-model", &indexmap::IndexMap::new(), &endpoints, held.as_ref(), false, None, None,
-            crate::agent::config::HelperModelChoice::Default,
+            crate::agent::config::HelperModelChoice::Default, &crate::agent::models::EffectiveAllowlist::Unrestricted,
         )
         .expect("the held static key routes the aux fallback");
         assert_eq!(aux.api_key.as_deref(), Some("p42-static-manager-key"));

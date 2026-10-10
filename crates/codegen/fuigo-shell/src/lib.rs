@@ -46,6 +46,8 @@ pub mod sampling;
 pub mod session;
 pub use fuigo_shell_terminal as terminal;
 #[cfg(test)]
+mod p169_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 pub mod tier;
 pub mod tools;

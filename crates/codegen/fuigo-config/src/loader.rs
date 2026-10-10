@@ -75,11 +75,20 @@ fn read_toml_file_as(path: &Path, blank: BlankRead) -> std::io::Result<toml::Val
 ///
 /// Costs one short wait only when the user layer is blank. Atomic writers
 /// (every Fuigo writer since P17-F1) never expose a blank file at all.
-fn confirm_blank(path: &Path) -> std::io::Result<String> {
+pub(crate) fn confirm_blank(path: &Path) -> std::io::Result<String> {
+    confirm_blank_with(path, |p: &Path| std::fs::read_to_string(p))
+}
+
+/// [`confirm_blank`] with the caller's reader. P183 round 9 (Grok r5 M2): an admin file's re-reads go through the ownership
+/// check again (a different inode swapped in during the wait must not be believed as the same blank file).
+pub(crate) fn confirm_blank_with(
+    path: &Path,
+    read: impl Fn(&Path) -> std::io::Result<String>,
+) -> std::io::Result<String> {
     for _ in 0..BLANK_RECHECKS {
         let before = FileStamp::of(path);
         blank_recheck_wait();
-        match std::fs::read_to_string(path) {
+        match read(path) {
             Ok(again) if !again.trim().is_empty() => return Ok(again),
             Ok(again) => {
                 let after = FileStamp::of(path);
@@ -135,6 +144,10 @@ impl FileStamp {
 
 #[cfg(not(test))]
 fn blank_recheck_wait() {
+    // With the `test-seams` feature (other crates' dev-dependencies only) a test can play the concurrent writer here,
+    // on its own thread, instead of racing a writer thread against the delay.
+    #[cfg(feature = "test-seams")]
+    blank_hook::fire();
     std::thread::sleep(BLANK_RECHECK_DELAY);
 }
 
@@ -145,8 +158,8 @@ fn blank_recheck_wait() {
     blank_hook::fire();
 }
 
-#[cfg(test)]
-pub(crate) mod blank_hook {
+#[cfg(any(test, feature = "test-seams"))]
+pub mod blank_hook {
     thread_local! {
         static HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
             const { std::cell::RefCell::new(None) };
@@ -154,13 +167,13 @@ pub(crate) mod blank_hook {
     }
 
     /// Install `hook` (run in place of the wait) and reset the count.
-    pub(crate) fn set(hook: Option<Box<dyn FnMut()>>) {
+    pub fn set(hook: Option<Box<dyn FnMut()>>) {
         HOOK.with(|h| *h.borrow_mut() = hook);
         FIRED.with(|f| f.set(0));
     }
 
     /// Waits taken on this thread since the last [`set`].
-    pub(crate) fn fired() -> usize {
+    pub fn fired() -> usize {
         FIRED.with(std::cell::Cell::get)
     }
 
@@ -185,6 +198,10 @@ pub fn load_toml_file(path: &Path) -> std::io::Result<toml::Value> {
 /// Never includes the offending source line (`Display` echoes it and it may carry a secret), so this is safe to log or return to a client.
 /// Shared with the trace `config_files` artifact so the redaction rule lives in one place.
 pub fn toml_error_detail(src: &str, e: &toml::de::Error) -> String {
+    crate::validation::display_scrub(&toml_error_detail_raw(src, e))
+}
+
+fn toml_error_detail_raw(src: &str, e: &toml::de::Error) -> String {
     match e.span() {
         Some(span) => {
             let (line, col) = line_col(src, span.start);
@@ -323,9 +340,28 @@ fn load_user_config_layer(home: Option<&Path>, filename: &str) -> std::io::Resul
 }
 
 pub fn load_system_managed_config() -> std::io::Result<toml::Value> {
-    let mut v = match system_config_dir() {
-        Some(dir) => load_toml_file(&dir.join(MANAGED_CONFIG_FILENAME))?,
-        None => toml::Value::Table(toml::map::Map::new()),
+    match system_config_dir() {
+        Some(dir) => load_admin_config_file(&dir.join(MANAGED_CONFIG_FILENAME)),
+        None => Ok(toml::Value::Table(toml::map::Map::new())),
+    }
+}
+
+/// P183 round 7 (sweep): the root-owned `managed_config.toml`, read once like the system requirements file, so a rewrite that
+/// breaks after startup validated it keeps the last validated copy ([`crate::validation::admin_requirements_source`]) instead
+/// of dropping its `[permission]` denies and pins. Absent is an empty table. A broken file this process never validated is
+/// still an error (startup refuses that case).
+pub(crate) fn load_admin_config_file(path: &Path) -> std::io::Result<toml::Value> {
+    // P183 round 8: a broken file with no validated copy (including a non-root-owned or group/other-writable one) is an
+    // error, never a fallback to an unchecked second read of the same path
+    use crate::validation::{AdminSource, admin_lockdown_managed_config, admin_source_state};
+    let mut v = match admin_source_state(path, &admin_lockdown_managed_config) {
+        // P186c (decision 24): a wrong-typed pin on a running process is the lock-down, not the stale copy
+        AdminSource::Locked { .. } => return Ok(admin_lockdown_managed_config()),
+        AdminSource::Broken(detail) => return Err(std::io::Error::other(detail)),
+        AdminSource::Text(Some(src)) => toml::from_str::<toml::Value>(&src)
+            .map_err(|e| std::io::Error::other(toml_error_detail(&src, &e)))?,
+        // P183 round 9 (Grok r5 M2): absent is an empty table; the path is never opened a second time
+        AdminSource::Text(None) => toml::Value::Table(toml::map::Map::new()),
     };
     apply_version_overrides_with_registered(&mut v)?;
     Ok(v)
@@ -357,15 +393,33 @@ pub fn managed_config_layers_at(
         let Some(path) = dir.map(|d| d.join(MANAGED_CONFIG_FILENAME)) else {
             continue;
         };
-        if !path.is_file() {
+        // P183 round 7 (sweep): the system layer keeps its last validated copy (a dangling symlink is not "absent" either)
+        let loaded = if is_system {
+            match load_admin_config_file(&path) {
+                Ok(v) if v.as_table().is_some_and(|t| t.is_empty()) => continue,
+                other => other,
+            }
+        } else if !path.is_file() {
             continue;
-        }
-        match load_config_file_with_key_naming(&path, true) {
+        } else {
+            load_config_file_with_key_naming(&path, true)
+        };
+        match loaded {
             Ok(value) => layers.push(ManagedConfigLayer {
                 value,
                 path,
                 is_system,
             }),
+            // P183 round 9 (Grok r5 H3): a broken SYSTEM managed_config.toml (no validated copy: that case is `Ok` above) is the
+            // lock-down, never a dropped layer: the deny-every-tool rule and the config-level keys of the one lock-down
+            Err(e) if is_system => {
+                tracing::error!(path = %path.display(), error = %e, "system managed_config.toml cannot be loaded and was never validated; locking down every tool");
+                layers.push(ManagedConfigLayer {
+                    value: crate::validation::admin_lockdown_managed_config(),
+                    path,
+                    is_system,
+                });
+            }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping managed_config.toml layer that failed to load or parse")
             }
@@ -516,9 +570,31 @@ impl HookConfigLayer {
 /// All config-layer `hooks` blocks, highest authority first (matching [`effective_config_base`]).
 /// Read WITHOUT env-expansion and never merged (hooks combine additively downstream).
 /// Absent or unparsable layers are skipped with a warning so one bad layer can't drop the others.
-/// macOS MDM is excluded (not a TOML file).
+/// P183 round 7 (sweep): the macOS MDM requirements layer's `[hooks]` come first (before, MDM-forced hooks never loaded).
 pub fn hook_config_layers() -> Vec<HookConfigLayer> {
-    hook_config_layers_at(system_config_dir().as_deref(), user_fuigo_home().as_deref())
+    let mut layers =
+        hook_config_layers_at(system_config_dir().as_deref(), user_fuigo_home().as_deref());
+    if let Some(mdm) = mdm_hook_layer(crate::validation::mdm_requirements_value()) {
+        layers.insert(0, mdm);
+    }
+    layers
+}
+
+/// The MDM requirements layer's `[hooks]` (normalized like the files: `fail_closed` stripped, `[[version_overrides]]`
+/// applied, no `$VAR` expansion), as a managed-policy layer. Startup refuses a forced payload with a non-table `hooks`.
+pub(crate) fn mdm_hook_layer(mdm: Option<toml::Value>) -> Option<HookConfigLayer> {
+    let hooks = mdm?.get("hooks")?.clone();
+    if !hooks.is_table() {
+        tracing::warn!("ignoring non-table `hooks` value in the MDM requirements layer");
+        return None;
+    }
+    let source_name = crate::macos_managed::MDM_REQUIREMENTS_SOURCE;
+    Some(HookConfigLayer {
+        provenance: HookProvenance::Requirements,
+        source_name: "requirements/mdm".to_owned(),
+        path: std::path::PathBuf::from(source_name),
+        hooks,
+    })
 }
 
 /// Warn when a policy-tier hooks file is a symlink or not root-owned; the no-disable exemption assumes admin ownership of the system dir.
@@ -608,7 +684,15 @@ pub fn hook_config_layers_at(
         let Some(path) = dir.map(|d| d.join(filename)) else {
             continue;
         };
-        if !path.is_file() {
+        // P183 round 4: the system requirements file is read once, like startup, and keeps its last validated hooks when it
+        // breaks (dangling symlink, parse or permission error, a blank mid-rewrite); only a real removal drops them
+        // P183 round 7 (sweep): the system `managed_config.toml` too (its hooks are policy hooks, like the requirements file's)
+        let admin_text = matches!(
+            provenance,
+            HookProvenance::Requirements | HookProvenance::SystemManaged
+        )
+        .then(|| crate::validation::admin_requirements_source(&path));
+        if matches!(admin_text, Some(None)) || (admin_text.is_none() && !path.is_file()) {
             continue;
         }
         // The no-disable exemption rests on OS ownership; a misconfigured system dir would silently create non-disableable hooks, so make it loud
@@ -617,7 +701,12 @@ pub fn hook_config_layers_at(
             warn_unless_root_owned(&path);
         }
         // No `$VAR` expansion: a literal `${VAR}` must reach the hook runner, which does the single expansion (expanding here would double-expand)
-        let mut value = match read_toml_file(&path) {
+        let read = match admin_text {
+            Some(Some(src)) => toml::from_str::<toml::Value>(&src)
+                .map_err(|e| std::io::Error::other(toml_error_detail(&src, &e))),
+            _ => read_toml_file(&path),
+        };
+        let mut value = match read {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "skipping config layer whose hooks could not be read");
@@ -626,8 +715,16 @@ pub fn hook_config_layers_at(
         };
         // Apply `[[version_overrides]]` (parity with `load_config_file`); deep-merge only, no `$VAR` expansion, so the layer stays unexpanded
         if let Err(e) = apply_version_overrides_with_registered(&mut value) {
-            tracing::warn!(path = %path.display(), error = %e, "skipping config layer whose version_overrides failed to apply");
-            continue;
+            // P183: the user-home requirements layer too, the same rule as its base pins (P162); before, its hooks vanished
+            if !provenance.is_managed_policy() && provenance != HookProvenance::UserRequirements {
+                tracing::warn!(path = %path.display(), error = %e, "skipping config layer whose version_overrides failed to apply");
+                continue;
+            }
+            // P162: a root-owned policy layer keeps its base hooks; only the unparseable override section is discarded (loudly)
+            tracing::error!(path = %path.display(), error = %e, "requirements or managed policy layer: invalid version_overrides ignored; its base hooks stay in force");
+            if let Some(table) = value.as_table_mut() {
+                table.remove(version_overrides::VERSION_OVERRIDES_KEY);
+            }
         }
         let Some(hooks) = value.get("hooks") else {
             continue;
@@ -646,10 +743,35 @@ pub fn hook_config_layers_at(
     layers
 }
 
-/// Applies matching `[[version_overrides]]` patches against the running CLI version; strips the section either way.
-/// If the installed version can't be parsed (broken `FUIGO_TEST_VERSION` in dev), it silently strips without applying, keeping the CLI usable.
+/// P183: the version `[[version_overrides]]` are matched against.
+/// [`fuigo_version::TEST_VERSION_ENV`] is a test hook, so it is honoured only in a dev build (no stamped `FUIGO_VERSION`) and only when it parses.
+/// Everywhere else this is the compiled version: the variable can never make policy validation skip, nor select another patch set in a release.
+pub fn policy_semver() -> Result<semver::Version, semver::Error> {
+    policy_semver_from(
+        std::env::var(fuigo_version::TEST_VERSION_ENV)
+            .ok()
+            .as_deref(),
+        fuigo_version::VERSION,
+        fuigo_version::IS_DEV_BUILD,
+    )
+}
+
+/// [`policy_semver`] with its inputs passed in, for tests.
+pub(crate) fn policy_semver_from(
+    test_version: Option<&str>,
+    compiled: &str,
+    dev_build: bool,
+) -> Result<semver::Version, semver::Error> {
+    if dev_build && let Some(v) = test_version.and_then(|s| semver::Version::parse(s.trim()).ok()) {
+        return Ok(v);
+    }
+    semver::Version::parse(compiled.trim())
+}
+
+/// Applies matching `[[version_overrides]]` patches against the running CLI version ([`policy_semver`]); strips the section either way.
+/// Only if the compiled version itself can't parse does it strip without applying (P183: a bad `FUIGO_TEST_VERSION` no longer can).
 pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::io::Result<()> {
-    match fuigo_version::installed_semver() {
+    match policy_semver() {
         Ok(version) => apply_version_overrides(value, &version)
             .map_err(|e| std::io::Error::other(e.redacted())),
         Err(_) => {
@@ -698,6 +820,50 @@ pub(crate) fn normalize_config_layer(layer: &mut toml::Value) {
             "allowed_domains".to_string(),
             toml::Value::Array(Vec::new()),
         );
+    }
+}
+
+/// P183 round 4 (Grok M6): merge one requirements layer over a lower one, like [`deep_merge_toml`], except that a higher value
+/// of the wrong type for a type-checked key ([`crate::validation::security_key_type_ok`]) does not replace an acceptable lower
+/// one: the lower layer's typed pin is kept (loudly). Its reader would ignore the wrong
+/// type, so letting it win would erase the lower pin. Only for requirements layers among themselves; requirements still
+/// override the user's config of any type.
+pub fn merge_requirements_toml(base: &mut toml::Value, overrides: &toml::Value) {
+    merge_requirements_toml_at(base, overrides, &mut Vec::new());
+}
+
+fn merge_requirements_toml_at(
+    base: &mut toml::Value,
+    overrides: &toml::Value,
+    path: &mut Vec<String>,
+) {
+    match (base, overrides) {
+        (toml::Value::Table(base_table), toml::Value::Table(overrides_table)) => {
+            for (key, value) in overrides_table {
+                path.push(key.clone());
+                match base_table.get_mut(key) {
+                    Some(existing) => merge_requirements_toml_at(existing, value, path),
+                    None => {
+                        base_table.insert(key.clone(), value.clone());
+                    }
+                }
+                path.pop();
+            }
+        }
+        // P183 round 5: keep the lower value only when the higher one is the wrong type for this key AND the lower one is
+        // acceptable; otherwise the higher layer wins as usual (so a lower layer's wrong type can never block a typed pin)
+        (base, overrides)
+            if crate::validation::security_key_type_ok(path, overrides) == Some(false)
+                && crate::validation::security_key_type_ok(path, base) == Some(true) =>
+        {
+            tracing::error!(
+                key = %path.join("."),
+                lower = base.type_str(),
+                higher = overrides.type_str(),
+                "requirements: a higher layer sets this key with the wrong type; the lower layer's pin is kept"
+            );
+        }
+        (base, overrides) => *base = overrides.clone(),
     }
 }
 
@@ -796,6 +962,24 @@ fn expand_env_vars_in_string_keeping(input: &str, key_default_resolves: bool) ->
 
 #[cfg(test)]
 mod tests {
+
+    /// P183 round 7 (sweep): MDM-forced `[hooks]` load as a managed-policy layer (before, they were never read); a non-table
+    /// `hooks` or no hooks is no layer.
+    #[test]
+    fn mdm_hooks_are_a_policy_layer_p183r7() {
+        let mdm: toml::Value = toml::from_str(
+            "[[hooks.PreToolUse]]\nmatcher = \"Bash\"\nhooks = [{ type = \"command\", command = \"deny.sh\" }]\n",
+        )
+        .unwrap();
+        let layer = mdm_hook_layer(Some(mdm)).expect("MDM hooks layer");
+        assert_eq!(layer.provenance(), HookProvenance::Requirements);
+        assert!(layer.provenance().is_managed_policy());
+        assert_eq!(layer.source_name(), "requirements/mdm");
+        assert!(layer.hooks().get("PreToolUse").is_some());
+        assert!(mdm_hook_layer(Some(toml::from_str("hooks = []\n").unwrap())).is_none());
+        assert!(mdm_hook_layer(Some(toml::from_str("[ui]\nyolo = false\n").unwrap())).is_none());
+        assert!(mdm_hook_layer(None).is_none());
+    }
     use super::*;
 
     fn write(dir: &Path, name: &str, contents: &str) {
@@ -850,6 +1034,23 @@ mod tests {
         assert_eq!(layers[0].provenance(), HookProvenance::UserRequirements);
         assert_eq!(layers[0].source_name(), "requirements/user");
         assert!(!layers[0].provenance().is_managed_policy());
+    }
+
+    /// P162: a managed-policy hook layer with unparseable `version_overrides` keeps its base hooks.
+    /// A non-managed layer keeps the old behaviour (skipped whole).
+    #[test]
+    fn hook_layer_bad_version_overrides_keeps_managed_policy_hooks_p162() {
+        let sys = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let hook = "[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"/r.sh\"\n";
+        let bad = "\n[[version_overrides]]\nminimum_version = \"not-a-version\"\n";
+        write(sys.path(), REQUIREMENTS_FILENAME, &format!("{hook}{bad}"));
+        write(home.path(), "config.toml", &format!("{hook}{bad}"));
+        let layers = hook_config_layers_at(Some(sys.path()), Some(home.path()));
+        let names: Vec<_> = layers.iter().map(|l| l.source_name().to_string()).collect();
+        // P183 round 9 (H1): invalid overrides in the admin file with no validated copy are broken admin policy, not the base
+        // hooks (the hook layer is skipped; non-managed hooks are locked by the hooks-only pin). Was: ["requirements/system"].
+        assert!(names.is_empty(), "{names:?}");
     }
 
     #[test]
@@ -1196,5 +1397,68 @@ mod tests {
             "leaked the source snippet/caret: {msg}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P183: a user-home requirements layer whose `[[version_overrides]]` cannot parse keeps its base hooks, the same rule as its base pins (P162).
+    /// Before, the whole layer was skipped, so the cloud-cached policy's hooks silently vanished.
+    #[test]
+    fn user_requirements_hooks_survive_bad_version_overrides_p183() {
+        let home = tempfile::tempdir().unwrap();
+        let hook = "[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"/r.sh\"\n";
+        for bad in [
+            "\n[[version_overrides]]\nminimum_version = \"not-a-version\"\n",
+            "\nversion_overrides = \"not-an-array\"\n",
+        ] {
+            // The bad section goes first so it is a root key, not a key inside the hook table (Astra r1)
+            write(
+                home.path(),
+                REQUIREMENTS_FILENAME,
+                &format!("{bad}\n{hook}"),
+            );
+            let layers = hook_config_layers_at(None, Some(home.path()));
+            let names: Vec<_> = layers.iter().map(|l| l.source_name().to_string()).collect();
+            assert_eq!(names, vec!["requirements/user"], "bad section {bad:?}");
+            assert!(layers[0].hooks().get("PostToolUse").is_some());
+        }
+    }
+
+    /// P183 round 4 (Grok M4): system requirements hooks that validated survive a dangling symlink or a broken rewrite;
+    /// they go only when the file is really removed.
+    #[cfg(unix)]
+    #[test]
+    fn system_requirements_hooks_keep_last_good_p183r4() {
+        let sys = tempfile::tempdir().unwrap();
+        let path = sys.path().join(REQUIREMENTS_FILENAME);
+        let hook = "[[hooks.PostToolUse]]\n[[hooks.PostToolUse.hooks]]\ntype = \"command\"\ncommand = \"/r.sh\"\n";
+        write(sys.path(), REQUIREMENTS_FILENAME, hook);
+        let names = |l: Vec<HookConfigLayer>| {
+            l.iter()
+                .map(|l| l.source_name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(hook_config_layers_at(Some(sys.path()), None)),
+            vec!["requirements/system"]
+        );
+        write(sys.path(), REQUIREMENTS_FILENAME, "[[hooks.PostToolUse\n");
+        assert_eq!(
+            names(hook_config_layers_at(Some(sys.path()), None)),
+            vec!["requirements/system"],
+            "parse error"
+        );
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(sys.path().join("gone"), &path).unwrap();
+        assert_eq!(
+            names(hook_config_layers_at(Some(sys.path()), None)),
+            vec!["requirements/system"],
+            "dangling"
+        );
+        std::fs::remove_file(&path).unwrap();
+        // P183 round 9 (M1): a validated file that is deleted keeps enforcing its copy for this process
+        assert_eq!(
+            names(hook_config_layers_at(Some(sys.path()), None)),
+            vec!["requirements/system"],
+            "removed"
+        );
     }
 }

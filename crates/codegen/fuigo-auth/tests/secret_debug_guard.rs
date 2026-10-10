@@ -25,6 +25,10 @@ use regex::Regex;
 /// `path::Type[::Variant]::field` (path relative to the workspace root) → why the derived `Debug` is safe.
 const ALLOWED: &[(&str, &str)] = &[
     (
+        "crates/codegen/fuigo-shell/src/leader/peer_auth.rs::PeerFacts::peer_token",
+        "the user account (a SID string) read from the peer process's Windows access token, or a Win32 error code; not a credential",
+    ),
+    (
         "crates/codegen/fuigo-chat-state/src/types.rs::ChatStateSnapshot::credentials",
         "`Credentials` implements a redacting Debug",
     ),

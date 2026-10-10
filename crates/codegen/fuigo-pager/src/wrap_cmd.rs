@@ -56,7 +56,8 @@ pub fn run(args: &WrapArgs) -> Result<()> {
             Err(e) => {
                 // PTY setup failed; keep the chosen route without our PTY so the command still works (just without clipboard forwarding)
                 fuigo_tty_utils::cli_eprintln!(
-                    "fuigo wrap: wrapped mode failed, running without PTY wrapping: {e}"
+                    "fuigo wrap: wrapped mode failed, running without PTY wrapping: {}",
+                    fuigo_tty_utils::untrusted(e)
                 );
                 exec_command(&fallback.program, &fallback.args)
             }

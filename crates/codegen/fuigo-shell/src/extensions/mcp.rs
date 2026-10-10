@@ -261,25 +261,43 @@ pub struct McpStatusSnapshot {
     pub auth_required: std::collections::HashSet<String>,
     /// The recorded cause of each server's failed start or handshake (P152; `McpState::init_failed`).
     pub init_failed: HashMap<String, String>,
+    /// Why the last automatic OAuth token request of each HTTP server was refused (K7), by server name.
+    /// rmcp's own refresh reports only "Request failed"; the reason comes from the token-request adapter.
+    pub auth_refusals: HashMap<String, String>,
 }
 
 /// Why `name` is not connected, for the `/mcps` list (P152): its recorded start or handshake failure, unless the server
-/// is ready (a later success supersedes the record) or waiting on auth (the badge already says so).
+/// is ready (a later success supersedes the record). A server waiting on auth says why only when its automatic token
+/// refresh was refused (K7); the badge says the rest.
 fn unavailable_reason(snapshot: &McpStatusSnapshot, name: &str) -> Option<String> {
-    if snapshot.auth_required.contains(name)
-        || snapshot
-            .clients
-            .iter()
-            .any(|c| c.name == name && c.status == McpSessionStatus::Ready)
+    if snapshot
+        .clients
+        .iter()
+        .any(|c| c.name == name && c.status == McpSessionStatus::Ready)
     {
         return None;
     }
-    snapshot
-        .init_failed
-        .get(name)
+    let recorded = if snapshot.auth_required.contains(name) {
+        snapshot.auth_refusals.get(name)
+    } else {
+        snapshot.init_failed.get(name)
+    };
+    recorded
         .map(|reason| reason.trim())
         .filter(|reason| !reason.is_empty())
         .map(str::to_owned)
+}
+
+/// The refusal reason of each configured HTTP server whose automatic OAuth refresh was refused (K7), by server name.
+fn auth_refusals_for(configs: &[acp::McpServer]) -> HashMap<String, String> {
+    configs
+        .iter()
+        .filter_map(|config| match config {
+            acp::McpServer::Http(http) => fuigo_mcp::auth_refusal_for_url(&http.url)
+                .map(|reason| (http.name.clone(), reason)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -764,11 +782,13 @@ pub(crate) async fn build_mcp_status(
         }
     }
 
+    let auth_refusals = auth_refusals_for(&configs);
     McpStatusSnapshot {
         configs,
         clients: client_statuses,
         auth_required,
         init_failed: init_failed.into_iter().collect(),
+        auth_refusals,
     }
 }
 
@@ -792,6 +812,81 @@ async fn ensure_agent_pool_initialized(mcp_state: &Arc<TokioMutex<McpState>>) {
     }
 }
 
+/// Why `mcp/upsert` must refuse `server` before any write: the project pin for a project-declared name, then the
+/// allow/deny lists (P169, Astra r2).
+fn upsert_refusal(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    cwd: &std::path::Path,
+    server: &acp::McpServer,
+) -> Option<String> {
+    project_pin_error(ms, cwd, server).or_else(|| policy_enable_error(&ms.mcp_allowlist, server))
+}
+
+/// Why `fuigo mcp add` must refuse `server` before it writes anything (P169, Grok 4.7 #3): the allow/deny lists, then
+/// the project pin when the add targets the project config (`project_scope`) or the project already declares the name.
+pub(crate) fn cli_add_refusal(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    cwd: &std::path::Path,
+    server: &acp::McpServer,
+    project_scope: bool,
+) -> Option<String> {
+    policy_enable_error(&ms.mcp_allowlist, server).or_else(|| {
+        if project_scope && ms.project_mcp.is_disabled() {
+            let name = crate::session::mcp_servers::mcp_server_name(server);
+            ms.mcp_project_pin_block(server)
+                .map(|reason| org_policy_message(name, &reason))
+        } else {
+            project_pin_error(ms, cwd, server)
+        }
+    })
+}
+
+/// Why `fuigo mcp enable <name>` must refuse before it writes anything (P169, Grok 4.7 #3): the definition the name
+/// resolves to (personal disable ignored) is judged like `/mcps` enable. A name with no judgeable definition (a
+/// setup-required entry, judged again at setup) is refused only under a lockdown.
+pub(crate) fn cli_enable_refusal(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    cwd: &std::path::Path,
+    name: &str,
+    definition: Option<&acp::McpServer>,
+) -> Option<String> {
+    match definition {
+        Some(server) => upsert_refusal(ms, cwd, server),
+        None => ms
+            .mcp_allowlist
+            .sources
+            .iter()
+            .find(|s| s.is_lockdown())
+            .map(|s| {
+                org_policy_message(
+                    name,
+                    &fuigo_workspace::permission::resolution::McpBlockReason::Lockdown {
+                        source: s.source_path.clone().unwrap_or_default(),
+                    },
+                )
+            }),
+    }
+}
+
+/// Drop every server managed policy blocks (allow/deny lists, and the project pin for project-declared ones).
+fn drop_policy_blocked(
+    configs: Vec<acp::McpServer>,
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    cwd: &std::path::Path,
+) -> Vec<acp::McpServer> {
+    configs
+        .into_iter()
+        .filter(|server| {
+            let blocked = policy_enable_error(&ms.mcp_allowlist, server)
+                .or_else(|| project_pin_error(ms, cwd, server));
+            if let Some(reason) = &blocked {
+                tracing::warn!(reason = %reason, "agent MCP pool: server blocked by managed policy");
+            }
+            blocked.is_none()
+        })
+        .collect()
+}
+
 /// Spawn config.toml MCP clients into the agent pool. Handshakes happen lazily on first `CallMcpTool`.
 pub(crate) async fn init_agent_mcp_pool(
     mcp_state: &Arc<TokioMutex<McpState>>,
@@ -806,6 +901,14 @@ pub(crate) async fn init_agent_mcp_pool(
         }
         state.configs.clone()
     };
+
+    // P169 (Astra r1 #3): the agent pool (sessionless ACP `mcp/call`) spawns only what managed policy allows, the same
+    // verdict as the session merge.
+    let configs = drop_policy_blocked(
+        configs,
+        fuigo_workspace::permission::resolution::managed_settings(),
+        cwd,
+    );
 
     if configs.is_empty() {
         let mut state = mcp_state.lock().await;
@@ -1054,7 +1157,18 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Carry the verdict for policy-dropped servers so the pager can say "blocked by policy"
     // instead of a generic "unavailable"; computed only with a session snapshot.
     let blocked_reasons: HashMap<String, String> = match (&session_snapshot, &definition_index) {
-        (Some(_), Some(index)) => list_blocked_reasons(index.definitions(), allowlist),
+        (Some(_), Some(index)) => {
+            let ms = fuigo_workspace::permission::resolution::managed_settings();
+            let mut reasons = list_blocked_reasons(index.definitions(), allowlist);
+            for (name, server) in index.definitions() {
+                if !reasons.contains_key(name)
+                    && let Some(message) = project_pin_error(ms, &cwd, server)
+                {
+                    reasons.insert(name.to_string(), message);
+                }
+            }
+            reasons
+        }
         _ => HashMap::new(),
     };
 
@@ -1683,8 +1797,7 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
             "server did not resolve after setup",
         ));
     };
-    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
-    if let Some(message) = policy_enable_error(allowlist, probe) {
+    if let Some(message) = policy_enable_error_in(&cwd, probe) {
         rollback_prefs().await;
         return Err(crate::acp_error::invalid_params(message));
     }
@@ -1814,25 +1927,44 @@ fn clamped_server_name(name: &str) -> std::borrow::Cow<'_, str> {
 /// User-facing refusal for enabling/spawning a policy-blocked server (`None` when it passes) —
 /// the one chokepoint for the toggle, setup, and upsert paths.
 pub(crate) fn policy_enable_error(
-    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    allowlist: &fuigo_workspace::permission::resolution::McpServerPolicy,
     server: &acp::McpServer,
 ) -> Option<String> {
-    if allowlist.is_server_allowed(server) {
-        return None;
-    }
-    let reason =
-        crate::session::managed_mcp::McpDisabledReason::for_blocked_server(allowlist, server);
+    let reason = crate::session::managed_mcp::mcp_block_reason(allowlist, server)?;
     Some(org_policy_message(
         crate::session::mcp_servers::mcp_server_name(server),
         &reason,
     ))
 }
 
+/// [`policy_enable_error`] plus the `enable_all_project_mcp_servers = false` pin for a project-declared server (P169):
+/// the runtime gate for the setup and toggle paths.
+pub(crate) fn policy_enable_error_in(cwd: &std::path::Path, server: &acp::McpServer) -> Option<String> {
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    policy_enable_error(&ms.mcp_allowlist, server).or_else(|| project_pin_error(ms, cwd, server))
+}
+
+fn project_pin_error(
+    ms: &fuigo_workspace::permission::resolution::ManagedSettings,
+    cwd: &std::path::Path,
+    server: &acp::McpServer,
+) -> Option<String> {
+    if !ms.project_mcp.is_disabled() {
+        return None;
+    }
+    let name = crate::session::mcp_servers::mcp_server_name(server);
+    if !crate::agent::folder_trust::project_scoped_mcp_names(cwd).contains(name) {
+        return None;
+    }
+    let reason = ms.mcp_project_pin_block(server)?;
+    Some(org_policy_message(name, &reason))
+}
+
 /// Verdicts for every discovered definition the policy would drop, keyed by server name;
 /// `mcp/list` copies them onto the rows the merge did not spawn.
 pub(crate) fn list_blocked_reasons<'a>(
     definitions: impl IntoIterator<Item = (&'a str, &'a acp::McpServer)>,
-    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    allowlist: &fuigo_workspace::permission::resolution::McpServerPolicy,
 ) -> HashMap<String, String> {
     definitions
         .into_iter()
@@ -1845,7 +1977,7 @@ pub(crate) fn list_blocked_reasons<'a>(
 /// `mcp/upsert`'s gate→persist sequence: the policy refusal comes BEFORE the config write, so a
 /// refused upsert leaves no state behind; generic over the persist future (unit-testable).
 pub(crate) async fn upsert_gate_then_persist<Fut>(
-    allowlist: &fuigo_workspace::permission::resolution::McpServerAllowlist,
+    allowlist: &fuigo_workspace::permission::resolution::McpServerPolicy,
     server: &acp::McpServer,
     persist: impl FnOnce() -> Fut,
 ) -> Result<Fut::Output, String>
@@ -1996,9 +2128,7 @@ async fn enable_mcp_server_gated(
         let Some(probe) = discovered.get(server_name) else {
             return Err(GatedEnableError::NotFound);
         };
-        let allowlist =
-            &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
-        if let Some(message) = policy_enable_error(allowlist, probe) {
+        if let Some(message) = policy_enable_error_in(cwd, probe) {
             return Err(GatedEnableError::PolicyRefused(message));
         }
         Ok(())
@@ -2245,7 +2375,13 @@ async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     // Policy check BEFORE persist and live spawn: /mcps Add/Edit is a spawn path, so a denied
     // server must fail closed exactly like the setup/toggle siblings.
-    let allowlist = &fuigo_workspace::permission::resolution::managed_settings().mcp_allowlist;
+    let ms = fuigo_workspace::permission::resolution::managed_settings();
+    // P169 (Astra r2): the project pin judges a name the project declares, before the write too.
+    let cwd = agent.get_session_cwd(&acp_id).unwrap_or_default();
+    if let Some(message) = upsert_refusal(ms, &cwd, &server_config) {
+        return Err(crate::acp_error::invalid_params(message));
+    }
+    let allowlist = &ms.mcp_allowlist;
     upsert_gate_then_persist(allowlist, &server_config, || {
         crate::util::config::save_mcp_server_config(&req.server_name, &req.config)
     })
@@ -2920,7 +3056,7 @@ mod tests {
     }
 
     /// Deny policy for `https://evil.corp/*` pinned by a full-path source.
-    fn deny_evil_corp() -> fuigo_workspace::permission::resolution::McpServerAllowlist {
+    fn deny_evil_corp() -> fuigo_workspace::permission::resolution::McpServerPolicy {
         use fuigo_workspace::permission::resolution::{AllowedMcpServer, McpServerAllowlist};
         McpServerAllowlist::new(
             vec![],
@@ -2929,6 +3065,106 @@ mod tests {
             }],
             Some(std::path::PathBuf::from("/etc/fuigo/managed_config.toml")),
         )
+        .into()
+    }
+
+    /// P169 (Grok 4.7 #3): the `fuigo mcp add` / `fuigo mcp enable` gates the CLI runs before its config write refuse a
+    /// policy-blocked server, the project pin on a `--scope project` add, and (enable) an unjudgeable name under a lockdown.
+    #[test]
+    fn cli_add_and_enable_gates_refuse_policy_blocked_servers() {
+        use fuigo_workspace::permission::resolution::{
+            McpServerAllowlist, PolicyLayerOwnership, PolicyPin,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let http = |name: &str, url: &str| {
+            acp::McpServer::Http(acp::McpServerHttp::new(name, url).headers(vec![]))
+        };
+        let evil = http("exfil", "https://evil.corp/mcp");
+        let ok = http("ok", "https://ok.example.com/mcp");
+        let mut ms = fuigo_workspace::permission::resolution::ManagedSettings::default();
+        ms.mcp_allowlist = deny_evil_corp();
+        let refused = cli_add_refusal(&ms, tmp.path(), &evil, false).expect("denied server refused");
+        assert!(refused.contains("organization policy"), "{refused}");
+        assert_eq!(cli_add_refusal(&ms, tmp.path(), &ok, false), None);
+        assert!(cli_enable_refusal(&ms, tmp.path(), "exfil", Some(&evil)).is_some());
+        assert_eq!(cli_enable_refusal(&ms, tmp.path(), "ok", Some(&ok)), None);
+        assert_eq!(cli_enable_refusal(&ms, tmp.path(), "ghost", None), None);
+
+        ms.project_mcp = PolicyPin::Disabled {
+            source: std::path::PathBuf::from("/etc/fuigo/requirements.toml"),
+            ownership: PolicyLayerOwnership::Admin,
+        };
+        assert!(
+            cli_add_refusal(&ms, tmp.path(), &ok, true).is_some(),
+            "a --scope project add is project-declared: the pin refuses an ungranted server"
+        );
+        assert_eq!(cli_add_refusal(&ms, tmp.path(), &ok, false), None, "a user-scope add is not");
+
+        let mut lock = fuigo_workspace::permission::resolution::ManagedSettings::default();
+        lock.mcp_allowlist = McpServerAllowlist::new(
+            vec![],
+            vec![],
+            Some(std::path::PathBuf::from("/etc/fuigo/managed_config.toml")),
+        )
+        .with_lockdown()
+        .into();
+        assert!(cli_add_refusal(&lock, tmp.path(), &ok, false).is_some());
+        assert!(
+            cli_enable_refusal(&lock, tmp.path(), "ghost", None).is_some(),
+            "under a lockdown even an unjudgeable name is refused"
+        );
+    }
+
+    /// P169 (Astra r2): `/mcps` Add/Edit of a name the project declares is refused under the project pin, before the
+    /// write; a user-only name passes.
+    #[test]
+    fn upsert_refuses_a_project_declared_name_under_the_project_pin() {
+        use fuigo_workspace::permission::resolution::{PolicyLayerOwnership, PolicyPin};
+        let repo = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        std::fs::write(
+            repo.path().join(".mcp.json"),
+            r#"{"mcpServers": {"repo-tool": {"url": "https://repo.example.com/mcp"}}}"#,
+        )
+        .unwrap();
+        let mut ms = fuigo_workspace::permission::resolution::ManagedSettings::default();
+        let server = |name: &str| {
+            acp::McpServer::Http(
+                acp::McpServerHttp::new(name, "https://repo.example.com/mcp").headers(vec![]),
+            )
+        };
+        assert_eq!(upsert_refusal(&ms, repo.path(), &server("repo-tool")), None, "no pin, no refusal");
+        ms.project_mcp = PolicyPin::Disabled {
+            source: std::path::PathBuf::from("/etc/fuigo/requirements.toml"),
+            ownership: PolicyLayerOwnership::Admin,
+        };
+        let refused = upsert_refusal(&ms, repo.path(), &server("repo-tool")).unwrap();
+        assert!(refused.contains("organization policy") && refused.contains("requirements.toml"), "{refused}");
+        assert_eq!(upsert_refusal(&ms, repo.path(), &server("my-tool")), None);
+    }
+
+    /// P169 (Astra r1 #3): the sessionless agent pool never spawns a policy-blocked server.
+    #[test]
+    fn agent_pool_drops_policy_blocked_servers() {
+        let mut ms = fuigo_workspace::permission::resolution::ManagedSettings::default();
+        ms.mcp_allowlist = deny_evil_corp();
+        let kept = drop_policy_blocked(
+            vec![
+                acp::McpServer::Http(
+                    acp::McpServerHttp::new("exfil", "https://evil.corp/mcp").headers(vec![]),
+                ),
+                acp::McpServer::Http(
+                    acp::McpServerHttp::new("ok", "https://ok.example.com/mcp").headers(vec![]),
+                ),
+            ],
+            &ms,
+            std::path::Path::new("/p169-no-such-dir"),
+        );
+        let names: Vec<&str> = kept
+            .iter()
+            .map(crate::session::mcp_servers::mcp_server_name)
+            .collect();
+        assert_eq!(names, ["ok"]);
     }
 
     /// The shared enable/upsert gate refuses a policy-blocked server with the org-policy message and passes an allowed one.
@@ -3028,7 +3264,7 @@ mod tests {
         // Blocked verdict: rollback, org-policy message (file name only).
         let blocked = McpServerWithPolicy {
             server: server(),
-            disabled_reason: Some(McpDisabledReason::Denylist {
+            disabled_reason: Some(McpDisabledReason::Deny {
                 source: std::path::PathBuf::from("/etc/fuigo/managed_config.toml"),
             }),
         };
@@ -3218,6 +3454,20 @@ mod tests {
         assert_eq!(unavailable_reason(&snapshot, "later-ok"), None);
         assert_eq!(unavailable_reason(&snapshot, "oauth"), None);
         assert_eq!(unavailable_reason(&snapshot, "never-seen"), None);
+        // K7: a server waiting on auth says why only when its refresh was refused
+        snapshot
+            .auth_refusals
+            .insert("oauth".into(), "refusing to send OAuth credentials to https://idp.example/token: refused".into());
+        snapshot.auth_refusals.insert("dead".into(), "not shown for a server that is not waiting on auth".into());
+        assert_eq!(
+            unavailable_reason(&snapshot, "oauth").as_deref(),
+            Some("refusing to send OAuth credentials to https://idp.example/token: refused")
+        );
+        assert_eq!(
+            unavailable_reason(&snapshot, "dead").as_deref(),
+            Some("MCP handshake timed out after 2s"),
+            "an auth refusal never replaces a handshake failure"
+        );
         let state = McpServerSessionState {
             enabled: true,
             status: Some(McpSessionStatus::Unavailable),

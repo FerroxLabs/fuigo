@@ -13,21 +13,70 @@ const REQUIREMENTS_KEY: &str = "requirements_toml_base64";
 /// Synthetic source label for the MDM layer (no file on disk); diagnostics only.
 pub const MDM_REQUIREMENTS_SOURCE: &str = "ai.x.grok:requirements_toml_base64";
 
-/// The MDM-forced requirements TOML, or `None` when none is forced (or not macOS).
-pub(crate) fn managed_preferences_requirements() -> Option<toml::Value> {
-    // Read once and cache for the process lifetime: the forced policy is fixed per launch, so a profile change isn't picked up until restart
-    // That is fine for a short-lived CLI, and it avoids re-crossing the CoreFoundation boundary
-    static CACHED: std::sync::OnceLock<Option<toml::Value>> = std::sync::OnceLock::new();
-    CACHED
-        .get_or_init(|| managed_requirements_from(read_forced_requirements))
-        .clone()
+/// Read once and cache for the process lifetime: the forced policy is fixed per launch, so a profile change isn't picked up until restart.
+/// That is fine for a short-lived CLI, and it avoids re-crossing the CoreFoundation boundary.
+/// P183: `Err` (redacted) when a payload is forced but cannot be read or decoded, so startup refuses instead of running with no MDM policy.
+pub(crate) fn forced_requirements() -> &'static Result<Option<toml::Value>, String> {
+    #[cfg(feature = "test-seams")]
+    if let Some(forced) = mdm_override::current() {
+        return forced;
+    }
+    static CACHED: std::sync::OnceLock<Result<Option<toml::Value>, String>> =
+        std::sync::OnceLock::new();
+    CACHED.get_or_init(|| managed_requirements_checked_from(read_forced_requirements))
+}
+
+/// P183 round 10: a test-only stand-in for the forced MDM payload (the real read is CoreFoundation, macOS only), so other
+/// crates can test their reaction to a broken payload. Same guard as `admin_root_override`: exists only under the
+/// `test-seams` feature (dev-dependencies of other crates only), set by function call, never by environment.
+#[cfg(feature = "test-seams")]
+pub mod mdm_override {
+    use std::cell::Cell;
+
+    type Forced = Result<Option<toml::Value>, String>;
+    // Per thread, like `admin_root_override`.
+    thread_local! {
+        static CURRENT: Cell<Option<&'static Forced>> = const { Cell::new(None) };
+    }
+
+    pub(super) fn current() -> Option<&'static Forced> {
+        CURRENT.with(Cell::get)
+    }
+
+    pub struct Guard(());
+
+    /// The leaked value lives for the process; this is test code.
+    pub fn set(forced: Forced) -> Guard {
+        CURRENT.with(|c| c.set(Some(Box::leak(Box::new(forced)))));
+        Guard(())
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CURRENT.with(|c| c.set(None));
+        }
+    }
 }
 
 /// Decode the forced requirements from a raw-string reader.
 /// Split from the FFI read (`read_forced_requirements`) so the decode path is unit-testable without CoreFoundation.
 /// The CFPreferences read/downcast itself stays FFI.
+#[cfg(test)]
 fn managed_requirements_from(read: impl FnOnce() -> Option<String>) -> Option<toml::Value> {
-    decode_managed_toml(&read()?)
+    managed_requirements_checked_from(|| Ok(read()))
+        .ok()
+        .flatten()
+}
+
+/// [`managed_requirements_from`] that keeps the decode failure: `Ok(None)` when nothing is forced (or the table is empty), `Err` when a forced payload is undecodable.
+/// The reader is `Err` when the key is forced but its value is missing or not a string (Astra r1: a forced plist `<data>` was read as "nothing forced").
+fn managed_requirements_checked_from(
+    read: impl FnOnce() -> Result<Option<String>, String>,
+) -> Result<Option<toml::Value>, String> {
+    match read()? {
+        Some(encoded) => decode_managed_toml_checked(&encoded),
+        None => Ok(None),
+    }
 }
 
 /// Decode a base64 TOML payload into a non-empty table.
@@ -35,7 +84,14 @@ fn managed_requirements_from(read: impl FnOnce() -> Option<String>) -> Option<to
 /// Expanding from the local process environment would let the very user the forced check excludes influence the admin policy.
 /// The policy feeds yolo, permission, and minimum-version enforcement.
 /// FFI-free, so unit-tested on every platform; invalid base64/UTF-8/TOML or an empty table yields `None`.
+#[cfg(test)]
 fn decode_managed_toml(encoded: &str) -> Option<toml::Value> {
+    decode_managed_toml_checked(encoded).ok().flatten()
+}
+
+/// [`decode_managed_toml`] that keeps the failure (redacted: never the payload or the offending line).
+/// An empty table is `Ok(None)` (no managed preference), not an error.
+fn decode_managed_toml_checked(encoded: &str) -> Result<Option<toml::Value>, String> {
     use base64::Engine as _;
 
     // Strip all whitespace: profile tooling line-wraps payloads and the STANDARD engine rejects interior whitespace
@@ -45,29 +101,74 @@ fn decode_managed_toml(encoded: &str) -> Option<toml::Value> {
         .collect();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(compact.as_bytes())
-        .map_err(|e| tracing::warn!("managed preference is not valid base64: {e}"))
-        .ok()?;
-    let toml_str = String::from_utf8(decoded)
-        .map_err(|e| tracing::warn!("managed preference is not valid UTF-8: {e}"))
-        .ok()?;
-    let value = toml::from_str::<toml::Value>(&toml_str)
         .map_err(|e| {
-            // Redact via the span-only detail: a TOML error's Display echoes the offending source line, and an admin payload may carry secrets
-            tracing::warn!(
-                "managed preference is not valid TOML: {}",
-                crate::loader::toml_error_detail(&toml_str, &e)
-            )
-        })
-        .ok()?;
-    value
+            tracing::warn!("managed preference is not valid base64: {e}");
+            format!("the forced payload is not valid base64: {e}")
+        })?;
+    let toml_str = String::from_utf8(decoded).map_err(|e| {
+        tracing::warn!("managed preference is not valid UTF-8: {e}");
+        format!("the forced payload is not valid UTF-8: {e}")
+    })?;
+    let value = toml::from_str::<toml::Value>(&toml_str).map_err(|e| {
+        // Redact via the span-only detail: a TOML error's Display echoes the offending source line, and an admin payload may carry secrets
+        let detail = crate::loader::toml_error_detail(&toml_str, &e);
+        tracing::warn!("managed preference is not valid TOML: {detail}");
+        detail
+    })?;
+    Ok(value
         .as_table()
         .is_some_and(|t| !t.is_empty())
-        .then_some(value)
+        .then_some(value))
 }
 
-/// The raw forced `requirements_toml_base64` MDM string via CoreFoundation, or `None`.
+/// P169: the MDM layer for the managed policy engine. `None` when nothing is forced; `Some(Err)` when a forced payload
+/// does not decode, so the engine fails closed instead of reading a broken admin policy as "no policy".
+pub(crate) fn mdm_policy_layer() -> Option<Result<toml::Value, String>> {
+    static CACHED: std::sync::OnceLock<Option<Result<toml::Value, String>>> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| mdm_policy_layer_from(read_forced_requirements_raw))
+        .clone()
+}
+
+/// `read` yields `None` when nothing is forced, `Some(None)` when a value is forced but is not a string (Astra r2: a
+/// plist `<data>` payload must fail closed, not vanish), and `Some(Some(text))` otherwise.
+fn mdm_policy_layer_from(
+    read: impl FnOnce() -> Option<Option<String>>,
+) -> Option<Result<toml::Value, String>> {
+    let Some(raw) = read()? else {
+        return Some(Err(
+            "the forced MDM requirements value is not a string".to_string()
+        ));
+    };
+    Some(decode_managed_toml_value(&raw))
+}
+
+/// Decode a forced payload for the policy engine: base64, UTF-8, TOML. A valid but empty document is an empty table
+/// (no policy), never an error (Astra r2).
+fn decode_managed_toml_value(encoded: &str) -> Result<toml::Value, String> {
+    use base64::Engine as _;
+    let compact: String = encoded
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(compact.as_bytes())
+        .map_err(|e| format!("the forced MDM requirements payload is not valid base64: {e}"))?;
+    let toml_str = String::from_utf8(decoded)
+        .map_err(|_| "the forced MDM requirements payload is not valid UTF-8".to_string())?;
+    toml::from_str::<toml::Value>(&toml_str).map_err(|e| {
+        format!(
+            "the forced MDM requirements payload is not valid TOML: {}",
+            crate::loader::toml_error_detail(&toml_str, &e)
+        )
+    })
+}
+
+/// [`read_forced_requirements_raw`] is P169's variant for the policy engine.
+/// The raw forced `requirements_toml_base64` MDM string via CoreFoundation; `Ok(None)` when the key is not forced.
+/// P183: a forced key whose value is absent or not a string is `Err`, so startup refuses instead of running with no MDM policy.
 #[cfg(target_os = "macos")]
-fn read_forced_requirements() -> Option<String> {
+fn read_forced_requirements() -> Result<Option<String>, String> {
     use core_foundation::base::{CFType, CFTypeRef, TCFType};
     use core_foundation::string::{CFString, CFStringRef};
 
@@ -87,23 +188,63 @@ fn read_forced_requirements() -> Option<String> {
         CFPreferencesAppValueIsForced(cf_key.as_concrete_TypeRef(), cf_app.as_concrete_TypeRef())
     };
     if forced == 0 {
-        return None;
+        return Ok(None);
     }
 
     let value_ref = unsafe {
         CFPreferencesCopyAppValue(cf_key.as_concrete_TypeRef(), cf_app.as_concrete_TypeRef())
     };
     if value_ref.is_null() {
-        return None;
+        return Err("the key is forced but has no value".to_owned());
     }
     // Type-check before reading as text: reading a non-CFString through CFString APIs is UB
     // `wrap_under_create_rule` owns the +1, freeing it even if the downcast fails
     let value = unsafe { CFType::wrap_under_create_rule(value_ref) };
-    value.downcast_into::<CFString>().map(|s| s.to_string())
+    value
+        .downcast_into::<CFString>()
+        .map(|s| Some(s.to_string()))
+        .ok_or_else(|| {
+            "the forced value is not a string (a base64 TOML <string> is expected)".to_owned()
+        })
+}
+
+/// [`read_forced_requirements`] for the policy engine: a forced non-string value is `Some(None)` (fail closed).
+#[cfg(target_os = "macos")]
+fn read_forced_requirements_raw() -> Option<Option<String>> {
+    use core_foundation::base::{CFType, CFTypeRef, TCFType};
+    use core_foundation::string::{CFString, CFStringRef};
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFPreferencesCopyAppValue(key: CFStringRef, application_id: CFStringRef) -> CFTypeRef;
+        fn CFPreferencesAppValueIsForced(key: CFStringRef, application_id: CFStringRef) -> u8;
+    }
+
+    let cf_key = CFString::new(REQUIREMENTS_KEY);
+    let cf_app = CFString::new(MANAGED_PREFERENCES_DOMAIN);
+    let forced = unsafe {
+        CFPreferencesAppValueIsForced(cf_key.as_concrete_TypeRef(), cf_app.as_concrete_TypeRef())
+    };
+    if forced == 0 {
+        return None;
+    }
+    let value_ref = unsafe {
+        CFPreferencesCopyAppValue(cf_key.as_concrete_TypeRef(), cf_app.as_concrete_TypeRef())
+    };
+    if value_ref.is_null() {
+        return Some(None);
+    }
+    let value = unsafe { CFType::wrap_under_create_rule(value_ref) };
+    Some(value.downcast_into::<CFString>().map(|s| s.to_string()))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn read_forced_requirements() -> Option<String> {
+fn read_forced_requirements() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_forced_requirements_raw() -> Option<Option<String>> {
     None
 }
 
@@ -111,6 +252,28 @@ fn read_forced_requirements() -> Option<String> {
 mod tests {
     use super::*;
     use base64::Engine as _;
+
+    /// P169: a forced payload that does not decode is an error layer (fail closed), not "no policy".
+    #[test]
+    fn mdm_policy_layer_fails_closed_on_a_broken_forced_payload() {
+        assert!(mdm_policy_layer_from(|| None).is_none());
+        assert!(matches!(
+            mdm_policy_layer_from(|| Some(Some("%%% not base64".into()))),
+            Some(Err(_))
+        ));
+        assert!(
+            matches!(mdm_policy_layer_from(|| Some(None)), Some(Err(_))),
+            "a forced non-string value fails closed"
+        );
+        let ok = mdm_policy_layer_from(|| Some(Some(b64("allow_managed_hooks_only = true\n")))).unwrap();
+        assert!(ok.unwrap().get("allow_managed_hooks_only").is_some());
+        for empty in ["\n", "# only a comment\n", ""] {
+            let v = mdm_policy_layer_from(|| Some(Some(b64(empty))))
+                .unwrap()
+                .unwrap_or_else(|e| panic!("valid empty TOML {empty:?} must not fail closed: {e}"));
+            assert!(v.as_table().is_some_and(|t| t.is_empty()));
+        }
+    }
 
     fn b64(s: &str) -> String {
         base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
@@ -182,5 +345,34 @@ mod tests {
         assert!(decode_managed_toml(&b64("= not toml =")).is_none());
         // An empty table counts as no managed preference
         assert!(decode_managed_toml(&b64("")).is_none());
+    }
+
+    /// P183: an admin-forced payload that cannot be decoded is reported, not silently treated as "no policy".
+    /// Nothing forced and an empty table stay "no layer" without an error.
+    #[test]
+    fn undecodable_forced_payload_is_an_error_p183() {
+        assert_eq!(managed_requirements_checked_from(|| Ok(None)), Ok(None));
+        assert_eq!(
+            managed_requirements_checked_from(|| Ok(Some(b64("")))),
+            Ok(None)
+        );
+        for bad in [
+            "not base64!!!".to_string(),
+            base64::engine::general_purpose::STANDARD.encode([0xff, 0xfe]),
+        ] {
+            assert!(
+                managed_requirements_checked_from(|| Ok(Some(bad.clone()))).is_err(),
+                "{bad:?}"
+            );
+        }
+        // A forced key whose value is missing or not a string (the FFI reader's Err) is an error too
+        assert!(managed_requirements_checked_from(|| Err("not a string".to_owned())).is_err());
+        let err = managed_requirements_checked_from(|| Ok(Some(b64("[ui\nsecret = \"s3cr3t\"\n"))))
+            .unwrap_err();
+        assert!(err.starts_with("TOML parse error at line 1"), "{err}");
+        assert!(
+            !err.contains("s3cr3t"),
+            "the payload must stay redacted: {err}"
+        );
     }
 }

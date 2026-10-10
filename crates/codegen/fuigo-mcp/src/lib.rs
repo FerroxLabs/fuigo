@@ -44,6 +44,7 @@ mod auth_status;
 pub mod credentials;
 pub mod elicitation;
 mod http_policy;
+pub use http_policy::auth_refusal_for_url;
 pub mod liveness;
 pub mod mcp_http_client;
 pub mod oauth;

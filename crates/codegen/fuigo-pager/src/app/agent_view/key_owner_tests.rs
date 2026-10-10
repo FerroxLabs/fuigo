@@ -1041,6 +1041,13 @@ fn vim_mode_permission_tab_and_esc_match_default() {
 }
 
 fn open_elicitation(agent: &mut AgentView) {
+    open_elicitation_with_tx(agent, None);
+}
+
+fn open_elicitation_with_tx(
+    agent: &mut AgentView,
+    response_tx: Option<crate::views::elicitation_view::ElicitResponseTx>,
+) {
     use crate::views::elicitation_view::ElicitationViewState;
     use fuigo_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
     agent.elicitation_view = Some(ElicitationViewState::from_request(
@@ -1060,7 +1067,7 @@ fn open_elicitation(agent: &mut AgentView) {
             },
         },
         Some(StashedPrompt::default()),
-        None,
+        response_tx,
     ));
 }
 
@@ -1315,4 +1322,213 @@ fn elicitation_shift_tab_walks_fields_backwards() {
         assert_eq!(ev.focus, ElicitationFocus::Fields);
         assert_eq!(ev.field_cursor(), 0);
     }
+}
+
+type ElicitAnswer = tokio::sync::oneshot::Receiver<fuigo_acp_lib::AcpResult<acp::ExtResponse>>;
+
+/// Like [`open_elicitation`], with a live response channel so the answer can be read back.
+fn open_elicitation_with_answer(agent: &mut AgentView) -> ElicitAnswer {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    open_elicitation_with_tx(agent, Some(tx));
+    rx
+}
+
+fn delivered_answer(rx: &mut ElicitAnswer) -> serde_json::Value {
+    let response = rx
+        .try_recv()
+        .expect("an answer was sent")
+        .expect("the answer is not an error");
+    serde_json::from_str(response.0.get()).expect("answer is JSON")
+}
+
+fn system_notes(agent: &AgentView) -> Vec<String> {
+    (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.get(i))
+        .filter_map(|entry| match &entry.block {
+            crate::scrollback::block::RenderBlock::System(block) => Some(block.text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn minimal_type(agent: &mut AgentView, keys: &[KeyCode]) {
+    use crossterm::event::Event;
+    let registry = ActionRegistry::defaults();
+    for code in keys {
+        let _ = agent.handle_minimal_input(
+            &Event::Key(KeyEvent::new(*code, KeyModifiers::NONE)),
+            &registry,
+        );
+    }
+}
+
+/// Minimal keeps the prompt pane focused.
+fn minimal_agent() -> AgentView {
+    let mut agent = make_agent();
+    agent
+        .prompt
+        .set_screen_mode(crate::app::ScreenMode::Minimal);
+    agent.set_active_pane(AgentPane::Prompt, true);
+    agent
+}
+
+#[test]
+fn minimal_keys_answer_the_elicitation_card_and_submit_it() {
+    let mut agent = minimal_agent();
+    let mut rx = open_elicitation_with_answer(&mut agent);
+    assert!(agent.is_awaiting_user_answer());
+
+    let mut keys: Vec<KeyCode> = "a@b.co".chars().map(KeyCode::Char).collect();
+    keys.extend([KeyCode::Enter, KeyCode::Tab, KeyCode::Char('y')]);
+    minimal_type(&mut agent, &keys);
+
+    assert_eq!(
+        serde_json::json!({ "outcome": "accept", "content": { "email": "a@b.co" } }),
+        delivered_answer(&mut rx)
+    );
+    assert!(
+        agent.elicitation_view.is_none(),
+        "the card closes on accept"
+    );
+    assert_eq!("", agent.prompt.text(), "no key leaked into the composer");
+    assert_eq!(Vec::<String>::new(), system_notes(&agent));
+}
+
+#[test]
+fn declined_elicitation_tells_the_server_and_leaves_a_notice() {
+    let mut agent = minimal_agent();
+    let mut rx = open_elicitation_with_answer(&mut agent);
+    minimal_type(&mut agent, &[KeyCode::Tab, KeyCode::Char('d')]);
+
+    assert_eq!(
+        serde_json::json!({ "outcome": "decline" }),
+        delivered_answer(&mut rx)
+    );
+    assert!(agent.elicitation_view.is_none());
+    assert_eq!(
+        vec!["Declined MCP “demo” request for input.".to_owned()],
+        system_notes(&agent)
+    );
+}
+
+#[test]
+fn cancelled_elicitation_tells_the_server_and_leaves_a_notice() {
+    use crossterm::event::Event;
+    let mut agent = minimal_agent();
+    let mut rx = open_elicitation_with_answer(&mut agent);
+    let _ = agent.handle_minimal_input(
+        &Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        &ActionRegistry::defaults(),
+    );
+
+    assert_eq!(
+        serde_json::json!({ "outcome": "cancel" }),
+        delivered_answer(&mut rx)
+    );
+    assert_eq!(
+        vec!["Dismissed MCP “demo” request for input without answering.".to_owned()],
+        system_notes(&agent)
+    );
+}
+
+#[test]
+fn accept_after_the_server_gave_up_leaves_a_notice() {
+    let mut agent = minimal_agent();
+    drop(open_elicitation_with_answer(&mut agent));
+    let mut keys: Vec<KeyCode> = "a@b.co".chars().map(KeyCode::Char).collect();
+    keys.extend([KeyCode::Enter, KeyCode::Tab, KeyCode::Char('y')]);
+    minimal_type(&mut agent, &keys);
+
+    assert!(agent.elicitation_view.is_none());
+    assert_eq!(
+        vec![
+            "MCP “demo” request for input closed before it was answered here (it timed out or was answered elsewhere)."
+                .to_owned()
+        ],
+        system_notes(&agent)
+    );
+}
+
+#[test]
+fn notice_quotes_only_catalog_name_characters_of_the_server() {
+    let mut agent = make_agent();
+    crate::minimal_api::open_test_elicitation(
+        &mut agent,
+        "x” approved. Visit https://evil.example",
+        "Create ticket?",
+    );
+    assert!(agent.dismiss_resolved_interaction("mcp-elicit-test"));
+    assert_eq!(
+        vec![
+            "MCP “xapprovedVisithttpsevilexample” request for input closed before it was answered here (it timed out or was answered elsewhere)."
+                .to_owned()
+        ],
+        system_notes(&agent)
+    );
+}
+
+#[test]
+fn elicitation_closed_elsewhere_leaves_a_notice() {
+    let mut agent = make_agent();
+    let _answer = open_elicitation_with_answer(&mut agent);
+
+    assert!(agent.dismiss_resolved_interaction("mcp-elicit-1"));
+
+    assert!(agent.elicitation_view.is_none());
+    assert!(!agent.is_awaiting_user_answer());
+    assert_eq!(
+        vec![
+            "MCP “demo” request for input closed before it was answered here (it timed out or was answered elsewhere)."
+                .to_owned()
+        ],
+        system_notes(&agent)
+    );
+}
+
+/// A URL accept the server can no longer hear closes the card with a notice and promotes the next parked request.
+#[test]
+fn closed_elsewhere_card_promotes_the_next_parked_request() {
+    use fuigo_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    let mut agent = make_agent();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    drop(rx);
+    open_url_elicitation(&mut agent, Some(tx));
+    let (next_tx, _next_rx) = tokio::sync::oneshot::channel();
+    agent.pending_elicitation = Some((
+        McpElicitExtRequest {
+            session_id: "s".into(),
+            tool_call_id: "mcp-elicit-next".into(),
+            server_name: "demo".into(),
+            message: "Next".into(),
+            mode: McpElicitModeFields::Form {
+                requested_schema: Some(serde_json::json!({ "type": "object", "properties": {} })),
+            },
+        },
+        next_tx,
+    ));
+    let _ = agent.handle_elicitation_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+
+    assert_eq!(
+        Some("mcp-elicit-next"),
+        agent
+            .elicitation_view
+            .as_ref()
+            .map(|ev| ev.tool_call_id.as_str()),
+        "the parked request is shown after the closed card"
+    );
+    assert!(agent.pending_elicitation.is_none());
+    assert_eq!(
+        vec![
+            "MCP “demo” request for input closed before it was answered here (it timed out or was answered elsewhere)."
+                .to_owned()
+        ],
+        system_notes(&agent)
+    );
+}
+
+#[test]
+fn cancel_turn_confirm_is_not_awaiting_a_user_answer() {
+    let mut agent = make_agent();
+    open_cancel_turn(&mut agent);
+    assert!(!agent.is_awaiting_user_answer());
 }

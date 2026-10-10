@@ -292,6 +292,7 @@ fn fork_initiation_supersedes_open_reload_window() {
     // The fork's own SessionLoaded is not deferred; it settles the batch
     dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
+            attempt: 0,
             agent_id: id,
             session_id: acp::SessionId::new("sess-fork"),
             models: None,
@@ -1309,6 +1310,7 @@ fn fork_session_ready_emits_load_session_with_new_id() {
     match effects.as_slice() {
         [
             Effect::LoadSession {
+                attempt: _,
                 agent_id,
                 session_id,
                 session_cwd,
