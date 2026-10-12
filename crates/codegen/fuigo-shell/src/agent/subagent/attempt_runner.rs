@@ -115,6 +115,8 @@ pub(super) async fn run_one_turn_attempt(
         json_schema: input.request.runtime_overrides.output_schema.clone(),
         send_now: false,
         admission: None,
+        // The task text was written by the parent model: model-authored authority, not a typed user prompt.
+        origin: crate::session::PromptOrigin::SubagentTask,
         tool_overrides_update: None,
         respond_to: prompt_tx,
         prompt_admitted: Some(input.prompt_admitted),

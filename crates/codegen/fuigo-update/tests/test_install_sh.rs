@@ -472,6 +472,69 @@ fn run_with_proxy_url(script: &Path, proxy_url: &str) -> (bool, String, bool) {
     (status.success(), urls, managed)
 }
 
+/// Run the real installer under `umask 002` (the Ubuntu default) in `home`, offline via the fake curl.
+fn run_under_umask_002(script: &Path, home: &Path) -> bool {
+    let fakedir = tempfile::tempdir().unwrap();
+    write_fake_curl(fakedir.path());
+    let path_env = format!("{}:/usr/bin:/bin", fakedir.path().display());
+    Command::new("/bin/sh")
+        .arg("-c")
+        .arg("umask 002 && exec /bin/bash \"$0\" 0.1.181")
+        .arg(script)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", path_env)
+        .env("SHELL", "/bin/bash")
+        .env("FUIGO_BIN_DIR", home.join(".fuigo").join("bin"))
+        .env("FUIGO_CHANNEL", "stable")
+        .env("FUIGO_DEPLOYMENT_KEY", "test-deployment-key")
+        .env("FUIGO_PROXY_URL", "https://proxy.example.com/v1")
+        .env("FAKE_MODE", "full")
+        .status()
+        .expect("spawn install script")
+        .success()
+}
+
+#[test]
+fn install_scripts_create_a_missing_fuigo_home_private_and_keep_an_existing_one() {
+    for name in INSTALL_SCRIPTS {
+        let Some(script) = script_path(name) else {
+            eprintln!("skipping: {name} not found relative to crate");
+            continue;
+        };
+        // Fresh HOME, no ~/.fuigo: the installer must create it 0700 even under umask 002.
+        let home = tempfile::tempdir().unwrap();
+        assert!(
+            run_under_umask_002(&script, home.path()),
+            "{name} must succeed"
+        );
+        let mode = std::fs::metadata(home.path().join(".fuigo"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "{name}: a new Fuigo home must be 0700, got {mode:o}"
+        );
+
+        // Existing 775 home: left alone (never chmod-ed).
+        let home = tempfile::tempdir().unwrap();
+        let fuigo = home.path().join(".fuigo");
+        std::fs::create_dir(&fuigo).unwrap();
+        std::fs::set_permissions(&fuigo, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(
+            run_under_umask_002(&script, home.path()),
+            "{name} must succeed"
+        );
+        let mode = std::fs::metadata(&fuigo).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o775,
+            "{name}: an existing home must not be chmod-ed, got {mode:o}"
+        );
+    }
+}
+
 fn assert_no_credentialed_proxy_request(label: &str, proxy_url: &str, urls: &str) {
     assert!(
         !urls.contains("/deployment/config")

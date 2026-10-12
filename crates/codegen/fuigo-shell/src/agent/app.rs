@@ -9,7 +9,7 @@ use crate::leader::protocol::InternalMethod;
 use crate::util::fuigo_home;
 use agent_client_protocol as acp;
 use fuigo_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
+    AcpAgentGatewaySender as GatewaySender,
 };
 use parking_lot::Mutex;
 use std::pin::Pin;
@@ -155,10 +155,13 @@ fn spawn_agent_local(
     if let Some(tx) = config_watcher_path_tx {
         agent.set_config_watcher_path_tx(tx);
     }
+    let park_hold = agent.park_hold.clone();
     let (conn, handle_io) =
         crate::agent::credential_scrub::agent_side_connection(agent, outgoing, incoming);
     tokio::task::spawn_local(
-        GatewayReceiver::new(gw_rx, conn)
+        fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
+            gw_rx,
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
             .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
             .run(),
     );
@@ -376,6 +379,8 @@ pub async fn run_stdio_agent(
     memory_config: Option<crate::config::MemoryConfig>,
 ) -> anyhow::Result<()> {
     register_fs_watch_runtime();
+    // Peer messaging (flag off: nothing happens): the inbox starts when the first session registers.
+    crate::peer_inbox::host::arm_peer_host();
     // Linux: PR_SET_PDEATHSIG. Windows: a parent-handle watcher that runs the
     // binary's parent-death hook (log line + telemetry flush, bounded), reaps
     // the global process scope and terminates us, which also closes every owned
@@ -457,6 +462,7 @@ pub async fn run_stdio_agent(
         })
         .await;
     agent_cancel.cancel();
+    crate::peer_inbox::host::shutdown_peer_host().await;
     crate::terminal::pty_session::close_all().await;
     fuigo_telemetry::session_ctx::drain_at_process_exit().await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -599,11 +605,14 @@ pub async fn run_headless(
                 if let Some(mc) = memory_config_for_first {
                     agent.set_memory_config(mc);
                 }
+                let park_hold = agent.park_hold.clone();
                 let (conn, handle_io) = crate::agent::credential_scrub::agent_side_connection(
                     agent, outgoing, incoming,
                 );
                 tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
+                    fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
+            gw_rx,
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
                         .with_on_meta(
                             fuigo_file_utils::trace_context::span_from_meta_traceparent,
                         )
@@ -797,7 +806,11 @@ fn spawn_leader_relay(
     let permitted = bridge_permitted(&relay_config, "leader", &refusal_board);
     if permitted && !relay_on_demand {
         info!("Starting relay connection (eager)");
-        let (tx, handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
+        // S4.1: a relay is installed: no session of this leader can message peers while it is. The guard is taken BEFORE the
+        // spawn (the relay task may run on another worker at once), so the fact holds before any relay frame can reach the agent.
+        let attach = crate::peer_inbox::driver::attach_remote();
+        let (tx, mut handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
+        handle.hold_peer_attach(attach);
         *agent_to_ws_tx.lock() = Some(tx);
         *slot.borrow_mut() = Some(handle);
         return;
@@ -824,7 +837,11 @@ fn spawn_leader_relay(
             }
         }
         info!("Headless client registered; starting relay connection");
-        let (tx, handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
+        // S4.1: a relay is installed: no session of this leader can message peers while it is. The guard is taken BEFORE the
+        // spawn (the relay task may run on another worker at once), so the fact holds before any relay frame can reach the agent.
+        let attach = crate::peer_inbox::driver::attach_remote();
+        let (tx, mut handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
+        handle.hold_peer_attach(attach);
         *agent_to_ws_tx.lock() = Some(tx);
         *slot_for_task.borrow_mut() = Some(handle);
     });
@@ -990,6 +1007,7 @@ pub async fn run_leader(
         Err(e) => return Err(anyhow::anyhow!("Failed to acquire leader lock: {}", e)),
     }
     lock.cleanup_socket()?;
+    crate::peer_inbox::driver::arm_peer_host_leader();
     info!("Leader server starting");
     let (ipc_to_agent_tx, mut ipc_to_agent_rx) = mpsc::unbounded_channel::<String>();
     let (agent_to_ipc_tx, agent_to_ipc_rx) = mpsc::unbounded_channel::<String>();
@@ -1147,11 +1165,14 @@ pub async fn run_leader(
                 if let Some(tx) = agent_config_watcher_path_tx {
                     agent.set_config_watcher_path_tx(tx);
                 }
+                let park_hold = agent.park_hold.clone();
                 let (conn, handle_io) = crate::agent::credential_scrub::agent_side_connection(
                     agent, outgoing, incoming,
                 );
                 tokio::task::spawn_local(
-                    GatewayReceiver::new(gw_rx, conn)
+                    fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
+            gw_rx,
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
                         .with_on_meta(
                             fuigo_file_utils::trace_context::span_from_meta_traceparent,
                         )
@@ -1507,6 +1528,7 @@ pub async fn run_leader(
             if let Some(relay_handle) = relay_handle_slot.borrow_mut().take() {
                 relay_handle.stop();
             }
+            crate::peer_inbox::host::shutdown_peer_host().await;
             anyhow::Ok(())
         })
         .await?;

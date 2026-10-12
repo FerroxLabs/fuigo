@@ -26,6 +26,15 @@ pub enum ProtocolError {
 pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     reader: &mut R,
 ) -> Result<Vec<u8>, ProtocolError> {
+    read_frame_limited(reader, MAX_MESSAGE_SIZE).await
+}
+
+/// [`read_frame`] with a caller-chosen size cap (checked from the 4-byte prefix before any allocation). Not tied to
+/// the leader message type. The `MessageTooLarge` text still names the leader's cap.
+pub(crate) async fn read_frame_limited<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    max: u32,
+) -> Result<Vec<u8>, ProtocolError> {
     let mut len_buf = [0u8; 4];
     match reader.read_exact(&mut len_buf).await {
         Ok(_) => {}
@@ -36,7 +45,7 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
     }
 
     let len = u32::from_be_bytes(len_buf);
-    if len > MAX_MESSAGE_SIZE {
+    if len > max {
         return Err(ProtocolError::MessageTooLarge(len));
     }
 
@@ -53,13 +62,20 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
 pub(crate) struct FrameReader<R> {
     reader: R,
     buf: BytesMut,
+    max: u32,
 }
 
 impl<R: AsyncRead + Unpin> FrameReader<R> {
     pub(crate) fn new(reader: R) -> Self {
+        Self::with_limit(reader, MAX_MESSAGE_SIZE)
+    }
+
+    /// Like [`FrameReader::new`] with a caller-chosen frame size cap.
+    pub(crate) fn with_limit(reader: R, max: u32) -> Self {
         FrameReader {
             reader,
             buf: BytesMut::new(),
+            max,
         }
     }
 
@@ -94,7 +110,7 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
             return Ok(None);
         };
         let len = u32::from_be_bytes(*header);
-        if len > MAX_MESSAGE_SIZE {
+        if len > self.max {
             return Err(ProtocolError::MessageTooLarge(len));
         }
         let frame_len = FRAME_HEADER_LEN + len as usize;
@@ -111,8 +127,17 @@ pub(crate) async fn write_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
     data: &[u8],
 ) -> Result<(), ProtocolError> {
+    write_frame_limited(writer, data, MAX_MESSAGE_SIZE).await
+}
+
+/// [`write_frame`] with a caller-chosen size cap.
+pub(crate) async fn write_frame_limited<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    max: u32,
+) -> Result<(), ProtocolError> {
     let len = data.len() as u32;
-    if len > MAX_MESSAGE_SIZE {
+    if len > max {
         return Err(ProtocolError::MessageTooLarge(len));
     }
 

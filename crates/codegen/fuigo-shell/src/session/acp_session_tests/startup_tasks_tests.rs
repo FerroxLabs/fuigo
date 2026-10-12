@@ -162,6 +162,7 @@ async fn prompt_turn_completes_while_mcp_init_is_in_flight() {
                     json_schema: None,
                     send_now: false,
                     admission: None,
+                    origin: crate::session::PromptOrigin::User,
                     tool_overrides_update: None,
                     respond_to,
                     prompt_admitted: None,

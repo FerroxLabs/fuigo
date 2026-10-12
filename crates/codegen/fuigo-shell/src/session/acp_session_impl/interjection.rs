@@ -11,7 +11,8 @@ use super::*;
 #[allow(unused_imports)]
 pub(crate) use fuigo_interjection_core::{
     INTERRUPT_NOTE, InterjectionAuthority, InterjectionBuffer, drain_formatted,
-    format_interjection, format_parent_agent_interjection, frame_user_turn,
+    format_interjection, format_parent_agent_interjection, format_peer_interjection,
+    frame_user_turn,
 };
 
 /// Shell instantiation of the shared entry type: images are ACP content.
@@ -72,12 +73,24 @@ impl SessionActor {
                 message_id,
                 sender_session_id,
             }),
+            // S1.5: a stranded peer entry comes back as a peer prompt, never as a user prompt.
+            InterjectionAuthority::Peer { message_id, from } => {
+                // The stranded message is tracked again so it is rechecked when this row runs as its own turn; if admission
+                // never saw it, it stays untracked and the recheck refuses it.
+                self.peer_admission.retrack_stranded(&(from.clone(), message_id.clone()));
+                InputOrigin::new(super::super::PromptOrigin::PeerMessage { message_id, from })
+            }
         };
+        let is_peer_fallback = input_origin.as_prompt_origin().is_peer();
         // A real user message (this skips queue_input) invalidates the in-flight
         // recap now; `queue_input` gates the same call on human intent, so a
         // parent agent's fallback must not cancel side calls either.
         if input_origin.policy().authority.is_human_intent() {
             self.invalidate_side_calls_for_new_prompt();
+            // S5.6: same reset as `queue_input` (this path skips it).
+            if crate::session::peer_message::peer_messaging_enabled() {
+                self.peer_admission.human_prompt();
+            }
         }
         let item = InputItem {
             prompt_id,
@@ -87,7 +100,8 @@ impl SessionActor {
             artifact_tracker: None,
             client_identifier: None,
             screen_mode: None,
-            verbatim: false,
+            // A peer entry is already wrapped; it must reach the model exactly as wrapped.
+            verbatim: is_peer_fallback,
             json_schema: None,
             input_origin,
             task_wake_fallback: None,
@@ -434,9 +448,14 @@ impl SessionActor {
             // The sanitizer rewrites `[Image #N: <path>]` to `[Image #N]` before the text reaches the model
             // It covers legacy-client raw text AND text harvested from queued rows sent as interjections
             // Wrapping and truncation stay in the shared crate (`format_interjection`)
-            let sanitized = crate::session::placeholder_images::strip_paths_from_image_placeholders(
-                text.clone(),
-            );
+            // A peer entry is left byte-for-byte as the receive path wrapped it.
+            let sanitized = if matches!(authority, InterjectionAuthority::Peer { .. }) {
+                text.clone()
+            } else {
+                crate::session::placeholder_images::strip_paths_from_image_placeholders(
+                    text.clone(),
+                )
+            };
             // An owning parent agent's message is model-authored and untrusted:
             // it keeps the narrow leading-command resolver and its own envelope,
             // never the human interjection note (see `InterjectionAuthority`).
@@ -449,6 +468,10 @@ impl SessionActor {
                     self.parent_agent_skill_information(&sanitized).await,
                     format_parent_agent_interjection(sanitized.clone()),
                 ),
+                // S1.2/S1.3: no skill scan and no slash resolution of any kind for peer text.
+                InterjectionAuthority::Peer { .. } => {
+                    (None, format_peer_interjection(sanitized.clone()))
+                }
             };
             // The pipeline consumes a clone; the guard keeps the original attachments restorable
             let images = self
@@ -472,6 +495,8 @@ impl SessionActor {
                 InterjectionAuthority::ParentAgent { .. } => {
                     ConversationItem::agent_message(model_text)
                 }
+                // S1.5: its own reason, never `AgentMessage` and never the user's interjection.
+                InterjectionAuthority::Peer { .. } => ConversationItem::peer_message(model_text),
             };
             for img in &images {
                 item.add_image(pick_user_image_url(img));

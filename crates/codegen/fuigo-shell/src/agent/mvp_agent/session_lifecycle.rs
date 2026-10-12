@@ -162,6 +162,9 @@ impl MvpAgent {
         id: &acp::SessionId,
         handle: SessionHandle,
     ) -> Option<SessionHandle> {
+        // Peer messaging: offer the main session (a replaced one gets a new incarnation). No-op unless the host armed
+        // the inbox and `features.peer_messaging` is on.
+        crate::peer_inbox::host::session_started(id.0.as_ref(), handle.message_delivery());
         self.session_registry.put_resident(id, handle)
     }
     pub(crate) fn resident_count(&self) -> usize {
@@ -192,10 +195,15 @@ impl MvpAgent {
     /// That runs even on idle-unload, so a wedged session's tree is still reclaimed.
     pub(super) fn take_session(&self, id: &acp::SessionId) -> Option<SessionHandle> {
         let handle = self.session_registry.take_resident(id);
+        if handle.is_some() {
+            crate::peer_inbox::host::session_ended(id.0.as_ref());
+        }
         if let Some(handle) = &handle
             && let Some(scope) = &handle.tool_context.process_scope
         {
             scope.kill_all();
+            // P189: close the session cgroup's gate and rmdir it if empty. Never kills.
+            scope.release_session_cgroup();
         }
         handle
     }

@@ -50,6 +50,8 @@ fn front_is_rewind_poppable(front: Option<&InputItem>) -> bool {
         matches!(
             f.input_origin.as_prompt_origin(),
             crate::session::PromptOrigin::User
+                | crate::session::PromptOrigin::SubagentTask
+                | crate::session::PromptOrigin::UnverifiedScheduled
         ) && !super::interjection::is_interject_fallback(&f.prompt_id)
     })
 }

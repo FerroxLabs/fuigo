@@ -99,6 +99,7 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::fuigo_build::scheduler::list::SchedulerListInput),
     UpdateGoal(UpdateGoalInput),
     Workflow(crate::implementations::fuigo_build::workflow::WorkflowToolInput),
+    Peer(crate::implementations::fuigo_build::peer_tools::PeerToolInput),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

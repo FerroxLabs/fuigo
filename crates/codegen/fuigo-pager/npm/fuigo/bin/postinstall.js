@@ -14,6 +14,7 @@ const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
 const { execSync } = require('child_process');
+const { installVendorBinary, ensureFuigoHome } = require('./fuigo-replace.js');
 const TOML = require('@iarna/toml');
 
 // $FUIGO_HOME (else ~/.fuigo), matching the Rust fuigo_home(): a symlinked
@@ -78,6 +79,7 @@ if (!version) {
 const IS_WINDOWS = process.platform === 'win32';
 const EXE = IS_WINDOWS ? '.exe' : '';
 
+ensureFuigoHome(FUIGO_HOME);
 fs.mkdirSync(CANONICAL_DIR, { recursive: true });
 
 function writeVendorBinary(brotliPath, binaryPath, destPath) {
@@ -90,6 +92,8 @@ function writeVendorBinary(brotliPath, binaryPath, destPath) {
         } else {
             return false;
         }
+        // An empty vendored file is a broken package: never put it in place of a binary.
+        if (fs.statSync(tmp).size === 0) return false;
         if (!IS_WINDOWS) fs.chmodSync(tmp, 0o755);
         fs.renameSync(tmp, destPath);
         return true;
@@ -109,8 +113,8 @@ function installBinary(binName, sourceDir, vendorSubpath) {
     const canonicalName = `${binName}${EXE}`;
     const canonicalPath = path.join(CANONICAL_DIR, canonicalName);
 
-    // Skip if this exact version is already installed.
-    if (!fs.existsSync(versionedPath) && !writeVendorBinary(brotliPath, binaryPath, versionedPath)) {
+    // Writes the binary, or replaces an installed one whose content differs (see fuigo-replace.js).
+    if (!installVendorBinary(brotliPath, binaryPath, versionedPath)) {
         console.error(`fuigo: missing binary at ${brotliPath}`);
         return false;
     }

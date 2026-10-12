@@ -789,6 +789,7 @@ mod tests {
 
     /// P198 r2: the codex `list_dir` walker against the shared contract (absolute rule, outside rule, symlinked cwd,
     /// bare name, symlink root, siblings).
+    #[cfg(unix)]
     #[tokio::test]
     async fn read_rules_follow_the_policy_matcher() {
         use crate::types::resources::{Cwd, DenyReadGlobs, Resources};

@@ -94,6 +94,8 @@ pub struct HeadlessOptions {
     pub total_timeout: Option<Duration>,
     /// After the prompt (or instead of one when resuming), run `fuigo/memory/flush`.
     pub memory_flush: bool,
+    /// `--peer`: opt the session in to peer messaging with operator `unattended` (packet 13). Off: nothing is sent.
+    pub peer: bool,
     /// CLI `--experimental-memory` / `--no-memory` override for the headless agent.
     pub memory_enabled_override: Option<bool>,
 }
@@ -455,6 +457,8 @@ struct HeadlessEmitter {
     /// Whether the run's terminal document (`on_end` / `on_error`) has been written. An interrupt
     /// that lands after it must not write a second one.
     terminal_emitted: bool,
+    /// MCP servers whose start failure was already reported this run.
+    mcp_start_failed_reported: HashSet<String>,
     /// Usage of the responses that completed so far (see [`Self::terminal_usage`]).
     observed_usage: fuigo_shell::extensions::notification::PromptUsageModel,
 }
@@ -496,6 +500,7 @@ impl HeadlessEmitter {
             permission_denial: None,
             denial_ended_run: false,
             terminal_emitted: false,
+            mcp_start_failed_reported: HashSet::new(),
             observed_usage: Default::default(),
         }
     }
@@ -620,6 +625,17 @@ impl HeadlessEmitter {
                 self.reduce_and_emit(StreamEvent::Lifecycle(event));
             }
         }
+    }
+
+    /// A configured MCP server failed to start: one warning per server per run, however many times the shell reports it
+    /// (the shell pushes the failure from two places, and a restart can fail again).
+    fn on_mcp_start_failed(&mut self, name: &str, kind: fuigo_shell::extensions::mcp::McpFailureKind) {
+        let (printed_name, lifecycle) = Lifecycle::mcp_start_failed(name, kind);
+        // Keyed on the name as printed, so two raw names that print alike never give two identical lines
+        if !self.mcp_start_failed_reported.insert(printed_name) {
+            return;
+        }
+        self.on_lifecycle(lifecycle);
     }
 
     /// P188: response boundaries for the formats that hold text themselves (`plain` writes, `json`/`stream-json`
@@ -1871,6 +1887,7 @@ async fn run_single_turn_inner(
     // spawns so a wedge anywhere on the path (initialize, session/new, the turn, the memory flush)
     // is bounded by it.
     let deadline = RunDeadline::start(options.total_timeout);
+    let peer_opt_in = options.peer;
 
     let cwd = match options.cwd {
         None => std::env::current_dir()?,
@@ -2181,6 +2198,14 @@ async fn run_single_turn_inner(
         session_id = %session_id.0,
         "headless: open_session complete"
     );
+    // `--peer` (packet 13): opt the session in with no operator. Without the flag nothing below runs and the run is unchanged.
+    if peer_opt_in
+        && let Err(e) = opt_in_to_peer_messaging(&acp_tx, &session_id, deadline).await
+    {
+        let msg = format!("--peer: {e}");
+        emitter.on_error(&msg, None);
+        anyhow::bail!("{msg}");
+    }
 
     let track_active = std::env::var("FUIGO_TRACK_HEADLESS").is_ok();
     if track_active {
@@ -2983,6 +3008,31 @@ where
 }
 
 /// Invoke `fuigo/memory/flush` and wait for the flush LLM to finish.
+/// The one `fuigo/peer/configure` a `--peer` run sends: opted in, operator `unattended` (nobody can release a hold, so a
+/// would-be hold is rejected `no_operator`; a delivered message follows the unattended equal-mode rule), policy `accept`.
+pub(crate) fn peer_opt_in_request(session_id: &acp::SessionId) -> serde_json::Result<acp::ExtRequest> {
+    let params = serde_json::json!({
+        "sessionId": session_id.0.to_string(),
+        "optIn": true,
+        "operator": "unattended",
+        "policy": "accept",
+    });
+    let raw = serde_json::value::to_raw_value(&params)?;
+    Ok(acp::ExtRequest::new("fuigo/peer/configure", raw.into()))
+}
+
+async fn opt_in_to_peer_messaging(
+    acp_tx: &AcpAgentTx,
+    session_id: &acp::SessionId,
+    deadline: RunDeadline,
+) -> anyhow::Result<()> {
+    let request = peer_opt_in_request(session_id)?;
+    with_send_deadline("peer opt-in", deadline.budget(None), acp_send(request, acp_tx))
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("peer messaging could not be enabled for this session ({e}); is features.peer_messaging on?"))
+}
+
 async fn run_headless_memory_flush(
     acp_tx: &AcpAgentTx,
     acp_rx: &mut AcpClientRx,
@@ -3177,7 +3227,11 @@ fn track_background_lifecycle(
             }
         }
         // Routed to the emitter by the caller, never tracked.
-        ExtEvent::MonitorEvent | ExtEvent::None | ExtEvent::Lifecycle(_) | ExtEvent::Stream(_) => {}
+        ExtEvent::MonitorEvent
+        | ExtEvent::None
+        | ExtEvent::Lifecycle(_)
+        | ExtEvent::Stream(_)
+        | ExtEvent::McpStartFailed { .. } => {}
     }
 }
 
@@ -3361,6 +3415,9 @@ fn handle_headless_acp_message(
             match event {
                 ExtEvent::Lifecycle(l) => emitter.on_lifecycle(l),
                 ExtEvent::Stream(event) => emitter.reduce_and_emit(*event),
+                ExtEvent::McpStartFailed { name, kind } => {
+                    emitter.on_mcp_start_failed(&name, kind);
+                }
                 other => track_background_lifecycle(other, pending_bg, completed_bg),
             }
         }

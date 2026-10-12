@@ -89,6 +89,8 @@ impl ChatStateActor {
             inject_memory_reminder(&mut items, &reminder);
         }
         items = crate::compaction_utils::ModelRequestHistory::from_raw(items).into_items();
+        // Peer messaging S7 data markers (kinds, hashes, ids) are state, never model context.
+        items.retain(|i| !i.is_peer_denial_data_marker());
 
         // Step 4: Assemble request
         ConversationRequest {
@@ -308,7 +310,6 @@ mod tests {
             soft_trim_head: 100,
             soft_trim_tail: 100,
             hard_clear_age_turns: 3,
-            ..Default::default()
         };
         let mut conv = vec![
             ConversationItem::user("real prompt"),

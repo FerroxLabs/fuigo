@@ -908,3 +908,66 @@ async fn get_task_running_fills_output_from_log() {
     assert!(!snap.completed);
     assert!(!snap.truncated);
 }
+
+/// A gateway that receives `terminal/output` and never answers (the held connection of a parked session).
+fn output_held_gateway() -> GatewaySender {
+    use fuigo_acp_lib::AcpClientMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Some(msg) = rx.recv().await {
+            if let AcpClientMessage::TerminalOutput(args) = msg {
+                held.push(args);
+            }
+        }
+    });
+    GatewaySender::new(tx)
+}
+
+/// Astra r2 NEW-5: a task list against a client that holds `terminal/output` answers from the log files within
+/// one bound (concurrently for all tasks), instead of waiting for the unpark.
+#[tokio::test]
+async fn list_tasks_with_a_held_client_answers_from_the_log_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let adapter = AcpTerminalAdapter::new(output_held_gateway(), acp::SessionId::new("s"));
+    for name in ["a", "b", "c"] {
+        let log = dir.path().join(format!("{name}.log"));
+        tokio::fs::write(&log, format!("log of {name}")).await.unwrap();
+        insert_task(&adapter, name, TrackedTask { output_file: log, ..Default::default() });
+    }
+    let started = std::time::Instant::now();
+    let snaps = tokio::time::timeout(std::time::Duration::from_secs(4), adapter.list_tasks())
+        .await
+        .expect("the task list waited for a held terminal/output");
+    assert!(started.elapsed() < std::time::Duration::from_secs(4));
+    assert_eq!(snaps.len(), 3);
+    assert!(snaps.iter().any(|s| s.output == "log of a"));
+}
+
+/// Astra r3 F9: a log file that never answers (a FIFO nobody writes: `open` blocks) ends the log read at the same
+/// bound as the live poll; the snapshot is answered with what it has instead of stalling the caller.
+#[cfg(unix)]
+#[tokio::test]
+async fn get_task_with_a_log_that_never_answers_is_bounded() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("stalled.log");
+    let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `c_path` is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+    let adapter = AcpTerminalAdapter::new(output_unavailable_gateway(), acp::SessionId::new("s"));
+    insert_task(
+        &adapter,
+        "t-stalled",
+        TrackedTask { output_file: fifo.clone(), output_byte_limit: 1024, ..Default::default() },
+    );
+    let snap = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.get_task("t-stalled"))
+        .await
+        .expect("the log read was not bounded")
+        .expect("task is tracked");
+    assert!(snap.output.is_empty());
+    assert!(!snap.completed);
+    // Let the blocked `open` finish so the runtime can shut down.
+    let _unblock = std::fs::OpenOptions::new().read(true).write(true).open(&fifo).unwrap();
+}

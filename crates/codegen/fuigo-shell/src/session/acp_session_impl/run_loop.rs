@@ -343,6 +343,12 @@ pub(super) async fn run_session(
     index_root: std::path::PathBuf,
     fs_watch_caps: fs_watch::FsWatchCapabilities,
 ) {
+    // P189: link a subagent to its parent so a parked root quiesces the whole tree; forgets the session's park on exit.
+    let _quiesce_guard = crate::session::quiesce::SessionGuard::new(
+        session.session_info.id.0.as_ref(),
+        session.startup_hints.parent_session_id.as_deref(),
+    );
+    session.announce_guard_kept_feature_off().await;
     let (completion_tx, mut completion_rx) =
         mpsc::unbounded_channel::<super::turn_task::TurnCompletionMsg>();
     let mut turn_end_queue = super::turn_end_hooks::TurnEndQueue::spawn(session.clone());
@@ -679,8 +685,7 @@ pub(super) async fn run_session(
                         SessionCommand::SetToolOverrides { overrides } => {
                             session.set_tool_overrides(overrides);
                         }
-                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, tool_overrides_update, respond_to, prompt_admitted, persist_ack, parsed_prompt_tx } => {
-                            let origin = super::PromptOrigin::from_prompt_id(&prompt_id);
+                        SessionCommand::Prompt { prompt_id, prompt_blocks, prompt_mode, artifact_upload_ctx, client_identifier, screen_mode, verbatim, traceparent, json_schema, send_now, admission, origin, tool_overrides_update, respond_to, prompt_admitted, persist_ack, parsed_prompt_tx } => {
                             let (actor_admitted, task_wake_fallback) = match admission {
                                 Some(admission) => {
                                     let fallback = session
@@ -697,7 +702,7 @@ pub(super) async fn run_session(
                             session.ensure_prefix_ready().await;
                             // Clear suppression: the user is re-engaging
                             // Synthetic auto-wake prompts skip this; the user has not actually re-engaged, so post-cancel suppression must hold
-                            if !origin.is_synthetic() {
+                            if origin.is_user_reengagement() {
                                 if let Some(gate) = &session.tool_context.task_wake_suppressed {
                                     gate.set(false);
                                 }
@@ -732,7 +737,7 @@ pub(super) async fn run_session(
                                 let queue_depth = state.pending_inputs.len();
                                 drop(state);
                                 tracing::info!(
-                                    prompt_id = %prompt_id,
+                                    prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id),
                                     has_running_task = has_running,
                                     queue_depth = queue_depth,
                                     "auto-wake: session actor received synthetic prompt"
@@ -742,6 +747,7 @@ pub(super) async fn run_session(
                                 Some(tu) => (Some(tu.gcs_config), Some(tu.artifact_tracker)),
                                 None => (None, None),
                             };
+                            let unpark_prompt_id = prompt_id.clone();
                             let cancel_for_send_now = session
                                 .queue_input(QueueInputRequest {
                                     prompt_blocks,
@@ -764,6 +770,13 @@ pub(super) async fn run_session(
                                     traceparent,
                                 })
                                 .await;
+                            // P189: an implicit unpark (this prompt arrived on a parked session) kept the session from
+                            // starting its own turns until the prompt was queued; it is queued now, ahead of any deferred wake.
+                            crate::session::quiesce::finish_unpark_on_prompt(session.session_info.id.0.as_ref(), &unpark_prompt_id);
+                            // A scheduled fire never finishes the unpark: it waits (off the loop) until no park entry is left.
+                            if crate::extensions::session_park::is_scheduled_fire_id(&unpark_prompt_id) {
+                                session.wake_scheduled_rows_after_park(completion_tx.clone());
+                            }
                             // An unsettled cancel means another finalization owns the turn; its release will re-kick the queue.
                             let settled = if cancel_for_send_now {
                                 session
@@ -792,6 +805,18 @@ pub(super) async fn run_session(
                                     completion_tx.clone(),
                                 )
                                 .await;
+                        }
+                        SessionCommand::PeerMessage { envelope, respond_to, slot: _slot, probe } => {
+                            let outcome = if probe {
+                                session.probe_peer_watch(*envelope).await
+                            } else {
+                                session.submit_peer_message(*envelope, completion_tx.clone()).await
+                            };
+                            let _ = respond_to.send(outcome);
+                        }
+                        SessionCommand::PeerAdmission { cmd, respond_to } => {
+                            let reply = session.handle_peer_admin(cmd, completion_tx.clone()).await;
+                            let _ = respond_to.send(reply);
                         }
                         SessionCommand::SessionMode { session_mode, responds_to } => {
                             session.handle_session_mode(session_mode).await;
@@ -871,12 +896,20 @@ pub(super) async fn run_session(
                                 .await;
                             let _ = respond_to.send(result);
                         }
-                        SessionCommand::KillBackgroundTask { task_id, source, respond_to } => {
-                            let result = session.tool_bridge_handle()
-                                .kill_background_task(&task_id, source)
-                                .await
-                                .map_err(|e| e.to_string());
-                            let _ = respond_to.send(result);
+                        SessionCommand::KillBackgroundTask { task_id, source, park, respond_to } => {
+                            // A park's kill queued before an unpark/withdraw is dropped, not run late.
+                            let stale = park
+                                .as_ref()
+                                .is_some_and(|p| !crate::session::quiesce::run_if_current(p, || {}));
+                            if stale {
+                                let _ = respond_to.send(Err("park no longer current".to_string()));
+                            } else {
+                                let result = session.tool_bridge_handle()
+                                    .kill_background_task(&task_id, source)
+                                    .await
+                                    .map_err(|e| e.to_string());
+                                let _ = respond_to.send(result);
+                            }
                         }
                         SessionCommand::DeleteScheduledTask { task_id, respond_to } => {
                             let result = session.tool_bridge_handle()
@@ -1393,6 +1426,37 @@ pub(super) async fn run_session(
                             };
                             let _ = respond_to.send(busy);
                         }
+                        SessionCommand::Quiesce { op, stop, respond_to } => {
+                            let report = session.quiesce_probe(&op, stop).await;
+                            let _ = respond_to.send(report);
+                        }
+                        SessionCommand::QuiesceRelease { op, owed, reopen_spawns, kick, reminder } => {
+                            if let Some(reminder) = reminder {
+                                session.push_system_reminder(&reminder);
+                            }
+                            // Grok r4 #4: a DIFFERENT park holds the session now (this release is stale): its
+                            // owed work moves to that park and nothing is reopened, compacted or kicked.
+                            let Err(owed) = crate::session::quiesce::hand_over_owed(
+                                session.session_info.id.0.as_ref(),
+                                op,
+                                owed,
+                            ) else {
+                                continue;
+                            };
+                            let family_compact = owed.family_switch_compact.is_some();
+                            session.quiesce_release(owed, reopen_spawns);
+                            if family_compact {
+                                // Owed by a `set_model` while parked; the entry is Unparking, so the model gate is open.
+                                if session.history_has_model_minted_items().await {
+                                    session.run_family_switch_compact(None).await;
+                                }
+                            }
+                            if kick {
+                                // Deferred wakes run in queue order, then the idle drain batches held notifications
+                                SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
+                                SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
+                            }
+                        }
                         SessionCommand::FlushComplete { respond_to } => {
                             // Flush the actor-owned replay buffer inline
                             // This branch already runs inside `run_session()`
@@ -1428,6 +1492,7 @@ pub(super) async fn run_session(
                                 task_identity,
                                 result: *result,
                                 elapsed_ms,
+                                completed_by_peer: false,
                                 processed: Some(processed),
                             });
                         }
@@ -2012,7 +2077,7 @@ pub(super) async fn run_session(
                                     turn_number.and_then(|n| usize::try_from(n).ok());
                                 let (last_user_message, last_assistant_message) = match turn_idx {
                                     Some(n) => {
-                                        let conv = s.chat_state_handle.get_conversation().await;
+                                        let conv = s.chat_state_handle.get_conversation_for_model().await;
                                         turn_texts_for_feedback(&conv, n)
                                     }
                                     None => {
@@ -2260,7 +2325,7 @@ pub(super) async fn run_session(
                                     // The warn! is a production tripwire: if it ever fires in real traffic, add a per-prompt stash
                                     if !cap.is_empty() {
                                         tracing::warn!(
-                                            requested_prompt_id = %prompt_id,
+                                            requested_prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id),
                                             slot_prompt_id = ?cap.prompt_id,
                                             "streaming_capture race: live slot belongs to a different prompt; \
                                              dropping streaming_partial.json for the requested turn",
@@ -2364,6 +2429,7 @@ pub(super) async fn run_session(
                         elapsed_ms,
                         #[cfg(test)]
                         processed,
+                        completed_by_peer,
                     }) = maybe_completion
                     else {
                         // Completion channel closed: full feedback teardown so the final signal sync and upload drain still run
@@ -2401,6 +2467,7 @@ pub(super) async fn run_session(
                         })
                     );
                     let completed_prompt_id = prompt_id.clone();
+                    let completed_by_peer_turn = completed_by_peer;
                     if !session
                         .handle_completion(prompt_id, epoch, &task_identity, result, elapsed_ms)
                         .await
@@ -2464,10 +2531,14 @@ pub(super) async fn run_session(
                     // A user who hit Ctrl+C wants model activity to stop
                     // Stale completions already `continue`d above, so a turn the Cancel path finalized never reaches this summary
                     if turn_ran && turn_succeeded {
+                        // A peer-message turn is not the user conversing: it never advances the title-refresh checkpoints.
+                        let completed_by_peer = completed_by_peer_turn;
                         session.restart_turn_summary(completed_prompt_id);
                         // Early-session auto-title refresh (turns 3 and 6), then frozen
                         // Same success gating as the turn summary
-                        session.maybe_refresh_title();
+                        if !completed_by_peer {
+                            session.maybe_refresh_title();
+                        }
                     }
                 }
         }

@@ -5958,7 +5958,61 @@ async fn p151_auth_client_without_a_login_still_needs_auth() {
         .err()
         .expect("401 without a login");
     assert!(client.init_failure_needs_auth(&error), "{error}");
+    // One shared function decides the reported kind: an OAuth-configured client is `needs_auth`
+    assert_eq!(client.start_failure_kind(&error), McpFailureKind::NeedsAuth);
     assert_eq!(tokens(&rig), 0);
+}
+
+/// A real HTTP 401 from a mock on 127.0.0.1 for a server with a configured Authorization header (so no OAuth client):
+/// the kind is whatever the code can prove. This pins what the code really does.
+#[tokio::test(flavor = "multi_thread")]
+async fn http_401_from_mock_without_oauth_is_classified_by_evidence() {
+    let rig = spawn_metadata_rig().await;
+    let events = fuigo_session_events::EventWriter::noop();
+    let ctx = probe_ctx(&events, OauthInteractivity::NonInteractive);
+    let mut http = acp::McpServerHttp::new("hdr401", &rig.url);
+    http.headers = vec![acp::HttpHeader::new("Authorization", "Bearer fake-key")];
+    let client = start_mcp_server(acp::McpServer::Http(http), None, None, None, &ctx)
+        .await
+        .expect("spawns");
+    assert!(!client.has_auth());
+    let error = client
+        .get_tool_registrations(Arc::new(Mutex::new(McpState::new(vec![]))))
+        .await
+        .err()
+        .expect("401");
+    let typed = error.has_typed_http_auth_status();
+    let kind = client.start_failure_kind(&error);
+    eprintln!("HTTP401-RESULT typed={typed} kind={kind:?} error={error}");
+    let want = if typed { McpFailureKind::NeedsAuth } else { McpFailureKind::ServerRejected };
+    assert_eq!(kind, want, "{error}");
+}
+
+/// A dead stdio server whose output is full of auth words is a start failure, never `needs_auth` (RED before the
+/// transport-first rule: the word match made it silent).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stdio_server_with_auth_words_is_not_needs_auth() {
+    let events = fuigo_session_events::EventWriter::noop();
+    let ctx = session_test_ctx(&events);
+    let mut server = acp::McpServerStdio::new("authwords", PathBuf::from("/bin/sh"));
+    server.args = vec![
+        "-c".into(),
+        "echo '401 Unauthorized authentication failed' >&2; echo '401 Unauthorized authentication failed'; exit 1".into(),
+    ];
+    let client = start_mcp_server(acp::McpServer::Stdio(server), None, None, None, &ctx)
+        .await
+        .expect("spawns");
+    let error = client
+        .get_tool_registrations(Arc::new(Mutex::new(McpState::new(vec![]))))
+        .await
+        .err()
+        .expect("the handshake cannot succeed");
+    let kind = client.start_failure_kind(&error);
+    assert!(
+        !matches!(kind, McpFailureKind::NeedsAuth | McpFailureKind::ServerRejected),
+        "stdio failure must not be classified as sign-in: {kind:?} ({error})"
+    );
 }
 
 // ---- P151 (C1b item 7): a refused sign-in says why ----
@@ -6244,4 +6298,132 @@ async fn p151_a_refused_discovery_is_not_retryable() {
     let reason = explain_missing_oauth(&url).await.expect("explained");
     assert!(!reason.contains("try again"), "{reason}");
     assert!(reason.contains("refused"), "{reason}");
+}
+
+fn handshake_err(source: ClientInitializeError) -> McpError {
+    McpError::HandshakeFailed {
+        server: "s".into(),
+        source: Box::new(source),
+    }
+}
+
+/// The failure kind comes from the error type; the message text only matters for the sign-in verdict, which is the
+/// classifier the rest of the code already uses.
+#[test]
+fn failure_kind_is_decided_from_the_error_type() {
+    let spawn = McpError::SpawnFailed {
+        server: "s".into(),
+        source: std::io::Error::from(std::io::ErrorKind::NotFound),
+    };
+    assert_eq!(spawn.failure_kind(), McpFailureKind::CommandNotStarted);
+    assert_eq!(
+        McpError::timeout("s", std::time::Duration::from_secs(5)).failure_kind(),
+        McpFailureKind::Timeout { secs: 5 }
+    );
+    assert_eq!(
+        McpError::Unreachable { server: "s".into() }.failure_kind(),
+        McpFailureKind::Unreachable
+    );
+    assert_eq!(
+        handshake_err(ClientInitializeError::ConnectionClosed("eof".into())).failure_kind(),
+        McpFailureKind::ExitedBeforeAnswer
+    );
+    let stdio_pipe = rmcp::transport::DynamicTransportError::from_parts(
+        "child",
+        std::any::TypeId::of::<SafeTokioChildProcess>(),
+        Box::new(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+    );
+    assert_eq!(
+        handshake_err(ClientInitializeError::TransportError {
+            error: stdio_pipe,
+            context: "send initialize request".into()
+        })
+        .failure_kind(),
+        McpFailureKind::ExitedBeforeAnswer
+    );
+    let other_transport = rmcp::transport::DynamicTransportError::from_parts(
+        "http",
+        std::any::TypeId::of::<String>(),
+        Box::new(std::io::Error::other("500 from server")),
+    );
+    assert_eq!(
+        handshake_err(ClientInitializeError::TransportError {
+            error: other_transport,
+            context: "send initialize request".into()
+        })
+        .failure_kind(),
+        McpFailureKind::Other
+    );
+    assert_eq!(McpError::ClientError("x".into()).failure_kind(), McpFailureKind::Other);
+}
+
+/// Classification order (`classify_start_failure`): typed sign-in only; words never silence a server.
+#[test]
+fn failure_kind_marks_sign_in_servers_only_on_typed_evidence() {
+    let words = || {
+        handshake_err(ClientInitializeError::ConnectionClosed(
+            "401 Unauthorized authentication failed".into(),
+        ))
+    };
+    // The type-only function never reads the text.
+    assert_eq!(words().failure_kind(), McpFailureKind::ExitedBeforeAnswer);
+    assert_eq!(
+        McpError::AuthRequired { server: "s".into() }.failure_kind(),
+        McpFailureKind::NeedsAuth
+    );
+    // 1. typed spawn-time gate, on any transport
+    for http in [true, false] {
+        assert_eq!(
+            classify_start_failure(&McpError::AuthRequired { server: "s".into() }, http, false),
+            McpFailureKind::NeedsAuth
+        );
+    }
+    // 2. stdio is never needs_auth, whatever the text or OAuth flag says
+    assert_eq!(classify_start_failure(&words(), false, false), McpFailureKind::ExitedBeforeAnswer);
+    assert_eq!(
+        classify_start_failure(&McpError::ClientError("Auth required 401 unauthorized".into()), false, false),
+        McpFailureKind::Other
+    );
+    // 3. OAuth-configured HTTP failure (e.g. a timeout) is needs_auth
+    assert_eq!(
+        classify_start_failure(&McpError::timeout("s", std::time::Duration::from_secs(5)), true, true),
+        McpFailureKind::NeedsAuth
+    );
+    // 4. HTTP, words only, no typed evidence: the sixth reason, a line is printed
+    assert_eq!(classify_start_failure(&words(), true, false), McpFailureKind::ServerRejected);
+    assert_eq!(
+        classify_start_failure(&McpError::ClientError("HTTP 401".into()), true, false),
+        McpFailureKind::ServerRejected
+    );
+    // 5. HTTP without any auth look keeps its type-based kind
+    assert_eq!(
+        classify_start_failure(&McpError::Unreachable { server: "s".into() }, true, false),
+        McpFailureKind::Unreachable
+    );
+}
+
+/// A typed numeric 401/403 on the transport error is evidence; the same words in a string are not.
+#[test]
+fn typed_http_status_is_needs_auth_but_a_string_is_not() {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let typed = |e: StreamableHttpError<reqwest::Error>| {
+        let t = rmcp::transport::DynamicTransportError::from_parts(
+            "http",
+            std::any::TypeId::of::<String>(),
+            Box::new(e),
+        );
+        handshake_err(ClientInitializeError::TransportError {
+            error: t,
+            context: "send initialize request".into(),
+        })
+    };
+    let ua = typed(StreamableHttpError::AuthRequired(
+        rmcp::transport::streamable_http_client::AuthRequiredError::new("Bearer".into()),
+    ));
+    assert!(ua.has_typed_http_auth_status());
+    assert_eq!(classify_start_failure(&ua, true, false), McpFailureKind::NeedsAuth);
+    let stringy = typed(StreamableHttpError::UnexpectedServerResponse("HTTP 401 Unauthorized".into()));
+    assert!(!stringy.has_typed_http_auth_status());
+    assert!(stringy.is_auth_rejection());
+    assert_eq!(classify_start_failure(&stringy, true, false), McpFailureKind::ServerRejected);
 }

@@ -2880,6 +2880,8 @@ impl Config {
         // unauthenticated). `[endpoints]` itself is read when the process
         // starts; see `re_resolve_runtime_fields` (P150).
         self.publish_trusted_api_origins();
+        // `features.peer_messaging`: the config and managed-requirements tiers reach the session-side resolution.
+        crate::session::peer_message::install_peer_messaging_tiers(self.feature_sources(Feature::PeerMessaging));
         self.cli_subagents = ctx.cli_subagents;
         self.web_search_model_override = ctx.cli_web_search_model.map(|s| s.to_owned());
         self.session_summary_model_override = ctx.cli_session_summary_model.map(|s| s.to_owned());
@@ -6451,6 +6453,8 @@ pub(crate) fn stamp_session_local_sampler_fields(
     }
     cfg.client_identifier = client_identifier;
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
+    // Helper calls of a session inherit its park gate whichever route they resolved to.
+    cfg.dispatch_gate = active_session_config.dispatch_gate.clone();
     if crate::util::is_fuigo_api_bearer_url(&cfg.base_url) {
         cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
     }
@@ -6650,6 +6654,7 @@ pub(crate) fn sampling_config_for_model(
         subscription: None,
         subscription_resolver: None,
         header_injector: None,
+        dispatch_gate: None,
         mtls_cert_dir: model.mtls_cert_dir.clone(),
     };
     if let Some(provider) = model.effective_auth_provider() {

@@ -706,6 +706,11 @@ impl RenderBlock {
         RenderBlock::System(SystemMessageBlock::new(text))
     }
 
+    /// A system row that is always exactly one row (cut with an ellipsis, never wrapped).
+    pub fn system_single_line(text: impl Into<String>) -> Self {
+        RenderBlock::System(SystemMessageBlock::single_line(text))
+    }
+
     /// Create a `/context` snapshot block.
     ///
     /// The block stores the raw `ContextInfo` snapshot and model name and rebuilds its styled output on every redraw.

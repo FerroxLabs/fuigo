@@ -239,6 +239,50 @@ impl SessionActor {
                 self.send_host_turn_slash_command_output(&msg).await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::Peers { args } => {
+                // S6.1: the human exit. Only a typed human command reaches here (peer and model origins resolve to inert/denied).
+                let owned_msg: String;
+                let new_cmd = !self.startup_hints.is_subagent
+                    && matches!(args.as_str(), "list" | "status")
+                    && crate::session::peer_message::peer_messaging_enabled();
+                let verb = args.split_whitespace().next().unwrap_or("");
+                let admin_cmd = matches!(verb, "held" | "release" | "refuse");
+                let msg = if admin_cmd && !self.startup_hints.is_subagent && crate::session::peer_message::peer_messaging_enabled() {
+                    // Human-typed only: model and peer origins never reach this arm, and a subagent is refused below.
+                    owned_msg = self.peers_human_admin(&args).await;
+                    owned_msg.as_str()
+                } else if new_cmd {
+                    owned_msg = crate::peer_inbox::tool_host::peers_command(&args, &*self.peer_host()).await;
+                    owned_msg.as_str()
+                } else if self.startup_hints.is_subagent {
+                    // A subagent's task prompt is model-authored text: it must never lift the parent's guard, whatever its origin.
+                    "Refused: /peers clear-influence acts only in the session the human is typing in."
+                } else if args != "clear-influence" {
+                    if crate::session::peer_message::peer_messaging_enabled() {
+                        "Usage: /peers list | status | held | release <id> | refuse <id> | clear-influence"
+                    } else {
+                        "Usage: /peers clear-influence"
+                    }
+                } else {
+                    use super::peer_admit::PeerClear;
+                    match self.clear_peer_influence().await {
+                        PeerClear::Outstanding => {
+                            "Refused: this session still has peer messages queued, held or running. Clear the influence after \
+                             they are answered or removed."
+                        }
+                        PeerClear::Cleared => {
+                            "Peer-influenced state cleared: protected files can be edited again. Denials carried from released \
+                             messages are forgotten, and senders your model refused are no longer held."
+                        }
+                        PeerClear::NotRecorded => {
+                            "Refused: the clear could not be recorded in the session history, so the session stays \
+                             peer-influenced. Try again."
+                        }
+                    }
+                };
+                self.send_host_turn_slash_command_output(msg).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::PluginsList => {
                 let text = match &*self.plugin_registry.borrow() {
                     Some(registry) if !registry.is_empty() => {

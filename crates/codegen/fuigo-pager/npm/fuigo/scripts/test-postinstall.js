@@ -1184,6 +1184,7 @@ if (process.platform !== 'win32') {
         const pkg = path.join(dir, 'pkg');
         fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
         fs.copyFileSync(path.join(pkgRoot, 'bin', 'postinstall.js'), path.join(pkg, 'bin', 'postinstall.js'));
+        fs.copyFileSync(path.join(pkgRoot, 'bin', 'fuigo-replace.js'), path.join(pkg, 'bin', 'fuigo-replace.js'));
         fs.copyFileSync(path.join(pkgRoot, 'package.json'), path.join(pkg, 'package.json'));
         const toml = path.join(pkg, 'node_modules', '@iarna', 'toml');
         fs.mkdirSync(toml, { recursive: true });
@@ -1207,6 +1208,28 @@ if (process.platform !== 'win32') {
     }
 
     const supported = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].includes(platformKey);
+    test('postinstall creates a fresh Fuigo home 0700 under umask 002 and leaves an existing 775 home alone', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        const oldMask = process.umask(0o002);
+        try {
+            const pkg = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            runPostinstall(pkg, home);
+            assert.strictEqual(fs.statSync(path.join(home, '.fuigo')).mode & 0o777, 0o700, 'fresh home must be 0700');
+            // An existing home keeps its mode.
+            const home2 = path.join(dir, 'home2');
+            fs.mkdirSync(path.join(home2, '.fuigo'), { recursive: true });
+            fs.chmodSync(path.join(home2, '.fuigo'), 0o775);
+            runPostinstall(pkg, home2);
+            assert.strictEqual(fs.statSync(path.join(home2, '.fuigo')).mode & 0o777, 0o775, 'an existing home must not be changed');
+        } finally {
+            process.umask(oldMask);
+            cleanup(dir);
+        }
+    });
+
     test('P150: postinstall creates ~/.fuigo/config.toml owner-only (0600) and keeps an existing file\'s mode', () => {
         if (!supported) return;
         const dir = makeTmpDir();

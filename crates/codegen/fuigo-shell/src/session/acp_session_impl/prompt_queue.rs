@@ -50,6 +50,7 @@ pub(crate) struct QueueInputRequest {
 }
 
 impl QueueInputRequest {
+    #[cfg(test)]
     pub(crate) fn from_legacy_prompt_id(
         prompt_blocks: Vec<acp::ContentBlock>,
         prompt_id: String,
@@ -142,7 +143,7 @@ impl SessionActor {
             initial_child_prompt_ready,
             traceparent,
         } = request;
-        tracing::info!("queueing prompt: {prompt_id}");
+        tracing::info!("queueing prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
         let queue_depth = { self.state.lock().await.pending_inputs.len() };
         fuigo_telemetry::unified_log::info(
             "shell.prompt.queued",
@@ -172,6 +173,10 @@ impl SessionActor {
         // Bump before any await so a LocalSet recap cannot commit/emit after this Prompt was accepted but before handle_prompt runs
         if policy.authority.is_human_intent() {
             self.invalidate_side_calls_for_new_prompt();
+            // S5.6: a human prompt gives the session its peer-turn budget back (flag off: nothing is tracked).
+            if crate::session::peer_message::peer_messaging_enabled() {
+                self.peer_admission.human_prompt();
+            }
         }
 
         // Prompt history is human-authored history, not a generic conversational log.
@@ -279,6 +284,8 @@ impl SessionActor {
                 crate::session::PromptOrigin::ParentAgentMessage { .. }
             ) {
                 "parent_agent_message"
+            } else if input_origin.as_prompt_origin().is_peer() {
+                "peer_message"
             } else if Self::extract_bash_command(&prompt_blocks).is_some() {
                 "bash"
             } else {
@@ -342,6 +349,7 @@ impl SessionActor {
         let cancel_running_turn =
             send_now && Self::send_now_cancels_running_turn(&state, goal_active);
         let merge_into_goal = send_now
+            && item.input_origin.as_prompt_origin().may_ride_as_interjection()
             && turn_running
             && goal_active
             && Self::extract_bash_command(&item.prompt_blocks).is_none();
@@ -700,7 +708,32 @@ impl SessionActor {
                 message_id: message_id.clone(),
                 sender_session_id: sender_session_id.clone(),
             },
-            _ => fuigo_interjection_core::InterjectionAuthority::User,
+            PromptOrigin::PeerMessage { message_id, from } => {
+                fuigo_interjection_core::InterjectionAuthority::Peer {
+                    message_id: message_id.clone(),
+                    from: from.clone(),
+                }
+            }
+            // None of these origins is ever promoted (hidden or non-editable rows, or `may_ride_as_interjection` is
+            // false at every promotion site), so this arm is only a fallback. If one ever got here its text is not
+            // something the human typed, so it takes the non-human authority, never `User`. (An unverified scheduled
+            // row re-queued as a human interjection would also skip the prompt hook.)
+            PromptOrigin::SubagentTask
+            | PromptOrigin::UnverifiedScheduled
+            | PromptOrigin::TaskCompleted { .. }
+            | PromptOrigin::SubagentCompleted { .. }
+            | PromptOrigin::WorkflowCompleted { .. }
+            | PromptOrigin::PeerNotice { .. }
+            | PromptOrigin::NotificationDrain
+            | PromptOrigin::GoalSummary
+            | PromptOrigin::GoalClassifierNudge
+            | PromptOrigin::SchedulerFired
+            | PromptOrigin::PlanResume => fuigo_interjection_core::InterjectionAuthority::ParentAgent {
+                message_id: prompt_id.clone(),
+                sender_session_id: String::new(),
+            },
+            // Exhaustive on purpose: a new origin must choose its interjection authority here. Only a typed prompt is human.
+            PromptOrigin::User => fuigo_interjection_core::InterjectionAuthority::User,
         };
         self.pending_interjections.push(PendingInterjection {
             text: text.clone(),
@@ -722,7 +755,7 @@ impl SessionActor {
         }
         tracing::info!(
             ?source,
-            prompt_id = %prompt_id,
+            prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id),
             "queued prompt promoted as a mid-turn interjection"
         );
     }
@@ -786,12 +819,18 @@ impl SessionActor {
         let Some(running_id) = state.running_prompt_id().map(str::to_string) else {
             return;
         };
+        // Peer rows about to enter the running turn are rechecked first (S4.7); a no-op unless a tracked peer row is queued.
+        self.demote_unqualified_peer_rows(&mut state, false);
+        // P189 A2: while the session (or its root) is parking or parked, a peer row is NOT promoted into the turn
+        // the park waits for: a peer could otherwise keep that turn alive for ever. It stays queued for unpark.
+        let hold_peers = crate::session::quiesce::is_tree_holding(self.session_info.id.0.as_ref());
         let mut promoted = Vec::new();
         while let Some(pos) = state.pending_inputs.iter().position(|item| {
             item.prompt_id != running_id
+                && !(hold_peers && item.input_origin.as_prompt_origin().is_peer())
                 && matches!(
                     item.input_origin.as_prompt_origin(),
-                    PromptOrigin::ParentAgentMessage { .. }
+                    PromptOrigin::ParentAgentMessage { .. } | PromptOrigin::PeerMessage { .. }
                 )
                 // Only the protected row `admit_parent_agent_message` commits.
                 // A queue-hidden row carrying the same origin is an
@@ -803,7 +842,9 @@ impl SessionActor {
                 // can invoke, and `turn.rs` executes it only on the row's own
                 // turn. Promotion would inject the literal text mid-turn and
                 // drop the action, so leave it queued exactly as before.
-                && !Self::parent_message_resolves_to_builtin(&item.prompt_blocks)
+                // (A peer message is never a builtin: its leading slash is inert text, S1.2.)
+                && (item.input_origin.as_prompt_origin().is_peer()
+                    || !Self::parent_message_resolves_to_builtin(&item.prompt_blocks))
         }) {
             let Some(item) = state.pending_inputs.remove(pos) else {
                 break;
@@ -814,6 +855,15 @@ impl SessionActor {
             return;
         }
         for item in promoted {
+            if item.input_origin.as_prompt_origin().is_peer() {
+                // S6.1: a peer row entering the running turn re-flags the session, even after a clear while it was queued.
+                self.mark_peer_influenced();
+                self.peer_admission.set_peer_turn_in_flight(true);
+                if let PromptOrigin::PeerMessage { message_id, .. } = item.input_origin.as_prompt_origin() {
+                    self.peer_admission.note_turn_peer_message(message_id);
+                }
+                self.set_root_peer_turn(true);
+            }
             // The hint that interrupted an in-flight wait named this message; it
             // is reaching the model now, so later waits must not see it as
             // pending. Per identifier, not a blanket clear: a message committed
@@ -877,6 +927,7 @@ impl SessionActor {
                 || state.edit_holds.contains_key(&item.prompt_id)
                 || item_owner != running_owner.as_deref()
                 || item.tool_overrides_update.is_some()
+                || !item.input_origin.as_prompt_origin().may_ride_as_interjection()
             {
                 break;
             }
@@ -1003,6 +1054,7 @@ impl SessionActor {
             }
             let merge_into_goal = turn_running
                 && goal_active
+                && item.input_origin.as_prompt_origin().may_ride_as_interjection()
                 && Self::extract_bash_command(&item.prompt_blocks).is_none();
             if merge_into_goal {
                 self.enqueue_prompt_as_planner_steering(&item);
@@ -1288,7 +1340,10 @@ impl SessionActor {
 
     fn combine_gate(item: &InputItem) -> fuigo_prompt_queue::CombineGate<'_> {
         let is_bash = Self::extract_bash_command(&item.prompt_blocks).is_some();
+        // Only a typed (`User`) row may be combined, in front or follower position: folding model-authored text
+        // (`UnverifiedScheduled`, `SubagentTask`) into a human turn would parse it with the human's authority.
         let is_plain_prompt = item.is_queue_editable()
+            && matches!(item.input_origin.as_prompt_origin(), PromptOrigin::User)
             && item.queue_meta.as_ref().map(|m| m.kind.as_str()) == Some("prompt")
             && !is_bash;
         let mut has_text = false;

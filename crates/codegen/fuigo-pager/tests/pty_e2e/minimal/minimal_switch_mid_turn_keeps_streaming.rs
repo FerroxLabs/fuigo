@@ -3,6 +3,7 @@
 use crate::common::*;
 
 /// A turn still running across `/minimal` survives the in-process switch.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_switch_mid_turn_keeps_streaming() {

@@ -5,6 +5,7 @@
 //! Downstream crates like `fuigo-chat-state` can depend on it without pulling in the full `fuigo-shell`.
 
 pub mod conversation;
+pub mod dispatch_gate;
 pub mod doom_loop;
 pub mod error;
 pub mod execution_admission;
@@ -15,6 +16,7 @@ pub mod tool_overrides;
 pub mod types;
 
 pub use self::conversation::*;
+pub use self::dispatch_gate::{DispatchGate, DispatchGateFuture};
 pub use self::execution_admission::{AdmissionFuture, ExecutionAdmission};
 pub use self::doom_loop::{
     DEFAULT_EXACT_REPETITION_MIN_TOKENS, DOOM_LOOP_CHECK_EVENT_TYPE, DOOM_LOOP_CHECK_HEADER,

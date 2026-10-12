@@ -105,6 +105,30 @@
         );
     }
 
+    /// The shell pushes a failed start from two places; the TUI row is patched, not appended, so the second push changes nothing.
+    #[test]
+    fn duplicate_start_failed_push_leaves_one_unavailable_row() {
+        use crate::views::extensions_modal::TabDataState;
+        use crate::views::mcps_modal::McpServerDisplayStatus;
+        use fuigo_shell::extensions::mcp::McpServerStatus;
+        let mut app = make_app_two_agents();
+        seed_owner_agent_with_open_modal(&mut app);
+        let notif = make_server_status_notif("sess-owner", "alpha", McpServerStatus::Unavailable, None);
+        let _ = handle_mcp_server_status(&notif, &mut app);
+        let rows_after = |app: &AppView| {
+            let modal = app.agents.get(&AgentId(0)).unwrap().extensions_modal.as_ref().unwrap();
+            let TabDataState::Loaded(ref servers) = modal.mcps_data else { panic!("loaded") };
+            servers.iter().map(|s| (s.name.clone(), s.status, s.tool_count)).collect::<Vec<_>>()
+        };
+        let first = rows_after(&app);
+        let effects = app.pending_effects.len();
+        let _ = handle_mcp_server_status(&notif, &mut app);
+        assert_eq!(rows_after(&app), first, "a repeat push must not change or add rows");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1, McpServerDisplayStatus::Unavailable);
+        assert_eq!(app.pending_effects.len(), effects, "no effect (toast, refetch) scheduled");
+    }
+
     #[test]
     fn mcp_init_progress_creates_when_none() {
         // When mcp_init_progress is None (no seed), init_progress creates a fresh McpInitProgress
@@ -489,6 +513,7 @@
             status: McpServerStatus::NeedsAuth,
             reason: McpServerStatusReason::AuthExpired,
             detail: Some("token expired".into()),
+            failure_kind: None,
             tools: None,
         };
         let json = serde_json::to_string(&payload).unwrap();

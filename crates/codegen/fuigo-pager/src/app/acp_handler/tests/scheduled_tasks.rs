@@ -84,6 +84,77 @@
         );
     }
 
+    fn cron_prompt_id_for(payload: serde_json::Value) -> String {
+        let mut app = make_app_with_agent("sess-1");
+        assert!(handle_scheduled_task_inject_prompt(&make_inject_notif(&payload), &mut app));
+        match &app.pending_effects[0] {
+            Effect::SendPromptBlocks { prompt_id, .. } => prompt_id.clone(),
+            other => panic!("expected SendPromptBlocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cron_prompt_echoes_the_shell_fire_ticket_in_the_prompt_id() {
+        let id = cron_prompt_id_for(serde_json::json!({
+            "sessionId": "sess-1", "taskId": "task-42", "prompt": "check", "humanSchedule": "every 5m",
+            "fireTicket": "0123456789abcdef0123456789abcdef",
+        }));
+        assert_eq!(id, "scheduler-fired-0123456789abcdef0123456789abcdef");
+    }
+
+    /// The shell binds the fire ticket to `format_scheduled_task_prompt(prompt, task, None, schedule)`. The pager must send exactly
+    /// that text, as ONE text block, with no extra block, so a real fire still redeems.
+    #[test]
+    fn cron_fire_sends_exactly_the_text_the_shell_binds_the_ticket_to() {
+        let mut app = make_app_with_agent("sess-1");
+        let payload = serde_json::json!({
+            "sessionId": "sess-1", "taskId": "task-42", "prompt": "check the deploy", "humanSchedule": "every 5m",
+            "fireTicket": "0123456789abcdef0123456789abcdef",
+        });
+        assert!(handle_scheduled_task_inject_prompt(&make_inject_notif(&payload), &mut app));
+        match &app.pending_effects[0] {
+            Effect::SendPromptBlocks { blocks, .. } => {
+                assert_eq!(blocks.len(), 1, "one block only: no images, no attached context");
+                let acp::ContentBlock::Text(t) = &blocks[0] else { panic!("expected Text block") };
+                assert_eq!(
+                    t.text,
+                    fuigo_tools::reminders::format_scheduled_task_prompt("check the deploy", "task-42", None, "every 5m")
+                );
+            }
+            other => panic!("expected SendPromptBlocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn queued_cron_row_debug_never_prints_the_fire_ticket() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.enqueue_cron_prompt_with_ticket(
+            "check".into(), "task-42".into(), "every 5m".into(),
+            Some("0123456789abcdef0123456789abcdef".into()),
+        );
+        let shown = format!("{:?}", agent.session.pending_prompts);
+        assert!(!shown.contains("0123456789abcdef"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
+    }
+
+    #[test]
+    fn cron_prompt_ids_are_logged_without_the_ticket() {
+        assert_eq!(
+            crate::app::agent::loggable_prompt_id("scheduler-fired-0123456789abcdef"),
+            "scheduler-fired-<redacted>"
+        );
+        assert_eq!(crate::app::agent::loggable_prompt_id("user-1"), "user-1");
+    }
+
+    #[test]
+    fn cron_prompt_without_a_ticket_keeps_the_prefix_for_display() {
+        let id = cron_prompt_id_for(serde_json::json!({
+            "sessionId": "sess-1", "taskId": "task-42", "prompt": "check", "humanSchedule": "every 5m",
+        }));
+        assert!(id.starts_with("scheduler-fired-") && id.len() > "scheduler-fired-".len(), "{id}");
+    }
+
     #[test]
     fn inject_prompt_malformed_json_returns_false() {
         let mut app = make_app_with_agent("sess-1");

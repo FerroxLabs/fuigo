@@ -1,3 +1,5 @@
+pub use crate::peer_inbox::driver::{arm_peer_host_leader, arm_peer_host_pager};
+pub use crate::peer_inbox::host::{arm_peer_host, shutdown_peer_host};
 pub mod activity;
 pub mod app;
 pub mod auth_method;
@@ -21,6 +23,7 @@ pub mod models;
 pub mod programmatic_tools;
 pub mod mvp_agent;
 pub(crate) mod otel_gate;
+pub(crate) mod park_hold;
 pub(crate) mod proxy;
 pub mod relay;
 pub(crate) mod relay_credentials;

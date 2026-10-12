@@ -3368,3 +3368,215 @@ async fn paths_note_chains_across_compactions() {
         ]
     );
 }
+/// Peer messaging S6.6: the integrity hold survives compaction (full and compaction views, twice), a cleared hold carries
+/// nothing, and the marker never reaches the model.
+#[tokio::test]
+async fn r3_integrity_hold_survives_compaction() {
+    fn compact(ctx: &CompactionStateContext) -> Vec<ConversationItem> {
+        build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: None,
+            state_context: ctx,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        })
+    }
+    let held = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nwork\n</user_query>"),
+        ConversationItem::peer_message("wrapped peer text"),
+        ConversationItem::peer_integrity_tripped_marker(),
+        ConversationItem::assistant("ok"),
+        ConversationItem::user("<user_query>\nnext\n</user_query>"),
+        ConversationItem::assistant("done"),
+    ];
+    let full = CompactionStateContext::build(&held, CompactionInputs::default()).await;
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&full)));
+    let tail_only = full.for_compaction();
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&tail_only)));
+    let again = CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
+    assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&again.for_compaction())));
+    let mut cleared_history = held.clone();
+    cleared_history.push(ConversationItem::peer_influence_marker(false));
+    let cleared = CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
+    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&cleared)));
+    assert!(!fuigo_sampling_types::history_has_peer_integrity_hold(&compact(&cleared.for_compaction())));
+    let model_view = ModelRequestHistory::from_raw(compact(&full)).into_items();
+    assert!(!model_view.iter().any(|i| i.is_peer_influence_marker()));
+}
+/// Peer messaging S6.1 round 3: the peer-influenced state survives compaction as ONE explicit marker, in both the
+/// compaction view and the full view, a cleared session carries none, and the marker never reaches the model.
+#[tokio::test]
+async fn r3_peer_influence_survives_compaction_as_one_marker() {
+    fn compact(ctx: &CompactionStateContext) -> Vec<ConversationItem> {
+        build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: None,
+            state_context: ctx,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        })
+    }
+    let influenced_history = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_info>OS</user_info>\n\n<user_query>\nwork\n</user_query>"),
+        ConversationItem::peer_message("wrapped peer text"),
+        ConversationItem::assistant("ok"),
+        ConversationItem::user("<user_query>\nnext\n</user_query>"),
+        ConversationItem::assistant("done"),
+    ];
+    let full = CompactionStateContext::build(&influenced_history, CompactionInputs::default()).await;
+    for ctx in [&full, &full.for_compaction()] {
+        let compacted = compact(ctx);
+        assert!(fuigo_sampling_types::history_is_peer_influenced(&compacted), "compaction must keep the state");
+        let markers = compacted.iter().filter(|i| i.is_peer_influence_marker()).count();
+        assert!(markers <= 1, "at most one carried marker, got {markers}");
+    }
+    // The tail no longer holds the peer message, only the carried marker keeps the state.
+    let tail_only = full.for_compaction();
+    assert!(tail_only.recent_messages.iter().all(|i| i.is_peer_influence_marker()));
+    assert_eq!(tail_only.recent_messages.len(), 1);
+    // Twice: a compacted history compacts again with the state intact.
+    let again = CompactionStateContext::build(&compact(&tail_only), CompactionInputs::default()).await;
+    assert!(fuigo_sampling_types::history_is_peer_influenced(&compact(&again.for_compaction())));
+    // Cleared: no marker is carried.
+    let mut cleared_history = influenced_history.clone();
+    cleared_history.insert(4, ConversationItem::peer_influence_marker(false));
+    let cleared = CompactionStateContext::build(&cleared_history, CompactionInputs::default()).await;
+    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(&cleared)));
+    assert!(!fuigo_sampling_types::history_is_peer_influenced(&compact(&cleared.for_compaction())));
+    // A session that never admitted a peer message gets no marker at all.
+    let plain = vec![ConversationItem::system("sys"), ConversationItem::user("<user_query>\nhi\n</user_query>")];
+    let plain_ctx = CompactionStateContext::build(&plain, CompactionInputs::default()).await;
+    assert!(!compact(&plain_ctx).iter().any(|i| i.is_peer_influence_marker()));
+    // Never model-facing.
+    let model_view = ModelRequestHistory::from_raw(compact(&full)).into_items();
+    assert!(!model_view.iter().any(|i| i.is_peer_influence_marker()));
+}
+
+/// Packet 7 round 3: no path that turns history into model input shows a peer marker (all five kinds), and compaction still
+/// carries the markers in the stored history.
+#[tokio::test]
+async fn p7r3_summarizer_inputs_hold_no_marker_text_and_compaction_keeps_the_markers() {
+    use fuigo_sampling_types::PeerCarriedState;
+    let carried = PeerCarriedState { carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())], refused: vec!["lane a".into()] };
+    let history = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nwork\n</user_query>"),
+        ConversationItem::peer_message("wrapped peer text"),
+        ConversationItem::peer_influence_marker(true),
+        ConversationItem::peer_integrity_tripped_marker(),
+        ConversationItem::peer_influence_marker(false),
+        ConversationItem::peer_denial_marker("edit", "sha256:cd", 100),
+        ConversationItem::peer_carried_denials_marker(&carried),
+        ConversationItem::assistant("ok"),
+    ];
+    let no_marker_text = |items: &[ConversationItem]| {
+        !items.iter().any(|i| i.is_peer_influence_marker() || i.text_content().contains("[state marker"))
+    };
+    assert!(no_marker_text(&prepare_conversation_for_summarization(history.clone())));
+    assert!(no_marker_text(&prepare_conversation_for_segment(history.clone())));
+    assert!(no_marker_text(&prepare_conversation_for_verbatim_summarization(history.clone(), false)));
+    assert!(no_marker_text(&prepare_conversation_for_verbatim_summarization(history.clone(), true)));
+    assert!(no_marker_text(&ModelRequestHistory::from_raw(history.clone()).into_items()));
+    assert!(no_marker_text(&drop_peer_state_markers(history.clone())));
+    // Stored history after compaction still has them (denials + carried state).
+    let ctx = CompactionStateContext::build(&history, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "prefix".into(),
+        agents_md_reminder: None,
+        state_context: &ctx.for_compaction(),
+        compaction_summary: "summary".into(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    });
+    assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted), carried);
+    assert_eq!(fuigo_sampling_types::history_peer_denials(&compacted).len(), 1);
+}
+
+/// Packet 7 round 3: a re-flag during a clear leaves [cleared, carried] in the tail; compaction keeps the carried state.
+#[tokio::test]
+async fn p7r3_compaction_keeps_a_carried_marker_that_follows_a_cleared_marker() {
+    use fuigo_sampling_types::PeerCarriedState;
+    let carried = PeerCarriedState { carried: vec![("bash".into(), "sha256:ab".into(), "m1".into())], refused: vec![] };
+    let history = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nwork\n</user_query>"),
+        ConversationItem::peer_carried_denials_marker(&carried),
+        ConversationItem::peer_influence_marker(false),
+        ConversationItem::peer_message("again"),
+        ConversationItem::peer_carried_denials_marker(&carried),
+        ConversationItem::assistant("ok"),
+    ];
+    assert_eq!(fuigo_sampling_types::history_peer_carried(&history), carried);
+    let ctx = CompactionStateContext::build(&history, CompactionInputs::default()).await;
+    for c in [&ctx, &ctx.for_compaction()] {
+        let compacted = build_compacted_history(CompactedHistoryInput {
+            system_message: ConversationItem::system("sys"),
+            user_message_prefix: "prefix".into(),
+            agents_md_reminder: None,
+            state_context: c,
+            compaction_summary: "summary".into(),
+            system_reminder: None,
+            summary_before_recent: false,
+            transcript_hint: None,
+            summary_count: 1,
+        });
+        assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted), carried);
+    }
+}
+
+/// Packet 7 round 4: the stored carried cap equals the live cap (128), so a full carried list survives compaction.
+#[tokio::test]
+async fn p7r4_a_full_carried_list_of_128_keys_survives_compaction() {
+    use fuigo_sampling_types::PeerCarriedState;
+    let carried = PeerCarriedState {
+        carried: (0..128).map(|i| ("bash".to_string(), format!("sha256:{i:016x}"), format!("m{i}"))).collect(),
+        refused: vec![],
+    };
+    let history = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("<user_query>\nwork\n</user_query>"),
+        ConversationItem::peer_carried_denials_marker(&carried),
+        ConversationItem::assistant("ok"),
+    ];
+    let ctx = CompactionStateContext::build(&history, CompactionInputs::default()).await;
+    let compacted = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("sys"),
+        user_message_prefix: "prefix".into(),
+        agents_md_reminder: None,
+        state_context: &ctx.for_compaction(),
+        compaction_summary: "summary".into(),
+        system_reminder: None,
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    });
+    assert_eq!(fuigo_sampling_types::history_peer_carried(&compacted).carried.len(), 128);
+}
+
+/// `ModelRequestHistory::from_raw` is the shared filter plus the agent-message label: same items in, same order, for a
+/// history with no markers.
+#[test]
+fn p7r4_from_raw_is_a_no_op_for_a_history_without_markers() {
+    let items = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("hi"),
+        ConversationItem::assistant("yo"),
+        ConversationItem::user("again"),
+    ];
+    let json = |v: &[ConversationItem]| serde_json::to_value(v).expect("serialize");
+    assert_eq!(json(&drop_peer_state_markers(items.clone())), json(&items));
+    assert_eq!(json(&ModelRequestHistory::from_raw(items.clone()).into_items()), json(&items));
+}

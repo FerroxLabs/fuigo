@@ -3883,3 +3883,178 @@ fn config_permission_shape_matches_decode_p183r7() {
         );
     }
 }
+
+// ── effective_peer_mode: the resolved base mode is recorded at resolution ──────────────────────────────────
+
+/// Every config source of every `defaultMode`: the exact base mode must come out.
+/// `auto` is carried by `prompt_policy` and acts only through the live auto flag (see the manager tests), so its base is `Default`.
+#[test]
+fn base_mode_table_settings_default_mode() {
+    use crate::permission::types::EffectivePermissionMode as M;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = isolated_home();
+    let table: &[(&str, M)] = &[
+        ("default", M::Default),
+        ("acceptEdits", M::AcceptEdits),
+        ("plan", M::Default), // nothing starts plan mode from defaultMode
+        ("auto", M::Default),
+        ("dontAsk", M::DontAsk),
+        ("bypassPermissions", M::BypassPermissions),
+        ("nope", M::Default), // unknown value fails safe to default
+    ];
+    for (raw, expected) in table {
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_dir = tmp.path().join(".claude");
+        std::fs::create_dir_all(&claude_dir).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.json"),
+            format!(r#"{{"defaultMode": "{raw}"}}"#),
+        )
+        .unwrap();
+        let (cfg, _, _) =
+            resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply)
+                .unwrap();
+        assert_eq!(cfg.base_mode(), *expected, "settings defaultMode={raw}");
+    }
+}
+
+/// bypassPermissions blocked by managed policy adds no rule, so the session prompts: base must be `Default`.
+#[test]
+fn base_mode_bypass_blocked_by_pin_is_default() {
+    use crate::permission::types::EffectivePermissionMode as M;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = isolated_home();
+    let tmp = tempfile::tempdir().unwrap();
+    let claude_dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"defaultMode": "bypassPermissions"}"#,
+    )
+    .unwrap();
+    let (cfg, _, _) = resolve_claude_settings_inner(
+        tmp.path(),
+        true,
+        Some("pin-reason"),
+        UserDefaultModeLoad::Apply,
+    )
+    .unwrap();
+    assert_eq!(cfg.base_mode(), M::Default);
+}
+
+/// Managed-settings `defaultMode` (highest tier) through the full resolver.
+#[tokio::test]
+async fn base_mode_table_managed_default_mode() {
+    use crate::permission::types::EffectivePermissionMode as M;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = isolated_home();
+    let table: &[(DefaultPermissionMode, M)] = &[
+        (DefaultPermissionMode::Default, M::Default),
+        (DefaultPermissionMode::AcceptEdits, M::AcceptEdits),
+        (DefaultPermissionMode::Plan, M::Default),
+        (DefaultPermissionMode::Auto, M::Default),
+        (DefaultPermissionMode::DontAsk, M::DontAsk),
+        (DefaultPermissionMode::BypassPermissions, M::BypassPermissions),
+    ];
+    for (mode, expected) in table {
+        let tmp = tempfile::tempdir().unwrap();
+        let managed = ManagedSettings {
+            default_mode: Some(*mode),
+            ..Default::default()
+        };
+        let resolved = resolve_permissions_with_provenance_inner(
+            tmp.path(),
+            inputs_with_managed(None, &managed),
+        )
+        .await
+        .expect("managed mode resolves");
+        assert_eq!(resolved.config.base_mode(), *expected, "managed {mode:?}");
+    }
+    // Pinned off: the catch-all rule is not added, so the mode is not bypass.
+    let tmp = tempfile::tempdir().unwrap();
+    let managed = ManagedSettings {
+        default_mode: Some(DefaultPermissionMode::BypassPermissions),
+        ..Default::default()
+    };
+    let resolved = resolve_permissions_with_provenance_inner(
+        tmp.path(),
+        inputs_with_managed(Some("pin-reason"), &managed),
+    )
+    .await
+    .unwrap();
+    assert_eq!(resolved.config.base_mode(), M::Default);
+}
+
+/// `startupHints.permissionMode=alwaysAllow` -> `AlwaysAllow`; an explicit defaultMode outranks it.
+#[test]
+fn base_mode_startup_hint_always_allow() {
+    use crate::permission::types::EffectivePermissionMode as M;
+    let mut config: Option<PermissionConfig> = None;
+    assert!(apply_permission_mode_hint(
+        &mut config,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(config.unwrap().base_mode(), M::AlwaysAllow);
+
+    let mut accept = Some(PermissionConfig {
+        default_mode_configured: true,
+        resolved_base: ResolvedBaseMode::AcceptEdits,
+        ..PermissionConfig::new(vec![])
+    });
+    assert!(!apply_permission_mode_hint(
+        &mut accept,
+        Some(PERMISSION_MODE_ALWAYS_ALLOW),
+        None
+    ));
+    assert_eq!(accept.unwrap().base_mode(), M::AcceptEdits);
+}
+
+/// A user-written `Allow Edit` rule is a rule, not the mode: it must still report `Default`.
+/// The same rule produced by `defaultMode=acceptEdits` reports `AcceptEdits`.
+#[test]
+fn user_allow_edit_rule_is_default_not_accept_edits() {
+    use crate::permission::types::EffectivePermissionMode as M;
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = isolated_home();
+    let rule = PermissionRule {
+        action: RuleAction::Allow,
+        tool: ToolFilter::Edit,
+        pattern: None,
+        pattern_mode: PatternMode::Glob,
+    };
+    assert_eq!(PermissionConfig::new(vec![rule]).base_mode(), M::Default);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let claude_dir = tmp.path().join(".claude");
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"permissions": {"allow": ["Edit"]}}"#,
+    )
+    .unwrap();
+    let (cfg, _, _) =
+        resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
+    assert!(cfg
+        .rules
+        .iter()
+        .any(|r| r.action == RuleAction::Allow && r.tool == ToolFilter::Edit));
+    assert_eq!(cfg.base_mode(), M::Default);
+
+    std::fs::write(
+        claude_dir.join("settings.json"),
+        r#"{"defaultMode": "acceptEdits"}"#,
+    )
+    .unwrap();
+    let (cfg, _, _) =
+        resolve_claude_settings_inner(tmp.path(), true, None, UserDefaultModeLoad::Apply).unwrap();
+    assert_eq!(cfg.base_mode(), M::AcceptEdits);
+}

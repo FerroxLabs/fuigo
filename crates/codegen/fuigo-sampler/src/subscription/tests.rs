@@ -650,3 +650,126 @@ async fn subscription_long_structured_error_message_is_capped() {
     );
     assert!(message.contains("No API-key fallback was attempted"));
 }
+
+/// Counts admits and refunds; used to prove the call slot is given back exactly once.
+#[derive(Debug, Default)]
+struct CountingSlots {
+    admits: AtomicUsize,
+    refunds: AtomicUsize,
+}
+impl fuigo_sampling_types::ExecutionAdmission for CountingSlots {
+    fn scope_id(&self) -> &str {
+        "p189-a2-r3-slots"
+    }
+    fn admit(
+        &self,
+        _: fuigo_sampling_types::RequestPurpose,
+        _: String,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        self.admits.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+    fn settle(
+        &self,
+        _: String,
+        _: Option<fuigo_sampling_types::TokenUsage>,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+    fn refund(
+        &self,
+        _: fuigo_sampling_types::RequestPurpose,
+        _: String,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        self.refunds.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Opens until `close()`; then every `wait_open` pends forever.
+#[derive(Debug, Default)]
+struct ClosableGate(std::sync::atomic::AtomicBool);
+impl fuigo_sampling_types::DispatchGate for ClosableGate {
+    fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
+        Box::pin(async move {
+            if self.0.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+        })
+    }
+}
+
+/// A resolver that closes the gate while it resolves (a park lands during the auth await), then succeeds.
+#[derive(Debug)]
+struct ClosingResolver(Arc<ClosableGate>);
+impl SubscriptionResolver for ClosingResolver {
+    fn resolve(&self) -> BoxFuture<'_, Result<SubscriptionBearer>> {
+        self.0.0.store(true, Ordering::SeqCst);
+        Box::pin(async { Ok(SubscriptionBearer::new("fake-token".into(), "account-a".into(), u64::MAX)) })
+    }
+}
+
+async fn run_cancelled(cfg: SamplerConfig, slots: &Arc<CountingSlots>) {
+    let mut conv = fuigo_sampling_types::ConversationRequest::new();
+    conv.execution_admission = Some(slots.clone());
+    let attempt = crate::request_accounting::Attempt::new(&conv, &uuid::Uuid::new_v4().to_string(), 1);
+    let client = SamplingClient::new(cfg).unwrap();
+    let _ = attempt
+        .scope(tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            client.create_response_stream(request("hello".into())),
+        ))
+        .await;
+    drop(attempt);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+}
+
+/// R3 #1: a cancel while the subscription auth resolve is pending (after admission) refunds the slot once.
+#[tokio::test]
+async fn subscription_cancel_during_auth_resolve_refunds_the_slot() {
+    let slots = Arc::new(CountingSlots::default());
+    let mut cfg = SamplerConfig {
+        subscription: Some(SubscriptionKind::Xai),
+        base_url: SubscriptionKind::Xai.base_url().into(),
+        ..Default::default()
+    };
+    cfg.subscription_resolver = Some(Arc::new(Waiting));
+    run_cancelled(cfg, &slots).await;
+    assert_eq!(slots.admits.load(Ordering::SeqCst), 1);
+    assert_eq!(slots.refunds.load(Ordering::SeqCst), 1, "a never-sent attempt kept its call slot");
+}
+
+/// R3 #1: a cancel at the subscription's own second gate wait (a park landed during the resolve) refunds once.
+#[tokio::test]
+async fn subscription_cancel_at_the_late_gate_refunds_the_slot() {
+    let slots = Arc::new(CountingSlots::default());
+    let gate = Arc::new(ClosableGate::default());
+    let mut cfg = SamplerConfig {
+        subscription: Some(SubscriptionKind::Xai),
+        base_url: SubscriptionKind::Xai.base_url().into(),
+        ..Default::default()
+    };
+    cfg.subscription_resolver = Some(Arc::new(ClosingResolver(gate.clone())));
+    cfg.dispatch_gate = Some(gate);
+    run_cancelled(cfg, &slots).await;
+    assert_eq!(slots.admits.load(Ordering::SeqCst), 1);
+    assert_eq!(slots.refunds.load(Ordering::SeqCst), 1, "a never-sent attempt kept its call slot");
+}
+
+/// R3 #1: a subscription attempt that was sent is never refunded.
+#[tokio::test]
+async fn subscription_sent_attempt_is_not_refunded() {
+    let server = server(None).await;
+    let slots = Arc::new(CountingSlots::default());
+    let mut conv = fuigo_sampling_types::ConversationRequest::new();
+    conv.execution_admission = Some(slots.clone());
+    let attempt = crate::request_accounting::Attempt::new(&conv, &uuid::Uuid::new_v4().to_string(), 1);
+    let client = SamplingClient::new(config(SubscriptionKind::Xai, resolver(&server))).unwrap();
+    let res = attempt.scope(client.create_response_stream(request("hello".into()))).await;
+    assert!(res.is_ok());
+    drop(res);
+    drop(attempt);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(slots.admits.load(Ordering::SeqCst), 1);
+    assert_eq!(slots.refunds.load(Ordering::SeqCst), 0);
+}

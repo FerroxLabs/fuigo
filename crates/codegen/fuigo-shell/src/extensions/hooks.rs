@@ -586,6 +586,8 @@ mod tests {
                 tool_input: serde_json::json!({ "command": "ls" }),
                 tool_input_truncated: true,
                 subagent_type: None,
+                origin: None,
+                peer_influenced: None,
             },
         };
         let dispatch = ClientHookDispatch {

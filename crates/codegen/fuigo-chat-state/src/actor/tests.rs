@@ -3900,6 +3900,27 @@ async fn get_last_user_query_text_returns_last() {
     assert_eq!(text.as_deref(), Some("second question"));
 }
 
+/// A peer state marker is a `User` item, but it is never "the last user query": the feedback context and
+/// every other caller of this accessor must get the human's text.
+#[tokio::test]
+async fn get_last_user_query_text_skips_peer_state_markers() {
+    let h = TestHarness::new();
+    h.handle
+        .push_user_message(ConversationItem::user("real question"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("answer"));
+    h.handle
+        .push_user_message(ConversationItem::peer_integrity_tripped_marker());
+    if let Some(marker) =
+        ConversationItem::peer_denial_keys_marker(&[("bash".to_owned(), "sha256:0123456789abcdef".to_owned())], 1)
+    {
+        h.handle.push_user_message(marker);
+    }
+
+    let text = h.handle.get_last_user_query_text().await;
+    assert_eq!(text.as_deref(), Some("real question"));
+}
+
 #[tokio::test]
 async fn get_conversation_counts_empty() {
     let h = TestHarness::new();

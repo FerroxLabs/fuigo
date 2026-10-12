@@ -185,7 +185,31 @@ pub(crate) fn current_policy() -> (RequestPurpose, Option<String>) {
         .unwrap_or((RequestPurpose::Unknown, None))
 }
 
-pub(crate) async fn admit_current() -> Result<(), String> {
+/// An admitted, not yet dispatched attempt. Dropping it without `disarm` (the request was cancelled between
+/// admission and the send) gives the call slot back; the refund runs on a spawned task.
+pub(crate) struct Admitted {
+    armed: Option<(Arc<dyn fuigo_sampling_types::ExecutionAdmission>, RequestPurpose, String)>,
+}
+
+impl Admitted {
+    pub(crate) fn disarm(mut self) {
+        self.armed = None;
+    }
+}
+
+impl Drop for Admitted {
+    fn drop(&mut self) {
+        if let Some((admission, purpose, id)) = self.armed.take()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(async move {
+                let _ = admission.refund(purpose, id).await;
+            });
+        }
+    }
+}
+
+pub(crate) async fn admit_current() -> Result<Admitted, String> {
     let admission = CURRENT
         .try_with(|state| {
             let receipt = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -197,9 +221,10 @@ pub(crate) async fn admit_current() -> Result<(), String> {
         .ok()
         .flatten();
     if let Some((admission, purpose, id)) = admission {
-        admission.admit(purpose, id).await?;
+        admission.admit(purpose, id.clone()).await?;
+        return Ok(Admitted { armed: Some((admission, purpose, id)) });
     }
-    Ok(())
+    Ok(Admitted { armed: None })
 }
 
 pub(crate) fn remaining_time() -> fuigo_sampling_types::Result<Option<std::time::Duration>> {

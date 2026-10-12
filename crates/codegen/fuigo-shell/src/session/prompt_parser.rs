@@ -80,6 +80,11 @@ pub async fn parse_prompt(
     )
     .await
 }
+/// S1.3: an ALLOW-list. Only these authorities may expand `@file` mentions and resource links; any authority not named
+/// here (model-authored, peer, or one added later) gets no expansion until someone deliberately adds it.
+pub(crate) fn file_expansion_allowed(authority: super::InputAuthority) -> bool {
+    matches!(authority, super::InputAuthority::HumanIntent)
+}
 /// This is the full-featured entry point. `parse_prompt` delegates here with an empty `skill_information` string for backward compatibility.
 pub(crate) async fn parse_prompt_with_skills(
     prompt: &[acp::ContentBlock],
@@ -90,7 +95,7 @@ pub(crate) async fn parse_prompt_with_skills(
     is_cursor: bool,
     skill_information: String,
 ) -> Result<ParsedPrompt, acp::Error> {
-    let allows_file_expansion = authority != super::InputAuthority::ModelAuthoredUntrusted;
+    let allows_file_expansion = file_expansion_allowed(authority);
     let mut message_parts: Vec<String> = Vec::new();
     let mut image_parts = Vec::new();
     let mut resource_links = Vec::new();
@@ -98,6 +103,9 @@ pub(crate) async fn parse_prompt_with_skills(
     for block in prompt {
         match block {
             acp::ContentBlock::Text(text) => message_parts.push(text.text.clone()),
+            // A peer message is text only: an image or embedded resource block is dropped, never rendered into the turn.
+            acp::ContentBlock::Image(_) | acp::ContentBlock::Resource(_)
+                if authority == super::InputAuthority::PeerUntrusted => {}
             acp::ContentBlock::Image(image_content) => image_parts.push(image_content.clone()),
             acp::ContentBlock::ResourceLink(link) => {
                 resource_links.push(link.clone());
@@ -492,11 +500,11 @@ mod tests {
         assert!(parse_editor_meta(&link).is_none());
     }
     #[tokio::test]
-    async fn test_runtime_control_prompt_expands_file_references() {
+    async fn test_runtime_control_prompt_does_not_expand_file_references() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("status.log"), "RUNTIME_FILE_MARKER").unwrap();
         let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-            "inspect @status.log",
+            "inspect @status.log and @/etc/hostname",
         ))];
         let info = crate::session::info::Info {
             id: agent_client_protocol::SessionId::new("test"),
@@ -513,7 +521,32 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(parsed.assemble().contains("RUNTIME_FILE_MARKER"));
+        let assembled = parsed.assemble();
+        assert!(!assembled.contains("RUNTIME_FILE_MARKER"), "{assembled}");
+        assert!(!assembled.contains("<file_contents") && !assembled.contains("<attached_files>"), "{assembled}");
+    }
+    /// A human-typed prompt still expands `@file` (the one authority on the allow-list).
+    #[tokio::test]
+    async fn test_human_prompt_still_expands_file_references() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("status.log"), "HUMAN_FILE_MARKER").unwrap();
+        let blocks = vec![acp::ContentBlock::Text(acp::TextContent::new("inspect @status.log"))];
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("test"),
+            cwd: dir.path().display().to_string(),
+        };
+        let parsed = parse_prompt_with_skills(
+            &blocks,
+            dir.path().to_path_buf(),
+            &info,
+            super::super::InputAuthority::HumanIntent,
+            false,
+            false,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        assert!(parsed.assemble().contains("HUMAN_FILE_MARKER"));
     }
     #[tokio::test]
     async fn test_model_authored_prompt_does_not_expand_file_references() {
@@ -620,5 +653,81 @@ mod tests {
             !result.contains("<open_and_recently_viewed_files>"),
             "got: {result}"
         );
+    }
+
+    /// S1.3: an ALLOW-list decides file expansion, so an authority nobody has decided about is excluded.
+    #[test]
+    fn s1_3_file_expansion_is_an_allow_list_only_human_intent_expands() {
+        use super::super::InputAuthority::*;
+        assert!(file_expansion_allowed(HumanIntent));
+        assert!(!file_expansion_allowed(RuntimeControl));
+        assert!(!file_expansion_allowed(ModelAuthoredUntrusted));
+        assert!(!file_expansion_allowed(PeerUntrusted));
+        // Adding a variant to `InputAuthority` compiles without touching `file_expansion_allowed`, and the
+        // `matches!` there names only the one allowed authority, so the new variant is excluded by construction.
+        // This pins the allowed set at exactly one (a human-typed prompt).
+        let allowed = [HumanIntent, ModelAuthoredUntrusted, RuntimeControl, PeerUntrusted]
+            .into_iter()
+            .filter(|a| file_expansion_allowed(*a))
+            .count();
+        assert_eq!(allowed, 1);
+    }
+    #[tokio::test]
+    async fn s1_3_peer_prompt_does_not_expand_file_references_or_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.txt"), "TEXT_SECRET_MARKER").unwrap();
+        std::fs::write(dir.path().join("linked.txt"), "LINK_SECRET_MARKER").unwrap();
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("look @secret.txt and @/etc/passwd")),
+            acp::ContentBlock::ResourceLink(acp::ResourceLink::new("linked.txt", "file://linked.txt")),
+        ];
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("test"),
+            cwd: dir.path().display().to_string(),
+        };
+        let parsed = parse_prompt_with_skills(
+            &blocks,
+            dir.path().to_path_buf(),
+            &info,
+            super::super::InputAuthority::PeerUntrusted,
+            true,
+            false,
+            String::new(),
+        )
+        .await
+        .unwrap();
+        let assembled = parsed.assemble();
+        assert!(parsed.query.contains("@secret.txt") && parsed.query.contains("@/etc/passwd"));
+        for forbidden in ["TEXT_SECRET_MARKER", "LINK_SECRET_MARKER", "root:", "<attached_files>", "<file_contents"] {
+            assert!(!assembled.contains(forbidden), "unexpected {forbidden}: {assembled}");
+        }
+    }
+    /// Round 2, item 5: a peer-authority prompt cannot carry an embedded resource or an image into the turn.
+    #[tokio::test]
+    async fn r2_peer_prompt_drops_resource_and_image_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocks = vec![
+            acp::ContentBlock::Text(acp::TextContent::new("hello")),
+            acp::ContentBlock::Resource(acp::EmbeddedResource::new(
+                acp::EmbeddedResourceResource::TextResourceContents(acp::TextResourceContents::new(
+                    "RESOURCE_SECRET_MARKER",
+                    "file:///x.txt",
+                )),
+            )),
+            acp::ContentBlock::Image(acp::ImageContent::new("aGVsbG8=", "image/png")),
+        ];
+        let info = crate::session::info::Info {
+            id: agent_client_protocol::SessionId::new("test"),
+            cwd: dir.path().display().to_string(),
+        };
+        let run = |authority| {
+            parse_prompt_with_skills(&blocks, dir.path().to_path_buf(), &info, authority, true, false, String::new())
+        };
+        let peer = run(super::super::InputAuthority::PeerUntrusted).await.unwrap();
+        assert!(!peer.assemble().contains("RESOURCE_SECRET_MARKER"), "{}", peer.assemble());
+        assert!(peer.images.is_empty(), "no image reaches a peer turn");
+        let human = run(super::super::InputAuthority::HumanIntent).await.unwrap();
+        assert!(human.assemble().contains("RESOURCE_SECRET_MARKER"), "unchanged for the user");
+        assert_eq!(human.images.len(), 1);
     }
 }

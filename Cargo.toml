@@ -57,6 +57,7 @@ members = [
     "crates/codegen/fuigo-pager-pty-harness",
     "crates/codegen/fuigo-pager-render",
     "crates/codegen/fuigo-paths",
+    "crates/codegen/fuigo-peer",
     "crates/codegen/fuigo-plugin-marketplace",
     "crates/codegen/fuigo-sampler",
     "crates/codegen/fuigo-sampling-types",
@@ -338,6 +339,7 @@ fuigo-auth = { path = "crates/codegen/fuigo-auth" }
 fuigo-bundle = { path = "crates/codegen/fuigo-bundle" }
 fuigo-config = { path = "crates/codegen/fuigo-config" }
 fuigo-config-types = { path = "crates/codegen/fuigo-config-types" }
+fuigo-peer = { path = "crates/codegen/fuigo-peer" }
 fuigo-dashboard-store = { path = "crates/codegen/fuigo-dashboard-store" }
 fuigo-diag-server = { path = "crates/codegen/fuigo-diag-server" }
 fuigo-env = { path = "crates/codegen/fuigo-env" }

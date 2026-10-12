@@ -52,6 +52,8 @@ pub(crate) enum BuiltinGate {
     Goal,
     WorkflowLaunches,
     WorkflowManagement,
+    /// Advertised only while `features.peer_messaging` is on (default off), so no other session sees a new command.
+    Peers,
 }
 fn resolve_compact(args: &str) -> BuiltinAction {
     BuiltinAction::Compact {
@@ -178,6 +180,18 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         workflow_projection: WorkflowProjection::None,
         resolve: |args| BuiltinAction::HooksRemove {
             path: args.trim().to_string(),
+        },
+    },
+    BuiltinCommand {
+        name: "peers",
+        description: "Peer messaging: `list`, `status`, `held`, `release <id>`, `refuse <id>`; `clear-influence` ends the peer-influenced state of this session",
+        argument_hint: Some("list | status | held | release <id> | refuse <id> | clear-influence"),
+        aliases: &[],
+        model_authored_eligibility: ModelAuthoredEligibility::Denied,
+        gate: BuiltinGate::Peers,
+        workflow_projection: WorkflowProjection::None,
+        resolve: |args| BuiltinAction::Peers {
+            args: args.trim().to_string(),
         },
     },
     BuiltinCommand {
@@ -410,6 +424,8 @@ pub(crate) struct CommandAvailability {
     pub goal: bool,
     pub workflows: bool,
     pub workflow_management: bool,
+    /// The session's peer-influenced flag is set (keeps `/peers` available with `features.peer_messaging` off).
+    pub peers_influenced: bool,
 }
 impl CommandAvailability {
     /// `true` if commands gated on `gate` should be advertised this session.
@@ -425,6 +441,9 @@ impl CommandAvailability {
             BuiltinGate::Goal => self.goal,
             BuiltinGate::WorkflowLaunches => self.workflows,
             BuiltinGate::WorkflowManagement => self.workflows || self.workflow_management,
+            // With the feature off the command stays available while the session is peer-influenced: `/peers clear-influence`
+            // is the human's only way to lift the guard that a resumed session keeps.
+            BuiltinGate::Peers => self.peers_influenced || crate::session::peer_message::peer_messaging_enabled(),
         }
     }
     #[cfg(test)]
@@ -439,6 +458,7 @@ impl CommandAvailability {
             goal: true,
             workflows: true,
             workflow_management: true,
+            peers_influenced: false,
         }
     }
 }
@@ -523,6 +543,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "multiline",
     "new",
     "onboarding",
+    "peers",
     "personas",
     "plan",
     "plan-view",
@@ -1258,6 +1279,10 @@ pub(super) enum BuiltinAction {
         path: String,
     },
     HooksUntrust,
+    /// `/peers <args>`; today only `clear-influence` (S6.1), a typed human command.
+    Peers {
+        args: String,
+    },
     PluginsList,
     PluginsReload,
     PluginsTrust,
@@ -1319,6 +1344,7 @@ impl BuiltinAction {
             BuiltinAction::HooksAdd { .. } => "hooks-add",
             BuiltinAction::HooksRemove { .. } => "hooks-remove",
             BuiltinAction::HooksUntrust => "hooks-untrust",
+            BuiltinAction::Peers { .. } => "peers",
             BuiltinAction::PluginsList => "plugins-list",
             BuiltinAction::PluginsReload => "plugins-reload",
             BuiltinAction::PluginsTrust => "plugins-trust",
@@ -1341,6 +1367,26 @@ impl BuiltinAction {
             BuiltinAction::WorkflowLaunch { .. } => "workflow",
         }
     }
+    /// Commands that change permissions or persistent configuration (always-approve, hooks, plugins, memory on/off).
+    /// Refused in a subagent session for every origin.
+    pub(crate) fn changes_permissions_or_config(&self) -> bool {
+        matches!(
+            self,
+            BuiltinAction::SetYolo { .. }
+                | BuiltinAction::HooksTrust
+                | BuiltinAction::HooksAdd { .. }
+                | BuiltinAction::HooksRemove { .. }
+                | BuiltinAction::HooksUntrust
+                | BuiltinAction::PluginsReload
+                | BuiltinAction::PluginsTrust
+                | BuiltinAction::PluginsAdd { .. }
+                | BuiltinAction::PluginsRemove { .. }
+                | BuiltinAction::PluginsInstall { .. }
+                | BuiltinAction::PluginsUninstall { .. }
+                | BuiltinAction::PluginsUpdate { .. }
+                | BuiltinAction::MemoryToggle { .. }
+        )
+    }
     pub(crate) fn args_provided(&self) -> bool {
         match self {
             BuiltinAction::Compact { user_context } => user_context.is_some(),
@@ -1353,6 +1399,7 @@ impl BuiltinAction {
             BuiltinAction::HooksAdd { .. } => true,
             BuiltinAction::HooksRemove { .. } => true,
             BuiltinAction::HooksUntrust => false,
+            BuiltinAction::Peers { .. } => false,
             BuiltinAction::PluginsList => false,
             BuiltinAction::PluginsReload => false,
             BuiltinAction::PluginsTrust => false,

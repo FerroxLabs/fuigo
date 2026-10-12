@@ -16,10 +16,18 @@ pub const AGENT_MESSAGE_MODEL_LABEL: &str =
 /// The private inner value distinguishes prepared history without inspecting
 /// or rewriting payload text.
 pub struct ModelRequestHistory(Vec<ConversationItem>);
+/// THE choke point for peer state markers (all five kinds: influenced, cleared, integrity tripped, denial, carried denials).
+/// They are persisted state, never model input: every path that turns history into a model request or a summarizer, segment,
+/// recap or dream input goes through this (directly or via [`ModelRequestHistory::from_raw`] / the `prepare_conversation_*`
+/// functions). Stored history is NOT touched by it; compaction carries the markers forward separately.
+pub fn drop_peer_state_markers(conversation: Vec<ConversationItem>) -> Vec<ConversationItem> {
+    conversation.into_iter().filter(|item| !item.is_peer_influence_marker()).collect()
+}
 impl ModelRequestHistory {
     pub fn from_raw(conversation: Vec<ConversationItem>) -> Self {
         Self(
-            conversation
+            // State markers (peer-influence) are persisted state, never model-facing content.
+            drop_peer_state_markers(conversation)
                 .into_iter()
                 .map(|item| match item {
                     ConversationItem::User(mut user)
@@ -78,6 +86,25 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
         })
         .collect()
 }
+/// Make `target` hold the S7 state of `source`: the newest sender-side denials and the receiver's carried state (older copies
+/// in `target` are dropped first so nothing doubles).
+fn carry_peer_denial_markers(source: &[ConversationItem], target: &mut Vec<ConversationItem>) {
+    let denials = fuigo_sampling_types::history_peer_denials(source);
+    let carried = fuigo_sampling_types::history_peer_carried(source);
+    if denials.is_empty() && carried.is_empty() {
+        return;
+    }
+    target.retain(|i| !i.is_peer_denial_data_marker());
+    let front: Vec<ConversationItem> =
+        denials.iter().filter_map(|d| ConversationItem::peer_denial_keys_marker(&d.keys, d.wall_secs)).collect();
+    target.splice(0..0, front);
+    // The carried marker goes LAST: restore reads the last relevant marker, and the retained tail may hold a cleared marker
+    // that sits before the carried marker in `source` (a re-flag during a clear) but would come after it if it were put first.
+    if !carried.is_empty() {
+        target.push(ConversationItem::peer_carried_denials_marker(&carried));
+    }
+}
+
 /// Drops every `ConversationItem::Reasoning(_)` sibling.
 ///
 /// Required before sending to backends that reject the structured reasoning
@@ -125,14 +152,14 @@ pub fn prepare_conversation_for_summarization(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
     strip_images(strip_reasoning_blocks(
-        strip_tool_messages_for_conversation_item(conversation),
+        strip_tool_messages_for_conversation_item(drop_peer_state_markers(conversation)),
     ))
 }
 /// Segment-store prep (`segments` mode): keep tool I/O verbatim, strip only images + reasoning.
 pub fn prepare_conversation_for_segment(
     conversation: Vec<ConversationItem>,
 ) -> Vec<ConversationItem> {
-    strip_images(strip_reasoning_blocks(conversation))
+    strip_images(strip_reasoning_blocks(drop_peer_state_markers(conversation)))
 }
 /// Drop a trailing assistant turn whose `tool_calls` lack a `ToolResult` (else strict backends reject the dangling `tool_use`).
 pub fn truncate_trailing_incomplete_tool_call(
@@ -151,6 +178,7 @@ pub fn prepare_conversation_for_verbatim_summarization(
     conversation: Vec<ConversationItem>,
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
+    let conversation = drop_peer_state_markers(conversation);
     let conversation = if strip_reasoning {
         strip_reasoning_blocks(conversation)
     } else {
@@ -330,7 +358,8 @@ pub fn extract_last_user_query(conversation: &[ConversationItem]) -> Option<Stri
     conversation
         .iter()
         .rev()
-        .find(|item| matches!(item, ConversationItem::User(_)))
+        // Peer state markers are `User` items too, but they are persisted state, never a user query.
+        .find(|item| matches!(item, ConversationItem::User(_)) && !item.is_peer_influence_marker())
         .map(|item| extract_user_query(&item.text_content()))
         .filter(|q| !q.is_empty())
 }
@@ -725,11 +754,27 @@ impl CompactionStateContext {
         let last_turn_paths =
             parse_image_files_paths(images.last_turn_image_files.as_deref().unwrap_or_default());
         images.attached_paths = collect_attached_image_paths(conversation, &last_turn_paths);
+        let mut recent_messages = extract_messages_since_last_compaction_anchor(conversation);
+        // Peer messaging S6.1: a still-influenced session keeps ONE explicit influenced marker in the compacted
+        // history, even when the stored peer message itself falls out of the retained tail.
+        if fuigo_sampling_types::history_is_peer_influenced(conversation)
+            && !fuigo_sampling_types::history_is_peer_influenced(&recent_messages)
+        {
+            recent_messages.insert(0, ConversationItem::peer_influence_marker(true));
+        }
+        // S6.6: the integrity hold survives compaction the same way.
+        if fuigo_sampling_types::history_has_peer_integrity_hold(conversation)
+            && !fuigo_sampling_types::history_has_peer_integrity_hold(&recent_messages)
+        {
+            recent_messages.insert(0, ConversationItem::peer_integrity_tripped_marker());
+        }
+        // S7: the sender's denials and the receiver's carried state survive compaction too.
+        carry_peer_denial_markers(conversation, &mut recent_messages);
         Self {
             cwd_generation: inputs.cwd_generation,
             destination_project_instructions: inputs.destination_project_instructions,
             agent_message_anchor: extract_latest_agent_message(conversation),
-            recent_messages: extract_messages_since_last_compaction_anchor(conversation),
+            recent_messages,
             last_user_query: last.map(|item| extract_user_query(&item.text_content())),
             images,
             agent_edited_paths: inputs.agent_edited_paths.into_iter().collect(),
@@ -771,7 +816,19 @@ impl CompactionStateContext {
                 .agent_message_anchor
                 .clone()
                 .or_else(|| extract_latest_agent_message(&self.recent_messages)),
-            recent_messages: Vec::new(),
+            // The working tail is dropped, but the peer-influenced state (S6.1) is carried as one marker.
+            recent_messages: {
+                let mut carried = Vec::new();
+                if fuigo_sampling_types::history_is_peer_influenced(&self.recent_messages) {
+                    carried.push(ConversationItem::peer_influence_marker(true));
+                }
+                // S6.6: the integrity hold is carried after the influenced marker (last marker wins on restore).
+                if fuigo_sampling_types::history_has_peer_integrity_hold(&self.recent_messages) {
+                    carried.push(ConversationItem::peer_integrity_tripped_marker());
+                }
+                carry_peer_denial_markers(&self.recent_messages, &mut carried);
+                carried
+            },
             last_user_query: self.last_user_query.clone(),
             images: self.images.clone(),
             agent_edited_paths: self.agent_edited_paths.clone(),

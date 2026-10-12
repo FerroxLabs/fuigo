@@ -144,6 +144,7 @@ async fn salvage_test_actor_on_backend(
             actor.tool_context.hunk_tracker_handle.clone(),
             actor.agent.borrow().tool_bridge().toolset(),
             None,
+            actor.tool_context.peer_influence.clone(),
         )
         .expect("bind_local_session");
     let actor = Arc::new(actor);

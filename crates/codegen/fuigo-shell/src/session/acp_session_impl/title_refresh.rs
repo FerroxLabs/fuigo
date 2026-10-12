@@ -27,6 +27,10 @@ impl SessionActor {
         if self.next_title_refresh_idx.get() >= session_summary::TITLE_REFRESH_TURNS.len() {
             return;
         }
+        // P189: owed to unpark while the session parks
+        if crate::session::quiesce::owe(self.session_info.id.0.as_ref(), |o| o.title_refresh = true) {
+            return;
+        }
         // One refresh at a time: a whole-conversation title doesn't need the very latest turn
         // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually consumed
         // That holds even when the model keeps failing
@@ -86,7 +90,7 @@ impl SessionActor {
     /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without consuming.
     /// The newer path then retries.
     async fn refresh_title(&self, generation: u64) {
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation = crate::session::model_facing_reads::title_refresh_conversation(&self.chat_state_handle).await;
         let turns = session_recap::main_turn_count(&conversation);
 
         let idx = self.next_title_refresh_idx.get();

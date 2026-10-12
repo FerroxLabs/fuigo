@@ -1207,6 +1207,7 @@ fn make_test_handle(
     );
     crate::session::SessionHandle {
         cmd_tx,
+        peer_gate: Default::default(),
         persistence_tx,
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
@@ -3123,6 +3124,9 @@ mod p136_forwarded_mcp_tests;
 mod p141_single_merge_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
+mod p189_park_round3_tests;
+mod p189_a2_tests;
+mod p13_peer_acp_tests;
 mod session_rename_tests;
 mod session_resume_close_tests;
 mod subagent_spawn_context_tests;
@@ -4755,6 +4759,7 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
         fuigo_hunk_tracker::HunkTrackerHandle::noop(),
         toolset,
         None,
+        Default::default(),
     )
     .expect("bind_local_session must succeed");
     assert!(toolset_weak.upgrade().is_some());

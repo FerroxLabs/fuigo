@@ -66,6 +66,7 @@ fn p175_item1_stash_untracked_tree_that_cannot_be_listed_keeps_the_floor() {
 
 /// Item 2: a partial clone whose promisor remote would run a program if contacted. The check must fail instead
 /// (undetermined, floor kept) and must not contact it.
+#[cfg(unix)]
 #[test]
 fn p175_item2_partial_clone_check_never_contacts_the_promisor_remote() {
     let scratch = tempfile::tempdir().unwrap();

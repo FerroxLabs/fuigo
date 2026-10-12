@@ -530,6 +530,10 @@ Use `default` mode plus narrow `Bash(...)` allow rules for the commands you run 
 
 ---
 
+## Shell commands you type with `!`
+
+A command you type with `!` is not asked about: it never shows an approval prompt. What it does obey are the denials. Before it runs, it is refused if a `Bash` deny rule (user, project or managed) matches it, if managed policy locks the session down, if it reads or writes a file that a deny rule covers, or if a `UserPromptSubmit` or `PreToolUse` hook blocks or denies it (see [Hooks](10-hooks.md)). Ask rules, `dontAsk`, plan mode and the auto-mode classifier do not refuse a `!` line and do not prompt for one: only an explicit deny does. This has a limit you should know: a deny rule stops a `!` line only when Fuigo can read the command well enough to match it. A line it cannot take apart (for example `bash -c "$VAR"`, `eval ...`, or a redirect to a variable) would only make Fuigo ask if the model had requested it, so as a `!` line it runs. Your own saved "never allow" answers to earlier prompts are not applied to `!` lines either: they record what you told the model, not a policy. The sandbox applies to it as before. A refused command does not run, and the line you see names what refused it.
+
 ## Combining with the Sandbox
 
 Permissions control what the model is allowed to request. The OS-level sandbox (see [18-sandbox.md](18-sandbox.md)) controls what the process can do even after a command is approved.

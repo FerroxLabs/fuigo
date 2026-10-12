@@ -214,6 +214,14 @@ impl SessionActor {
         )
     }
 
+    /// The three-dimension mode report for peer admission (S4): the plan flag, the base mode and the session edit
+    /// grant, each read live on every call. Plan never hides the base: shell, MCP and web still auto-approve under plan.
+    /// Not reported (limit): narrower allow rules and saved per-tool grants are not modes; see `EffectivePermissionMode`.
+    pub(super) fn effective_peer_mode(&self) -> fuigo_workspace::permission::EffectivePeerMode {
+        self.permissions
+            .effective_peer_mode(self.plan_mode.lock().is_active())
+    }
+
     pub(super) fn permission_mode_label(&self) -> &'static str {
         if self.plan_mode.lock().is_active() {
             "plan"
@@ -402,9 +410,9 @@ impl SessionActor {
     /// The event fires for every origin, but synthetic wakes and subagent sessions run the gate observe-only.
     pub(super) fn should_enforce_prompt_block(
         &self,
-        policy: &fuigo_agent_lifecycle::InputPolicy,
+        origin: &crate::session::PromptOrigin,
     ) -> bool {
-        policy.authority.is_human_intent() && !self.startup_hints.is_subagent
+        origin.enforces_prompt_block() && !self.startup_hints.is_subagent
     }
 
     /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the on-disk registry, with shared scrollback and telemetry side effects.
@@ -430,6 +438,62 @@ impl SessionActor {
         self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
             .await;
         gate.decision
+    }
+
+    /// Decision 35: run the blocking `UserPromptSubmit` hook on a real peer message. Returns true when the message must be refused.
+    /// Only a block counts; a rewrite, extra context or an approval from the hook is ignored (the prompt gate carries none of them).
+    /// A hook that FAILS (error or timeout) is fail-open for a human prompt; for a peer message it refuses (fail closed).
+    /// With no hook configured nothing runs. The hook text goes to the receiver's UI only, never to the sender.
+    pub(super) async fn peer_prompt_hook_refuses(
+        &self,
+        envelope: &fuigo_peer::Envelope,
+        wrapped: &str,
+        prompt_id: &str,
+    ) -> bool {
+        let event = fuigo_hooks::event::HookEventName::UserPromptSubmit;
+        if !self.may_have_hooks_for(event) {
+            return false;
+        }
+        let hook_envelope = self.fire_hook(
+            event,
+            Some(prompt_id.to_owned()),
+            fuigo_hooks::event::HookPayload::UserPromptSubmit {
+                prompt: Some(wrapped.to_owned()),
+                shell_command: None,
+                subagent_type: self.subagent_type_label(),
+                origin: Some("peer_message".to_owned()),
+                peer_sender: Some(envelope.from.to_string()),
+                peer_claimed_mode: Some(envelope.from_mode.to_wire()),
+            },
+        );
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return false;
+        };
+        let ctx = self.hook_run_ctx();
+        let gate = fuigo_hooks::dispatcher::dispatch_prompt_gate(&registry, &hook_envelope, &ctx).await;
+        // The hook saw peer text: its block reason, error and output are not shown or logged. Names and outcome only.
+        let redacted = redact_peer_hook_results(&gate.results);
+        self.send_hook_execution(&event.to_string(), None, None, Some(prompt_id), &redacted)
+            .await;
+        self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
+            .await;
+        match gate.decision {
+            fuigo_hooks::result::PromptDecision::Block { hook_name, .. } => {
+                tracing::info!(%hook_name, "peer message refused by user_prompt_submit hook");
+                true
+            }
+            fuigo_hooks::result::PromptDecision::Allow => {
+                let failed = gate
+                    .results
+                    .iter()
+                    .any(|r| matches!(r, fuigo_hooks::result::HookRunResult::Failed { .. }));
+                if failed {
+                    let names: Vec<&str> = redacted.iter().map(peer_hook_result_name).collect();
+                    tracing::info!(hooks = ?names, "peer message refused: user_prompt_submit hook failed (fail closed)");
+                }
+                failed
+            }
+        }
     }
 
     pub(super) async fn emit_hook_executed_telemetry(
@@ -473,6 +537,49 @@ impl SessionActor {
             });
         }
     }
+}
+
+fn peer_hook_result_name(r: &fuigo_hooks::result::HookRunResult) -> &str {
+    use fuigo_hooks::result::HookRunResult as R;
+    match r {
+        R::Success { hook_name, .. }
+        | R::Skipped { hook_name }
+        | R::Blocked { hook_name, .. }
+        | R::Failed { hook_name, .. } => hook_name,
+    }
+}
+
+/// Hook results for a peer message with the free text removed (block detail, error, system message, HTTP info).
+pub(super) fn redact_peer_hook_results(
+    results: &[fuigo_hooks::result::HookRunResult],
+) -> Vec<fuigo_hooks::result::HookRunResult> {
+    use fuigo_hooks::result::HookRunResult as R;
+    results
+        .iter()
+        .map(|r| match r {
+            R::Success { hook_name, elapsed, .. } => R::Success {
+                hook_name: hook_name.clone(),
+                elapsed: *elapsed,
+                http_info: None,
+                system_message: None,
+            },
+            R::Skipped { hook_name } => R::Skipped { hook_name: hook_name.clone() },
+            R::Blocked { hook_name, elapsed, .. } => R::Blocked {
+                hook_name: hook_name.clone(),
+                detail: String::new(),
+                elapsed: *elapsed,
+                http_info: None,
+                system_message: None,
+            },
+            R::Failed { hook_name, elapsed, .. } => R::Failed {
+                hook_name: hook_name.clone(),
+                error: String::new(),
+                elapsed: *elapsed,
+                http_info: None,
+                system_message: None,
+            },
+        })
+        .collect()
 }
 
 #[cfg(test)]

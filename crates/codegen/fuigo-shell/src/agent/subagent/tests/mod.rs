@@ -200,6 +200,7 @@ fn wedged_child_handle() -> (
     let (signals_handle, signals_actor) = crate::session::signals::SessionSignalsActor::new();
     let handle = SessionHandle {
         cmd_tx,
+        peer_gate: Default::default(),
         persistence_tx,
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -299,6 +300,41 @@ async fn cancelled_attempt_fails_closed_when_the_signals_read_never_answers() {
             outcome.cancellation_may_hide_usage,
             "an unanswered signals read must not pass for 'no work done'"
         );
+}
+/// The child's initial task prompt is text the parent MODEL wrote: it must carry the explicit `SubagentTask` origin
+/// (never `None`, which the child session would treat as a typed user prompt).
+#[tokio::test(start_paused = true)]
+async fn task_prompt_is_sent_with_the_subagent_task_origin() {
+    let (child_handle, mut cmd_rx, _signals_actor) = wedged_child_handle();
+    let cancel_token = CancellationToken::new();
+    cancel_token.cancel();
+    let request = auto_wake_test_request("task-origin");
+    let _ = tokio::time::timeout(
+        20 * CHILD_ACTOR_ACK_TIMEOUT,
+        run_one_turn_attempt(OneTurnAttemptInput {
+            child_handle: &child_handle,
+            request: &request,
+            worktree_path: None,
+            task_prompt_text: "/always-approve",
+            inherited_tool_overrides: None,
+            gcs_bucket_url: None,
+            gcs_upload_method: None,
+            cancel_token,
+            child_run_started_at: std::time::Instant::now(),
+            prompt_admitted: tokio::sync::oneshot::channel().0,
+        }),
+    )
+    .await;
+    let mut seen = false;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if let SessionCommand::Prompt { origin, verbatim, prompt_blocks, .. } = cmd {
+            assert_eq!(origin, crate::session::PromptOrigin::SubagentTask);
+            assert!(verbatim, "truncation rules via `verbatim` are unchanged");
+            assert_eq!(prompt_blocks.len(), 1);
+            seen = true;
+        }
+    }
+    assert!(seen, "the task prompt command was sent");
 }
 /// Regression: a wedged child actor must not park teardown on the
 /// streaming-capture take; the capture is skipped in bounded time.
@@ -2719,4 +2755,36 @@ async fn join_worker_task_drop_aborts_worker() {
         .await
         .expect("abort must reach the worker task")
         .expect("drop probe fires on abort");
+}
+#[test]
+fn subagent_completed_prompt_carries_an_explicit_origin() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let reservations = fuigo_tools::reminders::task_completion::TaskCompletionReservations::default();
+    let request = auto_wake_test_request("sa-origin");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "sa-origin".into(),
+        child_session_id: "sa-origin".into(),
+        ..Default::default()
+    };
+    reservations.reserve("sa-origin".into());
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-origin",
+        result: &result,
+        request: &request,
+        task_completion_reservations: &Some(reservations),
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: None,
+        scheduler_create_tool_name: None,
+        synthetic_trace_tx: &None,
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
+    });
+    let SessionCommand::Prompt { origin, .. } = cmd_rx.try_recv().expect("expected synthetic Prompt") else {
+        panic!("expected SessionCommand::Prompt");
+    };
+    assert_eq!(
+        origin,
+        crate::session::PromptOrigin::SubagentCompleted { subagent_id: "sa-origin".into() }
+    );
 }

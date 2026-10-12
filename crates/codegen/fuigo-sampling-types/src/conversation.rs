@@ -128,6 +128,26 @@ pub enum SyntheticReason {
     /// Model-authored input sent by another agent.
     #[serde(alias = "parent_agent_message")]
     AgentMessage,
+    /// Text from another session (peer messaging). Untrusted data, never a user prompt and never a parent-agent message.
+    PeerMessage,
+    /// Persisted state marker (peer messaging S6.1): the session is peer-influenced. Carried into a compacted history so
+    /// the state survives compaction. Never sent to the model. An older build loads it as [`Self::Unknown`].
+    PeerInfluenced,
+    /// Persisted state marker (peer messaging S6.1): the human cleared the peer-influenced state. Never sent to the model.
+    /// An older build loads it as [`Self::Unknown`].
+    PeerInfluenceCleared,
+    /// Persisted state marker (peer messaging S6.6): a protected file changed in a peer-influenced session, so the
+    /// `integrity` hold is up. Written when the hold is set; a cleared marker lifts it. Never sent to the model. An older
+    /// build loads it as [`Self::Unknown`] (a harmless fixed text; the load does not fail).
+    PeerIntegrityTripped,
+    /// Persisted state marker (peer messaging S7, sender side): one permission denial this session recorded (tool kind, hash,
+    /// wall-clock seconds), so a resumed session still stamps outgoing messages. Never sent to the model; an older build loads
+    /// it as [`Self::Unknown`].
+    PeerDenial,
+    /// Persisted state marker (peer messaging S7, receiver side): the denials carried by released messages and the senders the
+    /// model refused. Last marker wins; a [`Self::PeerInfluenceCleared`] after it empties both. Never sent to the model; an
+    /// older build loads it as [`Self::Unknown`].
+    PeerCarriedDenials,
     /// Auto-wake synthetic prompt injected when a background bash task completed.
     /// Wakes the agent for a new turn.
     TaskCompleted,
@@ -171,6 +191,7 @@ impl SyntheticReason {
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
             Self::AgentMessage
+            | Self::PeerMessage
             | Self::Unknown
             | Self::TaskCompleted
             | Self::SubagentCompleted
@@ -178,6 +199,11 @@ impl SyntheticReason {
             | Self::GoalClassifierNudge
             | Self::SchedulerFired => true,
             Self::CompactionMeta
+            | Self::PeerInfluenced
+            | Self::PeerInfluenceCleared
+            | Self::PeerIntegrityTripped
+            | Self::PeerDenial
+            | Self::PeerCarriedDenials
             | Self::SystemReminder
             | Self::LengthContinue
             | Self::ProjectInstructions
@@ -1335,6 +1361,108 @@ impl ConversationItem {
         })
     }
 
+    /// Create an untrusted message received from a peer session (already wrapped by the receive path).
+    pub fn peer_message(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: Some(SyntheticReason::PeerMessage),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Persisted peer-influence state marker (never sent to the model; see [`SyntheticReason::PeerInfluenced`]).
+    /// The text is a fixed, harmless note for an older build that loads the item as an unknown synthetic user item.
+    pub fn peer_influence_marker(influenced: bool) -> Self {
+        let (reason, text) = if influenced {
+            (SyntheticReason::PeerInfluenced, "[state marker: peer-influenced]")
+        } else {
+            (SyntheticReason::PeerInfluenceCleared, "[state marker: peer influence cleared]")
+        };
+        Self::User(UserItem {
+            content: vec![ContentPart::Text { text: Arc::<str>::from(text) }],
+            synthetic_reason: Some(reason),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Persisted marker that the S6.6 `integrity` hold is up (never sent to the model).
+    pub fn peer_integrity_tripped_marker() -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text { text: Arc::<str>::from("[state marker: peer integrity hold]") }],
+            synthetic_reason: Some(SyntheticReason::PeerIntegrityTripped),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Whether this is a peer-influence state marker (any kind). Such items are state, not conversation.
+    pub fn is_peer_influence_marker(&self) -> bool {
+        matches!(
+            self,
+            Self::User(UserItem {
+                synthetic_reason: Some(
+                    SyntheticReason::PeerInfluenced
+                        | SyntheticReason::PeerInfluenceCleared
+                        | SyntheticReason::PeerIntegrityTripped
+                        | SyntheticReason::PeerDenial
+                        | SyntheticReason::PeerCarriedDenials
+                ),
+                ..
+            })
+        )
+    }
+
+    /// Whether this is one of the S7 data markers ([`SyntheticReason::PeerDenial`], [`SyntheticReason::PeerCarriedDenials`]).
+    /// They are dropped from model requests.
+    pub fn is_peer_denial_data_marker(&self) -> bool {
+        matches!(
+            self,
+            Self::User(UserItem {
+                synthetic_reason: Some(SyntheticReason::PeerDenial | SyntheticReason::PeerCarriedDenials),
+                ..
+            })
+        )
+    }
+
+    fn peer_state_item(reason: SyntheticReason, text: String) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text { text: Arc::<str>::from(text) }],
+            synthetic_reason: Some(reason),
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
+    /// Persisted record of one sender-side denial (tool kind, hash, wall-clock seconds). No path, command or prompt text.
+    pub fn peer_denial_marker(kind: &str, hash: &str, wall_secs: u64) -> Self {
+        Self::peer_denial_keys_marker(&[(kind.to_owned(), hash.to_owned())], wall_secs).expect("one key")
+    }
+
+    /// Persisted record of one sender-side denial with all its keys (at most [`MAX_STORED_KEYS`] `kind hash` pairs, then the
+    /// wall-clock seconds). One key gives the same text as [`Self::peer_denial_marker`].
+    /// `None` for an empty key list: a targetless denial is never recorded, so no marker is ever written for one.
+    pub fn peer_denial_keys_marker(keys: &[(String, String)], wall_secs: u64) -> Option<Self> {
+        if keys.is_empty() {
+            return None;
+        }
+        let pairs: Vec<String> = keys.iter().take(MAX_STORED_KEYS).map(|(k, h)| format!("{k} {h}")).collect();
+        Some(Self::peer_state_item(SyntheticReason::PeerDenial, format!("{PEER_DENIAL_PREFIX}{} {wall_secs}", pairs.join(" "))))
+    }
+
+    /// Persisted receiver-side state: the carried denials and the refused senders.
+    pub fn peer_carried_denials_marker(state: &PeerCarriedState) -> Self {
+        let json = serde_json::to_string(state).unwrap_or_default();
+        Self::peer_state_item(SyntheticReason::PeerCarriedDenials, format!("{PEER_CARRIED_PREFIX}{json}"))
+    }
+
     /// Create a model-authored message received from another agent.
     pub fn agent_message(content: impl Into<String>) -> Self {
         Self::User(UserItem {
@@ -2197,6 +2325,132 @@ fn conversation_truncate_progressive(
     conversation.len()
 }
 
+/// Whether a stored history leaves its session peer-influenced (peer messaging S6.1): the LAST state-bearing item is a
+/// stored peer message (kind [`SyntheticReason::PeerMessage`]) or an influenced marker, not a cleared marker.
+/// Decided by item KIND only, never by text, so pasted text cannot flag a session and a forged file cannot clear it.
+pub fn history_is_peer_influenced(conversation: &[ConversationItem]) -> bool {
+    conversation.iter().rev().find_map(|item| match item {
+        ConversationItem::User(UserItem { synthetic_reason: Some(reason), .. }) => match reason {
+            SyntheticReason::PeerMessage | SyntheticReason::PeerInfluenced | SyntheticReason::PeerIntegrityTripped => Some(true),
+            SyntheticReason::PeerInfluenceCleared => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+    .unwrap_or(false)
+}
+
+const PEER_DENIAL_PREFIX: &str = "[state marker: peer denial] ";
+const PEER_CARRIED_PREFIX: &str = "[state marker: peer carried denials] ";
+const MAX_STORED_FIELD: usize = 128;
+/// Keys one stored denial may hold (the permission side's per-denial cap).
+pub const MAX_STORED_KEYS: usize = 8;
+/// Sender-side denials restored from a history (the ring size).
+pub const MAX_STORED_DENIALS: usize = 16;
+/// Carried denials restored from a history. Equals `fuigo_peer::limits::MAX_CARRIED_KEYS` (a compile-time check in
+/// `fuigo-shell` pins it; this crate does not depend on `fuigo-peer`).
+pub const MAX_STORED_CARRIED: usize = 128;
+/// Refused senders restored from a history.
+pub const MAX_STORED_REFUSED: usize = 256;
+
+/// One stored sender-side denial: its keys `(tool kind, truncated hash)` (1 to 8) and wall-clock Unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerDenialRecord {
+    pub keys: Vec<(String, String)>,
+    pub wall_secs: u64,
+}
+
+/// The receiver-side state stored by a [`SyntheticReason::PeerCarriedDenials`] marker: `carried` is `(kind, hash, message id)`,
+/// `refused` the sender addresses the model refused (S7.4). Ids, kinds and hashes only.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PeerCarriedState {
+    #[serde(default)]
+    pub carried: Vec<(String, String, String)>,
+    #[serde(default)]
+    pub refused: Vec<String>,
+}
+
+impl PeerCarriedState {
+    pub fn is_empty(&self) -> bool {
+        self.carried.is_empty() && self.refused.is_empty()
+    }
+}
+
+fn marker_text(item: &ConversationItem, reason: &SyntheticReason) -> Option<String> {
+    match item {
+        ConversationItem::User(u) if u.synthetic_reason.as_ref() == Some(reason) => Some(item.text_content()),
+        _ => None,
+    }
+}
+
+/// The sender-side denials stored in a history, oldest first, at most [`MAX_STORED_DENIALS`] (the newest). Malformed or
+/// oversize markers are skipped. Decided by item KIND; clear-influence does not remove them (the session's own ring stays).
+pub fn history_peer_denials(conversation: &[ConversationItem]) -> Vec<PeerDenialRecord> {
+    let mut out: Vec<PeerDenialRecord> = conversation
+        .iter()
+        .filter_map(|item| marker_text(item, &SyntheticReason::PeerDenial))
+        .filter_map(|text| {
+            let rest = text.strip_prefix(PEER_DENIAL_PREFIX)?;
+            let toks: Vec<&str> = rest.split(' ').collect();
+            // `kind hash` pairs, then the seconds: an odd token count, 1 to MAX_STORED_KEYS pairs.
+            if toks.len() < 3 || toks.len().is_multiple_of(2) || (toks.len() - 1) / 2 > MAX_STORED_KEYS {
+                return None;
+            }
+            let (pairs, secs) = toks.split_at(toks.len() - 1);
+            let mut keys = Vec::new();
+            for p in pairs.chunks(2) {
+                let (kind, hash) = (p[0], p[1]);
+                if kind.is_empty() || hash.is_empty() || kind.len() > MAX_STORED_FIELD || hash.len() > MAX_STORED_FIELD {
+                    return None;
+                }
+                keys.push((kind.to_owned(), hash.to_owned()));
+            }
+            Some(PeerDenialRecord { keys, wall_secs: secs[0].parse().ok()? })
+        })
+        .collect();
+    let skip = out.len().saturating_sub(MAX_STORED_DENIALS);
+    out.drain(..skip);
+    out
+}
+
+/// The receiver-side state a stored history leaves: scanning from the end, a carried marker is the state and a cleared marker
+/// means empty. Bounded on read.
+pub fn history_peer_carried(conversation: &[ConversationItem]) -> PeerCarriedState {
+    for item in conversation.iter().rev() {
+        let ConversationItem::User(UserItem { synthetic_reason: Some(reason), .. }) = item else { continue };
+        match reason {
+            SyntheticReason::PeerInfluenceCleared => return PeerCarriedState::default(),
+            SyntheticReason::PeerCarriedDenials => {
+                let text = item.text_content();
+                let Some(json) = text.strip_prefix(PEER_CARRIED_PREFIX) else { return PeerCarriedState::default() };
+                let mut st: PeerCarriedState = serde_json::from_str(json).unwrap_or_default();
+                let ok = |s: &String| !s.is_empty() && s.len() <= MAX_STORED_FIELD;
+                st.carried.retain(|(a, b, c)| ok(a) && ok(b) && ok(c));
+                st.carried.truncate(MAX_STORED_CARRIED);
+                st.refused.retain(ok);
+                st.refused.truncate(MAX_STORED_REFUSED);
+                return st;
+            }
+            _ => {}
+        }
+    }
+    PeerCarriedState::default()
+}
+
+/// Whether a stored history leaves the S6.6 `integrity` hold up: scanning from the end, a tripped marker means held and a
+/// cleared marker means not held; other items are skipped. Decided by item KIND only.
+pub fn history_has_peer_integrity_hold(conversation: &[ConversationItem]) -> bool {
+    conversation.iter().rev().find_map(|item| match item {
+        ConversationItem::User(UserItem { synthetic_reason: Some(reason), .. }) => match reason {
+            SyntheticReason::PeerIntegrityTripped => Some(true),
+            SyntheticReason::PeerInfluenceCleared => Some(false),
+            _ => None,
+        },
+        _ => None,
+    })
+    .unwrap_or(false)
+}
+
 /// Transform CWD paths in conversation items (used for forked sessions).
 /// This replaces source_cwd with target_cwd in text content.
 pub fn transform_conversation_cwd(
@@ -2631,6 +2885,19 @@ mod messages_tests;
 
 #[cfg(test)]
 mod tests {
+
+    /// Packet 7 round 4: a carried list at the live cap (128) survives a store-and-restore with every key present.
+    #[test]
+    fn p7r4_carried_list_of_128_keys_survives_store_and_restore() {
+        let state = PeerCarriedState {
+            carried: (0..128).map(|i| ("bash".to_string(), format!("sha256:{i:016x}"), format!("m{i}"))).collect(),
+            refused: vec![],
+        };
+        let marker = ConversationItem::peer_carried_denials_marker(&state);
+        let back = history_peer_carried(&[marker]);
+        assert_eq!(back.carried.len(), 128);
+        assert_eq!(back, state);
+    }
     use super::test_support::*;
     use super::*;
     use crate::tool_overrides::*;
@@ -4561,6 +4828,138 @@ mod tests {
         );
     }
 
+    /// S7 markers: round trip, last-state-wins with a cleared marker, bounds, and an older reader's fallback.
+    #[test]
+    fn s7_denial_markers_round_trip_and_clear() {
+        let mut hist = vec![ConversationItem::peer_denial_marker("bash", "sha256:aa", 100)];
+        for i in 0..20 {
+            hist.push(ConversationItem::peer_denial_marker("edit", &format!("sha256:{i}"), 200 + i));
+        }
+        let d = history_peer_denials(&hist);
+        assert_eq!(d.len(), MAX_STORED_DENIALS);
+        assert_eq!(d.last().unwrap().wall_secs, 219);
+        // A denial with several keys keeps them (up to 8); a ninth is not written; malformed text is skipped.
+        let many: Vec<(String, String)> = (0..10).map(|i| ("read".to_owned(), format!("sha256:f{i}"))).collect();
+        let m = history_peer_denials(&[ConversationItem::peer_denial_keys_marker(&many, 7).unwrap()]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].keys, many[..MAX_STORED_KEYS].to_vec());
+        assert_eq!(m[0].wall_secs, 7);
+        let st = PeerCarriedState { carried: vec![("bash".into(), "sha256:bb".into(), "m1".into())], refused: vec!["addr".into()] };
+        hist.push(ConversationItem::peer_carried_denials_marker(&st));
+        assert_eq!(history_peer_carried(&hist), st);
+        hist.push(ConversationItem::peer_influence_marker(false));
+        assert!(history_peer_carried(&hist).is_empty(), "cleared");
+        assert_eq!(history_peer_denials(&hist).len(), MAX_STORED_DENIALS, "clear-influence keeps the sender's own denials");
+        assert!(hist.iter().take(1).all(ConversationItem::is_peer_denial_data_marker));
+        let json = serde_json::to_value(&hist[0]).unwrap();
+        assert_eq!(json["synthetic_reason"], "peer_denial");
+        // An older reader loads an unknown reason as `Unknown` (serde(other)).
+        let mut old = json.clone();
+        old["synthetic_reason"] = serde_json::json!("peer_denial_from_the_future");
+        let item: ConversationItem = serde_json::from_value(old).unwrap();
+        assert!(matches!(item, ConversationItem::User(UserItem { synthetic_reason: Some(SyntheticReason::Unknown), .. })));
+        assert!(!SyntheticReason::PeerDenial.starts_prompt_turn() && !SyntheticReason::PeerCarriedDenials.starts_prompt_turn());
+    }
+
+    /// S1.5: a peer message is stored under its own reason, distinct from `AgentMessage`, and round-trips.
+    #[test]
+    fn s1_5_peer_message_has_its_own_reason_and_round_trips() {
+        let item = ConversationItem::peer_message("wrapped");
+        let json = serde_json::to_value(&item).expect("serialize");
+        assert_eq!(json["synthetic_reason"], "peer_message");
+        let back: ConversationItem = serde_json::from_value(json.clone()).expect("deserialize");
+        assert_eq!(serde_json::to_value(&back).expect("reserialize"), json);
+        assert!(matches!(
+            back,
+            ConversationItem::User(UserItem {
+                synthetic_reason: Some(SyntheticReason::PeerMessage),
+                ..
+            })
+        ));
+        assert_ne!(SyntheticReason::PeerMessage, SyntheticReason::AgentMessage);
+        assert!(SyntheticReason::PeerMessage.starts_prompt_turn());
+    }
+
+    /// Round 3: the persisted markers round-trip, are not prompt turns, and an older build's reader (which only knows
+    /// `Unknown` for a tag it does not have) loads them: simulated by a reader tag it does not know.
+    #[test]
+    fn r3_peer_influence_markers_round_trip_and_older_reader_loads_them() {
+        for (influenced, tag) in [(true, "peer_influenced"), (false, "peer_influence_cleared")] {
+            let item = ConversationItem::peer_influence_marker(influenced);
+            assert!(item.is_peer_influence_marker());
+            let json = serde_json::to_value(&item).expect("serialize");
+            assert_eq!(json["synthetic_reason"], tag);
+            let back: ConversationItem = serde_json::from_value(json).expect("deserialize");
+            assert!(back.is_peer_influence_marker());
+            // What an older build sees: the same JSON with a tag it has no variant for.
+            let old_view = serde_json::json!({"type": "user", "content": [{"type": "text", "text": "x"}], "synthetic_reason": tag});
+            let _: ConversationItem = serde_json::from_value(old_view).expect("loads");
+            let unknown: SyntheticReason = serde_json::from_value(serde_json::json!("some_future_tag")).expect("unknown tag");
+            assert_eq!(unknown, SyntheticReason::Unknown);
+        }
+        assert!(!SyntheticReason::PeerInfluenced.starts_prompt_turn());
+        assert!(!SyntheticReason::PeerInfluenceCleared.starts_prompt_turn());
+        assert!(!ConversationItem::peer_message("x").is_peer_influence_marker());
+    }
+
+    /// The integrity-hold marker is a state marker (dropped from model requests), reads as influenced, and the hold is
+    /// decided by the last tripped/cleared marker. An older reader loads the tag as `Unknown` (no failure).
+    #[test]
+    fn r3_integrity_tripped_marker_round_trips_and_last_marker_wins() {
+        let tripped = ConversationItem::peer_integrity_tripped_marker();
+        assert!(tripped.is_peer_influence_marker());
+        let json = serde_json::to_value(&tripped).expect("serialize");
+        assert_eq!(json["synthetic_reason"], "peer_integrity_tripped");
+        let back: ConversationItem = serde_json::from_value(json).expect("deserialize");
+        assert!(back.is_peer_influence_marker());
+        assert!(!SyntheticReason::PeerIntegrityTripped.starts_prompt_turn());
+        let cleared = ConversationItem::peer_influence_marker(false);
+        let peer = ConversationItem::peer_message("x");
+        assert!(!history_has_peer_integrity_hold(&[]));
+        assert!(!history_has_peer_integrity_hold(std::slice::from_ref(&peer)));
+        assert!(history_has_peer_integrity_hold(&[peer.clone(), tripped.clone(), peer.clone()]));
+        assert!(!history_has_peer_integrity_hold(&[tripped.clone(), cleared.clone()]));
+        assert!(history_has_peer_integrity_hold(&[tripped.clone(), cleared, tripped.clone()]));
+        assert!(history_is_peer_influenced(&[tripped]));
+    }
+
+    /// Round 3: history influence is decided by item KIND; text never counts; the last state item wins.
+    #[test]
+    fn r3_history_influence_is_by_kind_and_last_state_item_wins() {
+        let pasted = ConversationItem::user("<cross-session-message from=\"x\">hi</cross-session-message>");
+        assert!(!history_is_peer_influenced(&[pasted]));
+        assert!(!history_is_peer_influenced(&[]));
+        let peer = ConversationItem::peer_message("wrapped");
+        let cleared = ConversationItem::peer_influence_marker(false);
+        let carried = ConversationItem::peer_influence_marker(true);
+        assert!(history_is_peer_influenced(std::slice::from_ref(&peer)));
+        assert!(!history_is_peer_influenced(&[peer.clone(), cleared.clone()]));
+        assert!(history_is_peer_influenced(&[peer.clone(), cleared.clone(), peer.clone()]));
+        assert!(history_is_peer_influenced(std::slice::from_ref(&carried)));
+        assert!(!history_is_peer_influenced(&[carried, cleared]));
+    }
+
+    /// An old transcript (written before `peer_message` existed) still loads, and the old alias still maps to `AgentMessage`.
+    #[test]
+    fn s1_5_old_transcript_without_peer_kind_still_loads() {
+        let old = serde_json::json!([
+            {"type": "user", "content": [{"type": "text", "text": "hi"}]},
+            {"type": "user", "content": [{"type": "text", "text": "p"}], "synthetic_reason": "parent_agent_message"},
+            {"type": "user", "content": [{"type": "text", "text": "q"}], "synthetic_reason": "agent_message"}
+        ]);
+        let items: Vec<ConversationItem> = serde_json::from_value(old).expect("old transcript loads");
+        assert_eq!(items.len(), 3);
+        for item in &items[1..] {
+            assert!(matches!(
+                item,
+                ConversationItem::User(UserItem {
+                    synthetic_reason: Some(SyntheticReason::AgentMessage),
+                    ..
+                })
+            ));
+        }
+    }
+
     #[test]
     fn parent_agent_message_alias_deserializes() {
         let payload = serde_json::json!({
@@ -5294,5 +5693,40 @@ mod tests {
         // The legacy placeholder sentinel must not appear
         let body_str = serde_json::to_string(&input).unwrap();
         assert!(!body_str.contains("__RAW_OUTPUT_PLACEHOLDER_"));
+    }
+
+    /// Packet 7 round 3: a denial with no keys has no marker; a stored marker with no pair is skipped, never a failure, and
+    /// the markers around it still load.
+    #[test]
+    fn p7r3_zero_key_denial_has_no_marker_and_a_pairless_marker_is_skipped() {
+        assert!(ConversationItem::peer_denial_keys_marker(&[], 100).is_none());
+        let pairless = ConversationItem::peer_state_item(SyntheticReason::PeerDenial, format!("{PEER_DENIAL_PREFIX}100"));
+        let empty_text = ConversationItem::peer_state_item(SyntheticReason::PeerDenial, PEER_DENIAL_PREFIX.to_owned());
+        let junk = ConversationItem::peer_state_item(SyntheticReason::PeerDenial, "[state marker: peer denial] a b c d e".to_owned());
+        let hist = vec![
+            ConversationItem::peer_denial_marker("bash", "sha256:aa", 1),
+            pairless,
+            empty_text,
+            junk,
+            ConversationItem::peer_denial_marker("edit", "sha256:bb", 2),
+        ];
+        let got = history_peer_denials(&hist);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].keys[0].0.as_str(), got[1].keys[0].0.as_str()), ("bash", "edit"));
+        // A garbled carried marker is an empty state, not an error.
+        let bad = ConversationItem::peer_state_item(SyntheticReason::PeerCarriedDenials, "[state marker: peer carried denials] {not json".to_owned());
+        assert!(history_peer_carried(&[bad]).is_empty());
+    }
+
+    /// Packet 7 round 3: the restore reads the LAST relevant marker in order (carried after cleared wins; cleared after
+    /// carried wins).
+    #[test]
+    fn p7r3_carried_state_comes_from_the_last_relevant_marker() {
+        let st = PeerCarriedState { carried: vec![("bash".into(), "h".into(), "m".into())], refused: vec!["a".into()] };
+        let carried = ConversationItem::peer_carried_denials_marker(&st);
+        let cleared = ConversationItem::peer_influence_marker(false);
+        assert_eq!(history_peer_carried(&[carried.clone(), cleared.clone(), carried.clone()]), st);
+        assert!(history_peer_carried(&[carried.clone(), cleared.clone()]).is_empty());
+        assert_eq!(history_peer_carried(&[cleared.clone(), carried.clone(), ConversationItem::peer_message("x")]), st);
     }
 }

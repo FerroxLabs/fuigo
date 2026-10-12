@@ -32,7 +32,7 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::{info, warn};
 
 use fuigo_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
+    AcpAgentGatewaySender as GatewaySender,
     AcpClientMessage,
 };
 
@@ -561,10 +561,13 @@ fn setup_acp_connection(
     *relay_dest.borrow_mut() = Some(conn_gw_tx);
 
     // `Agent` is implemented for `Rc<T: Agent>` so this works.
+    let park_hold = agent.park_hold.clone();
     let (conn, handle_io) =
         crate::agent::credential_scrub::agent_side_connection(agent, outgoing, incoming);
     tokio::task::spawn_local(
-        GatewayReceiver::new(conn_gw_rx, conn)
+        fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
+            conn_gw_rx,
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
             .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
             .run(),
     );

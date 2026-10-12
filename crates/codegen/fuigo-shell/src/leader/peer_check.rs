@@ -14,13 +14,17 @@ use std::path::Path;
 
 /// The decision for one peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PeerVerdict {
+pub(crate) enum PeerVerdict {
     Accept,
     Refuse,
 }
 
 /// Same account, and only then. `Err` (could not learn the peer) refuses.
-pub(super) fn peer_is_same_user<E>(our_uid: u32, peer: Result<u32, E>) -> PeerVerdict {
+///
+/// What this proves: the peer process runs as the same OS user (effective uid) as we do. What it does NOT prove:
+/// which program or which Fuigo session is on the other end, that the peer is trustworthy, or anything about the
+/// bytes it sends; any process of the same user passes.
+pub(crate) fn peer_is_same_user<E>(our_uid: u32, peer: Result<u32, E>) -> PeerVerdict {
     match peer {
         Ok(uid) if uid == our_uid => PeerVerdict::Accept,
         _ => PeerVerdict::Refuse,
@@ -28,7 +32,7 @@ pub(super) fn peer_is_same_user<E>(our_uid: u32, peer: Result<u32, E>) -> PeerVe
 }
 
 #[cfg(unix)]
-fn os_peer_uid(stream: &LeaderStream) -> std::io::Result<u32> {
+fn os_peer_uid(stream: &tokio::net::UnixStream) -> std::io::Result<u32> {
     stream.peer_cred().map(|cred| cred.uid())
 }
 
@@ -40,13 +44,17 @@ fn our_uid() -> u32 {
 
 /// Which side of the connection is asking (test seam keys).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Side {
+pub(crate) enum Side {
     Client,
     Server,
 }
 
+/// The same-user check for any unix-socket stream (not leader specific): `side` and `key_path` only key the test
+/// seam and the debug log. Proves the peer's OS user equals ours and nothing more (see [`peer_is_same_user`]);
+/// a failed credential query refuses.
 #[cfg(unix)]
-fn verdict_for(side: Side, stream: &LeaderStream, socket_path: &Path) -> PeerVerdict {
+pub(crate) fn verdict_for(side: Side, stream: &tokio::net::UnixStream, key_path: &Path) -> PeerVerdict {
+    let socket_path = key_path;
     let ours = our_uid();
     #[cfg(test)]
     let peer = seam::query(side, socket_path, ours).unwrap_or_else(|| os_peer_uid(stream));
@@ -86,14 +94,18 @@ pub(super) fn client_accepts(stream: &LeaderStream, socket_path: &Path) -> bool 
     }
 }
 
-/// Bind the leader listener at `path`, mode 0600 from the first moment it is visible at `path`.
+/// Bind a listener at `path` (via `bind`, which receives a temporary path and must create the socket there), mode 0600 from the first moment it is visible at `path`.
 ///
 /// The socket is bound inside a fresh directory created 0700 next to `path`, chmod-ed 0600 there, and only then
 /// renamed into place (the rename replaces a stale socket atomically and keeps the socket connectable on Linux and
 /// macOS). Nobody but the owner can reach it before the rename, so there is no wider-mode window, and unlike
 /// `umask` (process-wide) no other thread's file creation is affected.
+/// Not leader specific: `bind` is the only listener-specific part. [`bind_private`] is the leader's use.
 #[cfg(unix)]
-pub(super) fn bind_private(path: &Path) -> std::io::Result<LeaderListener> {
+pub(crate) fn bind_private_with<L>(
+    path: &Path,
+    bind: impl FnOnce(&Path) -> std::io::Result<L>,
+) -> std::io::Result<L> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let parent = path.parent().unwrap_or_else(|| Path::new(""));
     let pid = std::process::id();
@@ -120,7 +132,7 @@ pub(super) fn bind_private(path: &Path) -> std::io::Result<LeaderListener> {
     let result = (|| {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
         let temp_sock = dir.join("s");
-        let listener = LeaderListener::bind(&temp_sock)?;
+        let listener = bind(&temp_sock)?;
         std::fs::set_permissions(&temp_sock, std::fs::Permissions::from_mode(0o600))?;
         std::fs::rename(&temp_sock, path)?;
         Ok(listener)
@@ -131,8 +143,16 @@ pub(super) fn bind_private(path: &Path) -> std::io::Result<LeaderListener> {
 }
 
 #[cfg(not(unix))]
+pub(crate) fn bind_private_with<L>(
+    path: &Path,
+    bind: impl FnOnce(&Path) -> std::io::Result<L>,
+) -> std::io::Result<L> {
+    bind(path)
+}
+
+/// Bind the leader listener at `path`; see [`bind_private_with`].
 pub(super) fn bind_private(path: &Path) -> std::io::Result<LeaderListener> {
-    LeaderListener::bind(path)
+    bind_private_with(path, |p| LeaderListener::bind(p))
 }
 
 /// Test-only injection of the credential query result, keyed by side and socket path so parallel tests never see
@@ -144,7 +164,7 @@ pub(super) mod seam {
     use std::sync::Mutex;
 
     #[derive(Clone, Copy)]
-    pub(in crate::leader) enum Inject {
+    pub(crate) enum Inject {
         /// Report a peer whose uid is ours plus one.
         ForeignUid,
         /// The credential query itself fails.
@@ -153,7 +173,7 @@ pub(super) mod seam {
 
     static SEAMS: Mutex<Vec<(Side, PathBuf, Inject)>> = Mutex::new(Vec::new());
 
-    pub(in crate::leader) fn set(side: Side, path: &Path, inject: Inject) {
+    pub(crate) fn set(side: Side, path: &Path, inject: Inject) {
         SEAMS.lock().unwrap().push((side, path.to_path_buf(), inject));
     }
 

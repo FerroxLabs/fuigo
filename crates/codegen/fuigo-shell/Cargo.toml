@@ -161,6 +161,7 @@ fuigo-agent = { path = "../fuigo-agent" }
 fuigo-bundle = { workspace = true }
 fuigo-config = { workspace = true }
 fuigo-config-types = { workspace = true }
+fuigo-peer = { workspace = true }
 fuigo-dirs = { workspace = true }
 fuigo-memory = { workspace = true }
 fuigo-hooks = { path = "../fuigo-hooks" }
@@ -198,7 +199,7 @@ nix = { workspace = true, features = ["dir"] }
 
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
-windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
 
 [dev-dependencies]
 fuigo-secrets = { workspace = true, features = ["test-support"] }
@@ -302,3 +303,9 @@ tar = { workspace = true }
 [[bin]]
 name = "chat-history-downgrade"
 path = "src/bin/chat-history-downgrade.rs"
+
+# Test helper for `tests/win_peer_two_process.rs`: the real stdio agent as a separate process.
+[[bin]]
+name = "p15d-stdio-agent"
+path = "src/bin/p15d-stdio-agent.rs"
+required-features = ["test-support"]

@@ -549,6 +549,14 @@ impl McpState {
             .is_some_and(|acp| !acp.servers.is_empty())
     }
 
+    /// Names of every registered in-process SDK server, connected or not (P189: the parked load's readiness).
+    pub fn acp_server_names(&self) -> Vec<String> {
+        self.acp_mcp
+            .iter()
+            .flat_map(|acp| acp.servers.iter().map(|entry| entry.name.to_string()))
+            .collect()
+    }
+
     /// Registered SDK servers not yet connected (no owned/shared client): the ones an init pass should build.
     /// Shared by [`build_pending_acp_clients`] and [`pending_acp_server_names`] so the "what to build" filter lives in one place.
     fn pending_acp_entries(&self) -> impl Iterator<Item = &AcpServerEntry> {
@@ -1135,6 +1143,31 @@ pub fn parse_mcp_meta_config(
 /// MCP initialization strategy. Defined in `fuigo-telemetry`; re-exported here so existing call sites continue to work.
 pub use fuigo_telemetry::enums::McpInitStrategy;
 
+/// Closed set of reasons a server failed to start, decided from the error TYPE (never from message text), for clients
+/// that must not show the raw error (a headless run). Sent on the wire as `failureKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpFailureKind {
+    /// The program could not be started (spawn failed).
+    CommandNotStarted,
+    /// The process started, then exited or closed its pipe before answering.
+    ExitedBeforeAnswer,
+    /// No answer within the start-up timeout.
+    Timeout { secs: u64 },
+    /// A network server that could not be reached.
+    Unreachable,
+    /// The server needs sign-in; reported by the auth flow, not as a start failure.
+    /// Only ever set from typed evidence, see [`McpClient::start_failure_kind`].
+    NeedsAuth,
+    /// An HTTP/SSE server rejected the connection in a way that reads like an auth refusal (by its words only, no typed
+    /// status). Reported as a start failure, because words alone are not proof that the server is waiting for sign-in.
+    ServerRejected,
+    /// Anything else.
+    Other,
+    /// A kind sent by a newer sender that this build does not know (never produced here; set by the lenient decoder).
+    Unknown,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum McpError {
     #[error("MCP client error: {0}")]
@@ -1181,6 +1214,30 @@ impl McpError {
 
     pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout { .. })
+    }
+
+    /// The closed failure reason for this error, from the error TYPE only. The error text is never read, so a dead server
+    /// whose message happens to say "unauthorized" is not mistaken for one that wants sign-in. Sign-in evidence that
+    /// depends on the client (transport, OAuth) is added by [`McpClient::start_failure_kind`], which callers must use.
+    pub fn failure_kind(&self) -> McpFailureKind {
+        match self {
+            Self::SpawnFailed { .. } => McpFailureKind::CommandNotStarted,
+            Self::Timeout { timeout_secs, .. } => McpFailureKind::Timeout { secs: *timeout_secs },
+            Self::Unreachable { .. } => McpFailureKind::Unreachable,
+            Self::HandshakeFailed { source, .. } => handshake_failure_kind(source),
+            Self::AuthRequired { .. } => McpFailureKind::NeedsAuth,
+            Self::ClientError(_) | Self::ServiceError(_) => McpFailureKind::Other,
+        }
+    }
+
+    /// Typed proof that an HTTP server refused for auth: the transport's own `AuthRequired` (401) or `InsufficientScope`
+    /// (403) variants, or a reqwest error carrying a numeric 401/403 status. Words in the message are NOT evidence.
+    fn has_typed_http_auth_status(&self) -> bool {
+        match self {
+            Self::AuthRequired { .. } => true,
+            Self::HandshakeFailed { source, .. } => init_error_has_typed_auth_status(source),
+            _ => false,
+        }
     }
 
     pub fn error_category(&self) -> fuigo_session_events::McpErrorCategory {
@@ -1251,6 +1308,60 @@ impl McpError {
             Self::Timeout { .. } | Self::SpawnFailed { .. } | Self::AuthRequired { .. } => false,
         }
     }
+}
+
+fn handshake_failure_kind(err: &ClientInitializeError) -> McpFailureKind {
+    if init_error_is_connect_phase(err) {
+        return McpFailureKind::Unreachable;
+    }
+    match err {
+        ClientInitializeError::ConnectionClosed(_) => McpFailureKind::ExitedBeforeAnswer,
+        // A transport error on the child-process transport is the pipe breaking under us
+        ClientInitializeError::TransportError { error, .. }
+            if error.transport_type_id == std::any::TypeId::of::<SafeTokioChildProcess>() =>
+        {
+            McpFailureKind::ExitedBeforeAnswer
+        }
+        _ => McpFailureKind::Other,
+    }
+}
+
+fn init_error_has_typed_auth_status(err: &ClientInitializeError) -> bool {
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+    let ClientInitializeError::TransportError { error, .. } = err else {
+        return false;
+    };
+    match error
+        .error
+        .downcast_ref::<StreamableHttpError<reqwest::Error>>()
+    {
+        Some(StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_)) => true,
+        Some(StreamableHttpError::Client(e)) => e
+            .status()
+            .is_some_and(|c| c == reqwest::StatusCode::UNAUTHORIZED || c == reqwest::StatusCode::FORBIDDEN),
+        _ => false,
+    }
+}
+
+/// The classification order for a failed start (shared by every push; see [`McpClient::start_failure_kind`]).
+fn classify_start_failure(error: &McpError, is_http: bool, oauth_needs_auth: bool) -> McpFailureKind {
+    // 1. Typed spawn-time sign-in gate.
+    if matches!(error, McpError::AuthRequired { .. }) {
+        return McpFailureKind::NeedsAuth;
+    }
+    // 2. Transport first: a stdio (or in-process) server never needs sign-in, whatever its text says.
+    if !is_http {
+        return error.failure_kind();
+    }
+    // 3. Typed evidence: an OAuth client, or a numeric/typed HTTP 401/403.
+    if oauth_needs_auth || error.has_typed_http_auth_status() {
+        return McpFailureKind::NeedsAuth;
+    }
+    // 4. Words alone: say so with a line instead of staying silent.
+    if error.is_auth_rejection() {
+        return McpFailureKind::ServerRejected;
+    }
+    error.failure_kind()
 }
 
 fn init_error_is_connect_phase(err: &ClientInitializeError) -> bool {
@@ -3070,6 +3181,8 @@ pub enum McpClientEvent {
     HandshakeFailed {
         server: McpServerName,
         reason: String,
+        /// Closed reason from the error type; the raw `reason` stays for the clients that show it.
+        failure: McpFailureKind,
     },
     /// Server pushed `notifications/tools/list_changed`.
     ToolsChanged { server: McpServerName },
@@ -3513,11 +3626,25 @@ impl McpClient {
     /// login exists and merely waits for authorization-server metadata that could not be fetched (P151, B33), which
     /// is a connection problem to retry with the login kept.
     pub fn init_failure_needs_auth(&self, error: &McpError) -> bool {
-        if error.is_unreachable() {
-            return false;
-        }
-        self.has_auth()
-            || (self.is_http() && !self.has_configured_auth_header() && error.is_auth_rejection())
+        self.oauth_failure_needs_auth(error)
+            || (!error.is_unreachable()
+                && self.is_http()
+                && !self.has_configured_auth_header()
+                && error.is_auth_rejection())
+    }
+
+    /// The typed half of [`Self::init_failure_needs_auth`]: the client is configured for OAuth and the failure is not a
+    /// plain connectivity verdict.
+    fn oauth_failure_needs_auth(&self, error: &McpError) -> bool {
+        !error.is_unreachable() && self.has_auth()
+    }
+
+    /// The closed reason to report for a failed start. The ONE function behind both the shell push and the dispatcher push.
+    /// `NeedsAuth` (silent in a headless run) only on typed evidence: the spawn-time `AuthRequired`, a typed HTTP 401/403,
+    /// or an OAuth-configured client (the condition of [`Self::init_failure_needs_auth`], minus its word match). A stdio
+    /// or in-process server is never `NeedsAuth`. An HTTP error that merely reads like auth is `ServerRejected`.
+    pub fn start_failure_kind(&self, error: &McpError) -> McpFailureKind {
+        classify_start_failure(error, self.is_http(), self.oauth_failure_needs_auth(error))
     }
 
     /// Try to recover tokens from disk or via refresh; no browser flow.
@@ -4216,6 +4343,7 @@ impl McpClient {
                     let _ = tx.send(McpClientEvent::HandshakeFailed {
                         server: self.server_name.clone(),
                         reason: e.to_string(),
+                        failure: self.start_failure_kind(e),
                     });
                 }
             }

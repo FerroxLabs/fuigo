@@ -963,6 +963,8 @@ pub(crate) async fn run_shell_child(
     tool_ctx.sampler_retry_only_before_output = task_output_budget.is_some();
     tool_ctx.monitor_event_buffer = Some(MonitorEventBuffer::default());
     tool_ctx.subagent_depth = child_depth;
+    // S6.1: a subagent spawned by a peer-influenced session inherits the state.
+    tool_ctx.peer_influence = ctx.parent_peer_influence.clone();
     tool_ctx.lsp = ctx.lsp.clone();
     tool_ctx.process_scope = ctx.process_scope.clone();
     let parent_traceparent = fuigo_file_utils::trace_context::current_traceparent();

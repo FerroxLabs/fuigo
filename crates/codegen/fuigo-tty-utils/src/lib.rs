@@ -72,7 +72,9 @@ pub use display_char::{
 };
 
 mod process_scope;
-pub use process_scope::{ProcessScope, global_process_scope};
+pub use process_scope::{PlaceHook, ProcessScope, SpawnPlacedError, global_process_scope};
+
+pub mod session_cgroup;
 
 #[cfg(windows)]
 mod parent_death_windows;

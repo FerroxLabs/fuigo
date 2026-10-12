@@ -88,7 +88,31 @@ struct HomeMemo {
     path: PathBuf,
 }
 
-/// The fuigo home, created if missing; falls back to [`default_fuigo_home`]
+/// Create the fuigo home if it is missing, and ONLY then: the home itself is made with mode 0700 (unix), parents as
+/// `create_dir_all` makes them. `mkdir` applies `mode & !umask`, and a umask can only remove bits, so 0700 comes out
+/// 0700 under every umask (including 002, the Ubuntu desktop default) and no chmod is needed. A home that already
+/// exists is never touched: its mode stays whatever the user (or an older version) left. Windows: plain `create_dir_all`.
+pub fn ensure_private_home(path: &Path) -> std::io::Result<()> {
+    if path.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    let result = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().mode(0o700).create(path)
+    };
+    #[cfg(not(unix))]
+    let result = std::fs::create_dir(path);
+    match result {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+        other => other,
+    }
+}
+
+/// The fuigo home, created if missing (see [`ensure_private_home`]); falls back to [`default_fuigo_home`]
 /// when neither `$FUIGO_HOME` nor a home resolves.
 ///
 /// Memoised on the INPUTS (`$FUIGO_HOME` and the OS home), not pinned for the
@@ -114,7 +138,7 @@ pub fn fuigo_home() -> PathBuf {
     let path = resolve_fuigo_home_from(fuigo_home_env.as_deref(), os_home.as_deref())
         .map(|(home, _)| home)
         .unwrap_or_else(default_fuigo_home);
-    if let Err(err) = std::fs::create_dir_all(&path) {
+    if let Err(err) = ensure_private_home(&path) {
         tracing::warn!(path = %path.display(), %err, "failed to create fuigo home");
     }
     *memo = Some(HomeMemo {
@@ -135,6 +159,34 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
     use std::ffi::OsString;
+
+    /// Serialises the tests that change the process umask.
+    #[cfg(unix)]
+    pub(crate) static UMASK_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn fresh_home_is_0700_under_umask_002_and_existing_home_is_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = UMASK_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: umask only; restored below, and serialised by UMASK_LOCK.
+        let old = unsafe { libc::umask(0o002) };
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("a").join(".fuigo");
+        let made = ensure_private_home(&home);
+        let mode = std::fs::metadata(&home).map(|m| m.permissions().mode() & 0o7777);
+        // An existing 775 home is left exactly as it is.
+        let old_home = tmp.path().join("old");
+        std::fs::create_dir(&old_home).unwrap();
+        std::fs::set_permissions(&old_home, std::fs::Permissions::from_mode(0o775)).unwrap();
+        let again = ensure_private_home(&old_home);
+        let old_mode = std::fs::metadata(&old_home).map(|m| m.permissions().mode() & 0o7777);
+        unsafe { libc::umask(old) };
+        made.unwrap();
+        again.unwrap();
+        assert_eq!(mode.unwrap(), 0o700);
+        assert_eq!(old_mode.unwrap(), 0o775);
+    }
 
     #[test]
     fn env_wins_over_os_home() {

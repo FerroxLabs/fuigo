@@ -620,6 +620,14 @@ jobs:
           ../../../../../scripts/release/test-release-scripts.sh
           npm run check-version
 
+      # Same-version reinstall: the launcher replaces a differing binary, keeps a good one when the
+      # vendored file is missing or empty, and two concurrent replaces leave a complete file. Node
+      # built-ins and temp dirs only. Exits non-zero on any FAIL, which stops the job before anything
+      # is assembled or published.
+      - name: Test same-version reinstall
+        working-directory: crates/codegen/fuigo-pager/npm/fuigo
+        run: node scripts/test-reinstall.js
+
       - name: Assemble platform packages
         working-directory: crates/codegen/fuigo-pager/npm/fuigo
         env:
