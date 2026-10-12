@@ -46,6 +46,8 @@ pub mod minimal_api;
 pub mod minimal_hook;
 pub mod models;
 pub mod notifications;
+pub mod peer_ui;
+pub mod peer_ui_state;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
 pub mod plugin_cmd;

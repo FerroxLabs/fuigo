@@ -2805,10 +2805,73 @@ impl AppView {
     /// 3. Global actions (quit with confirmation)
     ///
     /// Quit always goes through double-press confirmation, even when escalated from agent-level (e.g., Ctrl-C while cancelling).
+    /// The ONE hook for "the screen may not match the last paint": every non-key terminal event (focus, resize, paste, mouse, ...)
+    /// and every full clear / heal / mode switch / child suspend calls it, before any later key of the same batch is handled.
+    /// It only clears the peer hold dialog's painted proof (`a` then waits for a fresh frame); no-op with no dialog.
+    pub(crate) fn note_screen_disturbed(&self) {
+        for agent in self.agents.values() {
+            agent.note_screen_disturbed();
+            for child in agent.subagent_views.values() {
+                child.note_screen_disturbed();
+            }
+        }
+    }
+
+    /// Whether `ev` disturbs the screen. Exhaustive on purpose: a new `Event` variant must be classified here.
+    pub(crate) fn event_disturbs_screen(ev: &Event) -> bool {
+        match ev {
+            Event::Key(_) => false,
+            Event::FocusGained
+            | Event::FocusLost
+            | Event::Mouse(_)
+            | Event::Paste(_)
+            | Event::Resize(_, _) => true,
+        }
+    }
+
     pub fn handle_input(&mut self, ev: &Event) -> InputOutcome {
         self.handle_input_at_with_paste_provenance(ev, Instant::now(), PasteProvenance::Terminal)
     }
     pub(crate) fn handle_input_at_with_paste_provenance(
+        &mut self,
+        ev: &Event,
+        arrived_at: Instant,
+        paste_provenance: PasteProvenance,
+    ) -> InputOutcome {
+        // Packet 12b, the one dispatch point. A key that the peer dialog's own key handler did not take (an overlay, the tutorial, the
+        // import modal, the composer, anything) may have changed the screen: the dialog's painted proof is cleared, so `a` needs a fresh
+        // frame. Non-key events are handled inside (`event_disturbs_screen`). No dialog: all no-ops.
+        for agent in self.agents.values_mut() {
+            agent.peer.clear_key_taken();
+        }
+        let focus_before = self.focus_signature();
+        let outcome = self.handle_input_at_with_paste_provenance_inner(ev, arrived_at, paste_provenance);
+        if matches!(ev, Event::Key(_)) && !self.agents.values().any(|a| a.peer.key_taken()) {
+            self.note_screen_disturbed();
+        }
+        self.note_focus_change_since(focus_before);
+        outcome
+    }
+
+    /// The active view and the active agent's fullscreen subagent: what a peer dialog's paint belongs to.
+    pub(crate) fn focus_signature(&self) -> (ActiveView, Option<String>) {
+        let sub = match self.active_view {
+            ActiveView::Agent(id) => self.agents.get(&id).and_then(|a| a.active_subagent.clone()),
+            _ => None,
+        };
+        (self.active_view, sub)
+    }
+
+    /// If the focused view changed since `before`: disturb the screen and close every open peer dialog (token dropped, one notice).
+    pub(crate) fn note_focus_change_since(&mut self, before: (ActiveView, Option<String>)) {
+        if self.focus_signature() != before {
+            for agent in self.agents.values_mut() {
+                agent.peer_view_changed();
+            }
+        }
+    }
+
+    fn handle_input_at_with_paste_provenance_inner(
         &mut self,
         ev: &Event,
         arrived_at: Instant,
@@ -2824,6 +2887,9 @@ impl AppView {
             Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
             _ => None,
         };
+        if Self::event_disturbs_screen(ev) {
+            self.note_screen_disturbed();
+        }
         if let Event::Resize(_, rows) = ev {
             for agent in self.agents.values_mut() {
                 agent.note_terminal_resize();
@@ -5266,6 +5332,15 @@ impl AppView {
                             }
                             if let Some(panel) = &scroll_debug_panel {
                                 panel.render(full_area, f.buffer_mut());
+                            }
+                            // Painted after the agent view (and so over the peer hold dialog): the dialog's rows are not proven
+                            // visible this frame, so `a` waits for a frame without these.
+                            if self.import_claude_modal.is_some()
+                                || self.tutorial.is_some()
+                                || fps_overlay.is_some()
+                                || scroll_debug_panel.is_some()
+                            {
+                                agent.peer.begin_frame();
                             }
                             let (cursor_pos, post_flush) = result;
                             let has_cloud = false;

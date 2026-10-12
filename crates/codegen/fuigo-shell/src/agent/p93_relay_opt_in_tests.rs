@@ -86,6 +86,11 @@ impl tokio::io::AsyncWrite for Counting {
 
 /// The mock relay: accepts WebSockets, holds each open, counts TCP connections, bytes read and WebSockets.
 pub(super) async fn spawn_counting_relay() -> (std::net::SocketAddr, RelaySeen) {
+    spawn_counting_relay_sending(None).await
+}
+
+/// [`spawn_counting_relay`]; when `first_frame` is set, each accepted WebSocket is sent that one text frame at once.
+pub(super) async fn spawn_counting_relay_sending(first_frame: Option<&'static str>) -> (std::net::SocketAddr, RelaySeen) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = RelaySeen::default();
@@ -103,6 +108,10 @@ pub(super) async fn spawn_counting_relay() -> (std::net::SocketAddr, RelaySeen) 
                     return;
                 };
                 counters.websockets.fetch_add(1, Ordering::SeqCst);
+                if let Some(frame) = first_frame {
+                    use futures_util::SinkExt as _;
+                    let _ = ws.send(tokio_tungstenite::tungstenite::Message::text(frame)).await;
+                }
                 // Read (and count) whatever the agent sends until the test ends.
                 use futures_util::StreamExt as _;
                 while let Ok(Some(_)) =
@@ -177,7 +186,7 @@ pub(super) struct LeaderStart {
     slot: Rc<std::cell::RefCell<Option<crate::agent::relay::RelayHandle>>>,
     sender: Rc<Mutex<Option<mpsc::UnboundedSender<String>>>>,
     demand_tx: watch::Sender<bool>,
-    _ws_to_agent_rx: mpsc::UnboundedReceiver<String>,
+    ws_to_agent_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl LeaderStart {
@@ -216,7 +225,7 @@ pub(super) fn spawn_leader(relay: (String, String), on_demand: bool, cancel: &Ca
         slot,
         sender,
         demand_tx,
-        _ws_to_agent_rx: ws_to_agent_rx,
+        ws_to_agent_rx,
     }
 }
 
@@ -260,7 +269,7 @@ fn spawn_deferred(relay: (String, String), cancel: &CancellationToken) -> Leader
         slot,
         sender,
         demand_tx,
-        _ws_to_agent_rx: ws_to_agent_rx,
+        ws_to_agent_rx,
     }
 }
 
@@ -659,4 +668,107 @@ fn headless_relay_connection_requires_the_opt_in() {
         drop(handle);
         cancel.cancel();
     });
+}
+
+/// Wait (bounded, yielding) until `done` holds, or fail.
+async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// S4.1 ordering on the real start path (`spawn_leader_relay`): the "a relay is attached" fact is set before the relay
+/// task exists, so it holds before the relay can hand the agent any frame, and it is released when the relay task ends.
+/// Current-thread runtime on purpose: the attach fact is a thread-local under `cfg(test)`, so the guard, every read and
+/// the guard's release (when the relay task finishes) must all happen on the test thread.
+#[test]
+fn the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_reach_the_agent() {
+    use crate::peer_inbox::driver::remote_attached;
+    let Some((front, _env)) = child("the_production_relay_start_sets_remote_attached_before_any_relay_frame_can_reach_the_agent")
+    else {
+        return;
+    };
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let (addr, seen) = spawn_counting_relay_sending(Some(r#"{"jsonrpc":"2.0","method":"relay/test-frame"}"#)).await;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // (a) refused (no opt-in for the service origin): no relay, no fact.
+                assert!(!remote_attached());
+                let cancel = CancellationToken::new();
+                let refused = spawn_leader(service_relay(&front, addr), false, &cancel);
+                assert!(!refused.started() && !refused.sender_installed());
+                assert!(!remote_attached(), "a refused relay must not set the attached fact");
+                // (a)+(c) on demand: nothing until the demand fires, then the fact no later than the sender.
+                let cancel = CancellationToken::new();
+                let relay = fluxrouter_relay(&front, addr);
+                let demand = spawn_leader(relay.clone(), true, &cancel);
+                assert!(!remote_attached() && !demand.started() && !demand.sender_installed());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert!(!remote_attached(), "on demand and not demanded yet: not attached");
+                demand.demand_tx.send_replace(true);
+                wait_until("on-demand sender installed", || {
+                    if demand.sender_installed() {
+                        assert!(remote_attached(), "sender installed but the attached fact is not set yet");
+                        true
+                    } else {
+                        assert!(!remote_attached(), "attached before the demand's relay start installed its sender");
+                        false
+                    }
+                })
+                .await;
+                assert!(demand.started());
+                assert_connects(&seen, "on demand").await;
+                // (e) the relay task ends: the fact returns to false.
+                cancel.cancel();
+                wait_until("on-demand attach released", || !remote_attached()).await;
+                drop(demand);
+                // (b) eager: the fact is set when `spawn_leader` returns, with no yield.
+                let cancel = CancellationToken::new();
+                let mut eager = spawn_leader(relay, false, &cancel);
+                assert!(eager.started() && eager.sender_installed());
+                assert!(remote_attached(), "eager start: the attached fact must hold on return, before any yield");
+                // (d) the first frame the relay hands the agent finds the fact already set.
+                let frame = tokio::time::timeout(Duration::from_secs(10), eager.ws_to_agent_rx.recv())
+                    .await
+                    .expect("the mock relay's frame reached the agent channel")
+                    .expect("channel open");
+                assert!(frame.contains("relay/test-frame"), "unexpected frame: {frame}");
+                assert!(remote_attached(), "a relay frame reached the agent before the attached fact held");
+                // (e) cancel: the relay task ends and the fact is released.
+                cancel.cancel();
+                wait_until("eager attach released", || !remote_attached()).await;
+            })
+            .await;
+    });
+}
+
+/// Source pin for the same ordering (a current-thread runtime cannot race the spawn, so this is the check that fails
+/// if the guard is moved back after `spawn_relay_connection(`): in `spawn_leader_relay` every start takes
+/// `attach_remote()` before the spawn and hands it to the handle after it.
+#[test]
+fn spawn_leader_relay_takes_the_attach_guard_before_every_relay_spawn() {
+    let src = include_str!("app.rs");
+    let body = src.split("\nfn spawn_leader_relay(").nth(1).expect("spawn_leader_relay");
+    let body = body.split("\n}\n").next().unwrap();
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(flat.matches("spawn_relay_connection(").count(), 2, "two relay start sites");
+    let mut rest = flat.as_str();
+    for site in 0..2 {
+        let spawn = rest.find("= spawn_relay_connection(").expect("spawn site");
+        let before = &rest[..spawn];
+        let after = &rest[spawn..];
+        assert!(
+            before.rsplit("spawn_relay_connection(").next().unwrap().contains("let attach = crate::peer_inbox::driver::attach_remote();"),
+            "site {site}: attach_remote() must be taken before spawn_relay_connection("
+        );
+        let hold = after.find("handle.hold_peer_attach(attach);").expect("hold after spawn");
+        let next_spawn = after[1..].find("= spawn_relay_connection(").map_or(usize::MAX, |i| i + 1);
+        assert!(hold < next_spawn, "site {site}: the guard is handed to the handle right after the spawn");
+        rest = &after[hold..];
+    }
 }

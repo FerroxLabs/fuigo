@@ -13,6 +13,34 @@ fn attach_elicitation_tx(
         client.set_elicitation_tx(Some(tx));
     }
 }
+/// Push `fuigo/mcp/server_status` (`unavailable`, `handshake_failed`) for a server whose start failed.
+/// `detail` is the short cause already capped for the model-facing reminder.
+fn push_start_failed_status(
+    gateway: &fuigo_acp_lib::AcpAgentGatewaySender,
+    session_id: &str,
+    server_name: &str,
+    detail: Option<&str>,
+    failure_kind: fuigo_mcp::servers::McpFailureKind,
+) {
+    use crate::session::mcp_dispatcher::{
+        McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SERVER_STATUS_METHOD,
+        classify_source,
+    };
+    let payload = McpServerStatusPayload {
+        session_id: session_id.to_string(),
+        name: server_name.to_string(),
+        source: classify_source(server_name),
+        status: McpServerStatus::Unavailable,
+        reason: McpServerStatusReason::HandshakeFailed,
+        detail: detail.map(str::to_string),
+        failure_kind: Some(failure_kind),
+        tools: None,
+    };
+    if let Ok(raw) = serde_json::value::to_raw_value(&payload) {
+        gateway.forward_fire_and_forget(acp::ExtNotification::new(SERVER_STATUS_METHOD, raw.into()));
+    }
+}
+
 #[cfg(test)]
 mod oauth_lock_tests {
     use super::super::support::create_test_actor;
@@ -1562,6 +1590,16 @@ impl SessionActor {
                 Err(e) => {
                     tracing::warn!("Failed to spawn MCP server: {}", e);
                     let sname = e.server_name().unwrap_or("unknown").to_string();
+                    // A spawn failure (missing binary) never reaches the handshake, so the dispatcher has no event for it
+                    if !e.is_auth_rejection() && sname != "unknown" {
+                        push_start_failed_status(
+                            &self.notifications.gateway,
+                            session_id,
+                            &sname,
+                            Some(&fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)),
+                            e.failure_kind(),
+                        );
+                    }
                     if e.is_auth_rejection() && sname != "unknown" {
                         spawn_auth_failures.push(sname.clone());
                     } else if e.is_unreachable() && sname != "unknown" {
@@ -1732,18 +1770,22 @@ impl SessionActor {
                             Err(e) => {
                                 // Login can only rebuild HTTP clients; other transports keep init_failed.
                                 let needs_auth = client.init_failure_needs_auth(&e);
+                                // The same classifier the dispatcher's push uses (`start_failure_kind`)
+                                let failure_kind = client.start_failure_kind(&e);
                                 tracing::warn!(
                                     server = server_name.as_str(),
                                     elapsed_ms = server_start.elapsed().as_millis() as u64,
                                     timeout_sec,
                                     error = %e,
                                     needs_auth,
+                                    ?failure_kind,
                                     "MCP server failed to initialize"
                                 );
                                 Err((
                                     server_name,
                                     e,
                                     needs_auth,
+                                    failure_kind,
                                     server_start.elapsed(),
                                     timeout_sec,
                                 ))
@@ -1952,7 +1994,7 @@ impl SessionActor {
                                 total_tools_registered += tool_count;
                                 mcp_state.mark_server_ready(&server_name);
                             }
-                            Err((server_name, ref e, needs_auth, elapsed, timeout_sec)) => {
+                            Err((server_name, ref e, needs_auth, failure_kind, elapsed, timeout_sec)) => {
                                 let error_cat = if needs_auth {
                                     fuigo_session_events::McpErrorCategory::AuthRequired
                                 } else {
@@ -2015,6 +2057,25 @@ impl SessionActor {
                                     fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)
                                         .into_owned()
                                 });
+                                // A failed start is also pushed as a server_status delta from here: the dispatcher only
+                                // pushes one when the failure reaches `ensure_initialized` (a spawn failure may not), and a
+                                // headless run has no `/mcps` modal to read `init_failed` from. A repeat of the
+                                // dispatcher's push is harmless: clients patch the same row, headless reports a name once.
+                                // Gated on the typed kind, not on `needs_auth`: an HTTP error that only reads like auth is
+                                // `needs_auth` for the sign-in flow but still gets its (sixth-reason) line.
+                                if failure_kind != fuigo_mcp::servers::McpFailureKind::NeedsAuth {
+                                    let push_detail = detail.clone().unwrap_or_else(|| {
+                                        fuigo_tools::util::truncate_str_with_marker(&e.to_string(), 200)
+                                            .into_owned()
+                                    });
+                                    push_start_failed_status(
+                                        &gateway,
+                                        session_id_owned.as_ref(),
+                                        &server_name,
+                                        Some(push_detail.as_str()),
+                                        failure_kind,
+                                    );
+                                }
                                 if !needs_auth && e.is_connect_failure() {
                                     // Disk-only spawn can't observe connectivity; the unreachable-retry schedule starts here
                                     mcp_state.record_unreachable_failure(

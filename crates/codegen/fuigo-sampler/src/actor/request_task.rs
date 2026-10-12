@@ -797,6 +797,19 @@ async fn sleep_or_cancel(duration: Duration, cancel_token: &CancellationToken) -
 /// `doom_check` is the doom-loop policy while the resample budget lasts.
 /// `None` disarms the mid-stream abort and the terminal confidence check so the attempt completes and its response can be accepted.
 #[allow(clippy::too_many_arguments)]
+/// Races the attempt's stream construction (which can sit at the dispatch gate while the session is parked) against
+/// `cancel_token`, so a cancelled call ends without ever dispatching.
+async fn init_or_cancel<T>(
+    init: impl std::future::Future<Output = SamplingResult<T>>,
+    cancel_token: &CancellationToken,
+) -> Result<T, AttemptOutcome> {
+    tokio::select! {
+        biased;
+        () = cancel_token.cancelled() => Err(AttemptOutcome::Cancelled),
+        result = init => result.map_err(|error| AttemptOutcome::InitFailed { error }),
+    }
+}
+
 async fn run_one_attempt(
     client: &SamplingClient,
     request: ConversationRequest,
@@ -810,9 +823,9 @@ async fn run_one_attempt(
     let length_policy = request.length_policy;
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
-            let (raw, metadata) = match client.conversation_stream(request).await {
+            let (raw, metadata) = match init_or_cancel(client.conversation_stream(request), cancel_token).await {
                 Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
+                Err(outcome) => return outcome,
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
@@ -833,9 +846,9 @@ async fn run_one_attempt(
             let client_tools: HashSet<String> =
                 request.tools.iter().map(|t| t.name.clone()).collect();
             let (raw, metadata, doom_loop) =
-                match client.conversation_stream_responses(request).await {
+                match init_or_cancel(client.conversation_stream_responses(request), cancel_token).await {
                     Ok(parts) => parts,
-                    Err(e) => return AttemptOutcome::InitFailed { error: e },
+                    Err(outcome) => return outcome,
                 };
             if doom_check.is_none()
                 && let Some(collector) = &doom_loop
@@ -873,9 +886,9 @@ async fn run_one_attempt(
             .await
         }
         ApiBackend::Messages => {
-            let (raw, metadata) = match client.conversation_stream_messages(request).await {
+            let (raw, metadata) = match init_or_cancel(client.conversation_stream_messages(request), cancel_token).await {
                 Ok(pair) => pair,
-                Err(e) => return AttemptOutcome::InitFailed { error: e },
+                Err(outcome) => return outcome,
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
@@ -2278,5 +2291,24 @@ mod tests {
             "2 s + ~4 s + ~8 s (+/-20% on the ladder): {:?}",
             ladder.slept
         );
+    }
+
+    /// P189 A2 (step 4): for a call that is not cancelled `init_or_cancel` is the identity on the init result
+    /// (value and error mapping), and holds no state; only a cancelled token changes the outcome.
+    #[tokio::test]
+    async fn init_or_cancel_is_transparent_for_a_call_that_is_not_cancelled() {
+        let token = CancellationToken::new();
+        let ok = init_or_cancel(async { Ok::<_, SamplingError>(7_u32) }, &token).await;
+        assert!(matches!(ok, Ok(7)));
+        let failed = init_or_cancel(
+            async { Err::<u32, _>(SamplingError::InvalidConfiguration("x")) },
+            &token,
+        )
+        .await;
+        assert!(matches!(failed, Err(AttemptOutcome::InitFailed { .. })));
+        assert!(!token.is_cancelled());
+        token.cancel();
+        let cancelled = init_or_cancel(std::future::pending::<SamplingResult<u32>>(), &token).await;
+        assert!(matches!(cancelled, Err(AttemptOutcome::Cancelled)));
     }
 }

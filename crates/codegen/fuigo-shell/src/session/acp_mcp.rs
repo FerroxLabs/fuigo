@@ -79,13 +79,18 @@ pub(crate) fn admit_acp_mcp_servers(
 /// Calls are independent and may run concurrently; the gateway serializes them onto the session's message channel.
 pub(crate) struct GatewayAcpInvoker {
     gateway: AcpAgentGatewaySender,
+    /// The session whose MCP servers this invoker serves (P189: its park gates the reverse calls).
+    session_id: String,
 }
 
 impl GatewayAcpInvoker {
-    pub(crate) fn new(gateway: AcpAgentGatewaySender) -> Self {
-        Self { gateway }
+    pub(crate) fn new(gateway: AcpAgentGatewaySender, session_id: String) -> Self {
+        Self { gateway, session_id }
     }
 }
+
+/// The reverse MCP method, for the park hold (`crate::agent::park_hold`).
+pub(crate) const MCP_SDK_CALL_METHOD: &str = wire::MCP_SDK_CALL;
 
 /// Reverse `fuigo/mcp/sdk_call` params.
 /// Declares the on-wire field names once (mirroring the forward side's typed `McpCallRequest`) so `serverId` is never hand-spelled.
@@ -94,6 +99,10 @@ struct SdkCallParams<'a> {
     #[serde(rename = "serverId")]
     server_id: &'a str,
     message: serde_json::Value,
+    /// `{"fuigo/internal/ticket": id}`: the call's identity inside the process; stripped by `ParkHoldClient` before
+    /// the client is called, never written (`session::reverse_ticket`).
+    #[serde(rename = "_meta")]
+    meta: serde_json::Value,
 }
 
 #[async_trait::async_trait]
@@ -104,7 +113,19 @@ impl AcpReverseInvoker for GatewayAcpInvoker {
         message: serde_json::Value,
         timeout: Duration,
     ) -> Result<serde_json::Value, String> {
-        let params = serde_json::value::to_raw_value(&SdkCallParams { server_id, message })
+        // P189 r4 (Astra r3 F5): the call gets a ticket, the admission decision is taken once, here. The guard
+        // removes the ticket when this call ends (timeout included), which cancels the request held at delivery.
+        let ticket = crate::session::reverse_ticket::create(&self.session_id);
+        if ticket.ticket().wait_admitted().await.is_err() {
+            return Err(format!(
+                "{} to server {server_id} cancelled: the session was parked and a new prompt unparked it",
+                wire::MCP_SDK_CALL
+            ));
+        }
+        let meta = serde_json::Value::Object(
+            std::iter::once((crate::session::reverse_ticket::TICKET_META_KEY.to_owned(), ticket.id().into())).collect(),
+        );
+        let params = serde_json::value::to_raw_value(&SdkCallParams { server_id, message, meta })
             .map_err(|err| err.to_string())?;
         let request = acp::ExtRequest::new(wire::MCP_SDK_CALL, params.into());
         // Bound the round trip: a missing or hung client fails this reverse call at the per-server tool timeout instead of stalling the tool loop

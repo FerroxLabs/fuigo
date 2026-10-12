@@ -264,6 +264,8 @@ pub struct McpStatusSnapshot {
     /// Why the last automatic OAuth token request of each HTTP server was refused (K7), by server name.
     /// rmcp's own refresh reports only "Request failed"; the reason comes from the token-request adapter.
     pub auth_refusals: HashMap<String, String>,
+    /// Names of the registered in-process SDK servers (`_meta["fuigo/mcp/servers"]`), which have no `configs` entry.
+    pub acp_servers: Vec<String>,
 }
 
 /// Why `name` is not connected, for the `/mcps` list (P152): its recorded start or handshake failure, unless the server
@@ -351,6 +353,7 @@ pub struct McpToolsChanged {
 // This import from `session` into `extensions` inverts the typical `extensions` to `session` flow
 // Moving the types here would require either making the dispatcher import from `extensions` (the same inversion) or duplicating the schema
 // Leaving the re-export here keeps the single import point without duplicating definitions
+pub use fuigo_mcp::servers::McpFailureKind;
 pub use crate::session::mcp_dispatcher::{
     McpServerStatus, McpServerStatusPayload, McpServerStatusReason, SERVER_STATUS_METHOD,
 };
@@ -661,6 +664,7 @@ pub(crate) async fn build_mcp_status(
         auth_required,
         init_failed,
         disabled_regs,
+        acp_servers,
     ) = {
         let state = mcp_state.lock().await;
         (
@@ -681,6 +685,7 @@ pub(crate) async fn build_mcp_status(
                 .iter()
                 .map(|(k, v)| (k.clone(), v.description.clone()))
                 .collect::<Vec<_>>(),
+            state.acp_server_names(),
         )
     };
 
@@ -789,6 +794,7 @@ pub(crate) async fn build_mcp_status(
         auth_required,
         init_failed: init_failed.into_iter().collect(),
         auth_refusals,
+        acp_servers,
     }
 }
 

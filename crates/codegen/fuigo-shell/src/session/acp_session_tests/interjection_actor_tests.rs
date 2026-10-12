@@ -773,6 +773,47 @@ async fn aborted_drain_of_a_parent_message_keeps_its_authority_through_the_flush
         .await;
 }
 
+/// A subagent task row is the parent MODEL's text. If it is ever promoted as an interjection and then stranded, the
+/// fallback prompt must not come back with human authority.
+#[tokio::test]
+async fn promoted_then_stranded_subagent_task_row_is_not_requeued_as_a_user_prompt() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, _rx) = build_actor().await;
+            let mut task_row = user_item("task-row", "A");
+            task_row.input_origin = InputOrigin::new(crate::session::PromptOrigin::SubagentTask);
+            {
+                let mut state = actor.state.lock().await;
+                state.pending_inputs.push_back(user_item("running", "A"));
+                state.pending_inputs.push_back(task_row);
+                state.running_task = Some(running_task_stub("running"));
+            }
+            actor.promote_queued_as_interjections().await;
+            let promoted = actor.pending_interjections.snapshot();
+            if let Some(entry) = promoted.first() {
+                assert!(
+                    !matches!(entry.authority, InterjectionAuthority::User),
+                    "a promoted task row must not be a human interjection"
+                );
+            }
+            assert_eq!(actor.flush_stranded_interjections().await, promoted.len());
+            let state = actor.state.lock().await;
+            for row in state
+                .pending_inputs
+                .iter()
+                .filter(|i| i.prompt_id.starts_with("interject-fallback-"))
+            {
+                assert!(
+                    !row.input_origin.policy().authority.is_human_intent(),
+                    "a stranded task row must not gain human authority, got {:?}",
+                    row.input_origin.as_prompt_origin()
+                );
+            }
+        })
+        .await;
+}
+
 /// The other half of the boundary: a human interjection still strands into a
 /// real user prompt. Fixing the parent case must not demote the user's own
 /// message.

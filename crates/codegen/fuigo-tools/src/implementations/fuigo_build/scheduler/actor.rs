@@ -24,8 +24,9 @@ use crate::types::tool::ToolKind;
 
 use super::interval::interval_to_human;
 use super::types::{
-    LOOP_COMPLETION_OUTPUT_CAP, LOOP_FRESH_CHAIN_EVERY, ScheduledTask, SchedulerClock,
-    SchedulerCommand, SchedulerError, SchedulerSnapshot, SchedulerState, SchedulerVersion,
+    FoldReply, FoldTxn, FoldedFire, LOOP_COMPLETION_OUTPUT_CAP, LOOP_FRESH_CHAIN_EVERY, ScheduledTask, SchedulerClock,
+    SchedulerCommand, SchedulerError, SchedulerPaused, SchedulerSnapshot, SchedulerState,
+    SchedulerVersion,
 };
 
 const MAX_SCHEDULED_TASKS: usize = 50;
@@ -272,6 +273,10 @@ impl SchedulerActor {
 
     async fn compute_next_fire_delay(&self) -> Duration {
         let res = self.resources.lock().await;
+        // P189: a paused scheduler sleeps until a command (the resume) wakes it.
+        if res.get::<SchedulerPaused>().is_some_and(|paused| paused.0.is_some()) {
+            return Duration::MAX;
+        }
         let scheduler_state = res.get::<State<SchedulerState>>();
         scheduler_state
             .map(|s| {
@@ -297,6 +302,9 @@ impl SchedulerActor {
         debug_assert!(self.pending_removal.is_none());
         let now = Utc::now();
         let mut res = self.resources.lock().await;
+        if res.get::<SchedulerPaused>().is_some_and(|paused| paused.0.is_some()) {
+            return;
+        }
         let state = res.get_or_default::<State<SchedulerState>>();
         let idx = state.tasks.iter().position(|task| {
             task.next_wake_at() <= now && !self.blocked_expiries.contains(&task.id)
@@ -832,8 +840,130 @@ impl SchedulerActor {
         }
     }
 
+    /// P189: the tasks that came due while paused (what a fold would fold), without changing anything.
+    async fn due_while_paused(&self) -> Vec<FoldedFire> {
+        let now = Utc::now();
+        let mut res = self.resources.lock().await;
+        let state = res.get_or_default::<State<SchedulerState>>();
+        state
+            .tasks
+            .iter()
+            .filter(|task| {
+                !self.blocked_expiries.contains(&task.id) && !task.is_expired(now) && task.next_fire_at() <= now
+            })
+            .map(|task| FoldedFire {
+                task_id: task.id.clone(),
+                prompt: task.prompt.clone(),
+                human_schedule: interval_to_human(task.interval_secs),
+            })
+            .collect()
+    }
+
+    /// P189: fold exactly `due` (the tasks a reply listed): a recurring task advances to its next interval, a
+    /// one-shot (durable or not; a normal fire removes both the same way) is removed. A task that changed
+    /// meanwhile (gone, no longer due) is left alone.
+    async fn fold(&mut self, due: &[FoldedFire]) {
+        let now = Utc::now();
+        let ids: std::collections::HashSet<&str> = due.iter().map(|f| f.task_id.as_str()).collect();
+        let mut removed = Vec::new();
+        let mut changed = false;
+        {
+            let mut res = self.resources.lock().await;
+            let state = res.get_or_default::<State<SchedulerState>>();
+            let blocked = &self.blocked_expiries;
+            state.tasks.retain_mut(|task| {
+                if !ids.contains(task.id.as_str())
+                    || blocked.contains(&task.id)
+                    || task.is_expired(now)
+                    || task.next_fire_at() > now
+                {
+                    return true;
+                }
+                changed = true;
+                if task.recurring {
+                    task.last_fired_at = Some(now);
+                    true
+                } else {
+                    removed.push(task.id.clone());
+                    false
+                }
+            });
+        }
+        if changed
+            && let Err(error) = self.persist_resources().await
+        {
+            tracing::warn!(%error, "Folded scheduler fires were not persisted");
+        }
+        for task_id in removed {
+            let mut reservation = self.clock.prepare_transition(1);
+            let commit = reservation.commit_next(&mut self.clock);
+            log_rollover("fold", Some(&task_id), commit.rollover);
+            self.notification_handle
+                .send_scheduled_task_removed(task_removed_payload(
+                    task_id,
+                    ScheduledTaskRemovedReason::Completed,
+                    commit.version,
+                ));
+        }
+    }
+
+    async fn set_pause_owner(&self, owner: Option<u64>) {
+        self.resources.lock().await.insert(SchedulerPaused(owner));
+    }
+
+    async fn pause_owner(&self) -> Option<u64> {
+        self.resources.lock().await.get::<SchedulerPaused>().and_then(|paused| paused.0)
+    }
+
     async fn handle_command(&mut self, cmd: SchedulerCommand) {
         match cmd {
+            SchedulerCommand::SetPaused {
+                op,
+                paused,
+                fold_overdue,
+                reply,
+                fold,
+            } => {
+                if paused {
+                    self.set_pause_owner(Some(op)).await;
+                    let _ = reply.send(FoldReply::default());
+                    return;
+                }
+                // A resume applies only to the pause its op set (idempotent, and a withdrawn park's late resume
+                // never unpauses the park that replaced it).
+                if self.pause_owner().await != Some(op) {
+                    let _ = reply.send(FoldReply { id: fold.as_ref().map(|f| f.id), fires: Vec::new() });
+                    return;
+                }
+                if !fold_overdue {
+                    self.set_pause_owner(None).await;
+                    let _ = reply.send(FoldReply::default());
+                    return;
+                }
+                let due = self.due_while_paused().await;
+                match fold {
+                    // Transaction: list, wait (still paused) for a commit with the SAME id, fold only on it. A
+                    // reply nobody can receive (the caller gave up) starts no wait and folds nothing.
+                    Some(FoldTxn { id, commit }) => {
+                        let listed = due.clone();
+                        let delivered = reply.send(FoldReply { id: Some(id), fires: due }).is_ok();
+                        if delivered
+                            && !listed.is_empty()
+                            && matches!(
+                                tokio::time::timeout(super::types::FOLD_COMMIT_WAIT, commit).await,
+                                Ok(Ok(committed)) if committed == id
+                            )
+                        {
+                            self.fold(&listed).await;
+                        }
+                    }
+                    None => {
+                        self.fold(&due).await;
+                        let _ = reply.send(FoldReply { id: None, fires: due });
+                    }
+                }
+                self.set_pause_owner(None).await;
+            }
             SchedulerCommand::Create { task, reply } => {
                 if let Some(pending) = &self.pending_removal {
                     let _ =
@@ -959,7 +1089,7 @@ mod tests {
     const _: () = assert!(MUST_ARRIVE.as_secs() > super::DURABILITY_BARRIER_TIMEOUT.as_secs());
     use super::*;
     use crate::implementations::fuigo_build::scheduler::types::{
-        ScheduledTask, SchedulerHandle, scheduler_tool_error,
+        FoldId, FoldTxn, ScheduledTask, SchedulerHandle, scheduler_tool_error,
     };
     use crate::notification::{AcknowledgedToolNotification, ToolNotification};
     use crate::types::resources::{Resources, WebCitationCounter};
@@ -2470,6 +2600,245 @@ mod tests {
             "foreground fire must not touch the subagent coordinator"
         );
 
+        cancel.cancel();
+    }
+
+    const TEST_OP: u64 = 7;
+
+    async fn set_paused(handle: &SchedulerHandle, paused: bool, fold_overdue: bool) -> Vec<FoldedFire> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::SetPaused {
+                op: TEST_OP,
+                paused,
+                fold_overdue,
+                reply,
+                fold: None,
+            })
+            .unwrap();
+        rx.await.unwrap().fires
+    }
+
+    /// Two-phase resume-with-fold: the listed fires and the commit sender (drop it to cancel the fold).
+    async fn resume_folding(
+        handle: &SchedulerHandle,
+    ) -> (Vec<FoldedFire>, FoldId, tokio::sync::oneshot::Sender<FoldId>) {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let id = FoldId { op: TEST_OP, nonce: 1 };
+        handle
+            .0
+            .send(SchedulerCommand::SetPaused {
+                op: TEST_OP,
+                paused: false,
+                fold_overdue: true,
+                reply,
+                fold: Some(FoldTxn { id, commit: commit_rx }),
+            })
+            .unwrap();
+        let reply = rx.await.unwrap();
+        assert_eq!(reply.id, Some(id));
+        (reply.fires, id, commit_tx)
+    }
+
+    /// Create a task due `due_in` from now (`recurring`, `durable` as given).
+    async fn create_task_shaped(
+        handle: &SchedulerHandle,
+        prompt: &str,
+        recurring: bool,
+        durable: bool,
+        due_in: Duration,
+    ) -> String {
+        let mut task = ScheduledTask::new(60, prompt.into(), recurring, durable);
+        task.foreground = true;
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(60)
+            + chrono::Duration::from_std(due_in).unwrap();
+        let task_id = task.id.clone();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        task_id
+    }
+
+    /// Astra r1 #7: a two-phase fold whose commit never comes changes nothing: the due fire runs as usual
+    /// after the resume (it is never advanced without its reminder reaching the next turn).
+    #[tokio::test]
+    async fn folded_resume_without_commit_mutates_nothing() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        let due = create_task_due_in(&handle, "fold me maybe", true, Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let (listed, _id, commit) = resume_folding(&handle).await;
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].task_id, due);
+        drop(commit);
+        assert!(fired_within(&mut notif_rx, MUST_ARRIVE).await, "an uncommitted fold must leave the fire to run");
+        cancel.cancel();
+    }
+
+    /// The committed two-phase fold folds what it listed; nothing fires after the resume.
+    #[tokio::test]
+    async fn folded_resume_with_commit_folds() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        create_task_due_in(&handle, "fold me", true, Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let (listed, id, commit) = resume_folding(&handle).await;
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        commit.send(id).unwrap();
+        assert!(!fired_within(&mut notif_rx, Duration::from_secs(2)).await, "a committed fold fired anyway");
+        cancel.cancel();
+    }
+
+    /// F3: a resume from an op that does not own the pause (a withdrawn park, after its replacement paused
+    /// again) leaves the pause in place and folds nothing; the owning op's resume lifts it.
+    #[tokio::test]
+    async fn a_withdrawn_parks_resume_does_not_unpause_the_replacement_park() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        let pause = |op: u64, paused: bool| {
+            let handle = handle.clone();
+            async move {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                handle
+                    .0
+                    .send(SchedulerCommand::SetPaused { op, paused, fold_overdue: false, reply, fold: None })
+                    .unwrap();
+                rx.await.unwrap();
+            }
+        };
+        pause(1, true).await; // park P
+        pause(2, true).await; // replacement park Q
+        create_task_due_in(&handle, "held by Q", true, Duration::from_secs(1)).await;
+        pause(1, false).await; // P's late resume
+        assert!(
+            !fired_within(&mut notif_rx, Duration::from_millis(2500)).await,
+            "a withdrawn park's resume unpaused the replacement park"
+        );
+        pause(2, false).await;
+        assert!(fired_within(&mut notif_rx, MUST_ARRIVE).await, "the owning op's resume must lift the pause");
+        cancel.cancel();
+    }
+
+    /// F6: a fold whose reply nobody receives (the caller gave up at its bound) waits for nothing and folds
+    /// nothing, even if a commit with the right id arrives afterwards: the due fire runs as usual.
+    #[tokio::test]
+    async fn a_fold_reply_later_than_the_bound_advances_no_task() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        create_task_due_in(&handle, "late reply", true, Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel();
+        let id = FoldId { op: 9, nonce: 1 };
+        drop(rx); // the caller's bound elapsed before the scheduler answered
+        handle
+            .0
+            .send(SchedulerCommand::SetPaused {
+                op: TEST_OP,
+                paused: false,
+                fold_overdue: true,
+                reply,
+                fold: Some(FoldTxn { id, commit: commit_rx }),
+            })
+            .unwrap();
+        let _ = commit_tx.send(id);
+        assert!(fired_within(&mut notif_rx, MUST_ARRIVE).await, "a fold nobody heard about advanced the task");
+        cancel.cancel();
+    }
+
+    /// A commit for another fold transaction never folds this one.
+    #[tokio::test]
+    async fn a_commit_with_another_fold_id_is_ignored() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        create_task_due_in(&handle, "wrong id", true, Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let (listed, id, commit) = resume_folding(&handle).await;
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        commit.send(FoldId { op: id.op, nonce: id.nonce + 1 }).unwrap();
+        assert!(fired_within(&mut notif_rx, MUST_ARRIVE).await, "a commit with another id folded the task");
+        cancel.cancel();
+    }
+
+    /// Astra r1 #7: a durable one-shot that came due while parked is folded like any other one-shot.
+    #[tokio::test]
+    async fn folded_resume_folds_a_durable_one_shot() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        let due = create_task_shaped(&handle, "durable once", false, true, Duration::from_secs(1)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let folded = set_paused(&handle, false, true).await;
+        assert_eq!(folded.iter().map(|f| f.task_id.clone()).collect::<Vec<_>>(), vec![due]);
+        assert!(!fired_within(&mut notif_rx, Duration::from_secs(2)).await, "a folded durable one-shot fired");
+        cancel.cancel();
+    }
+
+    /// Create a recurring task whose first fire is due `due_in` from now.
+    async fn create_task_due_in(handle: &SchedulerHandle, prompt: &str, foreground: bool, due_in: Duration) -> String {
+        let mut task = ScheduledTask::new(60, prompt.into(), true, false);
+        task.foreground = foreground;
+        task.created_at = chrono::Utc::now() - chrono::Duration::seconds(60)
+            + chrono::Duration::from_std(due_in).unwrap();
+        let task_id = task.id.clone();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        handle
+            .0
+            .send(SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            })
+            .unwrap();
+        reply_rx.await.unwrap().unwrap();
+        task_id
+    }
+
+    async fn fired_within(notif_rx: &mut mpsc::UnboundedReceiver<ToolNotification>, within: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        while let Ok(Some(notif)) = tokio::time::timeout_at(deadline, notif_rx.recv()).await {
+            if matches!(notif, ToolNotification::ScheduledTaskFired(_)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// P189: a timer due 1 s into a park does not fire in the next 3 s, in the foreground or as a loop
+    /// subagent; resuming without folding lets it fire as usual.
+    #[tokio::test]
+    async fn paused_scheduler_defers_a_due_timer_until_resumed() {
+        let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
+        assert!(set_paused(&handle, true, false).await.is_empty());
+        create_task_due_in(&handle, "fg tick", true, Duration::from_secs(1)).await;
+        create_task_due_in(&handle, "bg tick", false, Duration::from_secs(1)).await;
+        assert!(!fired_within(&mut notif_rx, Duration::from_secs(3)).await, "a paused scheduler fired");
+        assert!(subagent_rx.try_recv().is_err(), "a paused scheduler spawned a loop subagent");
+        assert!(set_paused(&handle, false, false).await.is_empty());
+        assert!(fired_within(&mut notif_rx, MUST_ARRIVE).await, "resume must let the due timer fire");
+        cancel.cancel();
+    }
+
+    /// P189: resuming with `fold_overdue` returns the fires that came due while paused and advances them,
+    /// so nothing fires right after the resume.
+    #[tokio::test]
+    async fn folded_resume_returns_due_timers_and_does_not_fire_them() {
+        let (handle, cancel, mut notif_rx, _subagent_rx) = make_test_actor_with_subagents();
+        set_paused(&handle, true, false).await;
+        let due = create_task_due_in(&handle, "fold me", true, Duration::from_secs(1)).await;
+        let later = create_task_due_in(&handle, "not yet", true, Duration::from_secs(600)).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let folded = set_paused(&handle, false, true).await;
+        assert_eq!(folded.len(), 1, "{folded:?}");
+        assert_eq!(folded[0].task_id, due);
+        assert_eq!(folded[0].prompt, "fold me");
+        assert_ne!(folded[0].task_id, later);
+        assert!(!fired_within(&mut notif_rx, Duration::from_secs(2)).await, "a folded fire ran anyway");
         cancel.cancel();
     }
 

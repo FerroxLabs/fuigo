@@ -238,6 +238,7 @@ pub(super) async fn actor_with_mock_sampler_configured(
             actor.tool_context.hunk_tracker_handle.clone(),
             actor.agent.borrow().tool_bridge().toolset(),
             None,
+            actor.tool_context.peer_influence.clone(),
         )
         .expect("bind_local_session");
 

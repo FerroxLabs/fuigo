@@ -359,7 +359,65 @@ pub enum SchedulerCommand {
     List {
         reply: oneshot::Sender<SchedulerSnapshot>,
     },
+    /// P189 (session park): while paused, nothing fires; a task that comes due waits. Resuming with
+    /// `fold_overdue` folds every task that came due (a recurring one advances to its next interval, a
+    /// one-shot, durable or not, is removed) and returns them, so the caller can tell the next turn instead
+    /// of running them; resuming without it lets them fire as usual.
+    ///
+    /// With `fold`, the fold is a transaction: the reply (carrying the transaction's id) lists the due tasks
+    /// WITHOUT changing anything, and the actor (still paused) waits up to [`FOLD_COMMIT_WAIT`] for the commit.
+    /// Only a commit carrying the SAME id folds them; if the reply could not be delivered (the caller timed
+    /// out), nothing is waited for and nothing is folded. Otherwise nothing is mutated and the tasks fire as
+    /// usual after the resume, so a fire is never advanced without its reminder being delivered.
+    ///
+    /// `op` is the park operation issuing the command. The pause is OWNED by the op that set it: a resume from
+    /// another op (a withdrawn park resuming after its replacement paused again) changes nothing and folds
+    /// nothing.
+    SetPaused {
+        op: u64,
+        paused: bool,
+        fold_overdue: bool,
+        reply: oneshot::Sender<FoldReply>,
+        fold: Option<FoldTxn>,
+    },
 }
+
+/// Identity of one fold transaction: the park op plus a caller nonce, so a stale commit never folds a later one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldId {
+    pub op: u64,
+    pub nonce: u64,
+}
+
+/// The receiving half of a fold transaction (see [`SchedulerCommand::SetPaused`]).
+#[derive(Debug)]
+pub struct FoldTxn {
+    pub id: FoldId,
+    pub commit: oneshot::Receiver<FoldId>,
+}
+
+/// The reply to `SetPaused`: the due tasks, and the id of the fold transaction they were listed for (`None`
+/// when the command was not a transactional fold).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FoldReply {
+    pub id: Option<FoldId>,
+    pub fires: Vec<FoldedFire>,
+}
+
+/// How long a two-phase fold waits for its commit (see [`SchedulerCommand::SetPaused`]).
+pub const FOLD_COMMIT_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A scheduled fire that came due while the session was parked and was folded into the next turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoldedFire {
+    pub task_id: String,
+    pub prompt: String,
+    pub human_schedule: String,
+}
+
+/// Actor-private pause state (P189): the park op that owns the pause, if any. Kept in the scheduler's resources.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SchedulerPaused(pub(crate) Option<u64>);
 
 #[cfg(test)]
 mod tests {

@@ -216,6 +216,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `features.mcp_push_server_status` | `boolean` | `yes` | `user` | Pager subscribes to MCP server_status push. Process env FUIGO_MCP_PUSH_SERVER_STATUS wins at launch. |
 | `features.mcp_recursive_config_watch` | `boolean` | `yes` | `user` | Watch `<cwd>/` and `<cwd>/.fuigo/` for project MCP config edits. Name is a misnomer; watches are non-recursive. |
 | `features.non_git_warning` | `boolean` | `yes` | `user` | Show a blocking warning when Fuigo starts outside a Git repository. |
+| `features.peer_messaging` | `boolean` | `pin` | `user` | Named sessions that message each other. Default false. Also `FUIGO_PEER_MESSAGING`. A repository's own config file and a server-delivered campaign cannot turn it on. See [Named Sessions](28-named-sessions.md). |
 | `features.remember_mode` | `boolean` | `—` | `—` | Remember the last permission mode across sessions. Read from user `config.toml` only. |
 | `features.remote_fetch` | `boolean` | `pin` | `fleet` | Pin remote model-catalog and asset fetch. Managed wins over the user file when both set. |
 | `features.repo_status_in_system_prompt` | `boolean` | `pin` | `user` | Enable or disable `repo_status_in_system_prompt`. Default true. Also `FUIGO_REPO_STATUS_IN_SYSTEM_PROMPT`. |
@@ -427,6 +428,12 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | --- | --- | --- | --- | --- |
 | `paths.extra_rule_dirs` | `string[]` | `yes` | `user` | More rule directories (each contains `*.md`). |
 | `paths.extra_skill_dirs` | `string[]` | `yes` | `user` | More skill directories (each contains `<skill>/SKILL.md`). |
+
+### `peer`
+
+| Key | Type / Values | Requirements | Managed | Details |
+| --- | --- | --- | --- | --- |
+| `peer.inbound` | `accept / hold / refuse` | `—` | `user` | What this session does with a message from another session (needs `features.peer_messaging`). Any difference between the sender's and the receiver's permission mode holds the message for you, whatever this says. Default `accept`. Not yet read from the file; a host sets it on the session. |
 
 ### `permission`
 

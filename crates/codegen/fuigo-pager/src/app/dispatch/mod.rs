@@ -21,6 +21,7 @@ mod interject;
 mod jump;
 mod modes;
 pub(crate) mod notes;
+mod peer;
 mod permissions;
 mod prompt;
 mod queue;

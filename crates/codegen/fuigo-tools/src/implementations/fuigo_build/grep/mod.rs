@@ -3086,6 +3086,7 @@ mod tests {
     }
 
     /// P198 round 4: binary notices, odd names, a failing ripgrep and "nothing denied" through the `--json` records.
+    #[cfg(unix)]
     #[tokio::test]
     async fn json_records_hide_denied_files_in_every_mode() {
         crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move {
@@ -3094,6 +3095,7 @@ mod tests {
         .await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rules_that_are_not_total_do_not_hide_a_directory() {
         crate::util::read_deny::fixture::check_round4_rules(|cwd, path, deny| async move {
@@ -3103,6 +3105,7 @@ mod tests {
     }
 
     /// P198 round 4: with context lines and a rule that denies nothing, the re-rendered content is the text form.
+    #[cfg(unix)]
     #[tokio::test]
     async fn json_rendering_equals_text_rendering_with_context() {
         let t = crate::util::read_deny::fixture::tree();
@@ -3137,6 +3140,7 @@ mod tests {
 
     /// P198 r2: absolute rule (also outside the cwd, and through a symlinked cwd), bare name and siblings, in every
     /// output mode.
+    #[cfg(unix)]
     #[tokio::test]
     async fn read_rules_follow_the_policy_matcher() {
         crate::util::read_deny::fixture::check_grep(|cwd, path, deny| async move {
@@ -3146,6 +3150,7 @@ mod tests {
     }
 
     /// P198 r2: with an empty rule list the output is byte-identical to the output with no rule object at all.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_empty_rule_list_changes_nothing() {
         let t = crate::util::read_deny::fixture::tree();
@@ -3163,6 +3168,7 @@ mod tests {
 
     /// P198 round 3: results are post-filtered by the policy matcher (symlinked cwd, case, outside rule, braces,
     /// false-denial guards, odd names, missing cwd), in every output mode.
+    #[cfg(unix)]
     #[tokio::test]
     async fn results_are_post_filtered_by_the_policy_matcher() {
         crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move {
@@ -3172,6 +3178,7 @@ mod tests {
     }
 
     /// P198 round 3: a denied file is not counted in the count lines, and a file name with a colon stays attributed.
+    #[cfg(unix)]
     #[tokio::test]
     async fn counts_exclude_denied_files() {
         let t = crate::util::read_deny::fixture::tree();

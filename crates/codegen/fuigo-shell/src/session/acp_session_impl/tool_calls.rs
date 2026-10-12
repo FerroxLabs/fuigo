@@ -350,6 +350,19 @@ impl SessionActor {
         &self,
         tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
     ) -> Result<ToolLoop, acp::Error> {
+        let result = self.execute_tool_calls_inner(tool_calls).await;
+        // S6.6: also on the early-return (`?`) paths of the inner function. A second pass after the in-line one is cheap
+        // (a tripped state returns at once).
+        self.recheck_peer_integrity().await;
+        // S7: denials recorded during the batch are stored now that its results are in the history.
+        self.persist_peer_state().await;
+        result
+    }
+
+    async fn execute_tool_calls_inner(
+        &self,
+        tool_calls: Vec<crate::sampling::types::ToolCallResponse>,
+    ) -> Result<ToolLoop, acp::Error> {
         if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
             tracing::Span::current().record("model_id", cfg.model.as_str());
         }
@@ -393,6 +406,8 @@ impl SessionActor {
                 self.chat_state_handle.push_user_message(chat);
             }
         }
+        self.recheck_peer_integrity().await;
+        self.persist_peer_state().await;
         self.drain_interjections_at_safe_point().await;
         self.flush_pending_skill_reminders().await;
         if let Some(final_result) = final_result {
@@ -534,7 +549,7 @@ impl SessionActor {
         final_result: &mut Option<ToolLoop>,
     ) -> Result<(), acp::Error> {
         if self.permissions.is_auto_mode() {
-            let conversation = self.chat_state_handle.get_conversation().await;
+            let conversation = self.chat_state_handle.get_conversation_for_model().await;
             super::refresh_classifier_transcript(&self.permissions, &conversation);
         }
         let mcp_surface_requested = tool_calls.iter().any(|c| {
@@ -1578,11 +1593,14 @@ impl SessionActor {
                 .await?;
             return Ok(Err(ToolLoop::Continue));
         }
+        // S6.1: a peer-started turn requesting a permission is influenced, whatever happened to the flag.
+        self.remark_if_peer_turn();
         let tool_call_display = self
             .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
             .await;
         let plan_file_auto_approve = match &access_kind {
-            AccessKind::Edit(path) if hook_ask.is_none() => self
+            // S6.3: an influenced session never takes the bypass; its edit goes through `request()`, where the guard runs.
+            AccessKind::Edit(path) if hook_ask.is_none() && !self.permissions.is_peer_influenced() => self
                 .plan_mode
                 .lock()
                 .should_auto_approve_edit(std::path::Path::new(path)),
@@ -1693,12 +1711,16 @@ impl SessionActor {
                         edit_targets: fuigo_workspace::permission::edit_targets_for(&tool_input),
                         // P174: every file a multi-file read reads, judged as a Read each.
                         read_targets: fuigo_workspace::permission::read_targets_for(&tool_input),
+                        peer_note: None,
                         ..PermissionRequest::new(access_kind.clone(), tool_call_update)
                     })
                     .await
             };
             let manager_event = resolution.event;
             let decision = resolution.decision;
+            // Flush the hit and store this denial now (not at the batch end), so a crash inside a batch keeps it.
+            self.flush_laundering_hits();
+            self.persist_peer_state().await;
             self.events.permission_resolved(
                 &call.function.name,
                 match &decision {
@@ -2113,12 +2135,7 @@ impl SessionActor {
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
         let (respond_to, _rx) = oneshot::channel();
         let _ = self
-            .queue_input(QueueInputRequest::from_legacy_prompt_id(
-                prompt_blocks,
-                prompt_id,
-                mode,
-                respond_to,
-            ))
+            .queue_input(plan_resume_request(prompt_blocks, prompt_id, mode, respond_to))
             .await;
         SessionActor::maybe_start_running_task(self.clone(), completion_tx).await;
     }
@@ -2539,7 +2556,7 @@ impl SessionActor {
             trigger: fuigo_telemetry::events::SkillTrigger::SkillMdRead,
         });
     }
-    fn make_pre_tool_use_envelope(
+    pub(super) fn make_pre_tool_use_envelope(
         &self,
         resolved_tool_name: &str,
         call_id: &str,
@@ -2547,6 +2564,7 @@ impl SessionActor {
     ) -> fuigo_hooks::event::HookEventEnvelope {
         let (tool_input, tool_input_truncated) =
             fuigo_hooks::event::truncate_payload(input.clone());
+        let note = self.pre_tool_use_peer_note();
         self.make_hook_envelope(
             fuigo_hooks::event::HookEventName::PreToolUse,
             None,
@@ -2556,6 +2574,8 @@ impl SessionActor {
                 tool_input,
                 tool_input_truncated,
                 subagent_type: self.subagent_type_label(),
+                origin: note.as_ref().and_then(|n| n.origin.clone()),
+                peer_influenced: note.map(|n| n.peer_influenced),
             },
         )
     }
@@ -2746,6 +2766,8 @@ impl SessionActor {
         args: BridgeToolSuccess<'_>,
     ) -> Result<Vec<ConversationItem>, acp::Error> {
         use crate::session::acp_conversion::{acp_plan_update, acp_tool_update, maybe_rewrite};
+        // A hub-routed call decides its own policy: report the hits it queued and store its denials (nothing when none).
+        self.persist_peer_state().await;
         let BridgeToolSuccess {
             tool_call_id,
             call_id,
@@ -3037,6 +3059,8 @@ impl SessionActor {
         err: &anyhow::Error,
         model_id: &str,
     ) -> Vec<ConversationItem> {
+        // A hub-routed refusal arrives here as an error: report the hits it queued and store its denial now.
+        self.persist_peer_state().await;
         tracing::error!(
             session_id = %self.session_info.id.0,
             tool_name = requested_tool_name,
@@ -3647,5 +3671,33 @@ mod wait_interrupt_tests {
         );
         drop(new);
         assert_eq!(depth.depth(), 0);
+    }
+}
+
+/// The queue request for the synthetic turn after a resumed plan decision. The origin is set here, never read back from the id.
+fn plan_resume_request(
+    prompt_blocks: Vec<acp::ContentBlock>,
+    prompt_id: String,
+    mode: PromptMode,
+    respond_to: oneshot::Sender<PromptTurnResult>,
+) -> QueueInputRequest {
+    QueueInputRequest::from_input_origin(
+        prompt_blocks,
+        prompt_id,
+        InputOrigin::new(PromptOrigin::PlanResume),
+        mode,
+        respond_to,
+    )
+}
+
+#[cfg(test)]
+mod plan_resume_origin_tests {
+    use super::*;
+
+    #[test]
+    fn plan_resume_request_has_the_plan_resume_origin_whatever_the_id_says() {
+        let (respond_to, _rx) = oneshot::channel();
+        let request = plan_resume_request(Vec::new(), "opaque-id".into(), PromptMode::Agent, respond_to);
+        assert_eq!(request.input_origin.as_prompt_origin(), &PromptOrigin::PlanResume);
     }
 }

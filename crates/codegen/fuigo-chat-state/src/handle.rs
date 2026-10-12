@@ -468,6 +468,14 @@ impl ChatStateHandle {
         .unwrap_or_default()
     }
 
+    /// Model-facing read of the conversation: [`Self::get_conversation`] with every peer state marker
+    /// dropped via [`crate::compaction_utils::drop_peer_state_markers`]. Markers are persisted state and must
+    /// never reach a model; every reader whose result can reach a model uses this. Raw `get_conversation()`
+    /// is only for state logic (see the source-pin test in fuigo-shell).
+    pub async fn get_conversation_for_model(&self) -> Vec<ConversationItem> {
+        crate::compaction_utils::drop_peer_state_markers(self.get_conversation().await)
+    }
+
     /// Get current prompt index.
     pub async fn get_prompt_index(&self) -> usize {
         self.query("GetPromptIndex", |reply| ChatStateCommand::GetPromptIndex {

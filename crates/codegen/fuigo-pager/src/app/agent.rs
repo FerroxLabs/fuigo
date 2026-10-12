@@ -44,6 +44,27 @@ impl QueueEntryKind {
         }
     }
 }
+/// The shell's single-use cron fire ticket. It is a bearer secret until redeemed, so `Debug` never prints it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FireTicket(pub String);
+impl std::fmt::Debug for FireTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FireTicket(<redacted>)")
+    }
+}
+/// A prompt id for logs: a `scheduler-fired-<ticket>` id keeps its prefix only, so an unredeemed ticket never reaches a log.
+pub fn loggable_prompt_id(prompt_id: &str) -> std::borrow::Cow<'_, str> {
+    match prompt_id.starts_with("scheduler-fired-") {
+        true => std::borrow::Cow::Borrowed("scheduler-fired-<redacted>"),
+        false => std::borrow::Cow::Borrowed(prompt_id),
+    }
+}
+impl FireTicket {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
 /// An entry waiting in the queue to be sent to the agent.
 ///
 /// Each entry gets a monotonically increasing `id` for stable tracking.
@@ -79,6 +100,9 @@ pub struct QueuedPrompt {
     pub combined_texts: Vec<String>,
     /// Only for `SideQuestion` rows: whether the answer paints in minimal mode, captured when the question was held.
     pub side_question_minimal: bool,
+    /// Cron rows: the single-use ticket the shell put in the inject notification (`fireTicket`). It is echoed in the prompt id
+    /// (`scheduler-fired-<ticket>`) so the shell can verify the fire; absent for a shell that predates tickets.
+    pub fire_ticket: Option<FireTicket>,
 }
 impl QueuedPrompt {
     /// Base row with every optional field at its default.
@@ -98,6 +122,7 @@ impl QueuedPrompt {
             chip_elements: Vec::new(),
             combined_texts: Vec::new(),
             side_question_minimal: false,
+            fire_ticket: None,
         }
     }
     /// Whether the wire payload is exactly the display text.
@@ -999,11 +1024,22 @@ impl AgentSession {
         task_id: String,
         human_schedule: String,
     ) -> u64 {
+        self.enqueue_cron_prompt_with_ticket(text, task_id, human_schedule, None)
+    }
+    /// [`Self::enqueue_cron_prompt`] carrying the shell's single-use fire ticket.
+    pub fn enqueue_cron_prompt_with_ticket(
+        &mut self,
+        text: String,
+        task_id: String,
+        human_schedule: String,
+        fire_ticket: Option<String>,
+    ) -> u64 {
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         self.pending_prompts.push_back(QueuedPrompt {
             task_id: Some(task_id),
             human_schedule: Some(human_schedule),
+            fire_ticket: fire_ticket.map(FireTicket),
             ..QueuedPrompt::plain(id, text, QueueEntryKind::Cron)
         });
         id

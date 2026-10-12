@@ -229,6 +229,9 @@ pub struct PermissionRequest {
     /// each, the strictest result winning; `None` for every other tool. Build it with [`read_targets_for`] from the same
     /// input that runs (P174).
     pub read_targets: Option<ReadTargets>,
+    /// S6.7: the turn origin and influenced flag for the classifier request. Filled by the permission handle from the session's
+    /// own flag, never by the caller; `None` (request bytes unchanged) unless influenced or a peer-origin turn.
+    pub peer_note: Option<crate::permission::PeerPayloadNote>,
 }
 impl PermissionRequest {
     pub fn new(access: AccessKind, tool_call_update: acp::ToolCallUpdate) -> Self {
@@ -242,6 +245,7 @@ impl PermissionRequest {
             hook_ask: None,
             edit_targets: None,
             read_targets: None,
+            peer_note: None,
         }
     }
 }
@@ -365,6 +369,12 @@ pub enum PermissionCommand {
         request: PermissionRequest,
         respond_to: oneshot::Sender<PermissionResolution>,
     },
+    /// Read-only: the configured deny verdict for `access`, never a prompt, a grant or a state change (bang-controls).
+    DecideOnly {
+        access: AccessKind,
+        cwd: std::path::PathBuf,
+        respond_to: oneshot::Sender<Option<String>>,
+    },
     SetYoloMode(bool),
     SetAutoMode(bool),
     SetClassifier(Option<std::sync::Arc<dyn super::auto_mode::PermissionClassifier>>),
@@ -417,6 +427,13 @@ impl From<&fuigo_tools::types::ToolInput> for AccessKind {
             ToolInput::SchedulerCreate(_) => AccessKind::Tool("scheduler_create".to_owned()),
             ToolInput::SchedulerDelete(_) => AccessKind::Tool("scheduler_delete".to_owned()),
             ToolInput::Workflow(w) => workflow_access(w),
+            // Packet 9. Listing and the refusal are session bookkeeping (reads); sending leaves the session, so it is
+            // a `Tool` kind: the manager auto-allows exactly this name in every mode (`is_auto_allowed_tool`), after deny/ask rules, the
+            // peer guard and hooks; an MCP or plugin tool of the same name is a different `AccessKind` and does not inherit it.
+            ToolInput::Peer(fuigo_tools::implementations::fuigo_build::peer_tools::PeerToolInput::SendMessage(_)) => {
+                AccessKind::Tool("send_message".to_owned())
+            }
+            ToolInput::Peer(_) => AccessKind::Read(None),
             ToolInput::ImageGen(_) => AccessKind::Tool("image_gen".to_owned()),
             ToolInput::ImageEdit(_) => AccessKind::Tool("image_edit".to_owned()),
             ToolInput::ImageToVideo(_) => AccessKind::Tool("image_to_video".to_owned()),
@@ -541,6 +558,10 @@ pub struct PermissionConfig {
     pub prompt_policy: PromptPolicy,
     #[serde(default)]
     pub default_mode_configured: bool,
+    /// Which `defaultMode` the synthetic rules came from. Recorded at resolution, read only by
+    /// [`EffectivePermissionMode`]; it adds no rule and changes no decision.
+    #[serde(skip)]
+    pub resolved_base: ResolvedBaseMode,
 }
 impl PermissionConfig {
     pub fn new(rules: Vec<PermissionRule>) -> Self {
@@ -548,7 +569,162 @@ impl PermissionConfig {
             rules,
             prompt_policy: PromptPolicy::Ask,
             default_mode_configured: false,
+            resolved_base: ResolvedBaseMode::Default,
         }
+    }
+
+    /// The mode this config puts a session in before any run-time toggle.
+    /// `PromptPolicy::Allow` and `Deny` are checked first because they decide every prompt
+    /// (`manager/mod.rs` prompt gate); `Auto` is not here because only the live auto flag makes it act.
+    pub fn base_mode(&self) -> EffectivePermissionMode {
+        base_mode_of(Some(self))
+    }
+}
+
+/// `permissions.defaultMode` values that leave a mark other than `prompt_policy`.
+/// `plan` has no effect in the code (nothing starts plan mode from it) so it resolves to `Default`, and
+/// `dontAsk` / `auto` are carried by `prompt_policy`. A `bypassPermissions` blocked by managed policy
+/// also resolves to `Default` because it adds no rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResolvedBaseMode {
+    #[default]
+    Default,
+    AcceptEdits,
+    BypassPermissions,
+}
+
+/// The base permission mode of a session: everything the report says apart from the plan flag and the session
+/// edit grant (see [`EffectivePeerMode`]). Variants are equal only when the runtime behaviour is the same, so a
+/// base that auto-approves never equals one that prompts.
+///
+/// What is NOT reported (one plain sentence): narrower allow rules (a tool-scoped or pattern-scoped `Allow`, such
+/// as `Allow Edit` or `Allow Bash(git *)`) and saved per-tool grants ("always allow" answers kept in
+/// `PermissionState`) are not modes, so a session holding them reports the same base as one that prompts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EffectivePermissionMode {
+    Default,
+    AcceptEdits,
+    Auto,
+    DontAsk,
+    /// `permissions.defaultMode=bypassPermissions`: a catch-all `Allow Any` rule, yolo flag not set.
+    BypassPermissions,
+    /// A user, project or CLI catch-all `Allow Any` rule (see `rule_is_catchall`) that is not the
+    /// `bypassPermissions` synthetic one: everything auto-approves while the mode setting says otherwise.
+    AllowAnyRule,
+    /// Run-time always-approve flag (`PermissionHandle::set_yolo_mode`).
+    Yolo,
+    /// The `PermissionHandle::AllowAll` handle variant.
+    AllowAll,
+    /// `PromptPolicy::Allow` from `startupHints.permissionMode=alwaysAllow`.
+    AlwaysAllow,
+}
+
+impl EffectivePermissionMode {
+    /// Every value, for exhaustive round-trip tests.
+    pub const ALL: [Self; 9] = [
+        Self::Default,
+        Self::AcceptEdits,
+        Self::Auto,
+        Self::DontAsk,
+        Self::BypassPermissions,
+        Self::AllowAnyRule,
+        Self::Yolo,
+        Self::AllowAll,
+        Self::AlwaysAllow,
+    ];
+}
+
+/// The three independent dimensions a session reports. Two sessions are equal only when all three are equal:
+/// an active plan does not hide the base (shell, MCP and web still auto-approve under plan), and the
+/// session edit grant ("allow edits for this session") is its own flag because it changes what is auto-approved
+/// under every base. It is not normalised away under any base: over-reporting only causes an extra hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EffectivePeerMode {
+    pub plan_active: bool,
+    pub base: EffectivePermissionMode,
+    pub session_edit_grant: bool,
+}
+
+impl From<EffectivePermissionMode> for fuigo_peer::PeerBase {
+    fn from(m: EffectivePermissionMode) -> Self {
+        use EffectivePermissionMode as M;
+        match m {
+            M::Default => Self::Default,
+            M::AcceptEdits => Self::AcceptEdits,
+            M::Auto => Self::Auto,
+            M::DontAsk => Self::DontAsk,
+            M::BypassPermissions => Self::BypassPermissions,
+            M::AllowAnyRule => Self::AllowAnyRule,
+            M::Yolo => Self::Yolo,
+            M::AllowAll => Self::AllowAll,
+            M::AlwaysAllow => Self::AlwaysAllow,
+        }
+    }
+}
+
+impl From<fuigo_peer::PeerBase> for EffectivePermissionMode {
+    fn from(b: fuigo_peer::PeerBase) -> Self {
+        use fuigo_peer::PeerBase as B;
+        match b {
+            B::Default => Self::Default,
+            B::AcceptEdits => Self::AcceptEdits,
+            B::Auto => Self::Auto,
+            B::DontAsk => Self::DontAsk,
+            B::BypassPermissions => Self::BypassPermissions,
+            B::AllowAnyRule => Self::AllowAnyRule,
+            B::Yolo => Self::Yolo,
+            B::AllowAll => Self::AllowAll,
+            B::AlwaysAllow => Self::AlwaysAllow,
+        }
+    }
+}
+
+/// The envelope's sender mode for this report: all three dimensions, nothing folded.
+impl From<EffectivePeerMode> for fuigo_peer::PeerMode {
+    fn from(m: EffectivePeerMode) -> Self {
+        fuigo_peer::PeerMode::new(m.plan_active, m.base.into(), m.session_edit_grant)
+    }
+}
+
+/// `Err(())` for `PeerMode::Unknown`: a mode this build cannot read has no local equivalent.
+impl TryFrom<fuigo_peer::PeerMode> for EffectivePeerMode {
+    type Error = ();
+    fn try_from(m: fuigo_peer::PeerMode) -> Result<Self, ()> {
+        let k = m.known().ok_or(())?;
+        Ok(Self {
+            plan_active: k.plan_active,
+            base: k.base.into(),
+            session_edit_grant: k.session_edit_grant,
+        })
+    }
+}
+
+pub(crate) fn base_mode_of(config: Option<&PermissionConfig>) -> EffectivePermissionMode {
+    let Some(c) = config else {
+        return EffectivePermissionMode::Default;
+    };
+    match c.prompt_policy {
+        PromptPolicy::Allow => return EffectivePermissionMode::AlwaysAllow,
+        PromptPolicy::Ask | PromptPolicy::Auto | PromptPolicy::Deny => {}
+    }
+    if c.resolved_base == ResolvedBaseMode::BypassPermissions {
+        return EffectivePermissionMode::BypassPermissions;
+    }
+    if c.rules.iter().any(|r| {
+        matches!(r.action, RuleAction::Allow)
+            && matches!(r.tool, ToolFilter::Any)
+            && crate::permission::policy::rule_is_catchall(r)
+    }) {
+        return EffectivePermissionMode::AllowAnyRule;
+    }
+    match c.prompt_policy {
+        PromptPolicy::Deny => EffectivePermissionMode::DontAsk,
+        _ => match c.resolved_base {
+            ResolvedBaseMode::Default | ResolvedBaseMode::BypassPermissions => {
+                EffectivePermissionMode::Default
+            }
+            ResolvedBaseMode::AcceptEdits => EffectivePermissionMode::AcceptEdits,
+        },
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1271,5 +1447,35 @@ pub(crate) mod tests {
             serde_json::from_value::<ClientType>("generic".into()).unwrap(),
             ClientType::Generic,
         );
+    }
+}
+
+#[cfg(test)]
+mod peer_mode_wire_tests {
+    use super::*;
+
+    /// Finding 5: every base x plan x grant converts to the wire type, survives JSON, and converts back.
+    #[test]
+    fn every_report_combination_round_trips_through_the_wire_type() {
+        let mut n = 0;
+        for base in EffectivePermissionMode::ALL {
+            for plan_active in [false, true] {
+                for session_edit_grant in [false, true] {
+                    let r = EffectivePeerMode { plan_active, base, session_edit_grant };
+                    let wire = fuigo_peer::PeerMode::from(r);
+                    let json = serde_json::to_string(&wire).unwrap();
+                    let back: fuigo_peer::PeerMode = serde_json::from_str(&json).unwrap();
+                    assert_eq!(back, wire, "{json}");
+                    assert_eq!(EffectivePeerMode::try_from(back), Ok(r), "{json}");
+                    n += 1;
+                }
+            }
+        }
+        assert_eq!(n, 36);
+        assert_eq!(EffectivePeerMode::try_from(fuigo_peer::PeerMode::Unknown), Err(()));
+        for b in fuigo_peer::PeerBase::ALL {
+            assert_eq!(fuigo_peer::PeerBase::from(EffectivePermissionMode::from(b)), b);
+        }
+        assert_eq!(fuigo_peer::PeerBase::ALL.len(), EffectivePermissionMode::ALL.len());
     }
 }

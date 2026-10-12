@@ -393,7 +393,7 @@ mod tests {
 
 /// P198 round 2: one fixture and one set of assertions that every walker and every search tool is run against, so the
 /// three `list_dir` walkers and the three grep tools are held to the same contract through their own tool entry points.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) mod fixture {
     use std::future::Future;
     use std::path::PathBuf;

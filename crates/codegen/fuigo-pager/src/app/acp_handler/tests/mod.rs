@@ -2308,6 +2308,7 @@ pub(super) fn make_server_status_notif(
         status,
         reason: McpServerStatusReason::Initialized,
         detail: None,
+        failure_kind: None,
         tools,
     };
     let raw = serde_json::value::to_raw_value(&payload).unwrap();
@@ -2403,3 +2404,4 @@ mod version_mismatch;
 mod relay_refused;
 mod leader_notice;
 mod hooks;
+mod peer_ui;

@@ -205,6 +205,8 @@ pub struct ToolContext {
     pub prompt_index: Arc<tokio::sync::Mutex<usize>>,
     /// Lock-free mirror of `prompt_index`, read synchronously to attribute an active message to its parent prompt.
     pub(crate) active_message_parent_prompt_index: Arc<std::sync::atomic::AtomicUsize>,
+    /// Peer-influenced flag (S6.1), shared with this session's permission handle; a child session starts from its parent's value.
+    pub(crate) peer_influence: fuigo_workspace::permission::PeerInfluence,
     /// Top-level sessions start at 0; child sessions are parent_depth + 1.
     pub subagent_depth: u32,
     /// Carries spawn, query, cancel, list-active, completions, and outstanding messages to the coordinator.
@@ -357,6 +359,7 @@ impl ToolContext {
             hunk_tracking_enabled: true,
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
             active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            peer_influence: fuigo_workspace::permission::PeerInfluence::new(),
             subagent_depth: 0,
             subagent_event_tx: None,
             subagent_coordinator_sender: None,
@@ -453,6 +456,7 @@ mod tests {
                 active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(
                     0,
                 )),
+                peer_influence: fuigo_workspace::permission::PeerInfluence::new(),
                 subagent_depth: 0,
                 subagent_event_tx: None,
                 subagent_coordinator_sender: None,

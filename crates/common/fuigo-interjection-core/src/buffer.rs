@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::events::EventQueue;
-use crate::format::{format_interjection, format_parent_agent_interjection};
+use crate::format::{format_interjection, format_parent_agent_interjection, format_peer_interjection};
 
 /// Who authored a buffered interjection.
 ///
@@ -24,6 +24,9 @@ pub enum InterjectionAuthority {
         message_id: String,
         sender_session_id: String,
     },
+    /// A message from a peer session (peer messaging). The text is already wrapped by the receive path
+    /// (`<cross-session-message>` plus the fixed note) and must reach the model exactly as wrapped.
+    Peer { message_id: String, from: String },
 }
 
 /// A buffered mid-turn interjection awaiting the next safe drain point.
@@ -79,6 +82,7 @@ pub fn drain_formatted<Attachment>(
                 InterjectionAuthority::ParentAgent { .. } => {
                     format_parent_agent_interjection(sanitize_text(entry.text))
                 }
+                InterjectionAuthority::Peer { .. } => format_peer_interjection(entry.text),
             },
             attachments: entry.attachments,
         })
@@ -140,5 +144,21 @@ mod tests {
             "got: {}",
             out[0].text
         );
+    }
+
+    #[test]
+    fn drain_formatted_leaves_a_peer_entry_exactly_as_wrapped() {
+        let buf: InterjectionBuffer<()> = InterjectionBuffer::new();
+        let wrapped = "note\n<cross-session-message from=\"a\">\nbody\n</cross-session-message>".to_string();
+        buf.push(PendingInterjection {
+            text: wrapped.clone(),
+            authority: InterjectionAuthority::Peer {
+                message_id: "m1".into(),
+                from: "fuigo-peer:x".into(),
+            },
+            ..Default::default()
+        });
+        let out = drain_formatted(&buf, |t| t.replace("body", "SANITIZED"));
+        assert_eq!(out[0].text, wrapped, "peer text is neither sanitized, truncated nor re-framed");
     }
 }

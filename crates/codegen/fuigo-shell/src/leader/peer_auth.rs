@@ -113,11 +113,11 @@ pub(crate) mod win {
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    fn code(e: &windows::core::Error) -> u32 {
+    pub(crate) fn code(e: &windows::core::Error) -> u32 {
         (e.code().0 as u32) & 0xFFFF
     }
 
-    struct Owned(HANDLE);
+    pub(crate) struct Owned(pub(crate) HANDLE);
     impl Drop for Owned {
         fn drop(&mut self) {
             // SAFETY: the handle was opened by this module and is closed once.
@@ -126,7 +126,7 @@ pub(crate) mod win {
     }
 
     /// `S-1-...` text of a SID.
-    fn sid_to_string(sid: PSID) -> Result<String, u32> {
+    pub(crate) fn sid_to_string(sid: PSID) -> Result<String, u32> {
         let mut text = PWSTR::null();
         // SAFETY: `sid` points at a valid SID owned by the caller; `text` receives a LocalAlloc'd string.
         unsafe { ConvertSidToStringSidW(sid, &mut text) }.map_err(|e| code(&e))?;
@@ -137,28 +137,40 @@ pub(crate) mod win {
         s
     }
 
+    /// The raw bytes of one `GetTokenInformation` class (8-byte aligned), or the Win32 error.
+    pub(crate) fn token_info_buf(
+        token: HANDLE,
+        class: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
+    ) -> Result<Vec<u64>, u32> {
+        let mut needed = 0u32;
+        // SAFETY: size probe; the expected failure is "insufficient buffer" and sets `needed`.
+        let _ = unsafe { GetTokenInformation(token, class, None, 0, &mut needed) };
+        if needed == 0 {
+            return Err(0);
+        }
+        // u64 elements: the buffer is at least 8-byte aligned for TOKEN_USER and the other token structs.
+        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+        // SAFETY: `buf` holds at least `needed` bytes.
+        unsafe { GetTokenInformation(token, class, Some(buf.as_mut_ptr().cast()), needed, &mut needed) }
+            .map_err(|e| code(&e))?;
+        Ok(buf)
+    }
+
+    /// The user SID text of an open token (needs `TOKEN_QUERY`).
+    pub(crate) fn token_user_sid(token: HANDLE) -> Result<String, u32> {
+        let buf = token_info_buf(token, TokenUser)?;
+        // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points into the same buffer.
+        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        sid_to_string(sid)
+    }
+
     /// The token user SID text of the process behind `process` (needs `PROCESS_QUERY_LIMITED_INFORMATION`).
     fn process_token_user_sid(process: HANDLE) -> Result<String, u32> {
         let mut token = HANDLE::default();
         // SAFETY: `process` is a live process handle; `token` is writable.
         unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(|e| code(&e))?;
         let token = Owned(token);
-        let mut needed = 0u32;
-        // SAFETY: size probe; the expected failure is "insufficient buffer" and sets `needed`.
-        let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut needed) };
-        if needed == 0 {
-            return Err(0);
-        }
-        // u64 elements: the buffer is at least 8-byte aligned for TOKEN_USER.
-        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
-        // SAFETY: `buf` holds at least `needed` bytes.
-        unsafe {
-            GetTokenInformation(token.0, TokenUser, Some(buf.as_mut_ptr().cast()), needed, &mut needed)
-        }
-        .map_err(|e| code(&e))?;
-        // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points into the same buffer.
-        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-        sid_to_string(sid)
+        token_user_sid(token.0)
     }
 
     /// The user account of this process.
@@ -168,7 +180,7 @@ pub(crate) mod win {
     }
 
     /// The user account of process `pid`, from its token. Opening uses the least access (`PROCESS_QUERY_LIMITED_INFORMATION`).
-    fn peer_token_sid(pid: u32) -> Result<String, u32> {
+    pub(crate) fn peer_token_sid(pid: u32) -> Result<String, u32> {
         // SAFETY: plain Win32 call; the handle is owned by `Owned`.
         let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.map_err(|e| code(&e))?;
         let process = Owned(process);
@@ -249,7 +261,7 @@ pub(crate) mod win {
             Self::from_sddl(&format!("O:{me}D:P(A;;GA;;;SY)(A;;GA;;;{me})"))
         }
 
-        fn from_sddl(sddl: &str) -> io::Result<Self> {
+        pub(crate) fn from_sddl(sddl: &str) -> io::Result<Self> {
             let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
             let mut sd = PSECURITY_DESCRIPTOR::default();
             // SAFETY: `wide` is NUL-terminated; `sd` receives a LocalAlloc'd descriptor freed in `Drop`.
@@ -265,7 +277,7 @@ pub(crate) mod win {
             Ok(Self { sd, attrs })
         }
 
-        fn as_raw(&mut self) -> *mut c_void {
+        pub(crate) fn as_raw(&mut self) -> *mut c_void {
             (&mut self.attrs as *mut SECURITY_ATTRIBUTES).cast()
         }
     }

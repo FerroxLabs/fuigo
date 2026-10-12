@@ -1,0 +1,15 @@
+Read-only audit of Fuigo packet P189 in this git worktree (branch strike/p189, base 6221893ca0ab30b611b1e46305a8a791a859e37b).
+Review `git diff 6221893ca..HEAD` (commits 3cf2af24f, adf070e8d, the test-id fix, 7631a28ed). Wire spec: docs/strike/receipts/R189-p189.md, section "Wire spec (for Murage)" (untracked file in the worktree; read it from disk).
+
+Feature: ACP extension methods `_fuigo/session/park {sessionId, mode: hold|stop, timeoutMs}` and `_fuigo/session/unpark`, for Murage, which keeps one Fuigo process warm between user messages. Requirements:
+R1 While parked: no self-started turn (task/subagent/workflow wakes stay queued; notification drain idle), no model call in the session or its subagents, summary/title generation deferred.
+R2 Park replies only once the session is idle; timeout and typed -32010 error with reasons timeout|stop_incomplete|park_in_progress|withdrawn|session_closed; failure leaves the session unparked.
+R3 No frame of any kind for the parked session (or process-wide) may be written after the park reply, until unpark/prompt (agent/park_hold.rs ParkHoldClient wraps the connection). Requests are held unsent.
+R4 mode stop: no process the session's tools started may be alive after parked:true, including setsid / process-group descendants (fuigo-tools FUIGO_AGENT_PID env marker + session/tool_reaper.rs /proc scan, confirm dead), else stop_incomplete.
+R5 No scheduler timer fires while parked (fuigo-tools scheduler SetPaused); implicit unpark (session/prompt) folds due fires into the user's turn as a reminder.
+R6 Every frame released at unpark carries _meta["fuigo/released"]=true, then one `_fuigo/session_notification` update `unparked` {released:{frames,droppedFrames}}, before the prompt's first frame (implicit) or before the unpark reply (explicit).
+R7 Implicit unpark answers held request_permission / ask_user_question of the old turn as cancelled and never sends them; explicit unpark sends them marked released.
+R8 session/load on a parked session does not unpark; writes only its reply (replay frames with _meta.isReplay pass); may reconnect MCP servers; reply waits until each MCP server is ready/failed (bounded) and carries result._meta["fuigo/mcpReady"]={servers:[{name,status}]}; no mcp_initialized notification is written while parked.
+R9 Capability advertised in initialize at agentCapabilities._meta["fuigo/capabilities"].sessionPark.
+
+For EACH of R1..R9 answer FIXED or NOT FIXED with file:line evidence. Then list NEW regressions compared with 6221893ca and v1.0.21 behaviour for clients that never call park (everything must be unchanged for them), ordering/race bugs (single-threaded LocalSet ordering of the hold vs the ack, unpark races, held-request wakeups), deadlocks, leaks (registry entries, held queues), and security issues (the /proc scan + SIGKILL must never kill a process not started by this Fuigo process's tools). Rate each finding BLOCKER/HIGH/MEDIUM/LOW. End with a line: LAND-OK or NOT-LAND-OK.

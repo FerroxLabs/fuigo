@@ -172,6 +172,7 @@ async fn generic_tool_completion_chokepoint_has_exact_active_message_cardinality
                     actor.tool_context.hunk_tracker_handle.clone(),
                     actor.agent.borrow().tool_bridge().toolset(),
                     None,
+                    actor.tool_context.peer_influence.clone(),
                 )
                 .expect("bind_local_session must succeed");
             actor

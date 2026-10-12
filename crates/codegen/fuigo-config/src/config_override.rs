@@ -97,6 +97,42 @@ pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
     "fuigo_com_config",
 ];
 
+/// Dotted paths a campaign patch (remote, `[[campaigns]]` in any layer, `FUIGO_CAMPAIGNS_OVERRIDE`) may never set:
+/// `features.peer_messaging` lets sessions message each other and only the user or the machine's admin may turn it on.
+pub const CAMPAIGN_STRIP_PATHS: &[&str] = &["features.peer_messaging"];
+
+/// Remove [`CAMPAIGN_STRIP_PATHS`] from `patch`; a table the removal leaves empty is dropped too.
+pub fn strip_campaign_paths(patch: &mut toml::Table) {
+    for dotted in CAMPAIGN_STRIP_PATHS {
+        let path: Vec<&str> = dotted.split('.').collect();
+        remove_nested(patch, &path);
+    }
+}
+
+/// Remove the leaf at `path`, and every table the removal leaves empty on the way up.
+fn remove_nested(patch: &mut toml::Table, path: &[&str]) {
+    let Some((key, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        patch.remove(*key);
+        return;
+    }
+    match patch.get_mut(*key) {
+        Some(toml::Value::Table(nested)) => {
+            remove_nested(nested, rest);
+            if nested.is_empty() {
+                patch.remove(*key);
+            }
+        }
+        // A non-table ancestor would clobber everything beneath it on merge.
+        Some(_) => {
+            patch.remove(*key);
+        }
+        None => {}
+    }
+}
+
 /// Dotted paths the `FUIGO_CONFIG` / `FUIGO_CONFIG_PATH` overlay may set.
 /// They are applied at [`crate::env_overlay`]'s finalize step by [`retain_overlay_allowed`].
 /// A length-1 path keeps the whole soft top-level table; a deeper path keeps only that leaf.

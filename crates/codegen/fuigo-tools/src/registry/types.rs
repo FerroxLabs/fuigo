@@ -699,6 +699,9 @@ impl ToolRegistryBuilder {
         b.register::<fuigo_build::WaitTasksTool>();
         b.register::<fuigo_build::TaskTool>();
         b.register::<fuigo_build::SendSubagentMessageTool>();
+        b.register::<fuigo_build::ListAgentsTool>();
+        b.register::<fuigo_build::SendMessageTool>();
+        b.register::<fuigo_build::RefusePeerMessageTool>();
         b.register::<fuigo_build::WebSearchTool>();
         b.register_with_params::<fuigo_build::WebFetchTool, fuigo_build::web_fetch::WebFetchParams>();
         b.register::<fuigo_build::LspTool>();

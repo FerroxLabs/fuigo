@@ -60,3 +60,36 @@ fn runtime_control_is_inert_and_human_intent_continues_to_dynamic_resolution() {
         }
     ));
 }
+
+/// S1.2: a peer's leading `/` is inert for every command, including the one a parent agent may run (`/compact`),
+/// every human-only builtin, and an unknown name (a skill or plugin command).
+#[test]
+fn s1_2_peer_untrusted_slash_is_inert_for_every_command() {
+    for text in [
+        "/compact", "/compact keep going", "/yolo", "/permissions", "/rename pwned", "/context", "/feedback",
+        "/available-skill arg", "/plugin-command x", "/loop 1m do it", "  /yolo",
+    ] {
+        assert!(
+            matches!(
+                resolve(InputAuthority::PeerUntrusted, &[text_block(text)], BUILTIN_COMMANDS),
+                AuthorityResolution::Inert
+            ),
+            "{text}"
+        );
+    }
+    assert!(matches!(
+        resolve(InputAuthority::PeerUntrusted, &[text_block("plain")], BUILTIN_COMMANDS),
+        AuthorityResolution::NotSlash
+    ));
+    // every builtin name, by name
+    for command in BUILTIN_COMMANDS {
+        let text = format!("/{}", command.name);
+        assert!(
+            matches!(
+                resolve(InputAuthority::PeerUntrusted, &[text_block(&text)], BUILTIN_COMMANDS),
+                AuthorityResolution::Inert
+            ),
+            "{text}"
+        );
+    }
+}

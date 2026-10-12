@@ -15,6 +15,8 @@ fn concurrent_writers_lose_no_401_count() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join(FILE_NAME);
     test_clock::SLEEP_BETWEEN_LOAD_AND_SAVE_US.store(1500, Ordering::SeqCst);
+    // No writer may give up on the lock here, however loaded the machine: the 200 ms give-up is its own test.
+    test_clock::LOCK_WAIT_MS.store(120_000, Ordering::SeqCst);
     let workers: Vec<_> = ["fuigo-test-not-a-key-a", "fuigo-test-not-a-key-b"]
         .into_iter()
         .map(|cred| {
@@ -34,6 +36,11 @@ fn concurrent_writers_lose_no_401_count() {
         w.join().unwrap();
     }
     test_clock::SLEEP_BETWEEN_LOAD_AND_SAVE_US.store(0, Ordering::SeqCst);
+    test_clock::LOCK_WAIT_MS.store(0, Ordering::SeqCst);
+    // A writer that waited the full 200 ms and went on unlocked can lose an update through no fault of the lock:
+    // that is a stalled test machine, not a lost update under the lock, so say so before the counts are judged.
+    let unlocked = test_clock::unlocked_updates(&path);
+    assert_eq!(unlocked, 0, "MISSED LOCK: {unlocked} update(s) ran without the lock (it could not be opened or never freed); a lost count would be that, not the lock failing");
     let store = RouteMemory::at(path).load();
     assert_eq!(store.models_401_url.len(), 1);
     assert_eq!(store.models_401_url[0].n, 200, "every one of the 200 updates is counted");
@@ -90,4 +97,38 @@ fn a_lock_held_too_long_is_given_up_on() {
     assert!(start.elapsed() < std::time::Duration::from_secs(2), "bounded wait");
     assert!(mem.models_wait(URL, &["fuigo-test-not-a-key-a"], T0 + 1).is_some());
     holder.unlock().unwrap();
+}
+
+/// Another process cleared the URL row in the file (after a 200). This process kept a copy only because ITS write
+/// had failed. Once a successful read shows a file that changed since then and lacks the row, the copy goes.
+#[test]
+#[serial]
+fn a_row_another_process_cleared_is_dropped_after_a_good_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    let (a, b) = (RouteMemory::at(path.clone()), RouteMemory::at(path.clone()));
+    // The file exists and is readable; process A's write failed, so only A holds the 3-deep URL run.
+    for k in 0..3 {
+        b.note_models_401(URL, &[&format!("fuigo-test-not-a-key-{k}")], T0 + k);
+    }
+    let seen = a.stamp();
+    let held: Vec<Unsaved> = b.load().models_401_url.into_iter().map(|e| Unsaved { path: path.clone(), url_level: true, e, seen }).collect();
+    unsaved().extend(held);
+    // Another process rewrites the file without the row (a longer file, so the stamp differs for certain).
+    std::fs::write(&path, br#"{"models_401":[],"models_401_url":[]}"#).unwrap();
+    assert!(a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10).is_none(), "cleared elsewhere: not waiting");
+}
+
+/// The opposite: our write failed, nobody else wrote, the file is readable but unchanged since: the wait stays.
+#[test]
+#[serial]
+fn a_row_nobody_cleared_stays_when_the_file_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(FILE_NAME);
+    std::fs::write(&path, br#"{}"#).unwrap();
+    let a = RouteMemory::at(path.clone());
+    let uh = hash(&["models-401-url-v1", &normalise(URL).unwrap()]);
+    unsaved().push(Unsaved { path: path.clone(), url_level: true, e: Rejected { h: uh, n: 3, t: T0 }, seen: a.stamp() });
+    assert!(a.models_wait(URL, &["fuigo-test-not-a-key-new"], T0 + 10).is_some(), "still held");
+    unsaved().retain(|u| u.path != path);
 }

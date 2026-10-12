@@ -70,6 +70,8 @@ pub struct SpawnSnapshot {
 #[derive(Clone)]
 pub struct SessionHandle {
     pub cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    /// Opt-in state and in-flight count the peer inbox reads without asking the actor (shared with the admission state).
+    pub(crate) peer_gate: std::sync::Arc<super::message_delivery::PeerGate>,
     /// Persistence channel shared with the actor (used by extension handlers).
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     /// Current running prompt/turn id, if any.
@@ -188,11 +190,134 @@ pub struct SessionHandle {
         Option<fuigo_tools::implementations::fuigo_build::scheduler::types::SchedulerHandle>,
 }
 impl SessionHandle {
+    /// Peer admission (packet 4), in-process only: one round trip to the actor. `None` when the session is gone.
+    #[cfg_attr(not(test), allow(dead_code))]
+    async fn peer_admin(
+        &self,
+        cmd: super::peer_admission::PeerAdminCmd,
+    ) -> Option<super::peer_admission::PeerAdminReply> {
+        let (respond_to, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(SessionCommand::PeerAdmission { cmd, respond_to })
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// Submit a message from a peer: admit, hold or refuse (S4). With `features.peer_messaging` off nothing is sent or stored.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn submit_peer_message(
+        &self,
+        envelope: fuigo_peer::Envelope,
+    ) -> super::peer_admission::PeerSubmit {
+        use super::peer_admission::{PeerAdminCmd, PeerAdminReply, PeerSubmit};
+        if !super::peer_message::peer_messaging_enabled() {
+            return PeerSubmit::Outcome(fuigo_peer::DeliveryOutcome::Rejected {
+                reason: fuigo_peer::RejectReason::Unavailable,
+            });
+        }
+        match self.peer_admin(PeerAdminCmd::Submit(Box::new(envelope))).await {
+            Some(PeerAdminReply::Submit(r)) => r,
+            _ => PeerSubmit::SessionClosed,
+        }
+    }
+
+    /// Operator releases a held message. Needs the single-use token from [`Self::list_held_peer_messages`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn release_peer_message(
+        &self,
+        message_id: &str,
+        token: &str,
+    ) -> Result<super::peer_admission::ReleaseOutcome, super::peer_admission::ReleaseError> {
+        use super::peer_admission::{PeerAdminCmd, PeerAdminReply, ReleaseError};
+        if !super::peer_message::peer_messaging_enabled() {
+            return Err(ReleaseError::Unavailable);
+        }
+        match self
+            .peer_admin(PeerAdminCmd::Release { message_id: message_id.into(), token: token.into() })
+            .await
+        {
+            Some(PeerAdminReply::Release(r)) => r,
+            _ => Err(ReleaseError::NotFound),
+        }
+    }
+
+    /// Operator refuses a held message.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn reject_peer_message(
+        &self,
+        message_id: &str,
+        token: &str,
+    ) -> Result<(), super::peer_admission::ReleaseError> {
+        use super::peer_admission::{PeerAdminCmd, PeerAdminReply, ReleaseError};
+        if !super::peer_message::peer_messaging_enabled() {
+            return Err(ReleaseError::Unavailable);
+        }
+        match self
+            .peer_admin(PeerAdminCmd::Reject { message_id: message_id.into(), token: token.into() })
+            .await
+        {
+            Some(PeerAdminReply::Reject(r)) => r,
+            _ => Err(ReleaseError::NotFound),
+        }
+    }
+
+    /// Held messages with fresh tokens (old tokens die). Empty with the flag off.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn list_held_peer_messages(&self) -> Vec<super::peer_admission::HeldSummary> {
+        use super::peer_admission::{PeerAdminCmd, PeerAdminReply};
+        if !super::peer_message::peer_messaging_enabled() {
+            return Vec::new();
+        }
+        match self.peer_admin(PeerAdminCmd::ListHeld).await {
+            Some(PeerAdminReply::Held(h)) => h,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Held rows with EMPTY tokens; voids no token (the ACP event pump reads this, never `list_held_peer_messages`).
+    pub(crate) async fn peer_held_snapshot(&self) -> Vec<super::peer_admission::HeldSummary> {
+        use super::peer_admission::{PeerAdminCmd, PeerAdminReply};
+        if !super::peer_message::peer_messaging_enabled() {
+            return Vec::new();
+        }
+        match self.peer_admin(PeerAdminCmd::HeldSnapshot).await {
+            Some(PeerAdminReply::Held(h)) => h,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The session actor has gone (its command channel is closed).
+    pub(crate) fn peer_actor_gone(&self) -> bool {
+        self.cmd_tx.is_closed()
+    }
+
+    /// The host sets opt-in, inbound policy and operator presence for this session.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn configure_peer_admission(&self, config: super::peer_admission::PeerAdmissionConfig) {
+        if !super::peer_message::peer_messaging_enabled() {
+            return;
+        }
+        let _ = self.peer_admin(super::peer_admission::PeerAdminCmd::Configure(config)).await;
+    }
+
+    /// Collect delivery notices (released, expired, refused, re-held) recorded since the last call.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn take_peer_notices(&self) -> Vec<super::peer_admission::PeerNotice> {
+        if !super::peer_message::peer_messaging_enabled() {
+            return Vec::new();
+        }
+        match self.peer_admin(super::peer_admission::PeerAdminCmd::TakeNotices).await {
+            Some(super::peer_admission::PeerAdminReply::Notices(n)) => n,
+            _ => Vec::new(),
+        }
+    }
+
     pub(crate) fn message_delivery(&self) -> super::message_delivery::MessageDeliveryHandle {
         super::message_delivery::MessageDeliveryHandle::new(
             self.cmd_tx.clone(),
             self.info.id.0.to_string(),
         )
+        .with_gate(self.peer_gate.clone())
     }
     /// Last assistant `model_id` / `model_fingerprint` in conversation (global, not turn-scoped).
     pub(crate) async fn get_model_metadata(&self) -> fuigo_chat_state::ModelMetadata {
@@ -235,6 +360,7 @@ impl SessionHandle {
             .send(SessionCommand::KillBackgroundTask {
                 task_id: task_id.to_string(),
                 source,
+                park: None,
                 respond_to: tx,
             })
             .is_err()

@@ -30,10 +30,11 @@ fn tool_overrides_capability() -> serde_json::Value {
 /// `retryDiscard` (P188) announces the `retry_state` discard signal (`discardEmitted`, `streamStartMs`).
 /// `authenticateApiKey` (P08) tells a client, before it authenticates, that `authenticate` accepts a key in
 /// `_meta["fuigo/apiKey"]` even when `authMethods` is empty (Contract E.3 keeps the empty list for a credential-less start).
-fn fuigo_capabilities() -> serde_json::Value {
+pub(crate) fn fuigo_capabilities() -> serde_json::Value {
     let mut caps = serde_json::json!({
         "toolOverrides": tool_overrides_capability(),
         "authenticateApiKey": auth_method::runtime_api_key_capability(),
+        "sessionPark": session_park_capability(),
         // P188: `retry_state` `retrying` carries `discardEmitted` (and `streamStartMs`) when a resend voids output
         // the client already received. A client resets on `discardEmitted` only when this key is present.
         "retryDiscard": { "version": 1 },
@@ -42,7 +43,33 @@ fn fuigo_capabilities() -> serde_json::Value {
     caps.as_object_mut()
         .expect("capabilities is an object")
         .extend(crate::agent::init_flags::capability_entries());
+    // Packet 13: advertised only with `features.peer_messaging` on; with it off the object is byte-identical to before.
+    if crate::session::peer_message::peer_messaging_enabled() {
+        caps.as_object_mut()
+            .expect("capabilities is an object")
+            .insert("peerMessaging".to_owned(), crate::extensions::peer::capability());
+    }
     caps
+}
+/// P189: `_fuigo/session/park` / `_fuigo/session/unpark` (wire spec in `docs/strike/receipts/R189-p189.md`).
+/// Shape shared by every entry of `fuigo/capabilities`: an object with a `version` the client compares, plus the
+/// facts it needs before it calls (P190's interject/queue entries follow the same shape).
+pub(crate) fn session_park_capability() -> serde_json::Value {
+    use crate::extensions::session_park as park;
+    serde_json::json!({
+        "version": 1,
+        "methods": ["_fuigo/session/park", "_fuigo/session/unpark"],
+        "modes": crate::session::quiesce::advertised_modes(),
+        "defaultMode": "hold",
+        "defaultTimeoutMs": park::DEFAULT_PARK_TIMEOUT_MS,
+        "maxTimeoutMs": park::MAX_PARK_TIMEOUT_MS,
+        "errorCode": park::PARK_ERROR_CODE,
+        "promptWhileParked": "implicitUnpark",
+        "loadWhileParked": "staysParked",
+        "loadReplyMcpReady": true,
+        "releasedMetaKey": crate::agent::park_hold::RELEASED_META_KEY,
+        "unparkedUpdate": crate::agent::park_hold::UNPARKED_UPDATE,
+    })
 }
 /// The `authenticate` reply for a login that failed or that the user cancelled.
 /// Every embedding client calls `authenticate` on connect, and this is the failure path users hit most:
@@ -998,7 +1025,28 @@ impl acp::Agent for MvpAgent {
         &self,
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
-        self.load_session_inner(arguments).await
+        let session_id = arguments.session_id.clone();
+        // P189 (Astra r1 #6): a parked load's MCP reconnect may exchange `_fuigo/mcp/sdk_call` with the client,
+        // as part of answering the client's own load; other reverse MCP calls of the parked tree wait.
+        let _parked_load = crate::session::quiesce::entry(session_id.0.as_ref())
+            .is_some_and(|entry| entry.phase == crate::session::quiesce::ParkPhase::Parked)
+            .then(|| crate::session::quiesce::begin_parked_load(session_id.0.as_ref()));
+        let mut response = self.load_session_inner(arguments).await?;
+        // P189: a load does not unpark. A parked session may write nothing but this reply (and replay frames),
+        // so the MCP readiness Murage waits for rides in the reply instead of the `mcp_initialized` notification.
+        let parked = crate::session::quiesce::entry(session_id.0.as_ref())
+            .is_some_and(|entry| entry.phase == crate::session::quiesce::ParkPhase::Parked);
+        if parked && let Some(handle) = self.resident_handle(&session_id) {
+            let ready = crate::extensions::session_park::wait_mcp_settled(&handle).await;
+            response
+                .meta
+                .get_or_insert_with(acp::Meta::new)
+                .insert(
+                    crate::extensions::session_park::MCP_READY_META_KEY.to_owned(),
+                    ready,
+                );
+        }
+        Ok(response)
     }
     async fn list_sessions(
         &self,
@@ -1058,6 +1106,36 @@ impl acp::Agent for MvpAgent {
             .session_handle_waiting_for_load(&arguments.session_id)
             .await
             .ok_or_else(|| crate::acp_error::invalid_params("unknown session id"))?;
+        // P189: a prompt on a parked (or parking) session unparks it first. Held frames are written, then the
+        // prompt's own intake applies the usual user-first queue rules to the work the park deferred. The
+        // session starts no turn of its own until this prompt is queued; the guard finishes the unpark if the
+        // prompt never reaches the session.
+        // Owner decision 45 (2026-10-11): a scheduled-task fire never un-parks. While a park entry exists it is
+        // folded into the next real prompt and gets a normal `end_turn` reply (the pager's cron turn then ends
+        // cleanly and its queue moves on); it starts no turn and makes no model call.
+        if !crate::extensions::session_park::scheduled_fire_unparks()
+            && let Some(fire_id) = arguments
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("promptId"))
+                .and_then(|v| v.as_str())
+                .filter(|id| crate::extensions::session_park::is_scheduled_fire_id(id))
+            // Atomic with the park table: folded only while the session (or its root) is parking or parked.
+            && crate::extensions::session_park::fold_scheduled_fire(
+                arguments.session_id.0.as_ref(),
+                fire_id,
+                &arguments.prompt,
+            )
+        {
+            return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+        }
+        let _implicit_unpark = if crate::session::quiesce::entry(arguments.session_id.0.as_ref()).is_some() {
+            // Grok r4 #3: a prompt whose session is still parked after the unpark attempt fails here.
+            crate::extensions::session_park::implicit_unpark(self, &handle, arguments.session_id.0.as_ref())
+                .await?
+        } else {
+            None
+        };
         if self.models_manager.allowlist_excludes_all() {
             let message =
                 crate::agent::models::allowlist_excludes_all_message(&self.cfg.borrow());
@@ -1363,6 +1441,14 @@ impl acp::Agent for MvpAgent {
                 }
             }
         };
+        // The id is client-chosen, so it carries no authority: every client prompt is `User`, except a cron fire that
+        // redeems a single-use ticket this shell issued (`session::cron_fire_tickets`).
+        // The ticket is also bound to the prompt text: the blocks must be exactly the text the shell announced.
+        let prompt_origin = crate::session::cron_fire_tickets::client_prompt_origin(
+            arguments.session_id.0.as_ref(),
+            &prompt_id,
+            &arguments.prompt,
+        );
         let prompt_blocks = arguments.prompt.clone();
         let artifact_upload_ctx = trace_context
             .as_ref()
@@ -1383,6 +1469,7 @@ impl acp::Agent for MvpAgent {
                     json_schema,
                     send_now: true,
                     admission: None,
+                    origin: prompt_origin,
                     tool_overrides_update,
                     respond_to: tx,
                     prompt_admitted: None,
@@ -1407,6 +1494,7 @@ impl acp::Agent for MvpAgent {
                     traceparent,
                     json_schema,
                     tool_overrides_update,
+                    origin: prompt_origin,
                     respond_to: tx,
                     parsed_prompt_tx,
                 },
@@ -2361,6 +2449,10 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "fuigo/interject" => crate::extensions::interject::handle(self, &args).await,
+            "fuigo/session/park" => crate::extensions::session_park::handle_park(self, &args).await,
+            "fuigo/session/unpark" => {
+                crate::extensions::session_park::handle_unpark(self, &args).await
+            }
             "fuigo/feedback" | "fuigo/feedback/dismiss" | "fuigo/feedback/upload-trace"
             | "fuigo/btw" => crate::extensions::feedback::handle(self, &args).await,
             "fuigo/recap" => crate::extensions::recap::handle(self, &args).await,
@@ -2658,6 +2750,10 @@ impl acp::Agent for MvpAgent {
             }
             s if s.starts_with("fuigo/rewind") => {
                 crate::extensions::rewind::handle(self, &args).await
+            }
+            // Packet 13: only with the flag on. Off, the guard fails and the method is unknown like any other.
+            s if s.starts_with("fuigo/peer/") && crate::session::peer_message::peer_messaging_enabled() => {
+                crate::extensions::peer::handle(self, &args).await
             }
             other => {
                 // One copy of this message: `unknown_ext_method` also restores the `_` the protocol

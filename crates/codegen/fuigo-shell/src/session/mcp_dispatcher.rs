@@ -57,9 +57,28 @@ pub struct McpServerStatusPayload {
     /// Passes the full handshake / transport error reason to the UI verbatim (no sanitization or truncation) so failures are easy to debug.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Closed reason a start failed, decided from the error type. Lets a client that must not print `detail` (a headless
+    /// run) say why in fixed words. Absent from older senders; older clients ignore it.
+    /// A kind this build does not know decodes as `Unknown` instead of failing the whole payload.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_failure_kind"
+    )]
+    pub failure_kind: Option<fuigo_mcp::servers::McpFailureKind>,
     /// Reserved for future use; always `null` today.
     /// It may later carry the post-restart tool list so the client can re-render without a follow-up `mcp/list` round-trip.
     pub tools: Option<serde_json::Value>,
+}
+
+fn lenient_failure_kind<'de, D>(d: D) -> Result<Option<fuigo_mcp::servers::McpFailureKind>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.map(|v| {
+        serde_json::from_value(v).unwrap_or(fuigo_mcp::servers::McpFailureKind::Unknown)
+    }))
 }
 
 /// Status enum sent on the wire. Lowercase serialization to match the existing pager `McpSessionStatus` family.
@@ -255,14 +274,16 @@ pub(crate) fn build_payload(
     let (server, kind) = key;
     let source = classify_source(server);
 
+    let mut failure_kind = None;
     let (status, reason, detail) = match (kind, event) {
         (McpClientEventKind::TransportClosed, _) => (
             McpServerStatus::Unavailable,
             McpServerStatusReason::TransportClosed,
             None,
         ),
-        (McpClientEventKind::HandshakeFailed, McpClientEvent::HandshakeFailed { reason, .. }) => {
+        (McpClientEventKind::HandshakeFailed, McpClientEvent::HandshakeFailed { reason, failure, .. }) => {
             let detail = reason.clone();
+            failure_kind = Some(*failure);
             (
                 McpServerStatus::Unavailable,
                 McpServerStatusReason::HandshakeFailed,
@@ -313,6 +334,7 @@ pub(crate) fn build_payload(
         status,
         reason,
         detail,
+        failure_kind,
         tools: None,
     }
 }
@@ -877,6 +899,7 @@ mod tests {
             server: "linear".to_string(),
             // Internal service names and full length must pass through untouched: the UI shows the raw error
             reason: "cli-chat-proxy returned 502".to_string(),
+            failure: fuigo_mcp::servers::McpFailureKind::Other,
         };
         let payload = build_payload("sess1", &key, &ev);
         assert_eq!(payload.status, McpServerStatus::Unavailable);
@@ -895,11 +918,44 @@ mod tests {
         let ev = McpClientEvent::HandshakeFailed {
             server: "github".to_string(),
             reason: "401 Unauthorized".to_string(),
+            failure: fuigo_mcp::servers::McpFailureKind::NeedsAuth,
         };
         let payload = build_payload("sess1", &key, &ev);
         assert_eq!(payload.source, McpServerSource::Local);
         assert_eq!(payload.status, McpServerStatus::Unavailable);
         assert_eq!(payload.reason, McpServerStatusReason::HandshakeFailed);
+    }
+
+    /// The closed failure kind rides on the handshake-failed payload; other payloads carry none. A payload from an older
+    /// sender (no field) and one with unknown extra fields both still decode.
+    #[test]
+    fn payload_carries_failure_kind_and_tolerates_its_absence() {
+        use fuigo_mcp::servers::McpFailureKind;
+        let key = ("svr".to_string(), McpClientEventKind::HandshakeFailed);
+        let ev = McpClientEvent::HandshakeFailed {
+            server: "svr".to_string(),
+            reason: "401 Unauthorized".to_string(),
+            failure: McpFailureKind::NeedsAuth,
+        };
+        let payload = build_payload("s", &key, &ev);
+        assert_eq!(payload.failure_kind, Some(McpFailureKind::NeedsAuth));
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("\"failureKind\":\"needs_auth\""), "{json}");
+        let ready = build_payload("s", &("svr".to_string(), McpClientEventKind::Ready), &McpClientEvent::Ready { server: "svr".into() });
+        assert_eq!(ready.failure_kind, None);
+        assert!(!serde_json::to_string(&ready).unwrap().contains("failureKind"));
+        let old = r#"{"sessionId":"s","name":"a","source":"local","status":"unavailable","reason":"handshake_failed","tools":null,"someFutureField":1}"#;
+        let decoded: McpServerStatusPayload = serde_json::from_str(old).unwrap();
+        assert_eq!(decoded.failure_kind, None);
+        // A kind from a newer sender decodes as Unknown (string or struct shaped) and keeps the rest of the payload.
+        for kind in [r#""brand_new""#, r#"{"brand_new":{"x":1}}"#] {
+            let j = format!(
+                r#"{{"sessionId":"s","name":"a","source":"local","status":"unavailable","reason":"handshake_failed","failureKind":{kind},"tools":null}}"#
+            );
+            let d: McpServerStatusPayload = serde_json::from_str(&j).unwrap();
+            assert_eq!(d.failure_kind, Some(McpFailureKind::Unknown), "{kind}");
+            assert_eq!(d.name, "a");
+        }
     }
 
     /// Gateway catalog ids are `Managed`; `fuigo_com_*` spawned names are not.

@@ -6,6 +6,7 @@ edition.workspace = true
 description = "Core host-local workspace library (FS, VCS, execution, discovery) for fuigo-shell and remote sampler"
 
 [dependencies]
+fuigo-peer = { workspace = true }
 fuigo-secrets = { workspace = true }
 anyhow = { workspace = true }
 arc-swap = { workspace = true }

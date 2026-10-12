@@ -120,6 +120,16 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
+        // P189: a parked (or parking) session starts nothing; the queue runs at unpark. Its subagents may still be admitted and then wait at their first model call
+        if crate::session::quiesce::is_self_quiesced(self.session_info.id.0.as_ref()) {
+            tracing::debug!(
+                target: "qtrace",
+                event = "server_start_blocked",
+                session = self.session_info.id.0.as_ref(),
+                "maybe_start_running_task blocked: session parked"
+            );
+            return;
+        }
         // Fast path under the lock: nothing to promote.
         let may_combine;
         {
@@ -192,6 +202,8 @@ impl SessionActor {
                 session = self.session_info.id.0.as_ref(),
                 "maybe_start_running_task blocked: queue held after a hook block",
             );
+            // R3 #6: a child of a held root re-arms its wake here too (idempotent, no-op outside a park).
+            self.wake_peer_rows_after_hold(completion_tx.clone());
             return;
         }
 
@@ -200,6 +212,11 @@ impl SessionActor {
         // Drop stale synthetic fronts before promoting
         // Stale means already-reported workflow completions, and goal continuations whose goal is no longer Active
         // An Active goal queues a fresh continuation at turn end, so a leftover one here would jump ahead of the user's queue
+        // A peer row that no longer qualifies (opt-in, policy, either mode or the operator changed since it was admitted or
+        // released, or it is not tracked at all) goes back to held, or is dropped, before it can start a turn (S4.7). This runs
+        // AFTER the stale pops, so a peer row that a stale pop just exposed as the front is checked too, and it repeats until
+        // the front is stable. No-op when no peer row is queued.
+        let mut peer_demoted = false;
         loop {
             let stale = match state
                 .pending_inputs
@@ -228,11 +245,18 @@ impl SessionActor {
                 _ => false,
             };
             if !stale {
+                if self.demote_unqualified_peer_rows(&mut state, true) {
+                    peer_demoted = true;
+                    continue;
+                }
                 break;
             }
             if let Some(item) = state.pending_inputs.pop_front() {
                 Self::respond_removed_prompt(item.respond_to);
             }
+        }
+        if peer_demoted && state.pending_inputs.is_empty() {
+            return;
         }
 
         // Drop holds for rows no longer queued, then expire leaked holds so a client crash or dropped release cannot park the queue forever
@@ -270,7 +294,67 @@ impl SessionActor {
                 session = self.session_info.id.0.as_ref(),
                 "maybe_start_running_task blocked: front is under edit hold",
             );
+            // R3 #6: as at the hook-block return above.
+            self.wake_peer_rows_after_hold(completion_tx.clone());
             return;
+        }
+
+        // P189 A2: a peer message to a child of a held root (the child has no park entry of its own) starts no turn
+        // until the root is released. Every blocked start arms the wake HERE (at the block site, deduplicated), so a
+        // park that began after the row was admitted, or a re-park before this check, still gets a restart. A
+        // non-peer row queued behind the blocked peer rows (a parent message from the root's still-running turn)
+        // is started instead, so the park can drain; the peer rows stay queued in order.
+        if state
+            .pending_inputs
+            .front()
+            .is_some_and(|front| front.input_origin.as_prompt_origin().is_peer())
+            && crate::session::quiesce::is_ancestor_holding(self.session_info.id.0.as_ref())
+        {
+            self.wake_peer_rows_after_hold(completion_tx.clone());
+            let runnable = state.pending_inputs.iter().position(|item| {
+                !item.input_origin.as_prompt_origin().is_peer() && !state.edit_holds.contains_key(&item.prompt_id)
+            });
+            let Some(index) = runnable else {
+                tracing::debug!(
+                    target: "qtrace",
+                    event = "server_start_blocked",
+                    session = self.session_info.id.0.as_ref(),
+                    "maybe_start_running_task blocked: a peer message to a child of a held root"
+                );
+                return;
+            };
+            if let Some(item) = state.pending_inputs.remove(index) {
+                state.pending_inputs.push_front(item);
+            }
+        }
+
+        // P189 A2 r3: a scheduled-fire row on a child starts no turn while an ancestor has a park entry in ANY phase
+        // (`Unparking` included); it starts once the entry is gone. Client prompts and peer rows are unaffected here.
+        let is_fire_row = |item: &InputItem| {
+            matches!(item.input_origin.as_prompt_origin(), super::PromptOrigin::SchedulerFired)
+                || crate::extensions::session_park::is_scheduled_fire_id(&item.prompt_id)
+        };
+        if state.pending_inputs.front().is_some_and(is_fire_row)
+            && crate::session::quiesce::has_park_above(self.session_info.id.0.as_ref())
+        {
+            self.wake_scheduled_rows_after_park(completion_tx.clone());
+            let runnable = state.pending_inputs.iter().position(|item| {
+                !is_fire_row(item)
+                    && !item.input_origin.as_prompt_origin().is_peer()
+                    && !state.edit_holds.contains_key(&item.prompt_id)
+            });
+            let Some(index) = runnable else {
+                tracing::debug!(
+                    target: "qtrace",
+                    event = "server_start_blocked",
+                    session = self.session_info.id.0.as_ref(),
+                    "maybe_start_running_task blocked: a scheduled fire on a child of a parked root"
+                );
+                return;
+            };
+            if let Some(item) = state.pending_inputs.remove(index) {
+                state.pending_inputs.push_front(item);
+            }
         }
 
         if combine_queued {
@@ -364,6 +448,23 @@ impl SessionActor {
                 ),
             )
             .await;
+        #[cfg(test)]
+        super::peer_admit::run_after_resource_hook();
+        // Peer rows only: the permission-mode atomics can change during the await above, and `running_task` is set below under
+        // this same lock, so qualification is decided again here. If the row no longer qualifies the start is aborted (it is
+        // re-held or dropped exactly as the start-of-turn recheck does) and the next row, if any, gets its turn.
+        if input_origin.as_prompt_origin().is_peer() && self.demote_unqualified_peer_rows(&mut state, true) {
+            *self
+                .current_prompt_id
+                .lock()
+                .expect("current_prompt_id mutex poisoned") = None;
+            let more = !state.pending_inputs.is_empty();
+            drop(state);
+            if more {
+                Box::pin(Self::maybe_start_running_task(self, completion_tx)).await;
+            }
+            return;
+        }
 
         tracing::debug!(
             target: "qtrace",
@@ -466,6 +567,10 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
+        // P189: notifications stay pending while parked; unpark drains them
+        if crate::session::quiesce::is_self_quiesced(self.session_info.id.0.as_ref()) {
+            return;
+        }
         // Mid-turn tick: the parent may still be Responding so the idle hook never runs
         // Throttled so InjectNotification does not scan disk on every event
         if self

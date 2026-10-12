@@ -166,6 +166,7 @@ async fn decide_in(
             display_cwd: display_cwd.map(std::path::Path::to_path_buf),
         }),
         read_targets: read_targets_for(input),
+        peer_note: None,
         ..PermissionRequest::new(
             AccessKind::from(input),
             acp::ToolCallUpdate::new(
@@ -496,4 +497,25 @@ fn unresolved_read_target_is_refused() {
         judge(&[(vec!["/w/a".to_owned()], false), (vec!["/w/secrets/k".to_owned()], false)]),
         Some(Decision::Reject(_) | Decision::PolicyDeny(_))
     ));
+}
+
+/// Packet 7 round 2: a human `Reject` through a real prompt (an ACP client answering reject-once) is recorded as a denial with
+/// one key per file of the call, and an outgoing stamp carries them. An ordinary allowed read records nothing.
+#[test]
+fn p7r2_a_human_reject_through_a_real_prompt_is_recorded_and_stamps() {
+    run(|tmp, cwd| async move {
+        let mgr = acp_manager(&cwd, vec![read_rule(RuleAction::Ask, "secrets/**")], RecordingClient::default());
+        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", &abs(&tmp, "fine.txt")])).await;
+        assert_eq!(d, Decision::Allow, "no rule asks for these files");
+        assert_eq!(mgr.peer_influence().denials().ring_len(), 0, "an allowed call records nothing");
+        let d = decide(&mgr, tmp.path(), &codex_read("", &["ok.txt", "secrets/key"])).await;
+        assert!(matches!(d, Decision::Reject(_)), "the human rejected the prompt, got {d:?}");
+        let influence = mgr.peer_influence();
+        let log = influence.denials();
+        assert_eq!(log.ring_len(), 1, "the human Reject is one denial");
+        assert_eq!(log.entries()[0].len(), 2, "one key per file of the call");
+        let stamps = log.stamps(crate::permission::peer_denials::mono_secs());
+        assert_eq!(stamps.len(), 2);
+        assert!(stamps.iter().all(|s| s.tool_kind == "read" && s.target_hash.starts_with("sha256:")));
+    });
 }

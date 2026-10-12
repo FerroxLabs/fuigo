@@ -155,7 +155,7 @@ fn remote_campaign_to_entry(c: CampaignOverride) -> Option<CampaignEntry> {
         return None;
     }
     let id = id.to_owned();
-    // The patch may set any field with no allowlist filtering; `ConfigLayers::apply_campaign_overrides` restores requirements precedence
+    // The patch may set any field except `CAMPAIGN_STRIP_KEYS` and `CAMPAIGN_STRIP_PATHS` (`features.peer_messaging`), removed in `apply_active_campaign_patches`; `ConfigLayers::apply_campaign_overrides` restores requirements precedence
     let patch = match toml::Value::try_from(serde_json::Value::Object(c.patch)) {
         Ok(toml::Value::Table(t)) => t,
         Ok(_) => return None,

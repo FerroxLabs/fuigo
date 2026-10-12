@@ -712,6 +712,7 @@ mod tests {
     }
 
     /// P198 r2: absolute rule (also outside the cwd and through a symlinked cwd), bare name and siblings.
+    #[cfg(unix)]
     #[tokio::test]
     async fn read_rules_follow_the_policy_matcher() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -722,6 +723,7 @@ mod tests {
     }
 
     /// P198 round 4: binary notices, odd names, a failing ripgrep and "nothing denied" through the `--json` records.
+    #[cfg(unix)]
     #[tokio::test]
     async fn json_records_hide_denied_files() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -731,6 +733,7 @@ mod tests {
         .await;
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn rules_that_are_not_total_do_not_hide_a_directory() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -741,6 +744,7 @@ mod tests {
     }
 
     /// P198 r2: a denied explicit file, also through a symlink, is refused (the tool's only output mode is the file list).
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_denied_explicit_file_is_refused() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -751,6 +755,7 @@ mod tests {
     }
 
     /// P198 r2: an empty rule list prints the same bytes as no rule object.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_empty_rule_list_changes_nothing() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -766,6 +771,7 @@ mod tests {
     }
 
     /// P198 round 3: results are post-filtered by the policy matcher.
+    #[cfg(unix)]
     #[tokio::test]
     async fn results_are_post_filtered_by_the_policy_matcher() {
         assert!(rg_available(), "ripgrep is required for this test");
@@ -778,6 +784,7 @@ mod tests {
 
     /// P198 round 3 (Grok r2 finding 8): the tool prints paths only, so the refusal itself is what is asserted: with the
     /// check removed the denied file's path would be returned as a match.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_denied_explicit_file_gets_the_refusal_not_a_path() {
         assert!(rg_available(), "ripgrep is required for this test");

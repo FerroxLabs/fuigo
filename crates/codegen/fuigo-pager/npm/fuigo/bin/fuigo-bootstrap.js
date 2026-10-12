@@ -12,6 +12,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const zlib = require('zlib');
+const { installVendorBinary, ensureFuigoHome } = require('./fuigo-replace.js');
 
 const pkgName = 'fuigo';
 const IS_WINDOWS = process.platform === 'win32';
@@ -67,6 +68,8 @@ function writeVendorBinary(brotliPath, binaryPath, destPath) {
         } else {
             return false;
         }
+        // An empty vendored file is a broken package: never put it in place of a binary.
+        if (fs.statSync(tmp).size === 0) return false;
         if (!IS_WINDOWS) fs.chmodSync(tmp, 0o755);
         fs.renameSync(tmp, destPath);
         return true;
@@ -103,10 +106,11 @@ function swapCanonical(versionedName, versionedPath) {
 
 function bootstrapCanonical(brotliPath, binaryPath, version) {
     try {
+        ensureFuigoHome(FUIGO_HOME);
         fs.mkdirSync(CANONICAL_DIR, { recursive: true });
         const versionedName = `fuigo-${version}${EXE}`;
         const versionedPath = path.join(CANONICAL_DIR, versionedName);
-        if (!fs.existsSync(versionedPath) && !writeVendorBinary(brotliPath, binaryPath, versionedPath)) {
+        if (!installVendorBinary(brotliPath, binaryPath, versionedPath)) {
             return null;
         }
         swapCanonical(versionedName, versionedPath);

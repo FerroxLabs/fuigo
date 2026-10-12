@@ -67,6 +67,12 @@ pub fn format_parent_agent_interjection(text: String) -> String {
     format_steered_query(PARENT_AGENT_NOTE, parent_agent_message, text)
 }
 
+/// A peer-session message arrives already wrapped (`<cross-session-message>` and its fixed note) by the receive path.
+/// It is returned untouched: no truncation (cutting would drop the closing tag) and no user-query framing.
+pub fn format_peer_interjection(wrapped: String) -> String {
+    wrapped
+}
+
 /// Same envelope as [`format_interjection`], for the next real user query
 /// after a text-only mid-turn abort.
 pub fn format_interrupt(text: String) -> String {

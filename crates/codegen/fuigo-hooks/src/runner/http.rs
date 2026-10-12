@@ -1001,6 +1001,8 @@ mod tests {
                 tool_input: serde_json::json!({}),
                 tool_input_truncated: false,
                 subagent_type: None,
+                origin: None,
+                peer_influenced: None,
             },
         }
     }

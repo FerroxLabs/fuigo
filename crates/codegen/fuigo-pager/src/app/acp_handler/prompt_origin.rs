@@ -87,6 +87,7 @@ pub(crate) fn is_wake_prompt(prompt_id: &str) -> bool {
             | fuigo_shell::session::PromptOrigin::SubagentCompleted { .. }
             | fuigo_shell::session::PromptOrigin::WorkflowCompleted { .. }
             | fuigo_shell::session::PromptOrigin::ParentAgentMessage { .. }
+            | fuigo_shell::session::PromptOrigin::PeerMessage { .. }
             | fuigo_shell::session::PromptOrigin::NotificationDrain
     )
 }
@@ -243,6 +244,14 @@ mod tests {
     #[test]
     fn parent_message_is_non_adopted_actor_turn() {
         let prompt_id = "parent-message-msg-123";
+        assert!(is_server_initiated_prompt(prompt_id));
+        assert!(is_wake_prompt(prompt_id));
+        assert!(!should_adopt_running_prompt(prompt_id));
+    }
+
+    #[test]
+    fn peer_message_is_non_adopted_actor_turn_and_never_a_user_prompt() {
+        let prompt_id = "peer-message-msg-9";
         assert!(is_server_initiated_prompt(prompt_id));
         assert!(is_wake_prompt(prompt_id));
         assert!(!should_adopt_running_prompt(prompt_id));

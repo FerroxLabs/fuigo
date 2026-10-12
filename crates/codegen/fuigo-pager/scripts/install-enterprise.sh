@@ -170,6 +170,13 @@ fi
 
 BASE_URL_PRIMARY="https://x.ai/cli"
 BASE_URL_FALLBACK="https://storage.googleapis.com/fuigo-build-public-artifacts/cli"
+# Create the Fuigo home private (0700) when it does not exist yet. The peer inbox refuses a home
+# that group or others can write, and `mkdir -p` under a umask of 002 (default on Ubuntu) would
+# create it 775. An existing home is never chmod-ed. POSIX sh only.
+ensure_private_home() {
+    [ -d "$1" ] || ( umask 077 && mkdir -p "$1" )
+}
+ensure_private_home "$HOME/.fuigo"
 DOWNLOAD_DIR="$HOME/.fuigo/downloads"
 BIN_DIR="${FUIGO_BIN_DIR:-$HOME/.fuigo/bin}"
 mkdir -p "$DOWNLOAD_DIR" "$BIN_DIR"
@@ -266,6 +273,7 @@ else
 fi
 
 # Generate shell completions (best-effort)
+ensure_private_home "$HOME/.fuigo"
 mkdir -p "$HOME/.fuigo/completions/bash" "$HOME/.fuigo/completions/zsh"
 "$BIN_DIR/fuigo" completions bash > "$HOME/.fuigo/completions/bash/fuigo.bash" 2>/dev/null || true
 "$BIN_DIR/fuigo" completions zsh  > "$HOME/.fuigo/completions/zsh/_fuigo"     2>/dev/null || true

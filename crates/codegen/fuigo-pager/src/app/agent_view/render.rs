@@ -101,6 +101,7 @@ impl AgentView {
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
         }
+        self.peer_view_changed();
         let replay_outcome = crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
         tracing::debug!(child_sid = %child_sid, ?replay_outcome, "opened subagent fullscreen");
         self.active_subagent = Some(child_sid);
@@ -109,6 +110,7 @@ impl AgentView {
     /// See [`crate::app::subagent::evict_finished_child_view`] for rationale and guards.
     /// All close sites route through here.
     pub(crate) fn close_subagent_fullscreen(&mut self) {
+        self.peer_view_changed();
         if let Some(child_sid) = self.active_subagent.take() {
             let _ = crate::app::subagent::evict_finished_child_view(self, &child_sid);
         }
@@ -894,6 +896,52 @@ impl AgentView {
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
+        // Packet 12b: a new frame invalidates the peer dialog's "fixed rows were painted" proof; no dialog (flag off): no-ops.
+        if self.owns_peer_ui() {
+            self.peer.begin_frame();
+            self.peer_close_if_overlaid();
+        }
+        let out = self.draw_layers(
+            area,
+            buf,
+            registry,
+            scratch,
+            pending_hint,
+            overlay_focused,
+            banner,
+            bundle_state,
+            in_dashboard_overlay,
+            overlay_can_cycle,
+            link_spans_out,
+            app_params,
+        );
+        // The peer hold dialog is the LAST thing painted in the agent view, after every other layer, so nothing covers its rows.
+        if self.owns_peer_ui()
+            && let Some(d) = self.peer.dialog()
+        {
+            crate::peer_ui::render_peer_hold_dialog(area, buf, d, crate::peer_ui::now_secs());
+        }
+        out
+    }
+
+    fn draw_layers(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        registry: &ActionRegistry,
+        scratch: &mut ScratchBuffer,
+        pending_hint: Option<PendingHint>,
+        overlay_focused: bool,
+        banner: super::BannerSlotParams<'_>,
+        bundle_state: &crate::app::bundle::BundleState,
+        in_dashboard_overlay: bool,
+        overlay_can_cycle: bool,
+        link_spans_out: &mut Vec<fuigo_ratatui_inline::LinkSpan>,
+        app_params: AppRenderParams<'_>,
+    ) -> (
+        Option<(u16, u16)>,
+        Option<crate::terminal::overlay::PostFlush>,
+    ) {
         let AppRenderParams {
             voice_available,
             voice_listening,
@@ -1469,6 +1517,18 @@ impl AgentView {
                 .height
                 .saturating_sub(search_reserved_rows);
         }
+        // Packet 12b: one row under the transcript for held peer messages (flag on and something held; otherwise nothing changes).
+        self.peer.tick(crate::peer_ui::now_secs());
+        let peer_row_text = if search_active || layout.scrollback.height <= 6 {
+            None
+        } else {
+            self.peer.row_text(crate::peer_ui::now_secs())
+        };
+        let peer_reserved_rows = u16::from(peer_row_text.is_some());
+        if peer_reserved_rows > 0 {
+            layout.scrollback.height -= peer_reserved_rows;
+            layout.scrollback_content.height = layout.scrollback_content.height.saturating_sub(peer_reserved_rows);
+        }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
             || self.blocking_card().is_some()
@@ -1521,6 +1581,11 @@ impl AgentView {
                             .scrollback_content
                             .height
                             .saturating_sub(search_reserved_rows);
+                    }
+                    if peer_reserved_rows > 0 {
+                        layout.scrollback.height -= peer_reserved_rows;
+                        layout.scrollback_content.height =
+                            layout.scrollback_content.height.saturating_sub(peer_reserved_rows);
                     }
                     self.scrollback.prepare_layout(
                         layout.scrollback_content.width,
@@ -2169,6 +2234,11 @@ impl AgentView {
                     self.can_send_now(),
                 );
             }
+        }
+        if let Some(text) = peer_row_text.as_deref() {
+            let y = layout.scrollback.y + layout.scrollback.height;
+            let style = ratatui::style::Style::default().fg(theme.accent_running);
+            buf.set_stringn(layout.scrollback.x, y, text, usize::from(layout.scrollback.width), style);
         }
         self.last_btw_selection_model = ResolvedSelectionModel::default();
         self.last_btw_area = Rect::default();

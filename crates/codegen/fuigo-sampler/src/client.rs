@@ -707,6 +707,9 @@ pub struct SamplingClient {
     bearer_resolver: Option<crate::config::SharedBearerResolver>,
     /// Per-request header injection (OTel traceparent).
     header_injector: Option<crate::config::SharedHeaderInjector>,
+    /// Awaited before a request is dispatched (not yet used; see the park dispatch gate).
+    #[allow(dead_code)] // awaited by the dispatch point once WP-C lands
+    dispatch_gate: Option<crate::config::SharedDispatchGate>,
     /// Endpoint URL builder, resolved once from `base_url` and `query_params`.
     endpoint: EndpointTemplate,
     /// Whether every request body carries [`CacheBypass`]: only for FluxRouter's API host, and never on a subscription transport.
@@ -1176,6 +1179,7 @@ impl SamplingClient {
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
             header_injector: config.header_injector,
+            dispatch_gate: config.dispatch_gate,
             endpoint,
             fluxrouter_cache_bypass,
             identity_disclosure: identity,
@@ -1191,8 +1195,21 @@ impl SamplingClient {
         let fallback = (!crate::request_accounting::is_scoped()).then(||
             Attempt::new(&ConversationRequest::new(), &uuid::Uuid::new_v4().to_string(), 1));
         let dispatch = async {
-        crate::request_accounting::admit_current().await.map_err(|_|
+        // The single point every model request passes: hold while the owner is parked. Awaited before the budget
+        // clamp so waiting does not eat the deadline. The durable admission below is a real suspension point, so
+        // the gate is awaited AGAIN right after it (a park can reach Parked while the write is in flight); the
+        // subscription resolver re-awaits the gate itself.
+        if let Some(gate) = &self.dispatch_gate {
+            gate.wait_open().await;
+        }
+        // Grok r4 #7: the durable call debit comes AFTER the gate. A request cancelled while it waits at the gate
+        // was never admitted, so no call slot is consumed and no attempt is left pending.
+        let admitted = crate::request_accounting::admit_current().await.map_err(|_|
             SamplingError::InvalidConfiguration("execution admission denied or could not be persisted"))?;
+        if let Some(gate) = &self.dispatch_gate {
+            // Cancelled while waiting here: `admitted` drops armed and refunds the slot (nothing was sent).
+            gate.wait_open().await;
+        }
         if let Some(budget) = crate::execution_budget::process_budget().map_err(SamplingError::InvalidConfiguration)? {
             let (purpose, scope) = crate::request_accounting::current_policy();
             budget.admit_for_scope(purpose, scope.as_deref()).map_err(SamplingError::InvalidConfiguration)?;
@@ -1202,10 +1219,13 @@ impl SamplingClient {
             }
         }
         if let Some(kind) = self.subscription {
-            return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), request).await;
+            return crate::subscription::dispatch(kind, self.subscription_resolver.as_ref(), self.dispatch_gate.as_ref(), admitted, request).await;
         }
         crate::request_accounting::clamp_deadline(&mut request)?;
         crate::sent_credentials::record_request(&request, &self.configured_header_values);
+        // The guard stays armed through every await and fallible step above: a cancel or error anywhere before this
+        // point never sent anything and refunds the slot once. From here the attempt counts as sent.
+        admitted.disarm();
         crate::request_accounting::dispatched();
         fuigo_extra_ca::dispatch::execute(&self.http, request).await.map_err(|error| dispatch_error(error, streaming))
         };
@@ -1216,6 +1236,14 @@ impl SamplingClient {
         } else {
             dispatch.await
         }
+    }
+
+    /// Sets the gate awaited right before every request leaves the process (see `dispatch_request`).
+    /// For clients built without a session that are later bound to one.
+    #[must_use]
+    pub fn with_dispatch_gate(mut self, gate: crate::config::SharedDispatchGate) -> Self {
+        self.dispatch_gate = Some(gate);
+        self
     }
 
     pub fn api_backend(&self) -> ApiBackend {
@@ -3061,6 +3089,7 @@ mod tests {
             subscription: None,
             subscription_resolver: None,
             header_injector: None,
+            dispatch_gate: None,
             mtls_cert_dir: None,
             rate_limit_retry_threshold: None,
             reasoning_summary: None,

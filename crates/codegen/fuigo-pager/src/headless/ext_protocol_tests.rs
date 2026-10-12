@@ -799,3 +799,127 @@ fn headless_memory_flush_line_scrubs_the_error_and_path() {
     };
     assert_eq!(no_path.plain_message(), "Memory flush skipped:  [31mred.");
 }
+
+fn mcp_status_kind(
+    name: &str,
+    status: &str,
+    reason: &str,
+    detail: Option<&str>,
+    kind: Option<serde_json::Value>,
+) -> ExtEvent {
+    let mut params = serde_json::json!({
+        "sessionId": "s1", "name": name, "source": "local",
+        "status": status, "reason": reason, "tools": null,
+    });
+    if let Some(d) = detail {
+        params["detail"] = d.into();
+    }
+    if let Some(k) = kind {
+        params["failureKind"] = k;
+    }
+    handle_ext_notification(&make_raw_ext_notif("fuigo/mcp/server_status", params))
+}
+
+fn mcp_status(name: &str, status: &str, reason: &str, detail: Option<&str>) -> ExtEvent {
+    mcp_status_kind(name, status, reason, detail, None)
+}
+
+/// A failed start with a closed failure kind reaches headless; healthy, restarting or closed servers do not, and a push
+/// with no kind (an older sender) is left out. The event carries the name and the kind only, never the raw detail.
+#[test]
+fn headless_mcp_server_status_reports_only_a_failed_start() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    let kind = |k: &str| Some(serde_json::json!(k));
+    assert!(matches!(
+        mcp_status_kind("dead", "unavailable", "handshake_failed", Some("boom"), kind("exited_before_answer")),
+        ExtEvent::McpStartFailed { name, kind: K::ExitedBeforeAnswer } if name == "dead"
+    ));
+    assert!(matches!(
+        mcp_status_kind("t", "unavailable", "handshake_failed", None, Some(serde_json::json!({"timeout": {"secs": 5}}))),
+        ExtEvent::McpStartFailed { kind: K::Timeout { secs: 5 }, .. }
+    ));
+    assert!(matches!(
+        mcp_status("old", "unavailable", "handshake_failed", Some("boom")),
+        ExtEvent::None
+    ));
+    for (status, reason) in [
+        ("ready", "initialized"),
+        ("initializing", "config_added"),
+        ("unavailable", "transport_closed"),
+        ("unavailable", "restart_failed"),
+        ("needs_auth", "auth_expired"),
+    ] {
+        assert!(
+            matches!(mcp_status_kind("s", status, reason, None, kind("other")), ExtEvent::None),
+            "{status}/{reason}"
+        );
+    }
+}
+
+/// A `failureKind` this build does not know must not drop the push: it decodes and prints the handshake-failed line.
+#[test]
+fn headless_mcp_unknown_failure_kind_still_reports_handshake_failed() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    for k in [serde_json::json!("from_the_future"), serde_json::json!({"future": {"n": 1}})] {
+        let ev = mcp_status_kind("dead", "unavailable", "handshake_failed", Some("boom"), Some(k));
+        let ExtEvent::McpStartFailed { name, kind } = ev else {
+            panic!("an unknown kind must still be reported");
+        };
+        assert_eq!((name.as_str(), kind), ("dead", K::Unknown));
+        let (_, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed(&name, kind);
+        assert!(notice.plain_message().contains("failed to start: the start-up handshake failed."));
+    }
+}
+
+/// Servers that need sign-in stay silent: a 401 during the handshake and a needs-OAuth server both carry `needs_auth`
+/// (from the error type, decided in the shell and the dispatcher), whatever the raw detail says.
+#[test]
+fn headless_mcp_server_status_keeps_sign_in_servers_silent() {
+    let kind = Some(serde_json::json!("needs_auth"));
+    for detail in ["MCP server 'gh' handshake failed: HTTP 401 Unauthorized", "MCP server 'x': Auth required (non-interactive session)"] {
+        assert!(matches!(
+            mcp_status_kind("gh", "unavailable", "handshake_failed", Some(detail), kind.clone()),
+            ExtEvent::None
+        ));
+    }
+}
+
+/// The fixed reason for each failure kind; no raw text anywhere in the line.
+#[test]
+fn headless_mcp_start_failed_line_names_server_fixed_reason_and_doctor() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    for (kind, reason) in [
+        (K::CommandNotStarted, "the command could not be started"),
+        (K::ExitedBeforeAnswer, "the server exited before it answered"),
+        (K::Timeout { secs: 5 }, "the server did not answer within 5 s"),
+        (K::Unreachable, "the server could not be reached"),
+        (K::Other, "the start-up handshake failed"),
+        (K::ServerRejected, "the server rejected the connection (it may need sign-in)"),
+        (K::Unknown, "the start-up handshake failed"),
+    ] {
+        let (_, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed("srv", kind);
+        let line = notice.plain_message();
+        assert_eq!(
+            line,
+            format!("warning: MCP server \"srv\" failed to start: {reason}. Run `fuigo mcp doctor`.")
+        );
+    }
+}
+
+/// The name is outside text: escape sequences and newlines become inert, quotes are softened, the name is capped at 80
+/// characters.
+#[test]
+fn headless_mcp_start_failed_name_is_inert_and_capped() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    let (printed, notice) = crate::headless::reducer::Lifecycle::mcp_start_failed("ev\u{1b}]0;owned\u{7}\nil\"x", K::Other);
+    let line = notice.plain_message();
+    assert!(!line.contains('\u{1b}') && !line.contains('\u{7}') && !line.contains('\n'), "{line:?}");
+    assert_eq!(printed, "ev ]0;owned  il'x");
+    assert!(line.contains("\"ev ]0;owned  il'x\""), "{line}");
+
+    let (printed, _) = crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(500), K::Other);
+    assert_eq!(printed.chars().count(), 80);
+    assert!(printed.ends_with("..."));
+    let (printed, _) = crate::headless::reducer::Lifecycle::mcp_start_failed(&"n".repeat(80), K::Other);
+    assert_eq!(printed, "n".repeat(80), "an 80-character name is not cut");
+}

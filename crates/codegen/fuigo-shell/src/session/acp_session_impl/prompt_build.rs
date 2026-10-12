@@ -933,7 +933,7 @@ impl SessionActor {
         original_user_message: String,
         images: &[agent_client_protocol::ImageContent],
     ) -> Result<String, acp::Error> {
-        let prior = self.chat_state_handle.get_conversation().await;
+        let prior = self.chat_state_handle.get_conversation_for_model().await;
         let outline = crate::session::image_describe::build_conversation_outline(&prior);
         let session_dir = crate::session::persistence::ensure_owner_only_session_dir(
             &crate::session::info::Info {

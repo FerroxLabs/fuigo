@@ -148,3 +148,40 @@ fn t6_decision_table() {
     assert_eq!(peer_is_same_user(1000, Err("no credentials")), Refuse);
     assert_eq!(peer_is_same_user(0, Err(std::io::Error::other("x"))), Refuse);
 }
+
+// Reuse tests (packet 2): the extracted pieces driven with a non-leader path and a non-leader frame limit.
+
+#[tokio::test]
+async fn xs2_bind_private_with_gives_a_0600_socket_for_any_listener() {
+    let temp = TempDir::new().unwrap();
+    let sock = temp.path().join("other.sock");
+    let _listener = bind_private_with(&sock, |p| tokio::net::UnixListener::bind(p)).unwrap();
+    assert_eq!(mode_of(&sock) & 0o777, 0o600);
+}
+
+#[tokio::test]
+async fn xs2_oversized_frame_is_rejected_at_a_custom_limit() {
+    use crate::leader::protocol::{FrameReader, ProtocolError, read_frame_limited, write_frame_limited};
+    let (mut a, mut b) = tokio::io::duplex(1024);
+    assert!(matches!(
+        write_frame_limited(&mut a, &[0u8; 17], 16).await,
+        Err(ProtocolError::MessageTooLarge(17))
+    ));
+    write_frame_limited(&mut a, &[7u8; 16], 16).await.unwrap();
+    assert_eq!(read_frame_limited(&mut b, 16).await.unwrap(), vec![7u8; 16]);
+    tokio::io::AsyncWriteExt::write_all(&mut a, &17u32.to_be_bytes()).await.unwrap();
+    let mut reader = FrameReader::with_limit(&mut b, 16);
+    assert!(matches!(reader.read_frame().await, Err(ProtocolError::MessageTooLarge(17))));
+}
+
+#[tokio::test]
+async fn xs2_same_user_check_accepts_our_uid_and_refuses_an_injected_other_uid() {
+    let (a, _b) = tokio::net::UnixStream::pair().unwrap();
+    let key = Path::new("/xs2/not-a-leader.sock");
+    assert_eq!(verdict_for(Side::Server, &a, key), PeerVerdict::Accept);
+    set(Side::Server, key, Inject::ForeignUid);
+    assert_eq!(verdict_for(Side::Server, &a, key), PeerVerdict::Refuse);
+    let key2 = Path::new("/xs2/not-a-leader-2.sock");
+    set(Side::Client, key2, Inject::QueryError);
+    assert_eq!(verdict_for(Side::Client, &a, key2), PeerVerdict::Refuse);
+}

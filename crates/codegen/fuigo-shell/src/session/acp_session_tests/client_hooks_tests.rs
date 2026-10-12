@@ -240,6 +240,8 @@ async fn subagent_inherits_parent_pre_tool_use_client_hook() {
                     tool_input: serde_json::json!({}),
                     tool_input_truncated: false,
                     subagent_type: Some("code-reviewer".to_string()),
+                    origin: None,
+                    peer_influenced: None,
                 },
             );
 
@@ -322,6 +324,8 @@ async fn pre_tool_use_slow_callback_does_not_starve_a_deny() {
                     tool_input: serde_json::json!({}),
                     tool_input_truncated: false,
                     subagent_type: None,
+                    origin: None,
+                    peer_influenced: None,
                 },
             );
 
@@ -436,6 +440,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                     actor.tool_context.hunk_tracker_handle.clone(),
                     actor.agent.borrow().tool_bridge().toolset(),
                     None,
+                    actor.tool_context.peer_influence.clone(),
                 )
                 .expect("bind_local_session must succeed");
             actor
@@ -575,6 +580,7 @@ async fn mcp_error_result_fires_only_failure_and_delivers_original_output() {
                     actor.tool_context.hunk_tracker_handle.clone(),
                     actor.agent.borrow().tool_bridge().toolset(),
                     None,
+                    actor.tool_context.peer_influence.clone(),
                 )
                 .expect("bind_local_session must succeed");
 

@@ -372,6 +372,7 @@ async fn create_test_actor(
         initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announcements: Default::default(),
+        peer_admission: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
@@ -2294,6 +2295,161 @@ async fn the_prefire_pass_is_not_started_while_the_backup_is_owed() {
                 !actor.should_prefire_two_pass().await,
                 "a prefire request must not be sent for a compaction that is refused"
             );
+        })
+        .await;
+}
+// ---- P189 round 3 group C: the model gate holds through compaction ----
+/// Unparks the session tree when a test ends (also on a failed assertion), so a parked id never leaks into another test.
+struct UnparkOnDrop(String);
+impl Drop for UnparkOnDrop {
+    fn drop(&mut self) {
+        crate::session::quiesce::unpark(&self.0);
+    }
+}
+fn park_session(session_id: &str) -> UnparkOnDrop {
+    use crate::session::quiesce::{ParkMode, begin_park, complete_park};
+    let op = begin_park(session_id, ParkMode::Hold).expect("park");
+    assert!(complete_park(session_id, op));
+    UnparkOnDrop(session_id.to_owned())
+}
+fn minted_history() -> Vec<ConversationItem> {
+    vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("hello"),
+        ConversationItem::assistant("hi"),
+        ConversationItem::user("more"),
+        ConversationItem::assistant("done"),
+    ]
+}
+/// The actor pointed at a fresh mock model endpoint, with a client prepared BEFORE any park (the gap the gate must cover).
+async fn actor_with_prepared_client() -> (
+    Arc<SessionActor>,
+    fuigo_test_support::MockInferenceServer,
+    fuigo_sampler::SamplingClient,
+) {
+    let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+    let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+    let actor = Arc::new(create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await);
+    actor.chat_state_handle.replace_conversation(minted_history());
+    let server = fuigo_test_support::MockInferenceServer::start()
+        .await
+        .expect("mock inference server");
+    actor
+        .handle_set_session_model(switch_target_config("gate-model", server.url()), false, false, false, true, 85)
+        .await
+        .expect("switch");
+    let client = actor.prepare_chat_completion(false).await.expect("client");
+    (actor, server, client)
+}
+/// Astra r2 #5 (a): a compaction request prepared before the park but sent after it must wait for the unpark.
+#[tokio::test(flavor = "current_thread")]
+async fn compaction_request_prepared_before_a_park_is_not_sent_while_parked() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, server, client) = actor_with_prepared_client().await;
+            let session_id = actor.session_info.id.0.to_string();
+            let sampling_config = actor.reconstruct_full_config().await;
+            let parked = park_session(&session_id);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let run = tokio::task::spawn_local({
+                let session = actor.session_info.id.clone();
+                async move {
+                    crate::session::helpers::session_compact::generate_session_compact(
+                        minted_history(),
+                        0,
+                        Vec::new(),
+                        Vec::new(),
+                        client,
+                        session,
+                        &sampling_config,
+                        std::time::Duration::from_secs(30),
+                        0,
+                        crate::util::config::CompactionToolChoice::Auto,
+                        &cancel,
+                    )
+                    .await
+                    .map(|_| ())
+                }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            assert_eq!(server.requests().len(), 0, "a compaction request was sent while parked");
+            drop(parked);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
+            assert!(!server.requests().is_empty(), "the compaction request must go out after the unpark");
+        })
+        .await;
+}
+/// Astra r2 #5 (c): a subagent's compaction retry (the sampler's next attempt) waits while its PARENT is parked.
+#[tokio::test(flavor = "current_thread")]
+async fn subagent_compaction_retry_is_not_sent_while_the_parent_is_parked() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            use fuigo_compaction::{CompactionPrompt, CompactionSampler};
+            let (actor, server, client) = actor_with_prepared_client().await;
+            let child = actor.session_info.id.0.to_string();
+            let parent = format!("{child}-parent");
+            let _link = crate::session::quiesce::SessionGuard::new(&child, Some(&parent));
+            let sampling_config = actor.reconstruct_full_config().await;
+            let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
+                false,
+                None,
+                Vec::new(),
+                Vec::new(),
+                0,
+                client,
+                actor.session_info.id.clone(),
+                sampling_config,
+                std::time::Duration::from_secs(30),
+                0,
+                crate::util::config::CompactionToolChoice::Auto,
+                tokio_util::sync::CancellationToken::new(),
+            );
+            let parked = park_session(&parent);
+            let run = tokio::task::spawn_local(async move {
+                let prompt = CompactionPrompt { system: String::new(), user: String::new() };
+                let _ = sampler
+                    .sample_compaction(&minted_history()[1..], &prompt, std::time::Duration::from_secs(30))
+                    .await;
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            assert_eq!(server.requests().len(), 0, "a subagent compaction attempt was sent under a parked parent");
+            drop(parked);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
+            assert!(!server.requests().is_empty(), "the attempt must go out after the unpark");
+        })
+        .await;
+}
+/// Astra r2 #5 (b): a prefire pass-1 dispatched before the park but running after it makes no model call.
+#[tokio::test(flavor = "current_thread")]
+async fn prefire_pass1_dispatched_before_a_park_makes_no_model_call_while_parked() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let _home = fuigo_test_support::FuigoHome::new();
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (actor, server, _client) = actor_with_prepared_client().await;
+            let session_id = actor.session_info.id.0.to_string();
+            let parked = park_session(&session_id);
+            let run = tokio::task::spawn_local({
+                let actor = actor.clone();
+                async move { actor.run_prefire_pass1().await }
+            });
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            assert_eq!(server.requests().len(), 0, "prefire pass-1 called the model while parked");
+            drop(parked);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
         })
         .await;
 }

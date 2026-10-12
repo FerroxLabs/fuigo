@@ -415,6 +415,13 @@ pub(crate) async fn spawn_session_actor(
     );
     let _ = support_permission;
     let owns_permission_manager = inherited_permission_handle.is_none();
+    // Item 3 (S6.1 + feature off): a stored peer-influenced session resumed with the feature off keeps its guard.
+    let mut guard_kept_feature_off = false;
+    // S6.6: the integrity hold stored in the history (read here, before the history moves into the chat state).
+    let integrity_hold_from_history = super::peer_admit::peer_integrity_hold_from_history(startup_hints.is_subagent, &conversation);
+    // S7: the carried denials and the sender's denial ring stored in the history (applied where the admission state is built).
+    let peer_stored_state = super::peer_admit::PeerStoredState::from_history(startup_hints.is_subagent, &conversation);
+    let peer_denial_log = tool_context.peer_influence.denials().clone();
     let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
         inherited_permission_handle
     {
@@ -513,6 +520,19 @@ pub(crate) async fn spawn_session_actor(
                 crate::util::config::remember_tool_approvals_from_disk(),
                 hub_permission,
             );
+        // S6.1: the session's ONE peer-influenced flag is `tool_context.peer_influence` (a subagent's is the PARENT's, set from
+        // its spawn context). It is handed to the permission handle below and to the hub session at `bind_local_session`;
+        // no component creates a flag of its own.
+        // Every path that builds an actor from stored history comes through here (load, resume, crash recovery, leader
+        // restart, fork). The state comes from the stored history only: a `peer_message` item (or a carried marker) not
+        // followed by a cleared marker. With the feature OFF it is restored too (the guard stays on, notice below).
+        guard_kept_feature_off = super::peer_admit::restore_peer_influence(
+            &tool_context.peer_influence,
+            startup_hints.is_subagent,
+            crate::session::peer_message::peer_messaging_enabled(),
+            &conversation,
+        );
+        let permissions = permissions.with_peer_influence(tool_context.peer_influence.clone());
         if crate::util::config::auto_mode_session_active(
             crate::util::config::auto_permission_mode_enabled_from_disk(),
             session_auto_mode,
@@ -525,7 +545,7 @@ pub(crate) async fn spawn_session_actor(
     };
     let initial_prompt_index = conversation
         .iter()
-        .filter(|item| matches!(item, ConversationItem::User(_)))
+        .filter(|item| matches!(item, ConversationItem::User(_)) && !item.is_peer_influence_marker())
         .count();
     let initial_conversation_len = conversation.len();
     let title_session_dir = crate::session::persistence::session_dir(&session_info);
@@ -936,7 +956,7 @@ pub(crate) async fn spawn_session_actor(
             .cloned()
             .unwrap_or_default();
         let watcher = if watcher_config.enabled {
-            crate::session::memory::watcher::MemoryFileWatcher::start_scoped(&storage)
+            crate::session::memory::watcher::MemoryFileWatcher::start_scoped(storage)
                 .map(std::sync::Arc::new)
         } else {
             None
@@ -1055,6 +1075,7 @@ pub(crate) async fn spawn_session_actor(
         if !acp_mcp_servers.is_empty() {
             let invoker = std::sync::Arc::new(crate::session::acp_mcp::GatewayAcpInvoker::new(
                 gateway.clone(),
+                session_info.id.0.to_string(),
             ));
             let acp_server_count = acp_mcp_servers.len();
             state.set_acp_servers(acp_mcp_servers, invoker);
@@ -1249,6 +1270,7 @@ pub(crate) async fn spawn_session_actor(
         tool_context.hunk_tracker_handle.clone(),
         agent.tool_bridge().toolset(),
         None,
+        tool_context.peer_influence.clone(),
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
@@ -2044,6 +2066,25 @@ pub(crate) async fn spawn_session_actor(
             native_presentation: initial_native_presentation,
             ..Default::default()
         })),
+        peer_admission: {
+            let admission = crate::session::peer_admission::PeerAdmissionState::for_session(&session_info.id.to_string());
+            if guard_kept_feature_off {
+                admission.note_guard_kept_feature_off();
+            }
+            // S6.6: a stored integrity hold is up again before the actor can decide any message.
+            if integrity_hold_from_history {
+                admission.integrity_restore_tripped();
+            }
+            // S7: before the actor can decide any tool request or send any message. The denial log is the session tree's (shared
+            // with subagents, which restore nothing).
+            peer_stored_state.apply(
+                &peer_denial_log,
+                &admission,
+                crate::session::peer_admission::now_secs(),
+                fuigo_workspace::permission::mono_secs(),
+            );
+            admission
+        },
         mcp_announcements: Mutex::new(
             persisted_announcement_state
                 .map(crate::session::announcement_state::McpAnnounced::from_persisted)
@@ -2174,6 +2215,8 @@ pub(crate) async fn spawn_session_actor(
     if session.permissions.is_auto_mode() {
         session.wire_permission_auto_llm_classifier().await;
     }
+    // S6.6: a restored peer-influenced session is watched from the start, not after its first tool batch.
+    session.arm_peer_integrity();
     session
         .tool_bridge_handle()
         .update_resource(
@@ -2191,6 +2234,21 @@ pub(crate) async fn spawn_session_actor(
                 ),
             )
             .await;
+    }
+    session.peer_admission.set_admin_tx(&cmd_tx);
+    // A subagent is not offered the peer tools (builder), so it gets no host handle either.
+    if crate::session::peer_message::peer_messaging_enabled() && !session.startup_hints.is_subagent {
+        session
+            .tool_bridge_handle()
+            .update_resource(fuigo_peer::host::PeerHostHandle(session.peer_host()))
+            .await;
+        {
+            session.tool_bridge_handle().update_resource(session.spawn_peer_refuse_pump()).await;
+            // Default inbound (DESIGN line 290): an interactive (TUI) host opts its main sessions in; ACP and headless stay out.
+            if let Some(config) = crate::peer_inbox::driver::default_admission(session.startup_hints.is_subagent) {
+                session.peer_admission.configure(config);
+            }
+        }
     }
     if let Some(ref display_cwd) = prompt_display_cwd {
         session
@@ -2396,6 +2454,7 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     let hosting = fuigo_telemetry::activity::SESSIONS_ACTIVE.enter();
+    let peer_gate = session.peer_admission.gate();
     tokio::task::spawn_local(async move {
         let _hosting = hosting;
         fuigo_telemetry::session_ctx::with_session_ctx(
@@ -2417,6 +2476,7 @@ pub(crate) async fn spawn_session_actor(
     Ok((
         SessionHandle {
             cmd_tx,
+            peer_gate,
             persistence_tx: persistence.tx.clone(),
             current_prompt_id,
             pending_interactions,

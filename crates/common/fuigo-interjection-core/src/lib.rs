@@ -9,6 +9,6 @@ pub use buffer::{
 pub use events::EventQueue;
 pub use format::{
     INTERJECTION_NOTE, INTERRUPT_NOTE, LARGE_PROMPT_THRESHOLD, PARENT_AGENT_NOTE,
-    format_interjection, format_interrupt, format_parent_agent_interjection, frame_user_turn,
+    format_interjection, format_interrupt, format_parent_agent_interjection, format_peer_interjection, frame_user_turn,
     parent_agent_message, user_query,
 };

@@ -193,7 +193,7 @@ impl SessionActor {
                 .claim_task_finalization(&prompt_id, epoch, task_identity)
         else {
             let state = self.state.lock().await;
-            tracing::warn!("Received stale completion for prompt: {prompt_id}");
+            tracing::warn!("Received stale completion for prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
             fuigo_telemetry::unified_log::warn(
                 "shell.turn.stale_completion_dropped",
                 Some(self.session_info.id.0.as_ref()),
@@ -245,7 +245,7 @@ impl SessionActor {
             // That happens below, after `running_task` clears, so the wire's `running_prompt_id` does not advertise the finished turn
             broadcast_queue = input.queue_meta.is_some();
         } else {
-            tracing::warn!("Received completion for unknown prompt: {prompt_id}");
+            tracing::warn!("Received completion for unknown prompt: {}", crate::session::cron_fire_tickets::loggable_prompt_id(&prompt_id));
             fuigo_telemetry::unified_log::warn(
                 "shell.turn.stale_completion_dropped",
                 Some(self.session_info.id.0.as_ref()),

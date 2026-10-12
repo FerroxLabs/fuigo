@@ -7,8 +7,14 @@ use fuigo_agent_lifecycle::{InputPolicy, QueuePolicy, ShutdownPolicy};
 pub(crate) struct InputOrigin(PromptOrigin);
 
 impl InputOrigin {
+    /// Test-only: classify a hand-written fixture id the way the display rules do (never the peer origin). Production code
+    /// never derives an origin from an id: the sender passes it explicitly and a client id is always `User`.
+    #[cfg(test)]
     pub(crate) fn from_prompt_id(prompt_id: &str) -> Self {
-        Self(PromptOrigin::from_prompt_id(prompt_id))
+        Self(match PromptOrigin::from_prompt_id(prompt_id) {
+            PromptOrigin::PeerMessage { .. } => PromptOrigin::User,
+            other => other,
+        })
     }
 
     pub(crate) const fn new(origin: PromptOrigin) -> Self {

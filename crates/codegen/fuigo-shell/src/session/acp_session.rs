@@ -150,6 +150,10 @@ mod mcp_failed_reminder;
 mod model_switch;
 #[path = "acp_session_impl/parent_message.rs"]
 mod parent_message;
+#[path = "acp_session_impl/peer_admit.rs"]
+mod peer_admit;
+#[path = "acp_session_impl/peer_integrity.rs"]
+mod peer_integrity;
 #[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
@@ -170,6 +174,7 @@ mod length_salvage;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
 use sampler_turn::*;
+pub(crate) use sampler_turn::ParkGate;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
@@ -231,6 +236,8 @@ mod session_setup;
 mod side_call;
 #[path = "acp_session_impl/status_line.rs"]
 pub(crate) mod status_line;
+#[path = "acp_session_impl/park.rs"]
+mod park;
 #[path = "acp_session_impl/title_refresh.rs"]
 mod title_refresh;
 #[path = "acp_session_impl/turn_end.rs"]
@@ -1037,6 +1044,8 @@ pub(crate) struct SessionActor {
     /// MCP servers (connected and failed) already announced via system-reminder.
     /// See [`crate::session::announcement_state::McpAnnounced`] for how repeats are deduped.
     pub(crate) mcp_announcements: Mutex<crate::session::announcement_state::McpAnnounced>,
+    /// Peer admission state (packet 4): policy, operator, held store. Default: not opted in.
+    pub(crate) peer_admission: crate::session::peer_admission::PeerAdmissionState,
     /// Controls whether MCP server reminders inject only changes (Delta) or the full server list (Full).
     /// Read from `MCP_REMINDER_MODE` env var.
     pub(crate) mcp_reminder_mode: McpReminderMode,
@@ -1382,6 +1391,7 @@ impl SessionActor {
                 n == fuigo_tools::implementations::fuigo_build::workflow::WORKFLOW_TOOL_NAME
             }),
             workflow_management: false,
+            peers_influenced: self.tool_context.peer_influence.is_set(),
         }
     }
     /// Names of every tool registered with the session's tool bridge.
@@ -1595,7 +1605,7 @@ mod replace_system_prompt_tests;
 mod compaction_agent_borrow_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/support.rs"]
-mod support;
+pub(crate) mod support;
 #[cfg(test)]
 #[path = "acp_session_tests/usage_categories_tests.rs"]
 mod usage_categories_tests;
@@ -1818,6 +1828,9 @@ mod plan_mode_edit_gate_tests;
 #[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
 mod plan_mode_midturn_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/bang_controls_tests.rs"]
+mod bang_controls_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
 mod pre_tool_use_decision_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
@@ -1954,6 +1967,7 @@ mod tool_meta_stamp_tests {
                     deny_read_globs: Arc::new(vec![]),
                     in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     user_prompt_notify: Arc::new(parking_lot::Mutex::new(None)),
+                    mode_view: Default::default(),
                 };
                 let captured: Arc<tokio::sync::Mutex<Option<acp::ToolCallUpdate>>> =
                     Arc::new(tokio::sync::Mutex::new(None));
@@ -2021,6 +2035,7 @@ mod tool_meta_stamp_tests {
                     deny_read_globs: Arc::new(vec![]),
                     in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     user_prompt_notify: Arc::new(parking_lot::Mutex::new(None)),
+                    mode_view: Default::default(),
                 };
                 let captured = Arc::new(tokio::sync::Mutex::new(None));
                 let captured_in_task = captured.clone();
@@ -2100,6 +2115,7 @@ mod tool_meta_stamp_tests {
                     deny_read_globs: Arc::new(vec![]),
                     in_flight: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                     user_prompt_notify: Arc::new(parking_lot::Mutex::new(None)),
+                    mode_view: Default::default(),
                 };
                 let captured = Arc::new(tokio::sync::Mutex::new(None));
                 let captured_in_task = captured.clone();
@@ -2204,6 +2220,9 @@ mod auto_wake_suppression_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/between_turn_completion_tests.rs"]
 mod between_turn_completion_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/park_tests.rs"]
+mod park_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;

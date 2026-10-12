@@ -4,6 +4,7 @@ use std::path::Path;
 
 use tree_sitter::Node;
 
+mod peer_cmd;
 mod tripwire;
 use tripwire::CommandExtras;
 
@@ -2262,6 +2263,12 @@ enum DestinationKind {
     /// operand is a hook root or hooks directory (`.git/hooks`, `~/.fuigo/hooks`), or, with `recursive`, a directory
     /// that contains one (`chmod -R +x .git`). Never counts as a write by itself.
     HookMetadata { recursive: bool },
+    /// Peer scope only: an operand of `ln` or `cp -l`/`-s`. Source or destination, it is judged as a write target (a
+    /// link lets a later write reach the other end), and a bare `.claude`/`.fuigo`/`.cursor` operand counts.
+    LinkOperand,
+    /// Peer scope only: a `rm`/`mv`/`shred`/`truncate` operand. Judged as a write target, and a directory that holds a
+    /// protected name (bounded check of the fixed well-known names) counts too.
+    Container,
 }
 
 /// One directory-destination write: the path, its kind and, for [`DestinationKind::CopiedTree`], the source operand.
@@ -3123,6 +3130,23 @@ impl CommandTargets {
     }
 }
 
+/// `ln` (any form) or `cp` asked to link (`-l`, `-s`, `--link`, `--symbolic-link`, any unique prefix).
+fn links_files(program: &str, inner: &[String]) -> bool {
+    match program {
+        "ln" => true,
+        "cp" => inner.iter().skip(1).take_while(|w| *w != "--").any(|word| {
+            word.strip_prefix("--").map_or_else(
+                || word.starts_with('-') && word.len() > 1 && word[1..].contains(['l', 's']),
+                |long| {
+                    let name = long.split_once('=').map_or(long, |(n, _)| n);
+                    !name.is_empty() && ("link".starts_with(name) || "symbolic-link".starts_with(name))
+                },
+            )
+        }),
+        _ => false,
+    }
+}
+
 /// Every write target of one command (its literal words): redirect-free writer operands, creation operands,
 /// directory destinations, the extra writers of [`tool_writes`], git worktree writes, awk's literal print redirects,
 /// what `xargs`/`find -exec` run, and literal `sh -c` scripts (parsed, up to `depth` levels).
@@ -3165,6 +3189,16 @@ fn command_targets(words: &[String], depth: usize, extras: &CommandExtras) -> Co
         if writes.unpinned {
             out.unpinned();
         }
+    }
+    if peer_extended_set_active() {
+        peer_cmd::peer_command_targets(&program, inner, &mut out);
+    }
+    if peer_extended_set_active() && links_files(&program, inner) {
+        out.targets.extend(
+            shell_file_candidates(inner)
+                .into_iter()
+                .map(|operand| (operand.to_owned(), Some(DestinationKind::LinkOperand), None)),
+        );
     }
     let tripwire = tripwire::tripwire(&program, words, inner, extras);
     out.targets.extend(
@@ -3261,6 +3295,19 @@ fn command_targets(words: &[String], depth: usize, extras: &CommandExtras) -> Co
             }
         }
     }
+    // Peer scope (S6.4): a shell interpreter whose script is not a literal `-c` string that was parsed above (`sh -c
+    // "$X"`, `... | sh`, `sh <<EOF`, `bash script.sh`) runs text nothing here can read: it touches the protected set.
+    if peer_extended_set_active()
+        && matches!(program.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh" | "ash" | "fish" | "csh" | "tcsh" | "busybox")
+    {
+        let shell_words: Vec<ShellWord<'_>> = inner.iter().map(ShellWord::from).collect();
+        let literal = depth > 0
+            && matches!(shell_dash_c_script(&shell_words), InlineShellScript::Literal(i)
+                if inner.get(i).is_some_and(|script| try_parse_shell(script).is_some()));
+        if !literal {
+            out.unpinned();
+        }
+    }
     if peel.moved && out.has_writes() {
         out.unpinned();
     }
@@ -3345,6 +3392,19 @@ impl ShellWriteFacts {
                 }));
         }
         facts
+    }
+
+    /// Whether some write of this script could not be pinned to a path: an expansion redirect, a `cd` to a computed
+    /// directory, an `Unpinned` target, an unknown `~user` word, or such a thing in a nested script (S6.4 refusal text).
+    pub(crate) fn has_unresolved(&self) -> bool {
+        self.opaque_write
+            || self.cwd_changes.iter().any(|change| change.target.is_none())
+            || self.targets.iter().any(|target| {
+                (peer_extended_set_active() && !is_safe_write_sink(&target.path) && peer_unpinnable_word(&target.path))
+                    || matches!(target.destination, Some(DestinationKind::Unpinned))
+                    || matches!(tilde_word(&target.path), TildeWord::Unknown)
+            })
+            || self.nested.iter().any(|nested| nested.facts.has_unresolved())
     }
 
     /// Whether the script writes anything (a target, an expansion redirect, or a nested script that does).
@@ -3511,9 +3571,17 @@ impl ShellWriteFacts {
         real_cwd: &Path,
         resolve: &dyn Fn(&Path, &str) -> std::path::PathBuf,
     ) -> Option<ProtectedEditReason> {
+        // Peer scope (S6.4): a write target nothing can pin (`> "$OUT"`) may be any protected file.
+        if peer_extended_set_active() && self.opaque_write {
+            return Some(ProtectedEditReason::Sensitive);
+        }
         let direct = self.targets.iter().find_map(|target| {
             if is_safe_write_sink(&target.path) {
                 return None;
+            }
+            // Peer scope (S6.4): a glob word cannot be pinned to the name it will match, so it is unpinned.
+            if peer_extended_set_active() && peer_unpinnable_word(&target.path) {
+                return Some(ProtectedEditReason::Sensitive);
             }
             // P166 r11 rule 2: ONE function decides every word that starts with `~`.
             let (spelled, pinned) = match tilde_word(&target.path) {
@@ -3539,6 +3607,11 @@ impl ShellWriteFacts {
                         copied_tree_protection(&path, &source, follow_links)
                     }
                     Some(DestinationKind::Unpinned) => Some(ProtectedEditReason::Sensitive),
+                    Some(DestinationKind::LinkOperand) => {
+                        edit_target_protection(&path).or_else(|| peer_container_destination(&path))
+                    }
+                    Some(DestinationKind::Container) => edit_target_protection(&path)
+                        .or_else(|| crate::permission::peer_guard::peer_holds_protected(&path).then_some(ProtectedEditReason::Sensitive)),
                     Some(DestinationKind::Pathspec) => pathspec_protection(&path),
                     Some(DestinationKind::HookMetadata { recursive }) => hook_metadata_protection(&path, recursive),
                     Some(DestinationKind::GeneratedNames) => {
@@ -4064,11 +4137,14 @@ fn via_directory_protection(path: &Path) -> Option<ProtectedEditReason> {
     let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
         return None;
     };
+    if let Some(reason) = peer_container_destination(dir) {
+        return Some(reason);
+    }
     match std::fs::metadata(dir) {
         Ok(metadata) if metadata.is_dir() => edit_target_protection(path),
         Ok(_) => None,
         // Not there yet (created earlier in the same script): judge the spelling.
-        Err(_) => protected_edit_reason(&fuigo_paths::normalize_lexically(&Path::new(dir).join(name))),
+        Err(_) => scoped_protected_reason(&fuigo_paths::normalize_lexically(&Path::new(dir).join(name))),
     }
 }
 
@@ -4090,6 +4166,9 @@ fn copied_tree_protection(
 ) -> Option<ProtectedEditReason> {
     if !std::fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
         return None;
+    }
+    if let Some(reason) = peer_container_destination(dest) {
+        return Some(reason);
     }
     // With `follow_links`, each pending directory carries the physical directories above it: a link back to one of
     // them is a cycle (fts reports it and copies nothing more there), so it is not walked again.
@@ -4126,7 +4205,7 @@ fn copied_tree_protection(
             }
             let rel_entry = rel.join(entry.file_name());
             if let Some(reason) = prefixes.iter().find_map(|prefix| {
-                protected_edit_reason(&fuigo_paths::normalize_lexically(&prefix.join(&rel_entry)))
+                scoped_protected_reason(&fuigo_paths::normalize_lexically(&prefix.join(&rel_entry)))
             }) {
                 return Some(reason);
             }
@@ -4318,6 +4397,60 @@ impl ProtectedEditPermission {
 /// This helper preserves its uncollapsed components for physical symlink and `..` resolution.
 /// It also checks a separate lexical normalization for traversal aliases.
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
+    edit_target_floor(path).or_else(|| {
+        // Peer guard (S6.4): while a peer-influenced session's shell command is judged, the extended protected set
+        // (instruction files, rule dirs, git config, session store) joins the floor for every shell write form.
+        PEER_EXTENDED_SET
+            .with(std::cell::Cell::get)
+            .then(|| crate::permission::peer_guard::is_peer_protected_path_extension(path))
+            .filter(|hit| *hit)
+            .map(|_| ProtectedEditReason::Sensitive)
+    })
+}
+
+/// Peer scope: a glob word, or an unquoted brace expansion (`{a,b}`, `{m..m}`), cannot be pinned to the name it makes.
+fn peer_unpinnable_word(word: &str) -> bool {
+    word.contains(['*', '?', '['])
+        || (word.contains('{') && (word.contains(',') || word.contains("..")))
+}
+
+thread_local! {
+    /// Set only inside [`with_peer_extended_set`] (synchronous, same thread); never set on the ordinary permission path.
+    static PEER_EXTENDED_SET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the peer-extended set is active on this thread (inside [`with_peer_extended_set`]).
+pub(crate) fn peer_extended_set_active() -> bool {
+    PEER_EXTENDED_SET.with(std::cell::Cell::get)
+}
+
+/// [`protected_edit_reason`] for an already-normalized path, plus the extended set inside the peer scope (lexical only).
+fn scoped_protected_reason(path: &Path) -> Option<ProtectedEditReason> {
+    protected_edit_reason(path).or_else(|| {
+        (peer_extended_set_active() && crate::permission::peer_guard::is_peer_protected_lexical(path))
+            .then_some(ProtectedEditReason::Sensitive)
+    })
+}
+
+/// Inside the peer scope: a destination directory that is itself `.claude`/`.fuigo`/`.cursor` (S6.4).
+fn peer_container_destination(dir: &Path) -> Option<ProtectedEditReason> {
+    (peer_extended_set_active() && crate::permission::peer_guard::is_peer_bare_container(dir))
+        .then_some(ProtectedEditReason::Sensitive)
+}
+
+/// Run `f` with the peer-extended protected set added to [`edit_target_protection`].
+pub(crate) fn with_peer_extended_set<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PEER_EXTENDED_SET.with(|c| c.set(self.0));
+        }
+    }
+    let _reset = Reset(PEER_EXTENDED_SET.with(|c| c.replace(true)));
+    f()
+}
+
+fn edit_target_floor(path: &Path) -> Option<ProtectedEditReason> {
     if !path.is_absolute() {
         return Some(ProtectedEditReason::Sensitive);
     }
@@ -4497,7 +4630,7 @@ fn protected_vendor_mcp_config(components: &[&str]) -> bool {
 /// True when `pred` holds for the user fuigo home in either its lexical or physically-resolved form.
 /// Both forms are checked because callers hold a lexical and a resolved candidate path, and the home itself may sit behind a symlink.
 /// The comparison is byte-exact (no case folding), like every other resolved-path check in this module.
-fn fuigo_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
+pub(crate) fn fuigo_home_matches(home: Option<&Path>, pred: impl Fn(&Path) -> bool) -> bool {
     home.is_some_and(|home| {
         let lexical = fuigo_paths::normalize_lexically(home);
         pred(&lexical)

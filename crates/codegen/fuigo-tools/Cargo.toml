@@ -30,6 +30,7 @@ fuigo-token-estimation = { workspace = true }
 async-lsp = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+fuigo-peer = { workspace = true }
 base64 = { workspace = true }
 crc32fast = { workspace = true }
 ignore = { workspace = true }

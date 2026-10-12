@@ -498,10 +498,11 @@ pub(super) fn handle_scheduled_task_inject_prompt(
         }
 
         let agent_id = agent.session.id;
-        agent.session.enqueue_cron_prompt(
+        agent.session.enqueue_cron_prompt_with_ticket(
             prompt.to_string(),
             task_id.to_string(),
             human_schedule.to_string(),
+            payload["fireTicket"].as_str().map(str::to_string),
         );
         agent_id
     };

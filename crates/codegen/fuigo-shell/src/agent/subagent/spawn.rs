@@ -504,6 +504,9 @@ pub(crate) fn inject_subagent_completed_prompt(params: InjectParams) {
             json_schema: None,
             send_now: false,
             admission: None,
+            origin: crate::session::PromptOrigin::SubagentCompleted {
+                subagent_id: subagent_id.to_string(),
+            },
             tool_overrides_update: None,
             respond_to,
             prompt_admitted: None,

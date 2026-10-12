@@ -960,6 +960,7 @@ mod tests {
 
 
     /// P198 r2: an empty rule list prints the same bytes as no rule object, and an absolute rule hides what it names.
+    #[cfg(unix)]
     #[tokio::test]
     async fn glob_with_an_empty_rule_list_changes_nothing() {
         let t = crate::util::read_deny::fixture::tree();
@@ -1005,6 +1006,7 @@ mod tests {
     }
 
     /// P198 round 4: odd names, a failing walk and "nothing denied" for the glob listing.
+    #[cfg(unix)]
     #[tokio::test]
     async fn round4_contract() {
         crate::util::read_deny::fixture::check_round4(|cwd, path, deny| async move { glob_text(cwd, path, deny).await.0 })
@@ -1012,6 +1014,7 @@ mod tests {
     }
 
     /// P198 round 4: the byte cap counts what the filter KEPT: a flood of denied names must not push allowed names out.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_byte_cap_runs_after_the_filter() {
         let t = crate::util::read_deny::fixture::tree();
@@ -1033,6 +1036,7 @@ mod tests {
     }
 
     /// P198 round 3: results are post-filtered by the policy matcher, and the totals exclude denied files.
+    #[cfg(unix)]
     #[tokio::test]
     async fn results_are_post_filtered_by_the_policy_matcher() {
         crate::util::read_deny::fixture::check_round3(|cwd, path, deny| async move { glob_text(cwd, path, deny).await.0 })
@@ -1044,6 +1048,7 @@ mod tests {
     }
 
     /// P198 round 3 (finding D): an explicit denied FILE is refused, not listed.
+    #[cfg(unix)]
     #[tokio::test]
     async fn glob_of_a_denied_explicit_file_is_refused() {
         let t = crate::util::read_deny::fixture::tree();

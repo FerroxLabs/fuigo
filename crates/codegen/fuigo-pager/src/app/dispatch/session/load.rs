@@ -1165,6 +1165,7 @@ pub(in crate::app::dispatch) fn handle_session_loaded(
             cwd,
             session_id: hydrate_sid.to_string(),
         });
+        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &hydrate_sid.to_string()));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: hydrate_sid.clone(),

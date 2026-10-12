@@ -179,8 +179,14 @@ impl AgentView {
     /// The ephemeral-tip show gate refuses until the next draw re-measures.
     /// Resize draws are debounced (`RESIZE_DEBOUNCE`), so that window is a frame's worth of events, and a refusal burns nothing.
     pub(crate) fn note_terminal_resize(&mut self) {
+        // (peer dialog proof is cleared by `AppView::note_screen_disturbed`, which every non-key event reaches)
         self.terminal_size_stale = true;
         self.last_resize_at = Some(std::time::Instant::now());
+    }
+
+    /// The screen may no longer show what was last painted: the peer hold dialog needs a fresh frame before `a` acts. No-op with no dialog.
+    pub(crate) fn note_screen_disturbed(&self) {
+        self.peer.note_screen_disturbed();
     }
 
     /// iTerm2 only: it rescales committed pixels with the grid during a

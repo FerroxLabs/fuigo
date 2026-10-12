@@ -76,6 +76,7 @@ impl StaticShellSnapshot {
         );
 
         let result = tokio::time::timeout(INIT_TIMEOUT, async {
+            // P189-unplaced: static-shell snapshot capture; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
             let mut cmd = tokio::process::Command::new(shell_binary(shell));
             cmd.args(["-lc", &script])
                 .current_dir(cwd)
@@ -87,6 +88,7 @@ impl StaticShellSnapshot {
             fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
             crate::util::apply_shell_environment_policy(&mut cmd, policy);
             cmd.envs(crate::util::pager_env());
+            // P189-unplaced: see the snapshot-capture note above (awaited helper, killed on drop).
             #[allow(clippy::disallowed_methods)] // probe killed on drop
             let mut child = cmd.spawn().ok()?;
 
