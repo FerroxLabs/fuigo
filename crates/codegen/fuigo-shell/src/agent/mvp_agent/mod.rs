@@ -663,6 +663,9 @@ pub struct MvpAgent {
     resident_roster_titles: RefCell<RosterDisplayCache>,
     pub(crate) initialize_request: OnceLock<acp::InitializeRequest>,
     pub(crate) gateway: GatewaySender,
+    /// P189: this connection's hold for parked sessions' frames, shared with the `ParkHoldClient` around the connection.
+    /// LEADER-SAFE(shared): connection-wide, touched only on the agent's thread.
+    pub(crate) park_hold: std::rc::Rc<crate::agent::park_hold::ParkFrameHold>,
     /// Agent configuration. LEADER-SAFE(init-once): never mutated after construction.
     pub(crate) cfg: RefCell<AgentConfig>,
     /// Current auth method.

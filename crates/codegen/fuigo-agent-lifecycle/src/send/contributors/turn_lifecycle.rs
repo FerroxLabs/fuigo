@@ -5,13 +5,16 @@ pub enum InputAuthority {
     HumanIntent,
     ModelAuthoredUntrusted,
     RuntimeControl,
+    /// Text from another session (peer messaging). Stricter than `ModelAuthoredUntrusted`: no slash command of any kind, no
+    /// file expansion, no hook gate, never human intent. Data, not instructions.
+    PeerUntrusted,
 }
 
 impl InputAuthority {
     pub fn is_human_intent(self) -> bool {
         match self {
             Self::HumanIntent => true,
-            Self::ModelAuthoredUntrusted | Self::RuntimeControl => false,
+            Self::ModelAuthoredUntrusted | Self::RuntimeControl | Self::PeerUntrusted => false,
         }
     }
 }
@@ -27,6 +30,8 @@ pub enum TurnBoundary {
 pub enum AnalyticsClass {
     HumanPrompt,
     AgentMessage,
+    /// A message from a peer session; never a human prompt.
+    PeerMessage,
     RuntimeWake,
 }
 
@@ -34,7 +39,7 @@ impl AnalyticsClass {
     pub fn is_human_prompt(self) -> bool {
         match self {
             Self::HumanPrompt => true,
-            Self::AgentMessage | Self::RuntimeWake => false,
+            Self::AgentMessage | Self::PeerMessage | Self::RuntimeWake => false,
         }
     }
 }
@@ -43,6 +48,8 @@ impl AnalyticsClass {
 pub enum CompactionClass {
     HumanAnchor,
     ConversationalAgentAnchor,
+    /// A peer message keeps its own class so it can never be read as a parent-agent anchor.
+    ConversationalPeerAnchor,
     RuntimeEphemera,
 }
 
@@ -96,6 +103,7 @@ mod policy_tests {
             (InputAuthority::HumanIntent, true),
             (InputAuthority::ModelAuthoredUntrusted, false),
             (InputAuthority::RuntimeControl, false),
+            (InputAuthority::PeerUntrusted, false),
         ];
         for (authority, human_intent) in cases {
             assert_eq!(authority.is_human_intent(), human_intent, "{authority:?}");
@@ -107,6 +115,7 @@ mod policy_tests {
         let cases = [
             (AnalyticsClass::HumanPrompt, true),
             (AnalyticsClass::AgentMessage, false),
+            (AnalyticsClass::PeerMessage, false),
             (AnalyticsClass::RuntimeWake, false),
         ];
         for (analytics, human_prompt) in cases {

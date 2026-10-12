@@ -405,6 +405,7 @@ async fn e2e_handshake_failed_schedules_restart_without_dropping_client() {
             tx.send(McpClientEvent::HandshakeFailed {
                 server: "svr".to_string(),
                 reason: "boom".to_string(),
+                failure: fuigo_mcp::servers::McpFailureKind::Other,
             })
             .unwrap();
             tokio::task::yield_now().await;

@@ -575,7 +575,83 @@ pub(crate) async fn enforce_hub_policy(
     prompt_accesses: &[crate::permission::AccessKind],
     facts: HubCallFacts,
 ) -> Result<Vec<String>, ToolError> {
-    use crate::permission::{HubPolicyContext, hub_policy_verdict_all};
+    // What the denial keys need, copied before `facts` is consumed (no hashing here).
+    let basis = (facts.patch_targets.clone(), facts.read_targets.clone(), facts.display_cwd.clone());
+    let result =
+        enforce_hub_policy_inner(workspace, session, session_id, call_id, tool_name, accesses, prompt_accesses, facts).await;
+    // S7.1 (hub-routed path): the SAME recording rule as `PermissionHandle::request` (`records_denial`): an explicit human
+    // reject, a policy or guard deny, a shown-then-cancelled prompt and a human follow-up are denials the session
+    // remembers (kind and hash only); a prompt error or timeout, a prompt never shown and a failed check are not.
+    match result {
+        Ok(globs) => Ok(globs),
+        Err((e, cause)) => {
+            if e.kind == ToolErrorKind::PermissionDenied && crate::permission::records_denial(cause) {
+                let keys = hub_denial_keys(session, accesses, basis.0, basis.1, basis.2, false).await.unwrap_or_default();
+                session
+                    .peer_influence()
+                    .denials()
+                    .record_keys(keys, crate::permission::peer_denials::mono_secs());
+            }
+            Err(e)
+        }
+    }
+}
+
+/// A hub refusal and how it ended (an internal enum, not on the wire).
+type HubRefusal = (ToolError, crate::permission::DenialCause);
+
+/// The denial keys of every access of a hub-routed call, resolved as the packet 6 guard resolves targets (off the async
+/// worker: symlinks are followed). Flattened into one key set; `matching` false: the recording keys, capped at the
+/// per-denial limit; true: the keys a request is matched by (either spelling), uncapped.
+async fn hub_denial_keys(
+    session: &crate::session::WorkspaceSession,
+    accesses: &[crate::permission::AccessKind],
+    patch_targets: Option<Result<Vec<String>, String>>,
+    read_targets: Option<crate::permission::ReadTargets>,
+    display_cwd: Option<std::path::PathBuf>,
+    matching: bool,
+) -> Result<Vec<crate::permission::DenialKey>, tokio::task::JoinError> {
+    let (accesses, cwd) = (accesses.to_vec(), session.cwd().to_path_buf());
+    let edit_targets = match patch_targets {
+        Some(Ok(t)) if !t.is_empty() => Some(crate::permission::EditTargets::Paths(t)),
+        _ => None,
+    };
+    tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if accesses.iter().any(|a| matches!(a, crate::permission::AccessKind::Bash(c) if c == "__p7r3_panic_keys__")) {
+            panic!("test: denial key computation panics");
+        }
+        let mut keys: Vec<crate::permission::DenialKey> = Vec::new();
+        for a in &accesses {
+            let ks = if matching {
+                crate::permission::match_keys_for(a, edit_targets.as_ref(), read_targets.as_ref(), &cwd, display_cwd.as_deref())
+            } else {
+                crate::permission::denial_keys_for(a, edit_targets.as_ref(), read_targets.as_ref(), &cwd, display_cwd.as_deref())
+            };
+            for k in ks {
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+        }
+        // A recorded denial is capped; a match set is not (either spelling of each target must stay).
+        if matching { keys } else { crate::permission::cap_keys(keys) }
+    })
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn enforce_hub_policy_inner(
+    workspace: &WorkspaceHandle,
+    session: &crate::session::WorkspaceSession,
+    session_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    accesses: &[crate::permission::AccessKind],
+    prompt_accesses: &[crate::permission::AccessKind],
+    facts: HubCallFacts,
+) -> Result<Vec<String>, HubRefusal> {
+    use crate::permission::{DenialCause, HubPolicyContext, hub_policy_verdict_all};
     // P184: a patch that does not parse, or writes nothing, is refused in every mode before anything is judged.
     let patch_targets = match facts.patch_targets {
         Some(Err(message)) => {
@@ -587,9 +663,12 @@ pub(crate) async fn enforce_hub_policy(
                 %reason,
                 "hub tool call refused by the local permission policy"
             );
-            return Err(ToolError::new(
-                ToolErrorKind::PermissionDenied,
-                format!("tool call refused by the local permission policy: {reason}"),
+            return Err((
+                ToolError::new(
+                    ToolErrorKind::PermissionDenied,
+                    format!("tool call refused by the local permission policy: {reason}"),
+                ),
+                DenialCause::Policy,
             ));
         }
         Some(Ok(targets)) => targets,
@@ -599,6 +678,59 @@ pub(crate) async fn enforce_hub_policy(
         return Ok(Vec::new());
     }
     let session_cwd = session.cwd().to_path_buf();
+    // S6.3 (hub-routed path): a peer-influenced session's protected edits are denied before the hub verdict, whatever
+    // always-approve says. Edit-class accesses only; the shell is PART B (S6.4).
+    if session.peer_influence().is_set() {
+        // Every access is judged (a patch's targets apply to each edit access), off the async worker: the guard resolves symlinks.
+        let (accesses, targets, cwd, display) = (
+            accesses.to_vec(),
+            (!patch_targets.is_empty()).then(|| crate::permission::EditTargets::Paths(patch_targets.clone())),
+            session_cwd.clone(),
+            facts.display_cwd.clone(),
+        );
+        let denial = match tokio::task::spawn_blocking(move || {
+            accesses.iter().find_map(|a| {
+                crate::permission::peer_guard::peer_guard_denial(a, targets.as_ref(), &cwd, display.as_deref())
+            })
+        })
+        .await
+        {
+            Ok(denial) => denial,
+            // The check did not finish: deny rather than let a protected edit through.
+            Err(_) => Some(crate::permission::peer_guard::peer_guard_denial_text("(unchecked)")),
+        };
+        if let Some(reason) = denial {
+            return Err((ToolError::new(ToolErrorKind::PermissionDenied, reason), DenialCause::Policy));
+        }
+    }
+    // S7.3 (hub-routed path): an access that matches a denial carried by a released peer message is refused before the hub
+    // verdict, whatever always-approve says. A session that carries nothing computes no keys.
+    if session.peer_influence().denials().has_carried() {
+        match hub_denial_keys(session, accesses, Some(Ok(patch_targets.clone())), facts.read_targets.clone(), facts.display_cwd.clone(), true).await {
+            Ok(keys) => {
+                if let Some(hit) = session.peer_influence().denials().match_carried_any(&keys) {
+                    return Err((
+                        ToolError::new(
+                            ToolErrorKind::PermissionDenied,
+                            crate::permission::peer_denials::laundering_refused_text(&hit.kind),
+                        ),
+                        DenialCause::Policy,
+                    ));
+                }
+            }
+            // The key check did not finish with a list carried: fail closed, as the packet 6 guard does. The refusal is the
+            // generic `laundering_refused` text (no hit is queued: no key matched).
+            Err(_) => {
+                return Err((
+                    ToolError::new(
+                        ToolErrorKind::PermissionDenied,
+                        crate::permission::peer_denials::laundering_refused_text("(unchecked)"),
+                    ),
+                    DenialCause::ManagerFailure,
+                ));
+            }
+        }
+    }
     let config = crate::permission::resolution::resolve_permission_config_with_fallback(
         &session_cwd,
         workspace.shared.project_permissions_trusted,
@@ -677,6 +809,7 @@ pub(crate) async fn enforce_hub_policy(
             asks: Vec::new(),
         },
     };
+    let check_failed = verdict.denied.as_ref().is_some_and(|(r, _)| r.starts_with("the permission check did not complete"));
     if let Some((reason, _)) = verdict.denied {
         tracing::info!(
             tool = %tool_name,
@@ -685,9 +818,12 @@ pub(crate) async fn enforce_hub_policy(
             %reason,
             "hub tool call refused by the local permission policy"
         );
-        return Err(ToolError::new(
-            ToolErrorKind::PermissionDenied,
-            format!("tool call refused by the local permission policy: {reason}"),
+        return Err((
+            ToolError::new(
+                ToolErrorKind::PermissionDenied,
+                format!("tool call refused by the local permission policy: {reason}"),
+            ),
+            if check_failed { DenialCause::ManagerFailure } else { DenialCause::Policy },
         ));
     }
     if verdict.asks.is_empty() {
@@ -696,7 +832,7 @@ pub(crate) async fn enforce_hub_policy(
     let transport = workspace.hub_server_blocking().await.and_then(|server| {
         crate::permission::ToolServerPermissionTransport::from_session_id(server, session_id)
     });
-    crate::permission::settle_hub_asks(
+    crate::permission::settle_hub_asks_caused(
         transport
             .as_ref()
             .map(|t| t as &dyn crate::permission::PermissionHookTransport),
@@ -2450,5 +2586,118 @@ mod tests {
             !dumped.contains("/workspace/conv-abc"),
             "CCO value JSON must not leak the real root: {dumped}"
         );
+    }
+}
+
+#[cfg(test)]
+mod peer_guard_hub_tests {
+    use super::*;
+    use crate::permission::{AccessKind, PeerInfluence};
+
+    async fn protected_edit(handle: &WorkspaceHandle, id: &str) -> Result<Vec<String>, ToolError> {
+        let session = handle.session(id).expect("session");
+        let target = session.cwd().join("CLAUDE.md").to_string_lossy().into_owned();
+        let accesses = [AccessKind::Edit(target)];
+        enforce_hub_policy(handle, &session, id, "call-1", "edit_file", &accesses, &accesses, HubCallFacts::default()).await
+    }
+
+    /// Round 3: an influenced session's protected edit through the hub-routed path is denied, for the session and for a
+    /// subagent session that adopted the parent's ONE flag; the same edit of a clear session is not a guard denial.
+    #[tokio::test]
+    async fn r3_hub_guard_denies_for_session_and_subagent_sharing_one_flag() {
+        let handle = WorkspaceHandle::for_test();
+        handle.create_session("parent").expect("parent");
+        handle.create_session("child").expect("child");
+        let flag = PeerInfluence::new();
+        handle.session("parent").unwrap().bind_peer_influence(flag.clone());
+        handle.session("child").unwrap().bind_peer_influence(flag.clone());
+        for id in ["parent", "child"] {
+            let before = protected_edit(&handle, id).await;
+            let not_guard = |r: &Result<Vec<String>, ToolError>| {
+                r.as_ref().err().is_none_or(|e| !e.to_string().contains("/peers clear-influence"))
+            };
+            assert!(not_guard(&before), "{id}: a clear session meets no guard denial");
+            flag.set(true);
+            let err = protected_edit(&handle, id).await.expect_err("influenced: denied");
+            assert!(err.to_string().contains("/peers clear-influence"), "{id}: {err}");
+            flag.set(false);
+        }
+    }
+
+    fn mcp_deploy() -> [AccessKind; 1] {
+        [AccessKind::MCPTool { name: "srv__deploy".into(), input: serde_json::json!({"env": "prod"}) }]
+    }
+
+    /// Packet 7 round 2 (finding 1): a hub-routed call under always-approve is refused when a carried denial matches, and a
+    /// hub refusal is recorded in the ring (kind and hash only).
+    #[tokio::test]
+    async fn p7_hub_path_refuses_carried_denial_and_records_hub_denials() {
+        let handle = WorkspaceHandle::for_test();
+        handle.create_session("s").expect("session");
+        let session = handle.session("s").unwrap();
+        session.set_yolo_mode(true);
+        let accesses = mcp_deploy();
+        let run = |a: &[AccessKind]| {
+            let (handle, session) = (handle.clone(), session.clone());
+            let a = a.to_vec();
+            async move {
+                enforce_hub_policy(&handle, &session, "s", "call-1", "srv__deploy", &a, &a, HubCallFacts::default()).await
+            }
+        };
+        run(&accesses).await.expect("always-approve, nothing carried: runs");
+        assert!(session.peer_influence().denials().snapshot().is_empty(), "an allowed call records nothing");
+        let key = crate::permission::denial_keys_for(&accesses[0], None, None, std::path::Path::new("/"), None).remove(0);
+        session.peer_influence().denials().carry(
+            "m-1",
+            &[fuigo_peer::DenialStamp { tool_kind: key.kind.clone(), target_hash: key.hash.clone() }],
+        );
+        let err = run(&accesses).await.expect_err("carried denial: refused under always-approve");
+        assert!(err.to_string().contains("laundering_refused"), "{err}");
+        assert_eq!(session.peer_influence().denials().take_hits().len(), 1);
+        assert_eq!(session.peer_influence().denials().snapshot(), vec![key], "the hub refusal is recorded");
+        let other = [AccessKind::MCPTool { name: "srv__list".into(), input: serde_json::json!({}) }];
+        run(&other).await.expect("an unrelated call still runs");
+    }
+
+    /// Packet 7 round 3 (item 1): on the hub path a guard denial is recorded; a refusal for lack of a prompt is not.
+    #[tokio::test]
+    async fn p7r3_hub_records_a_guard_denial_but_not_an_unshown_prompt() {
+        let handle = WorkspaceHandle::for_test();
+        handle.create_session("s").expect("session");
+        let session = handle.session("s").unwrap();
+        session.peer_influence().set(true);
+        let err = protected_edit(&handle, "s").await.expect_err("guard denial");
+        assert!(err.to_string().contains("/peers clear-influence"), "{err}");
+        assert_eq!(session.peer_influence().denials().ring_len(), 1, "a packet 6 guard denial is recorded");
+        // A call that needs a prompt where no prompt exists is refused but is not a denial.
+        handle.create_session("t").expect("session");
+        let t = handle.session("t").unwrap();
+        let a = mcp_deploy();
+        let err = enforce_hub_policy(&handle, &t, "t", "c", "srv__deploy", &a, &a, HubCallFacts::default()).await;
+        if let Err(e) = err {
+            assert_eq!(t.peer_influence().denials().ring_len(), 0, "a prompt never shown records nothing: {e}");
+        }
+    }
+
+    /// Packet 7 round 3 (item 3): a panic while computing the carried-list keys fails closed (the generic
+    /// `laundering_refused` refusal) when a list is carried, and is not recorded as a denial.
+    #[tokio::test]
+    async fn p7r3_hub_key_computation_panic_fails_closed_with_a_carried_list() {
+        let handle = WorkspaceHandle::for_test();
+        handle.create_session("s").expect("session");
+        let session = handle.session("s").unwrap();
+        session.set_yolo_mode(true);
+        let a = [AccessKind::Bash("__p7r3_panic_keys__".into())];
+        let run = || enforce_hub_policy(&handle, &session, "s", "c", "bash", &a, &a, HubCallFacts::default());
+        // Nothing carried: the keys are never computed, the panic hook is never reached.
+        let before = run().await;
+        assert!(before.is_ok(), "{before:?}");
+        session.peer_influence().denials().carry(
+            "m",
+            &[fuigo_peer::DenialStamp { tool_kind: "bash".into(), target_hash: "sha256:00".into() }],
+        );
+        let err = run().await.expect_err("fail closed");
+        assert!(err.to_string().contains("laundering_refused"), "{err}");
+        assert_eq!(session.peer_influence().denials().ring_len(), 0, "an unchecked refusal records nothing");
     }
 }

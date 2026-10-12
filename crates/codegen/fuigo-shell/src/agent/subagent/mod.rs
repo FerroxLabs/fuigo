@@ -137,6 +137,8 @@ pub(crate) struct SubagentSpawnContext {
     /// The parent's cutoff at spawn, applied to the child's first turn. `None` if unset.
     pub inherited_tool_overrides: Option<fuigo_sampling_types::ToolOverrides>,
     pub yolo_mode: bool,
+    /// The parent was peer-influenced at spawn (S6.1): the child starts influenced.
+    pub parent_peer_influence: fuigo_workspace::permission::PeerInfluence,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
     pub subagents_max_depth: u32,
@@ -758,6 +760,9 @@ async fn read_parent_sampling_config(
                 subscription: None,
                 subscription_resolver: None,
                 header_injector: ctx.sampling_config.header_injector.clone(),
+                dispatch_gate: Some(std::sync::Arc::new(crate::session::acp_session::ParkGate {
+                    session_id: ctx.parent_session_id.clone(),
+                })),
                 mtls_cert_dir: cfg.mtls_cert_dir,
                 rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
                 reasoning_summary: cfg.reasoning_summary,
@@ -1265,7 +1270,7 @@ async fn bootstrap_initial_context(
     }
     let live_items = match ctx.parent_chat_state.as_ref() {
         Some(chat_state) => {
-            let items = chat_state.get_conversation().await;
+            let items = chat_state.get_conversation_for_model().await;
             if items.is_empty() { None } else { Some(items) }
         }
         None => None,

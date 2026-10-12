@@ -10,7 +10,8 @@ use std::str::FromStr;
 use tracing::{debug, info, warn};
 
 use crate::permission::types::{
-    PatternMode, PermissionConfig, PermissionRule, PromptPolicy, RuleAction, ToolFilter,
+    PatternMode, PermissionConfig, PermissionRule, PromptPolicy, ResolvedBaseMode, RuleAction,
+    ToolFilter,
 };
 
 /// Whether user/project/local files should apply their own `defaultMode`.
@@ -549,6 +550,7 @@ async fn resolve_permissions_with_provenance_inner(
     let mut skipped = Vec::new();
     let mut prompt_policy = PromptPolicy::default();
     let mut default_mode_configured = false;
+    let mut resolved_base = ResolvedBaseMode::Default;
 
     // Apply managed defaultMode synthetics and prompt policy (highest mode tier)
     if let Some(mode) = managed_mode {
@@ -560,7 +562,10 @@ async fn resolve_permissions_with_provenance_inner(
             .clone()
             .unwrap_or_else(|| PathBuf::from("managed-settings.json"));
         let source = RequirementSource::ManagedSettings { path: managed_path };
-        let (syn_rules, syn_skipped, _) = synthetic_rules_for_default_mode(mode, policy_block);
+        let (syn_rules, syn_skipped, blocked) = synthetic_rules_for_default_mode(mode, policy_block);
+        if !blocked {
+            resolved_base = mode.resolved_base();
+        }
         skipped.extend(syn_skipped);
         for rule in syn_rules {
             all_rules.push(Sourced {
@@ -578,6 +583,7 @@ async fn resolve_permissions_with_provenance_inner(
         if managed_mode.is_none() {
             prompt_policy = config.prompt_policy;
             default_mode_configured = config.default_mode_configured;
+            resolved_base = config.resolved_base;
         }
         tag_with_source(
             &mut all_rules,
@@ -612,6 +618,7 @@ async fn resolve_permissions_with_provenance_inner(
             rules,
             prompt_policy,
             default_mode_configured,
+            resolved_base,
         },
         sources,
         skipped,
@@ -756,6 +763,11 @@ fn resolve_claude_settings_inner(
             rules: all_rules,
             prompt_policy,
             default_mode_configured: applied_mode.is_some(),
+            resolved_base: if bypass_blocked {
+                ResolvedBaseMode::Default
+            } else {
+                applied_mode.map_or(ResolvedBaseMode::Default, DefaultPermissionMode::resolved_base)
+            },
         },
         all_skipped,
         source_path,

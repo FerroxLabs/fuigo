@@ -292,6 +292,10 @@ impl SessionActor {
     /// The nudge cap (`max_nudges_per_session`) and the classifier telemetry events flow through the same code path in both modes.
     /// Debug mode adds logging; it does not bypass the production decision logic.
     pub(crate) async fn maybe_fire_laziness_check(self: Arc<Self>) {
+        // P189: no idle-triggered classifier while parked
+        if crate::session::quiesce::is_self_quiesced(self.session_info.id.0.as_ref()) {
+            return;
+        }
         let model_id_acp = self.models_manager.current_model_id();
         let Some((model_id, cfg)) = self.models_manager.laziness_target(&model_id_acp.0) else {
             return;
@@ -392,16 +396,7 @@ impl SessionActor {
         //
         // `items_sent` (surfaced to telemetry and the debug log) counts the source chat items the classifier saw, not the 2 wire items
         // That matches the historical meaning and keeps the cost dashboard interpretable
-        let mut source_items = self.chat_state_handle.get_conversation().await;
-        let window_start = laziness_window_start(
-            &source_items,
-            LAZINESS_CONTEXT_ITEM_LIMIT,
-            LAZINESS_MIN_USER_TURNS,
-            LAZINESS_MIN_ASSISTANT_TURNS,
-        );
-        if window_start > 0 {
-            source_items.drain(0..window_start);
-        }
+        let source_items = crate::session::model_facing_reads::laziness_source_items(&self.chat_state_handle).await;
         let items_count_after_trim = source_items.len();
         // An absent per-model `include_reasoning` defers to `LAZINESS_INCLUDE_REASONING` rather than forcing a config edit on every model entry
         let include_reasoning = cfg.include_reasoning.unwrap_or(LAZINESS_INCLUDE_REASONING);

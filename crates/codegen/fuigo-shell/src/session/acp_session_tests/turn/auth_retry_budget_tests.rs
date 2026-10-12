@@ -292,6 +292,7 @@ async fn session_token_actor(
             actor.tool_context.hunk_tracker_handle.clone(),
             actor.agent.borrow().tool_bridge().toolset(),
             None,
+            actor.tool_context.peer_influence.clone(),
         )
         .expect("bind_local_session");
 

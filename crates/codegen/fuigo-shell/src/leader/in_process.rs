@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use fuigo_acp_lib::{
-    AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
+    AcpAgentGatewaySender as GatewaySender,
 };
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, simplex};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -31,13 +31,16 @@ pub fn spawn_agent(
         let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
         let agent = MvpAgent::new(GatewaySender::new(gateway_tx), &config, auth_manager, None)
             .expect("valid agent config");
+        let park_hold = agent.park_hold.clone();
         let (conn, handle_io) = crate::agent::credential_scrub::agent_side_connection(
             agent,
             agent_out_write.compat_write(),
             agent_in_read.compat(),
         );
         tokio::task::spawn_local(
-            GatewayReceiver::new(gateway_rx, conn)
+            fuigo_acp_lib::AcpGatewayReceiver::<agent_client_protocol::AgentSide, _>::new(
+            gateway_rx,
+            crate::agent::park_hold::ParkHoldClient::new(conn, park_hold))
                 .with_on_meta(fuigo_file_utils::trace_context::span_from_meta_traceparent)
                 .run(),
         );

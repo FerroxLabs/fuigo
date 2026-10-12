@@ -1720,6 +1720,7 @@ mod tests {
 
     /// P198 r2: the current and the legacy `list_dir` walkers against the shared contract, and the no-rule contract of the
     /// legacy walker (an empty rule list prints the same bytes as none).
+    #[cfg(unix)]
     #[tokio::test]
     async fn read_rules_follow_the_policy_matcher() {
         use crate::types::resources::DenyReadGlobs;
@@ -1747,6 +1748,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn legacy_walker_prints_the_same_bytes_with_an_empty_rule_list() {
         use crate::types::resources::DenyReadGlobs;

@@ -142,6 +142,7 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                     actor.tool_context.hunk_tracker_handle.clone(),
                     actor.agent.borrow().tool_bridge().toolset(),
                     None,
+                    actor.tool_context.peer_influence.clone(),
                 )
                 .expect("bind_local_session");
 

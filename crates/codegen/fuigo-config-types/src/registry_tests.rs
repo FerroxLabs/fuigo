@@ -76,6 +76,7 @@ fn registered_settings() {
                 ("FUIGO_REPO_STATUS_IN_SYSTEM_PROMPT", true),
             ),
             ("terminal_theme", ("FUIGO_TERMINAL_THEME", false)),
+            ("peer_messaging", ("FUIGO_PEER_MESSAGING", false)),
         ]),
     );
 }
@@ -109,7 +110,7 @@ fn every_registered_feature_reads_its_own_remote_setting() {
                 settings.repo_status_in_system_prompt = Some(value)
             }
             // The rows with no remote tier, stated as such rather than as a projection that reads nothing
-            Feature::BackendTools | Feature::TerminalTheme => {
+            Feature::BackendTools | Feature::TerminalTheme | Feature::PeerMessaging => {
                 assert!(spec.remote.is_none(), "{} grew a remote tier", spec.key);
                 continue;
             }

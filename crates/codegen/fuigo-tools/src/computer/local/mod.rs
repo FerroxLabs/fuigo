@@ -12,6 +12,10 @@ pub mod terminal;
 // See `computer::task_log` for the tests that run everywhere.
 #[cfg(all(test, unix))]
 mod terminal_snapshot_tests;
+#[cfg(all(test, unix))]
+mod placement_guard_tests;
+#[cfg(all(test, target_os = "linux"))]
+mod placement_cgroup_tests;
 
 pub use cgroup::{CgroupMemoryConfig, PROCESS_OOM_EXIT_CODE};
 pub use file_system::LocalFs;

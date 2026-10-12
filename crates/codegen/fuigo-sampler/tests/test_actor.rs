@@ -103,6 +103,7 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         subscription: None,
         subscription_resolver: None,
         header_injector: None,
+        dispatch_gate: None,
         mtls_cert_dir: None,
         rate_limit_retry_threshold: None,
         reasoning_summary: None,
@@ -1760,4 +1761,292 @@ async fn await_event_matching(
             Err(_) => return None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// P189 round 4 (M3): admission at the single dispatch point
+// ---------------------------------------------------------------------------
+
+/// A gate the test opens and closes, standing in for a session park.
+struct TestGate(tokio::sync::watch::Receiver<bool>);
+
+impl fuigo_sampling_types::DispatchGate for TestGate {
+    fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
+        let mut rx = self.0.clone();
+        Box::pin(async move {
+            let _ = rx.wait_for(|open| *open).await;
+        })
+    }
+}
+
+fn gated_config(base_url: String, open: bool) -> (SamplerConfig, tokio::sync::watch::Sender<bool>) {
+    let (tx, rx) = tokio::sync::watch::channel(open);
+    let mut cfg = test_config(base_url, "test-model");
+    cfg.dispatch_gate = Some(Arc::new(TestGate(rx)));
+    (cfg, tx)
+}
+
+fn counting_ok_router(counter: Arc<AtomicU32>, fail_first: bool) -> Router {
+    Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter);
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if fail_first && n == 0 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        json!({ "error": { "message": "transient" } }).to_string(),
+                    ))
+                } else {
+                    let events = sse::chat_completion_events("ok", "test-model");
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    )
+}
+
+/// The subagent case: attempt 1 fails, the park starts, the sampler's backoff ends DURING the park, and the retry
+/// must be held at the dispatch point: 0 further requests while parked, exactly 1 after the unpark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_subagent_retry_whose_backoff_ends_during_a_hold_park_sends_nothing() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), true)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cfg, gate) = gated_config(server.base_url(), true);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let rid = RequestId::from("req-retry-park");
+    handle.submit(rid.clone(), user_request("hi"));
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Retrying { .. }),
+        Duration::from_secs(10),
+    )
+    .await
+    .expect("retrying after the first failure");
+    gate.send(false).unwrap(); // park starts while the sampler is in backoff
+    tokio::time::sleep(Duration::from_secs(6)).await; // the backoff (about 2s, jittered) ends during the park
+    assert_eq!(counter.load(Ordering::SeqCst), 1, "the retry was sent while parked");
+
+    gate.send(true).unwrap(); // unpark
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
+    assert_eq!(counter.load(Ordering::SeqCst), 2, "exactly one request after the unpark");
+}
+
+/// A side call (a plain `conversation_collect`, no actor, no retry loop) reaches the dispatch point even if it got
+/// past every earlier check: it sends nothing while the gate is closed and one request after it opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_side_call_past_execution_admission_is_held_at_dispatch() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), false)).await;
+    let (cfg, gate) = gated_config(server.base_url(), false);
+    let client = fuigo_sampler::SamplingClient::new(cfg).expect("client");
+    let call = tokio::spawn(async move { client.conversation_collect(user_request("hi")).await });
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(counter.load(Ordering::SeqCst), 0, "a side call dispatched while the gate was closed");
+    assert!(!call.is_finished());
+
+    gate.send(true).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(10), call).await.expect("finishes").expect("join");
+    server.shutdown();
+    result.expect("collect after unpark");
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+}
+
+/// A call cancelled while it waits at the gate ends as cancelled and never dispatches, not even after the unpark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_call_waiting_at_the_gate_ends_without_dispatch() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), false)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cfg, gate) = gated_config(server.base_url(), false);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let rid = RequestId::from("req-cancel-gate");
+    handle.submit(rid.clone(), user_request("hi"));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    handle.cancel(rid.clone());
+    let failed = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed event after cancel while gated");
+    if let SamplingEvent::Failed { error, .. } = failed {
+        assert!(error.message.contains("cancelled"));
+    }
+    gate.send(true).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(counter.load(Ordering::SeqCst), 0, "a cancelled call dispatched after the unpark");
+    assert_eq!(handle.active_count().await, 0);
+    server.shutdown();
+}
+
+/// Counts `admit` calls (the durable call debit) and nothing else.
+#[derive(Debug, Default)]
+struct CountingAdmission {
+    admits: AtomicU32,
+}
+
+impl fuigo_sampling_types::ExecutionAdmission for CountingAdmission {
+    fn scope_id(&self) -> &str {
+        "p189-a2-count"
+    }
+    fn admit(
+        &self,
+        _purpose: fuigo_sampling_types::RequestPurpose,
+        _attempt_id: String,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        self.admits.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+    fn settle(
+        &self,
+        _attempt_id: String,
+        _usage: Option<fuigo_sampling_types::TokenUsage>,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Grok r4 #7: a call held at the dispatch gate is not admitted yet, and one cancelled there never is: no call
+/// slot is consumed by a cancel while parked. Admission happens once, after the gate opens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_waiting_at_the_gate_is_not_admitted_until_it_dispatches() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), false)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cfg, gate) = gated_config(server.base_url(), false);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
+    let admission = Arc::new(CountingAdmission::default());
+    let mut cancelled = user_request("cancel me");
+    cancelled.execution_admission = Some(admission.clone());
+    let rid = RequestId::from("req-admit-cancel");
+    handle.submit(rid.clone(), cancelled);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "admitted while held at the gate");
+    handle.cancel(rid.clone());
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed event after cancel while gated");
+    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "a cancel at the gate consumed a call slot");
+
+    let mut served = user_request("serve me");
+    served.execution_admission = Some(admission.clone());
+    handle.submit(RequestId::from("req-admit-serve"), served);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(admission.admits.load(Ordering::SeqCst), 0, "admitted while the gate is closed");
+    gate.send(true).unwrap();
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    server.shutdown();
+    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
+    assert_eq!(admission.admits.load(Ordering::SeqCst), 1, "admitted exactly once, after the gate");
+}
+
+/// An admission whose `admit` awaits (a durable write) while the gate closes; counts refunds.
+#[derive(Debug, Default)]
+struct SlowAdmission {
+    admits: AtomicU32,
+    refunds: AtomicU32,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl fuigo_sampling_types::ExecutionAdmission for SlowAdmission {
+    fn scope_id(&self) -> &str {
+        "p189-a2-r2-slow"
+    }
+    fn admit(
+        &self,
+        _purpose: fuigo_sampling_types::RequestPurpose,
+        _attempt_id: String,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.admits.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+    fn settle(
+        &self,
+        _attempt_id: String,
+        _usage: Option<fuigo_sampling_types::TokenUsage>,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
+    fn refund(
+        &self,
+        _purpose: fuigo_sampling_types::RequestPurpose,
+        _attempt_id: String,
+    ) -> fuigo_sampling_types::AdmissionFuture<'_> {
+        self.refunds.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// Opus r1 #1: a call inside the durable admission write while the gate closes sends NOTHING until the gate
+/// reopens (the gate is awaited again after `admit`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_inside_the_admission_write_when_the_gate_closes_sends_nothing() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), false)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cfg, gate) = gated_config(server.base_url(), true);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+    let admission = Arc::new(SlowAdmission::default());
+    let mut request = user_request("hi");
+    request.execution_admission = Some(admission.clone());
+    handle.submit(RequestId::from("req-r2-slow-admit"), request);
+    admission.entered.notified().await; // inside the admission write, gate still open
+    gate.send(false).unwrap(); // the park reaches Parked while the write is in flight
+    admission.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(counter.load(Ordering::SeqCst), 0, "a request left after the park was acknowledged");
+    gate.send(true).unwrap();
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(10)).await;
+    server.shutdown();
+    assert!(matches!(events.last(), Some(SamplingEvent::Completed { .. })), "{:?}", events.last());
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.refunds.load(Ordering::SeqCst), 0, "a dispatched attempt must not be refunded");
+}
+
+/// A call cancelled at the second gate (admitted, never sent) gives its call slot back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_cancelled_at_the_second_gate_refunds_its_slot() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let server = MockServer::spawn(counting_ok_router(Arc::clone(&counter), false)).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let (cfg, gate) = gated_config(server.base_url(), true);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+    let admission = Arc::new(SlowAdmission::default());
+    let mut request = user_request("hi");
+    request.execution_admission = Some(admission.clone());
+    let rid = RequestId::from("req-r2-cancel-second-gate");
+    handle.submit(rid.clone(), request);
+    admission.entered.notified().await;
+    gate.send(false).unwrap();
+    admission.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    handle.cancel(rid);
+    let _ = await_event_matching(&mut event_rx, |e| matches!(e, SamplingEvent::Failed { .. }), Duration::from_secs(5))
+        .await
+        .expect("Failed event after cancel at the second gate");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.shutdown();
+    assert_eq!(counter.load(Ordering::SeqCst), 0);
+    assert_eq!(admission.admits.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.refunds.load(Ordering::SeqCst), 1, "the cancelled, never-sent attempt kept its slot");
 }

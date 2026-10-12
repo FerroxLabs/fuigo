@@ -460,6 +460,7 @@ pub(crate) async fn create_test_actor_with_terminal(
         initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announcements: Default::default(),
+        peer_admission: crate::session::peer_admission::PeerAdmissionState::unmetered(),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),

@@ -640,6 +640,7 @@ impl Presenter {
             queued_before,
             |force| {
                 if force {
+                    app.note_screen_disturbed();
                     let _ = terminal.clear();
                     // terminal.clear() rewrote every cell, erasing iTerm2
                     // inline pixels; drop overlay ownership so the next
@@ -867,6 +868,7 @@ fn run_pending_suspends(
                 // The child owned the screen; re-anchor if it printed inline
                 // Repaint the full viewport rather than diffing against a screen state we can no longer vouch for
                 restore_after_child(terminal, app.screen_mode, moved_cursor);
+                app.note_screen_disturbed();
                 presenter.request_presentation(app, terminal, true);
                 suspend_wait_reports.editor_reported = false;
             }
@@ -949,6 +951,7 @@ fn run_pending_suspends(
         // The pager owned the screen
         // Re-anchor if it printed inline (cat) and repaint the full viewport rather than diffing against a screen state we can no longer vouch for
         restore_after_child(terminal, app.screen_mode, moved_cursor);
+        app.note_screen_disturbed();
         presenter.request_presentation(app, terminal, true);
         suspend_wait_reports.pager_reported = false;
     }
@@ -1417,6 +1420,7 @@ pub(crate) async fn run(
         ("--disallowed-tools", args.cli_disallowed_tools.is_some()),
         ("--max-turns", args.max_turns.is_some()),
         ("--memory-flush", args.memory_flush),
+        ("--peer", args.peer),
     ];
     for &(flag, set) in headless_only {
         if set {
@@ -3951,6 +3955,11 @@ async fn drain_and_process(
     let suspend_armed_after_event = std::cell::Cell::new(false);
     let mut handle_one = |routed: &RoutedInputEvent| -> bool {
         let ev = &routed.event;
+        // FocusGained / FocusLost return below without reaching `handle_input`: clear the peer dialog's painted proof here,
+        // at first sight, so a later key of this batch cannot act on a stale screen.
+        if AppView::event_disturbs_screen(ev) {
+            app.note_screen_disturbed();
+        }
         match ev {
             Event::FocusGained => {
                 // Re-assert mouse capture on refocus: ConPTY-backed relays (VS Code on Windows with a WSL/SSH session) can strip DEC private modes

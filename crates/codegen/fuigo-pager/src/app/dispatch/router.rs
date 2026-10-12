@@ -146,8 +146,17 @@ pub(super) fn dispatch_copy_auth_url(
 /// Do not extract a returning arm into a handler: as a delegation its `return`s become plain arm values and start flowing through the tail.
 /// The fat inline arms stayed inline for this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
+    // Packet 12b: any change of which view is active or fullscreen disturbs the screen and closes an open peer dialog.
+    let before = app.focus_signature();
+    let effects = dispatch_inner(action, app);
+    app.note_focus_change_since(before);
+    effects
+}
+
+fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     let effects = match action {
+        Action::PeerUi(a) => super::peer::dispatch_peer_ui(a, app),
         Action::Quit | Action::QuitConfirmed => {
             if let Some(tx) = &app.voice_cmd_tx {
                 let _ = tx.try_send(fuigo_voice::VoiceCommand::Shutdown);

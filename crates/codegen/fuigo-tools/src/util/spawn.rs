@@ -5,7 +5,7 @@
 //! (tracing is unavailable there).
 
 pub use fuigo_tty_utils::{
-    ProcessGroup, ProcessScope, detach_command, global_process_scope, new_process_group,
+    ProcessGroup, ProcessScope, SpawnPlacedError, detach_command, global_process_scope, new_process_group,
 };
 
 /// Prepare a search child (`rg` and friends): the policy base environment, then

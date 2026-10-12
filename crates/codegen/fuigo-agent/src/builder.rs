@@ -97,6 +97,7 @@ pub struct AgentBuilder {
         fuigo_tools::implementations::fuigo_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     active_agent_messages_enabled: bool,
+    peer_messaging_tools: bool,
     subagents_enabled: bool,
     background_workflows_enabled: bool,
     ask_user_question_enabled: bool,
@@ -244,6 +245,7 @@ impl AgentBuilder {
             app_builder_deployer_config: Default::default(),
             write_file_enabled: true,
             active_agent_messages_enabled: false,
+            peer_messaging_tools: false,
             subagents_enabled: false,
             background_workflows_enabled: false,
             ask_user_question_enabled: true,
@@ -552,6 +554,12 @@ impl AgentBuilder {
         self.active_agent_messages_enabled = enabled;
         self
     }
+    /// Add the peer messaging tools `list_agents`, `send_message`, `refuse_peer_message` (default: off; with it off the
+    /// tool list is exactly what it was before the feature existed). The caller passes `features.peer_messaging`.
+    pub fn with_peer_messaging_tools(mut self, enabled: bool) -> Self {
+        self.peer_messaging_tools = enabled;
+        self
+    }
     /// Enable or disable subagent (task tool) support.
     ///
     /// When disabled, `build()` strips the `TaskTool` from the agent's tool config, so the model cannot spawn child agent sessions.
@@ -788,6 +796,20 @@ impl AgentBuilder {
             tool_config
                 .tools
                 .retain(|tool| !is_active_agent_message(tool));
+        }
+        // A subagent reaches only its own family, through `send_subagent_message`; the peer tools are not offered to it at all.
+        if self.peer_messaging_tools && self.prompt_audience != crate::prompt::context::PromptAudience::Subagent {
+            use fuigo_tools::implementations::fuigo_build::{ListAgentsTool, RefusePeerMessageTool, SendMessageTool};
+            use fuigo_tools::registry::types::ToolConfig;
+            for config in [
+                ToolConfig::for_tool::<ListAgentsTool>(),
+                ToolConfig::for_tool::<SendMessageTool>(),
+                ToolConfig::for_tool::<RefusePeerMessageTool>(),
+            ] {
+                if !tool_config.tools.iter().any(|tool| tool.id == config.id) {
+                    tool_config.tools.push(config);
+                }
+            }
         }
         if self.memory_backend.is_none() {
             let fuigo_build_ns = fuigo_tools::types::tool::ToolNamespace::FuigoBuild.to_string();
@@ -2977,5 +2999,58 @@ mod skill_discovery_budget_tests {
             elapsed < Duration::from_secs(3),
             "agent build waited {elapsed:?} on skill discovery instead of capping it"
         );
+    }
+
+    async fn peer_definitions(peer: Option<bool>) -> Vec<String> {
+        use fuigo_tools::computer::local::LocalTerminalBackend;
+        let mut builder = AgentBuilder::new(
+            std::env::temp_dir(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .from_definition(crate::config::AgentDefinition::default_fuigo_build())
+        .with_active_agent_messages_enabled(true);
+        if let Some(enabled) = peer {
+            builder = builder.with_peer_messaging_tools(enabled);
+        }
+        builder
+            .build()
+            .await
+            .expect("agent should build")
+            .tool_definitions()
+            .await
+            .iter()
+            .map(|d| serde_json::to_string(d).expect("serializable"))
+            .collect()
+    }
+    #[tokio::test]
+    async fn peer_tools_flag_off_leaves_the_tool_list_byte_identical() {
+        let base = peer_definitions(None).await;
+        assert_eq!(base, peer_definitions(Some(false)).await);
+        for name in ["list_agents", "send_message", "refuse_peer_message"] {
+            assert!(!base.iter().any(|d| d.contains(&format!("\"name\":\"{name}\""))), "{name}");
+        }
+    }
+    #[tokio::test]
+    async fn peer_tools_flag_on_adds_exactly_three_and_changes_no_other_definition() {
+        let base = peer_definitions(None).await;
+        let on = peer_definitions(Some(true)).await;
+        assert_eq!(on.len(), base.len() + 3);
+        for d in &base {
+            assert!(on.contains(d), "an existing definition changed: {d}");
+        }
+        let added: Vec<&String> = on.iter().filter(|d| !base.contains(d)).collect();
+        assert_eq!(added.len(), 3);
+        // S2.5, S9.1: the send_message schema has exactly to, message, summary and notify_when_idle (packet 11) and rejects any
+        // other field.
+        let send = added.iter().find(|d| d.contains("\"name\":\"send_message\"")).expect("send_message");
+        let v: serde_json::Value = serde_json::from_str(send).unwrap();
+        let params = v.pointer("/function/parameters").expect("parameters");
+        let mut keys: Vec<&str> = params["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["message", "notify_when_idle", "summary", "to"]);
+        assert_eq!(params["additionalProperties"], serde_json::json!(false));
+        let sub_off = base.iter().find(|d| d.contains("\"name\":\"send_subagent_message\"")).expect("subagent message tool");
+        assert!(on.contains(sub_off));
     }
 }

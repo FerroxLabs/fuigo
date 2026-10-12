@@ -308,6 +308,7 @@ impl AgentView {
             btw_state: None,
             minimal_btw_lifecycle: None,
             btw_focused: false,
+            peer: crate::peer_ui_state::PeerUiState::default(),
             hit_btw_close: Default::default(),
             toast: None,
             ephemeral_tip: Default::default(),
@@ -430,6 +431,8 @@ impl AgentView {
     /// Establish read-only child identity before a view is stored or opened.
     pub(crate) fn mark_as_subagent_view(&mut self) {
         self.is_subagent_view = true;
+        // A child never owns peer state (structural: no row, no dialog, no tokens).
+        self.peer = crate::peer_ui_state::PeerUiState::default();
     }
     /// Register a child view and establish its read-only subagent identity.
     pub(crate) fn insert_subagent_view(

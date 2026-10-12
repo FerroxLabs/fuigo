@@ -29,6 +29,7 @@ fn populate_and_evict(agent: &MvpAgent, i: usize) {
             fuigo_hunk_tracker::HunkTrackerHandle::noop(),
             toolset,
             None,
+            Default::default(),
         )
         .expect("bind_local_session must succeed");
     }

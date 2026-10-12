@@ -1,0 +1,15 @@
+[package]
+license = "Apache-2.0"
+edition.workspace = true
+name = "fuigo-peer"
+version = "0.1.0"
+description = "Contracts for named sessions that message each other: envelope, opaque address, delivery outcomes, bounds and tool argument types (no transport, no behaviour)"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

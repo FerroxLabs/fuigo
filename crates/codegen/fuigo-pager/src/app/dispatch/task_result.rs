@@ -946,6 +946,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::PeerRpcDone { agent_id, outcome } => super::peer::on_rpc_done(app, agent_id, outcome),
         TaskResult::PromptHistoryLoaded { agent_id, prompts } => {
             use fuigo_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
@@ -1608,6 +1609,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
                         side_question_minimal: false,
+                        fire_ticket: None,
                     });
                 agent.show_toast(&format!("Interjection failed. Requeued: {error}"));
             }

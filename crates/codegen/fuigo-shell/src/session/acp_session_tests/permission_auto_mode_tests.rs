@@ -497,3 +497,41 @@ fn subagent_does_not_set_classifier_project_instructions() {
 
     assert!(!should_set_classifier_project_instructions(true, None));
 }
+
+/// `effective_peer_mode` reads plan first, then the live permission handle, on every call.
+#[tokio::test(flavor = "current_thread")]
+async fn effective_peer_mode_sees_plan_and_runtime_toggles() {
+    use fuigo_workspace::permission::{EffectivePeerMode, EffectivePermissionMode as M};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _grx) =
+                tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+            let (persistence_tx, _prx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            install_real_permissions(&mut actor);
+
+            let r = |plan_active, base| EffectivePeerMode {
+                plan_active,
+                base,
+                session_edit_grant: false,
+            };
+            assert_eq!(actor.effective_peer_mode(), r(false, M::Default));
+            actor.permissions.set_yolo_mode(true);
+            assert_eq!(actor.effective_peer_mode(), r(false, M::Yolo));
+            super::support::activate_plan_mode(&actor);
+            let plan_yolo = actor.effective_peer_mode();
+            assert_eq!(plan_yolo, r(true, M::Yolo));
+            assert_ne!(plan_yolo, r(true, M::Default), "plan+yolo != plan+default");
+            assert_ne!(plan_yolo, r(false, M::Yolo), "plan+yolo != yolo");
+            assert!(actor.plan_mode.lock().deactivate_approved());
+            assert_eq!(actor.effective_peer_mode(), r(false, M::Yolo));
+            actor.permissions.set_yolo_mode(false);
+            actor.permissions.set_auto_mode(true);
+            assert_eq!(actor.effective_peer_mode(), r(false, M::Auto));
+            actor.permissions.set_auto_mode(false);
+            assert_eq!(actor.effective_peer_mode(), r(false, M::Default));
+        })
+        .await;
+}

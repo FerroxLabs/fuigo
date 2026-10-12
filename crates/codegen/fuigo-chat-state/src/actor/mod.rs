@@ -491,6 +491,8 @@ impl ChatStateActor {
                             .iter()
                             .cloned(),
                     );
+                    // The capture leaves the session (traces, feedback): peer state markers are never part of it.
+                    messages.retain(|item| !item.is_peer_influence_marker());
                     TurnCapture {
                         messages,
                         compaction_occurred: cap.compaction_occurred,

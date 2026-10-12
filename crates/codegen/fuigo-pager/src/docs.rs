@@ -183,6 +183,11 @@ pub static USER_GUIDE: &[Doc] = &[
         description: "Depth-1 Grove clone, --full-history, and safe deepen/switch commands",
         content: include_str!("../docs/user-guide/27-fuigo-clone.md"),
     },
+    guide!(
+        "28-named-sessions.md",
+        "Named Sessions and Peer Messaging",
+        "Sessions on one machine list each other and send messages; off by default"
+    ),
 ];
 
 /// Non-user-guide reference docs.

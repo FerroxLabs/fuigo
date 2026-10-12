@@ -1099,6 +1099,7 @@ fn plugin_root_is_none_when_the_path_does_not_canonicalize() {
 
 // ---- P183 round 10 (Grok r6 H): an admin entry replaced by a non-regular object, read through the real source reader ----------
 
+#[cfg(unix)]
 fn mkfifo_at(path: &Path) {
     use std::os::unix::ffi::OsStrExt as _;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -1108,6 +1109,7 @@ fn mkfifo_at(path: &Path) {
 /// The audit's sequence at the policy-engine boundary: each replacement object is an `Err` source (never absent or blank), so
 /// the engine locks MCP, hooks and project MCP; with a validated copy it enforces the copy (no blanket deny) and without one
 /// it denies every tool. A directory whose entry a group/other can write is the same.
+#[cfg(unix)]
 #[test]
 fn replaced_admin_entry_is_a_broken_source_the_engine_locks_down_p183r10() {
     use std::os::unix::fs::PermissionsExt as _;

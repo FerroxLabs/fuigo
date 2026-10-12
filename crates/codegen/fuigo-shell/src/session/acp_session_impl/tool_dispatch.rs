@@ -298,7 +298,7 @@ impl SessionActor {
                 .toolset()
                 .tool_name_for_kind(fuigo_tools::types::tool::ToolKind::Execute)
         };
-        let bash_meta = match exec_wire {
+        let bash_meta = match exec_wire.clone() {
             Some(wire) => self.stamp_tool_meta(bash_marker.clone(), &wire, Some(&tool_input)),
             None => bash_marker,
         };
@@ -315,6 +315,18 @@ impl SessionActor {
             None,
         )
         .await;
+
+        // bang-controls (decision 40): denials apply before the command runs. A refusal never prompts.
+        let hook_tool_name = exec_wire.clone().unwrap_or_else(|| "Bash".to_owned());
+        if let Some(refusal) = self
+            .bang_refusal(_prompt_id, &command, &tool_call_id, &hook_tool_name, &tool_input)
+            .await
+        {
+            return self
+                .finish_refused_bang(tool_call_id, &command, &refusal)
+                .await;
+        }
+        let run_started = std::time::Instant::now();
 
         let request = TerminalRunRequest {
             tool_call_id: tool_call_id.clone(),
@@ -388,6 +400,15 @@ impl SessionActor {
                 output_delta: None,
                 was_bare_echo: false,
             };
+            let raw_output_value = serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok();
+            self.bang_post_tool_use(
+                &tool_call_id,
+                &hook_tool_name,
+                &tool_input,
+                raw_output_value.clone(),
+                run_started.elapsed(),
+            )
+            .await;
             self.send_update(
                 acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
                     tool_call_id,
@@ -424,7 +445,7 @@ impl SessionActor {
                                 BashModeOutput::model_result(&history_output, &status_line),
                             )),
                         )]))
-                        .raw_output(serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok()),
+                        .raw_output(raw_output_value),
                 )),
                 None,
             )
@@ -452,7 +473,206 @@ impl SessionActor {
         let total_tokens = self.chat_state_handle.get_total_tokens().await;
         ok_end_turn(total_tokens, None)
     }
+
+    /// Denials for a typed `!` line (decision 40 part 3), in order, stopping at the first that refuses:
+    /// `UserPromptSubmit` hook (block), `PreToolUse` hook (deny), configured permission rules / managed policy (deny).
+    /// Asks never prompt and are treated as allow; a hook cannot rewrite the command and its added context is ignored.
+    /// Returns the one-line refusal naming what refused it.
+    pub(crate) async fn bang_refusal(
+        &self,
+        prompt_id: &str,
+        command: &str,
+        tool_call_id: &acp::ToolCallId,
+        hook_tool_name: &str,
+        tool_input: &fuigo_tools::types::ToolInput,
+    ) -> Option<String> {
+        use fuigo_hooks::event::{HookEventName, HookPayload, truncate_payload};
+        use fuigo_hooks::result::{HookDecision, PromptDecision};
+        let safe = |text: &str| {
+            let flat = crate::util::text_sanitize::flatten_spoofable(text).unwrap_or_default();
+            fuigo_hooks::event::clip_reason(&flat)
+        };
+        // (a) UserPromptSubmit: a block refuses; context and rewrites do not apply to a shell line.
+        if let PromptDecision::Block { reason, hook_name } = self
+            .dispatch_prompt_submit_hook(
+                HookPayload::UserPromptSubmit {
+                    prompt: Some(command.to_owned()),
+                    shell_command: Some(command.to_owned()),
+                    subagent_type: self.subagent_type_label(),
+                    origin: None,
+                    peer_sender: None,
+                    peer_claimed_mode: None,
+                },
+                Some(prompt_id),
+            )
+            .await
+        {
+            return Some(format!(
+                "Refused: a UserPromptSubmit hook ({}) blocked this command: {}",
+                safe(fuigo_hooks::config::hook_display_name(&hook_name)),
+                safe(&reason)
+            ));
+        }
+        // (b) PreToolUse: a deny refuses; ask is allow, an updated input and added context are ignored.
+        let pre_registry = self.hook_registry.borrow().clone();
+        if self.may_have_hooks_for(HookEventName::PreToolUse)
+            && let Some(registry) = pre_registry
+        {
+            let mut input = match tool_input {
+                fuigo_tools::types::ToolInput::Bash(b) => {
+                    serde_json::to_value(b).unwrap_or(serde_json::Value::Null)
+                }
+                _ => serde_json::Value::Null,
+            };
+            if let Some(map) = input.as_object_mut() {
+                map.insert("userTyped".to_owned(), serde_json::Value::Bool(true));
+            }
+            let (tool_input_value, tool_input_truncated) = truncate_payload(input);
+            let envelope = self.make_hook_envelope(
+                HookEventName::PreToolUse,
+                None,
+                HookPayload::PreToolUse {
+                    tool_name: hook_tool_name.to_owned(),
+                    tool_use_id: tool_call_id.0.to_string(),
+                    tool_input: tool_input_value,
+                    tool_input_truncated,
+                    subagent_type: self.subagent_type_label(),
+                    // A `! cmd` the human typed: not a peer-origin turn (S6.7).
+                    origin: None,
+                    peer_influenced: self.pre_tool_use_peer_note().map(|n| n.peer_influenced),
+                },
+            );
+            let ctx = self.hook_run_ctx();
+            let pre = fuigo_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            self.send_hook_execution(
+                "pre_tool_use",
+                Some(hook_tool_name),
+                Some(&tool_call_id.0),
+                None,
+                &pre.results,
+            )
+            .await;
+            if let HookDecision::Deny { reason, hook_name } = pre.decision {
+                return Some(format!(
+                    "Refused: a PreToolUse hook ({}) denied this command: {}",
+                    safe(fuigo_hooks::config::hook_display_name(&hook_name)),
+                    safe(&reason)
+                ));
+            }
+        }
+        // (c) Configured rules and managed policy: deny only (the decide-only entry of the permission manager).
+        if let Some(reason) = self
+            .permissions
+            .configured_deny(
+                fuigo_workspace::permission::AccessKind::Bash(command.to_owned()),
+                self.tool_context.cwd.as_path().to_path_buf(),
+            )
+            .await
+        {
+            return Some(format!("Refused: {}", safe(&reason)));
+        }
+        None
+    }
+
+    /// End a refused `!` line: the block fails with the refusal line (the model's copy of the tool result is generic),
+    /// the model's conversation gets one short fixed item that carries neither the hook message nor the rule, and the turn ends.
+    async fn finish_refused_bang(
+        &self,
+        tool_call_id: acp::ToolCallId,
+        command: &str,
+        refusal: &str,
+    ) -> PromptTurnResult {
+        let bash_output = BashOutput {
+            output_for_prompt: BashOutput::make_output_for_prompt(refusal),
+            output: refusal.as_bytes().to_vec(),
+            exit_code: 126,
+            command: command.to_owned(),
+            truncated: false,
+            signal: None,
+            timed_out: false,
+            description: None,
+            current_dir: self.tool_context.cwd.to_string(),
+            output_file: String::new(),
+            total_bytes: refusal.len(),
+            output_delta: None,
+            was_bare_echo: false,
+        };
+        self.send_update(
+            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+                tool_call_id,
+                acp::ToolCallUpdateFields::new()
+                    .status(Some(acp::ToolCallStatus::Failed))
+                    .content(Some(vec![acp::ToolCallContent::from(
+                        acp::ContentBlock::Text(acp::TextContent::new(BANG_REFUSED_MODEL_TEXT)),
+                    )]))
+                    .raw_output(serde_json::to_value(ToolsToolOutput::Bash(bash_output)).ok()),
+            )),
+            None,
+        )
+        .await;
+        self.chat_state_handle.push_user_message(ConversationItem::user(format!(
+            "I tried to run a terminal command, but it was refused by policy and did not run: `{command}`"
+        )));
+        self.chat_state_handle.flush();
+        let flush_error = self.flush_to_disk().await.err();
+        self.disk_full_acp_error(flush_error.as_ref())?;
+        let total_tokens = self.chat_state_handle.get_total_tokens().await;
+        ok_end_turn(total_tokens, None)
+    }
+
+    /// (d) PostToolUse for a `!` line: observe-only, it cannot undo the command and its added context is ignored.
+    async fn bang_post_tool_use(
+        &self,
+        tool_call_id: &acp::ToolCallId,
+        hook_tool_name: &str,
+        tool_input: &fuigo_tools::types::ToolInput,
+        output: Option<serde_json::Value>,
+        elapsed: std::time::Duration,
+    ) {
+        use fuigo_hooks::event::{HookEventName, HookPayload, truncate_payload};
+        if !self.may_have_hooks_for(HookEventName::PostToolUse) {
+            return;
+        }
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return;
+        };
+        let input = match tool_input {
+            fuigo_tools::types::ToolInput::Bash(b) => serde_json::to_value(b).unwrap_or_default(),
+            _ => serde_json::Value::Null,
+        };
+        let (tool_input_value, tool_input_truncated) = truncate_payload(input);
+        let (tool_result_value, tool_result_truncated) =
+            truncate_payload(output.unwrap_or(serde_json::Value::Null));
+        let envelope = self.make_hook_envelope(
+            HookEventName::PostToolUse,
+            None,
+            HookPayload::PostToolUse {
+                tool_name: hook_tool_name.to_owned(),
+                tool_use_id: tool_call_id.0.to_string(),
+                tool_input: tool_input_value,
+                tool_result: tool_result_value,
+                tool_input_truncated,
+                tool_result_truncated,
+                duration_ms: Some(elapsed.as_millis() as u64),
+                is_backgrounded: false,
+                subagent_type: self.subagent_type_label(),
+            },
+        );
+        let ctx = self.hook_run_ctx();
+        let post = fuigo_hooks::dispatcher::dispatch_post_tool_use(&registry, &envelope, &ctx).await;
+        self.send_hook_execution(
+            "post_tool_use",
+            Some(hook_tool_name),
+            Some(&tool_call_id.0),
+            None,
+            &post.results,
+        )
+        .await;
+    }
 }
+
+/// What the model's copy of a refused `!` tool result says (fixed text: no hook message, no rule text).
+const BANG_REFUSED_MODEL_TEXT: &str = "The command was refused by policy and did not run.";
 
 // ── Bash-mode output shapes ─────────────────────────────────────────────
 

@@ -12,6 +12,12 @@ impl SessionActor {
         auto_compact_threshold_percent: u8,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(sampling_config.model.clone());
+        // F8: the family the session is leaving, read before the new config replaces it.
+        let old_model = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .map(|config| config.model);
         // The replayed side-call tool list aligned with the old model's cache; the next main turn records a fresh one
         self.last_sent_tool_specs.replace(None);
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
@@ -135,24 +141,55 @@ impl SessionActor {
         if turn_in_flight && is_family_switch {
             tracing::warn!("Family-switch compact skipped: turn in flight");
         }
-        if is_family_switch && !turn_in_flight && self.history_has_model_minted_items().await {
-            self.abort_and_clear_prefire().await;
-            let estimated_total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
-            let context_window = new_context_window.get();
-            let trigger_info = compaction::AutoCompactTriggerInfo {
-                tokens_used: estimated_total_tokens,
-                context_window,
-                percentage: fuigo_token_estimation::usage_percentage_u8(
-                    estimated_total_tokens,
-                    context_window,
-                ),
-            };
+        // A parked (or parking) session makes no model call and its actor must stay free for the unpark: the
+        // compaction is owed and runs at the implicit unpark, before the prompt's turn. The debt is tracked
+        // against the ORIGIN family, so a switch that returns to it owes nothing.
+        let identity_of = |model: &str| {
+            let models = self.models_manager.models();
+            crate::agent::config::find_model_by_id(&models, model)
+                .and_then(|e| e.info.model_family.clone())
+                .unwrap_or_else(|| model.to_owned())
+        };
+        let arriving = identity_of(&sampling_config.model);
+        let leaving = old_model.as_deref().map(identity_of);
+        let minted = is_family_switch && !turn_in_flight && self.history_has_model_minted_items().await;
+        let parked = crate::session::quiesce::owe(&self.session_info.id.0, |o| {
+            o.note_model_switch(minted, leaving.clone(), &arriving);
+        });
+        if parked {
+            tracing::info!("Family-switch compact: session is parked; owed state updated");
+        } else if minted {
             tracing::info!("Family-switch compact: -> {}", sampling_config.model);
-            if let Err(e) = self.run_compact_only(trigger_info, true).await {
-                tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Family-switch compaction failed; switching anyway");
-            }
+            self.run_family_switch_compact(Some(new_context_window.get())).await;
         }
         Ok(model_id)
+    }
+    /// Compacts the model-minted history after a family switch; a failure is logged and the switch stands.
+    /// `context_window` is `None` for an owed compaction: the window is the session's CURRENT one, read here.
+    pub(super) async fn run_family_switch_compact(self: &std::sync::Arc<Self>, context_window: Option<u64>) {
+        let context_window = match (context_window, self.compaction.context_window_override) {
+            (Some(window), _) => window,
+            (None, Some(window)) => window.get(),
+            (None, None) => self
+                .chat_state_handle
+                .get_sampling_config()
+                .await
+                .map(|config| config.context_window.get())
+                .unwrap_or(DEFAULT_CONTEXT_WINDOW),
+        };
+        self.abort_and_clear_prefire().await;
+        let estimated_total_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let trigger_info = compaction::AutoCompactTriggerInfo {
+            tokens_used: estimated_total_tokens,
+            context_window,
+            percentage: fuigo_token_estimation::usage_percentage_u8(
+                estimated_total_tokens,
+                context_window,
+            ),
+        };
+        if let Err(e) = self.run_compact_only(trigger_info, true).await {
+            tracing::error!(error = %crate::sampling::error::acp_error_text(&e), "Family-switch compaction failed; switching anyway");
+        }
     }
     /// Set the reasoning effort on the live sampling config, applying the same
     /// support check and per-effort model routing as `apply_supported_effort`.
@@ -278,6 +315,7 @@ impl SessionActor {
             self.tool_context.hunk_tracker_handle.clone(),
             self.agent.borrow().tool_bridge().toolset(),
             None,
+            self.tool_context.peer_influence.clone(),
         ) {
             tracing::warn!(error = %e, "failed to rebind local session toolset after agent rebuild");
         }
@@ -429,7 +467,7 @@ impl SessionActor {
         }
     }
     /// Whether the conversation has anything a family switch must compact away.
-    async fn history_has_model_minted_items(&self) -> bool {
+    pub(super) async fn history_has_model_minted_items(&self) -> bool {
         self.chat_state_handle
             .get_conversation()
             .await

@@ -142,7 +142,7 @@ impl SessionActor {
         })?;
 
         // Full conversation snapshot including system prompt, reasoning, tool calls, and results.
-        let mut items = self.chat_state_handle.get_conversation().await;
+        let mut items = self.chat_state_handle.get_conversation_for_model().await;
 
         let sampling_config = self.chat_state_handle.get_sampling_config().await;
         let reasoning_effort = sampling_config.as_ref().and_then(|c| c.reasoning_effort);
@@ -321,7 +321,7 @@ impl SessionActor {
         // A prompt accepted while we await the conversation then bumps the epoch after this capture and cancels the recap
         let recap_epoch = self.recap_epoch.get();
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation = self.chat_state_handle.get_conversation_for_model().await;
         let main_turns = session_recap::main_turn_count(&conversation);
 
         let stored = self.last_recap_main_turn.get();
@@ -754,7 +754,7 @@ impl SessionActor {
             return None;
         };
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation = self.chat_state_handle.get_conversation_for_model().await;
         let Some(transcript) = prompt_suggest::build_transcript(&conversation) else {
             tracing::debug!(
                 items = conversation.len(),

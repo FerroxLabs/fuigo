@@ -34,6 +34,15 @@ impl FromStr for DefaultPermissionMode {
 }
 
 impl DefaultPermissionMode {
+    pub(crate) fn resolved_base(self) -> crate::permission::types::ResolvedBaseMode {
+        use crate::permission::types::ResolvedBaseMode as B;
+        match self {
+            Self::AcceptEdits => B::AcceptEdits,
+            Self::BypassPermissions => B::BypassPermissions,
+            Self::Default | Self::Plan | Self::Auto | Self::DontAsk => B::Default,
+        }
+    }
+
     pub(crate) fn effects(self) -> DefaultModeEffects {
         match self {
             Self::AcceptEdits => DefaultModeEffects {

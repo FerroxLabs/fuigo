@@ -471,6 +471,12 @@ pub enum HookPayload {
         tool_input_truncated: bool,
         #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
         subagent_type: Option<String>,
+        /// `"peer_message"` when the turn started from a message of another session (S6.7); absent otherwise.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+        /// `true` when the session has read peer messages (S6.7); absent otherwise.
+        #[serde(rename = "peerInfluenced", default, skip_serializing_if = "Option::is_none")]
+        peer_influenced: Option<bool>,
     },
     PostToolUse {
         #[serde(rename = "toolName")]
@@ -523,8 +529,23 @@ pub enum HookPayload {
     UserPromptSubmit {
         #[serde(skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// Set only for a `!` shell line the user typed: the command that would run. Absent for every other prompt.
+        #[serde(rename = "shellCommand", skip_serializing_if = "Option::is_none")]
+        shell_command: Option<String>,
         #[serde(rename = "subagentType", skip_serializing_if = "Option::is_none")]
         subagent_type: Option<String>,
+        /// Absent for a prompt the human typed. Otherwise the origin tag: `"peer_message"` (a message from another session,
+        /// decision 35), `"parent_agent_message"`, `"scheduled"`, `"unverified_scheduled"`, `"task_completed"`,
+        /// `"subagent_completed"`, `"workflow_completed"`, `"notification"`, `"goal_summary"`, `"goal_classifier_nudge"`,
+        /// `"plan_resume"`, `"subagent_task"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
+        /// The peer sender's address (a claim by a same-user process; never the release token).
+        #[serde(rename = "peerSender", default, skip_serializing_if = "Option::is_none")]
+        peer_sender: Option<String>,
+        /// The mode the sender claims to run in.
+        #[serde(rename = "peerClaimedMode", default, skip_serializing_if = "Option::is_none")]
+        peer_claimed_mode: Option<String>,
     },
     Notification {
         #[serde(rename = "notificationType")]
@@ -812,6 +833,8 @@ mod tests {
             tool_input: serde_json::json!({ "command": "ls" }),
             tool_input_truncated: false,
             subagent_type: None,
+            origin: None,
+            peer_influenced: None,
         })
         .to_hook_json();
         assert_base_aliases(&pre);
@@ -846,6 +869,8 @@ mod tests {
                 tool_input: serde_json::Value::Null,
                 tool_input_truncated: false,
                 subagent_type: None,
+                origin: None,
+                peer_influenced: None,
             })
         }
         .to_hook_json();
@@ -928,5 +953,30 @@ mod tests {
             assert_eq!(value["cancelledBy"], cancelled_by);
             assert!(value.get("cancelTrigger").is_none());
         }
+    }
+
+    /// S6.7: the `PreToolUse` payload carries the origin and the influenced flag only when set; otherwise the bytes are
+    /// exactly what they were before.
+    #[test]
+    fn pre_tool_use_peer_fields_are_absent_unless_set() {
+        let pre = |origin: Option<&str>, infl: Option<bool>| {
+            serde_json::to_value(HookPayload::PreToolUse {
+                tool_name: "run_terminal_command".into(),
+                tool_use_id: "tu-1".into(),
+                tool_input: serde_json::json!({ "command": "ls" }),
+                tool_input_truncated: false,
+                subagent_type: None,
+                origin: origin.map(str::to_owned),
+                peer_influenced: infl,
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            serde_json::to_string(&pre(None, None)).unwrap(),
+            r#"{"toolName":"run_terminal_command","toolUseId":"tu-1","toolInput":{"command":"ls"},"toolInputTruncated":false}"#
+        );
+        let v = pre(Some("peer_message"), Some(true));
+        assert_eq!(v["origin"], "peer_message");
+        assert_eq!(v["peerInfluenced"], true);
     }
 }

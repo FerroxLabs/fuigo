@@ -1970,3 +1970,58 @@ async fn task_completed_notification_is_frame_bounded() {
         serde_json::from_str::<serde_json::Value>(&params).unwrap(),
     );
 }
+
+/// The wake prompt carries its origin explicitly; the shell never re-derives it from the id.
+#[tokio::test]
+async fn task_wake_prompt_carries_an_explicit_task_completed_origin() {
+    let (config, mut cmd_rx) = make_test_config();
+    config
+        .task_output_tool_name
+        .set(Some("get_command_or_subagent_output".to_string()))
+        .expect("slot is fresh in this test fixture");
+    let notification = ToolNotification::TaskCompleted(make_task_snapshot("bg-origin", TaskKind::Bash));
+    let mut offsets = HashMap::new();
+    handle_notification_with_admission(&config, notification, &mut offsets, &mut cmd_rx, true).await;
+    let command = cmd_rx.try_recv().expect("expected Prompt");
+    let SessionCommand::Prompt { origin, .. } = command else {
+        panic!("expected Prompt");
+    };
+    assert_eq!(
+        origin,
+        crate::session::PromptOrigin::TaskCompleted { task_id: "bg-origin".into() }
+    );
+}
+
+/// A scheduled-task fire hands the pager a ticket the shell remembers; the ticket redeems once.
+#[tokio::test]
+async fn scheduled_task_inject_notification_carries_a_redeemable_fire_ticket() {
+    let (config, mut gateway_rx, _persistence_rx, _cmd_rx) = make_test_config_full();
+    let fired = fuigo_tools::notification::types::ScheduledTaskFired {
+        task_id: "t-1".into(),
+        prompt: "check".into(),
+        human_schedule: "every 5m".into(),
+        next_fire_at: None,
+        subagent_id: None,
+        generation: String::new(),
+        revision: 0,
+    };
+    let mut offsets = HashMap::new();
+    handle_notification(&config, ToolNotification::ScheduledTaskFired(fired), &mut offsets).await;
+    let mut ticket = None;
+    while let Ok(message) = gateway_rx.try_recv() {
+        if let fuigo_acp_lib::AcpClientMessage::ExtNotification(args) = message
+            && args.request.method.as_ref() == "fuigo/scheduled_task_inject_prompt"
+        {
+            let payload: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
+            ticket = payload["fireTicket"].as_str().map(str::to_string);
+        }
+    }
+    let ticket = ticket.expect("the inject notification carries fireTicket");
+    let session = config.session_id.0.to_string();
+    let id = format!("scheduler-fired-{ticket}");
+    let framed = vec![acp::ContentBlock::Text(acp::TextContent::new(
+        crate::session::cron_fire_tickets::scheduled_prompt_text("check", "t-1", "every 5m"),
+    ))];
+    assert!(crate::session::cron_fire_tickets::redeem(&session, &id, &framed));
+    assert!(!crate::session::cron_fire_tickets::redeem(&session, &id, &framed), "single use");
+}

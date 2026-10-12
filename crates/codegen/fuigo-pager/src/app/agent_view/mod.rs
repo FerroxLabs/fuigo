@@ -165,6 +165,7 @@ mod media;
 mod modals;
 mod notices;
 mod panes;
+mod peer;
 mod paste;
 mod plan;
 mod prompt;
@@ -1405,6 +1406,8 @@ pub struct AgentView {
     /// prompt. Set on a `Done` answer; cleared when the user types in or clicks
     /// the prompt.
     pub(crate) btw_focused: bool,
+    /// Packet 12b: held peer messages and the hold dialog (flag off: always empty).
+    pub(crate) peer: crate::peer_ui_state::PeerUiState,
     /// Hit area for the [Esc] close button in the /btw panel title.
     pub(crate) hit_btw_close: HitArea,
     /// Toast message to display briefly (e.g., "Copied!" after y).

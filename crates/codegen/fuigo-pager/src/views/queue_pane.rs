@@ -54,7 +54,7 @@ impl ServerRowCapabilities {
     const PROTECTED: Self = Self { can_mutate: false };
 
     pub(crate) fn from_wire_kind(kind: &str) -> Self {
-        if kind == "parent_agent_message" {
+        if kind == "parent_agent_message" || kind == "peer_message" {
             Self::PROTECTED
         } else {
             Self::EDITABLE
@@ -2178,5 +2178,12 @@ mod tests {
             Some(ids[1]),
             "scroll must refresh the hovered row to the entry now under the cursor"
         );
+    }
+
+    #[test]
+    fn peer_message_row_is_protected_from_edit_delete_reorder_and_send_now() {
+        let c = ServerRowCapabilities::from_wire_kind("peer_message");
+        assert!(!c.can_edit() && !c.can_delete() && !c.can_reorder() && !c.can_send_now());
+        assert!(ServerRowCapabilities::from_wire_kind("prompt").can_edit());
     }
 }

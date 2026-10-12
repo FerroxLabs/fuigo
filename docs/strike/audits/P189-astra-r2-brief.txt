@@ -1,0 +1,11 @@
+Read-only audit (round 2) of Fuigo packet P189 in this git worktree (branch strike/p189, base 6221893ca0ab30b611b1e46305a8a791a859e37b).
+Review `git diff 6221893ca..HEAD`; the round-1 findings are in docs/strike/audits/P189-astra-r1.txt; round-2 fixes are commits c35c826f2, 1951d4b5a, 49941a5fd. Wire spec: docs/strike/receipts/R189-p189.md "Wire spec (for Murage)".
+
+Requirements R1..R9 are as in docs/strike/audits/P189-astra-r1-brief.txt, with these coordinator decisions (binding):
+D1 Linux: Fuigo sets PR_SET_CHILD_SUBREAPER (session/orphan_reaper.rs); stop sweep (session/tool_reaper.rs classify) uses ppid lineage first, token marker as cross-check; an unreadable-environ same-user process outside the parked lineage (ssh-agent) is ignored, an unreadable one in the lineage fails closed (stop_incomplete). Adopted orphans are reaped with waitid(P_PID) only for pids known to be adopted (never a tool child or another owner's child).
+D2 A scheduler pause-ack timeout reports reason "timeout" (no new reason).
+D3 Windows: per-session Job Objects (fuigo-tools util/session_job.rs), stop = TerminateJobObject + ActiveProcesses==0, unguaranteed -> stop_incomplete.
+D4 No client-visible wire change.
+D5 Murage sequence on a parked session: session/load -> session/set_model -> session/prompt; set_model must not unpark and its notifications are held and released at the prompt.
+
+For EACH r1 finding (#1..#13) answer FIXED or NOT FIXED with file:line evidence, and check D1..D5. Then list NEW regressions compared with 6221893ca and v1.0.21 (clients that never park must see no change), races (single-threaded LocalSet ordering, implicit unpark barrier, op ids), deadlocks (any await while Parked that needs the held connection), leaks, and kill-safety (the sweep or the orphan reaper must never kill or wait for a process not started by this Fuigo's tools). Rate each BLOCKER/HIGH/MEDIUM/LOW. End with LAND-OK or NOT-LAND-OK.

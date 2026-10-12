@@ -1651,6 +1651,18 @@ impl AcpUpdateTracker {
             }
             return true;
         }
+        // Packet 12: a delivered peer message is ONE preview row (flag on only), never a user prompt row.
+        if meta.prompt_id.as_deref().is_some_and(|p| p.starts_with("peer-message-"))
+            && let Some(row) = crate::peer_ui::preview_row_for_wrapped(&text)
+        {
+            let entry_id = scrollback.push_block(RenderBlock::system_single_line(row));
+            if let Some(ms) = meta.turn_start_ms.or(meta.agent_timestamp_ms)
+                && let Some(entry) = scrollback.get_by_id_mut(entry_id)
+            {
+                entry.created_at = Some(utc_ms_to_local(ms));
+            }
+            return true;
+        }
         let display_override = match &chunk.content {
             acp::ContentBlock::Text(t) => t
                 .meta

@@ -129,6 +129,10 @@ pub struct SamplerConfig {
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
+
+    /// Gate awaited before each model request is dispatched (default none).
+    #[serde(skip)]
+    pub dispatch_gate: Option<SharedDispatchGate>,
 }
 
 /// Hand-written `Debug` (P70): credential values print as `<redacted>` (headers and query parameters by name only), so a `{:?}` of this type in a log, panic or error cannot disclose them.
@@ -172,6 +176,7 @@ impl std::fmt::Debug for SamplerConfig {
             compaction_at_tokens,
             doom_loop_recovery,
             header_injector,
+            dispatch_gate,
         } = self;
         f.debug_struct("SamplerConfig")
             .field("subscription", subscription)
@@ -210,6 +215,7 @@ impl std::fmt::Debug for SamplerConfig {
             .field("compaction_at_tokens", compaction_at_tokens)
             .field("doom_loop_recovery", doom_loop_recovery)
             .field("header_injector", &header_injector.as_ref().map(|_| "<dyn>"))
+            .field("dispatch_gate", &dispatch_gate.as_ref().map(|_| "<dyn>"))
             .finish()
     }
 }
@@ -254,6 +260,7 @@ impl Default for SamplerConfig {
             compaction_at_tokens: None,
             doom_loop_recovery: None,
             header_injector: None,
+            dispatch_gate: None,
         }
     }
 }
@@ -271,6 +278,9 @@ pub trait HeaderInjector: Send + Sync + std::fmt::Debug {
 }
 
 pub type SharedHeaderInjector = std::sync::Arc<dyn HeaderInjector>;
+
+/// Shared handle to a [`fuigo_sampling_types::DispatchGate`].
+pub type SharedDispatchGate = std::sync::Arc<dyn fuigo_sampling_types::DispatchGate>;
 
 /// Retry knobs for the sampler's internal transport-error retry loop.
 #[derive(Debug, Clone, Serialize, Deserialize)]

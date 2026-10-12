@@ -335,6 +335,8 @@ async fn spawn_agent_thread_direct<A: agent_client_protocol::Agent + AgentThread
             let result = local.block_on(&rt, async move {
                 let client_tx = channel.tx.clone();
                 let agent_rc = spawn_agent(client_tx)?;
+                // Peer messaging (flag off: nothing happens): the inbox starts when the first session registers.
+                fuigo_shell::agent::arm_peer_host_pager();
 
                 // Direct dispatch: RPC requests go straight to the agent
                 let gw_rx = direct_gateway(channel.rx, agent_rc.clone()).with_tracing(true);
@@ -385,6 +387,7 @@ async fn spawn_agent_thread_direct<A: agent_client_protocol::Agent + AgentThread
                 // SessionEnd. Mirrors leader auto-update / relaunch.
                 cancel.cancelled().await;
                 agent_rc.flush_all_sessions(SESSION_FLUSH_GRACE).await;
+                fuigo_shell::agent::shutdown_peer_host().await;
                 fuigo_telemetry::session_ctx::drain_at_process_exit().await;
                 anyhow::Result::Ok(())
             });

@@ -33,4 +33,11 @@ pub trait ExecutionAdmission: std::fmt::Debug + Send + Sync {
     fn abandon(&self, _attempt_id: String) -> AdmissionFuture<'_> {
         Box::pin(async { Ok(()) })
     }
+    /// Give back the call slot of an attempt that was admitted but provably never left
+    /// the process (the request was cancelled while held at the dispatch gate after its
+    /// admission). Only this case may refund; an attempt that was dispatched never does.
+    /// Defaults to a no-op, which keeps the debit (conservative).
+    fn refund(&self, _purpose: RequestPurpose, _attempt_id: String) -> AdmissionFuture<'_> {
+        Box::pin(async { Ok(()) })
+    }
 }

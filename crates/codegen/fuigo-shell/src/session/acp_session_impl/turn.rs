@@ -413,7 +413,7 @@ impl SessionActor {
         }
         user_images
     }
-    pub(super) fn persist_host_turn_user_echo(&self, text: &str, prompt_id: &str) {
+    pub(super) fn persist_host_turn_user_echo(&self, text: &str, origin: &InputOrigin) {
         let text = text.trim();
         if text.is_empty() {
             return;
@@ -423,7 +423,7 @@ impl SessionActor {
             crate::session::storage::HOST_TURN_META_KEY.into(),
             serde_json::json!(true),
         );
-        if super::super::PromptOrigin::from_prompt_id(prompt_id).hide_user_echo_from_scrollback() {
+        if origin.as_prompt_origin().hide_user_echo_from_scrollback() {
             chunk_meta.insert("hideFromScrollback".into(), serde_json::json!(true));
         }
         let update = acp::SessionUpdate::UserMessageChunk(
@@ -597,7 +597,9 @@ impl SessionActor {
                 self.signals_handle().record_edit_and_retry();
             }
         }
-        if policy.authority != InputAuthority::ModelAuthoredUntrusted
+        // S2.3: `!cmd` runs a shell, and only a typed prompt (human authority) may start one. Runtime-control, model-authored
+        // and peer prompts ignore the meta and are handled as their text (bang-controls, decision 40 part 1).
+        if policy.authority.is_human_intent()
             && let Some(bash_command) = Self::extract_bash_command(&prompt_blocks)
         {
             return self
@@ -639,7 +641,9 @@ impl SessionActor {
                 );
                 (resolved, slash_skills, Some(workflow_registry))
             }
-            InputAuthority::ModelAuthoredUntrusted | InputAuthority::RuntimeControl => {
+            InputAuthority::ModelAuthoredUntrusted
+            | InputAuthority::RuntimeControl
+            | InputAuthority::PeerUntrusted => {
                 match crate::session::slash_authority::resolve(
                     policy.authority,
                     &prompt_blocks,
@@ -697,6 +701,17 @@ impl SessionActor {
         let prompt_blocks = match resolved {
             Ok(blocks) => blocks,
             Err(SlashCommandOutcome::Builtin(action)) => {
+                // Defence in depth: a subagent shares its parent's permission handle and configuration, so no origin
+                // may change them from inside a subagent session.
+                if self.startup_hints.is_subagent && action.changes_permissions_or_config() {
+                    self.mark_front_message_committed().await;
+                    self.send_host_turn_slash_command_output(&format!(
+                        "/{} is not available in a subagent session.",
+                        action.command_name()
+                    ))
+                    .await;
+                    return ok_end_turn(0, None);
+                }
                 let text_block =
                     |text: String| acp::ContentBlock::Text(acp::TextContent::new(text));
                 let slash_used = fuigo_telemetry::events::SlashCommandUsed {
@@ -725,7 +740,7 @@ impl SessionActor {
                                 vec![text_block(reminder)]
                             }
                             GoalResumeOutcome::Message(msg) => {
-                                self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                                self.persist_host_turn_user_echo(&original_prompt_text, &input_origin);
                                 self.mark_front_message_committed().await;
                                 self.send_host_turn_slash_command_output(&msg).await;
                                 return ok_end_turn(0, None);
@@ -736,7 +751,7 @@ impl SessionActor {
                         let Some(workflow_registry) = workflow_registry.as_ref() else {
                             unreachable!("workflow slash commands require human authority")
                         };
-                        self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                        self.persist_host_turn_user_echo(&original_prompt_text, &input_origin);
                         self.mark_front_message_committed().await;
                         let msg = self
                             .launch_named_workflow(workflow_registry, &name, &input)
@@ -746,7 +761,7 @@ impl SessionActor {
                     }
                     _ => {
                         if policy.authority.is_human_intent() {
-                            self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
+                            self.persist_host_turn_user_echo(&original_prompt_text, &input_origin);
                         }
                         return self.execute_builtin_slash_command(action).await;
                     }
@@ -965,18 +980,34 @@ impl SessionActor {
             }
             acc
         });
-        let prompt_block = if policy.authority != InputAuthority::ModelAuthoredUntrusted {
+        // S1.4: model-authored and peer text never reach the `UserPromptSubmit` gate, so a hook can be neither
+        // satisfied nor bypassed by it.
+        // A subagent task keeps running the (observe-only in a subagent) gate exactly as before the origin existed.
+        let prompt_block = if !matches!(
+            policy.authority,
+            InputAuthority::ModelAuthoredUntrusted | InputAuthority::PeerUntrusted
+        ) || matches!(
+            input_origin.as_prompt_origin(),
+            super::super::PromptOrigin::SubagentTask | super::super::PromptOrigin::UnverifiedScheduled
+        ) {
             let prompt_gate_verdict = self
                 .dispatch_prompt_submit_hook(
                     fuigo_hooks::event::HookPayload::UserPromptSubmit {
                         prompt: Some(text.clone()),
+                        shell_command: None,
                         subagent_type: self.subagent_type_label(),
+                        origin: input_origin
+                            .as_prompt_origin()
+                            .hook_origin_tag()
+                            .map(str::to_owned),
+                        peer_sender: None,
+                        peer_claimed_mode: None,
                     },
                     Some(prompt_id),
                 )
                 .await;
             match (
-                self.should_enforce_prompt_block(&policy),
+                self.should_enforce_prompt_block(input_origin.as_prompt_origin()),
                 prompt_gate_verdict,
             ) {
                 (true, fuigo_hooks::result::PromptDecision::Block { reason, hook_name }) => {
@@ -1050,6 +1081,7 @@ impl SessionActor {
                 &prompt_blocks,
                 self.tool_context.cwd.to_path_buf(),
                 &self.session_info,
+                // `@file` expands for human-typed text only (`file_expansion_allowed`); model-, tool- and schedule-influenced text never does.
                 policy.authority,
                 verbatim,
                 self.is_cursor_harness(),
@@ -1063,7 +1095,9 @@ impl SessionActor {
                     return Err(err);
                 }
             };
-            let recovered = if policy.authority == InputAuthority::ModelAuthoredUntrusted {
+            // Only text a human typed may name image files for disk recovery: a scheduled, task, subagent or notification
+            // text can be model- or tool-influenced.
+            let recovered = if !policy.authority.is_human_intent() {
                 0
             } else {
                 crate::session::placeholder_images::recover_orphan_placeholders(
@@ -1092,7 +1126,8 @@ impl SessionActor {
             let user_images = self
                 .normalize_images_with_notices(&mut context, raw_images, is_cursor)
                 .await;
-            let (query, extra_images) = if !self.is_cursor_harness() {
+            // A peer body is text only: no inline base64 image extraction.
+            let (query, extra_images) = if !self.is_cursor_harness() && !input_origin.as_prompt_origin().is_peer() {
                 let extraction = fuigo_tools::util::base64_images::extract_base64_images(query);
                 if extraction.images.is_empty() {
                     (extraction.text, Vec::new())
@@ -1156,11 +1191,18 @@ impl SessionActor {
                     local_path: truncated_local_path,
                 });
             }
+            // The content chunk feeds the first-prompt title generator and the search index. Peer text must not
+            // title the session (S1.7: a title is the owner's, never the sender's), so a peer turn sends it empty.
+            let content_chunk_blocks = if input_origin.as_prompt_origin().is_peer() {
+                Vec::new()
+            } else {
+                prompt_blocks.to_vec()
+            };
             let _ = self
                 .notifications
                 .persistence_tx
                 .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
-                    prompt_blocks.to_vec(),
+                    content_chunk_blocks,
                 )));
             let model_id = self
                 .chat_state_handle
@@ -1250,7 +1292,11 @@ impl SessionActor {
                 super::super::PromptOrigin::ParentAgentMessage { .. } => {
                     ConversationItem::agent_message(user_message)
                 }
-                super::super::PromptOrigin::WorkflowCompleted { .. } => {
+                super::super::PromptOrigin::PeerMessage { .. } => {
+                    ConversationItem::peer_message(user_message)
+                }
+                super::super::PromptOrigin::WorkflowCompleted { .. }
+                | super::super::PromptOrigin::PeerNotice { .. } => {
                     ConversationItem::notification_drain(user_message)
                 }
                 super::super::PromptOrigin::NotificationDrain => {
@@ -1262,11 +1308,13 @@ impl SessionActor {
                 super::super::PromptOrigin::GoalClassifierNudge => {
                     ConversationItem::goal_classifier_nudge(user_message)
                 }
-                super::super::PromptOrigin::SchedulerFired => {
+                // An unverified scheduled prompt is recorded as a scheduled item: it came from a schedule, not a person.
+                super::super::PromptOrigin::SchedulerFired
+                | super::super::PromptOrigin::UnverifiedScheduled => {
                     ConversationItem::scheduler_fired(user_message)
                 }
                 super::super::PromptOrigin::PlanResume => ConversationItem::user(user_message),
-                super::super::PromptOrigin::User => {
+                super::super::PromptOrigin::User | super::super::PromptOrigin::SubagentTask => {
                     let mut item = ConversationItem::user(
                         self.maybe_apply_interrupt_envelope(user_message, verbatim),
                     );
@@ -1317,14 +1365,14 @@ impl SessionActor {
                 } else {
                     tracing::error!(
                         session_id = %self.session_info.id.0,
-                        prompt_id = %prompt_id,
+                        prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(prompt_id),
                         "user prompt flush barrier failed"
                     );
                 }
             } else {
                 tracing::error!(
                     session_id = %self.session_info.id.0,
-                    prompt_id = %prompt_id,
+                    prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(prompt_id),
                     "user prompt commit skipped: chat-state actor unavailable"
                 );
             }
@@ -1417,8 +1465,19 @@ impl SessionActor {
                         );
                         break round;
                     }
-                    if crate::session::PromptOrigin::from_prompt_id(prompt_id).is_synthetic()
-                        || !self.has_pending_goal_continuation().await
+                    // Existing origins keep the id-based test they had before peer messages
+                    // (a stranded row can carry an `interject-fallback-` id with a synthetic
+                    // stored origin, and that must still take the standalone branch). A peer
+                    // message is treated here exactly like a user prompt: while a goal
+                    // continuation is pending it runs standalone, so text from another session
+                    // can never continue, pause or end this session's goal.
+                    let id_origin = crate::session::PromptOrigin::from_prompt_id(prompt_id);
+                    // The id alone never decides: the stored origin must agree (a client id such as `task-completed-x`
+                    // is a user prompt and runs standalone).
+                    let id_says_synthetic = id_origin.is_synthetic()
+                        && input_origin.is_synthetic()
+                        && !matches!(id_origin, crate::session::PromptOrigin::PeerMessage { .. });
+                    if id_says_synthetic || !self.has_pending_goal_continuation().await
                     {
                         let decision = if self.goal_runs_on_workflow_engine() {
                             self.run_goal_round_end().await
@@ -1895,7 +1954,7 @@ impl SessionActor {
     #[tracing::instrument(
         name = "session.freeze_prompt_usage",
         skip_all,
-        fields(session_id = %self.session_info.id.0, prompt_id = %prompt_id)
+        fields(session_id = %self.session_info.id.0, prompt_id = %crate::session::cron_fire_tickets::loggable_prompt_id(prompt_id))
     )]
     pub(super) async fn freeze_prompt_usage(
         &self,

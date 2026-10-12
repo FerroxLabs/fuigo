@@ -693,3 +693,49 @@ async fn pre_tool_use_additional_context_reaches_the_model_after_the_tool_result
         })
         .await;
 }
+
+fn send_message_call(id: &str) -> ToolCallResponse {
+    ToolCallResponse {
+        id: id.to_string(),
+        kind: "function".to_string(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "send_message",
+            serde_json::json!({ "to": "fuigo-peer:someone", "message": "hello" }).to_string(),
+        ),
+    }
+}
+
+/// Design row 3a: `send_message` is auto-allowed, but a blocking `PreToolUse` hook still stops it, in the default mode and
+/// under always-approve. Control: with a hook that decides nothing the call prepares (the tool is registered and parses).
+#[tokio::test(flavor = "current_thread")]
+async fn a_blocking_pre_tool_use_hook_stops_send_message_in_default_and_always_approve() {
+    const DENY: &str = r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"hook says no"}}'"#;
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            for (script, yolo, blocked) in [("exit 0", false, false), (DENY, false, true), (DENY, true, true)] {
+                let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+                let actor = Arc::new(
+                    actor_with_hooks(
+                        vec![ToolConfig::for_tool::<fuigo_tools::implementations::fuigo_build::SendMessageTool>()],
+                        vec![pre_tool_use_spec("test/pretooluse", None, script)],
+                        yolo,
+                        gateway_tx,
+                    )
+                    .await,
+                );
+                let gateway = RecordingGateway::spawn(gateway_rx, PromptAnswer::Select("reject-once"));
+                let result = prepare_call(&actor, send_message_call("call_send")).await;
+                if blocked {
+                    assert!(
+                        matches!(result, Err(ref e) if !matches!(e, ToolLoop::NonExistingTool | ToolLoop::ToolParsingError)),
+                        "a blocking hook must stop send_message (yolo={yolo}): {result:?}"
+                    );
+                } else {
+                    assert!(result.is_ok(), "control: no hook decision, send_message is allowed (yolo={yolo}): {result:?}");
+                    assert_eq!(gateway.prompts(), 0, "auto-allowed: no prompt");
+                }
+            }
+        })
+        .await;
+}

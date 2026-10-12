@@ -44,6 +44,18 @@ async fn seeded_active_plan_actor_with_edit_tools() -> (
     tempfile::TempDir,
     std::path::PathBuf,
 ) {
+    seeded_active_plan_actor_in("").await
+}
+
+/// Same as above with the plan file at `<tempdir>/<rel_dir>/plan.md`.
+async fn seeded_active_plan_actor_in(
+    rel_dir: &str,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpClientMessage>,
+    tempfile::TempDir,
+    std::path::PathBuf,
+) {
     use fuigo_tools::implementations::fuigo_build::enter_plan_mode::EnterPlanModeTool;
     use fuigo_tools::implementations::fuigo_build::exit_plan_mode::ExitPlanModeTool;
     use fuigo_tools::registry::types::ToolConfig;
@@ -75,11 +87,13 @@ async fn seeded_active_plan_actor_with_edit_tools() -> (
     .await;
 
     let dir = tempfile::tempdir().unwrap();
-    let plan_path = dir.path().join("plan.md");
+    let plan_dir = dir.path().join(rel_dir);
+    std::fs::create_dir_all(&plan_dir).unwrap();
+    let plan_path = plan_dir.join("plan.md");
     std::fs::write(&plan_path, SEED_PLAN).unwrap();
     {
         let mut tracker = actor.plan_mode.lock();
-        *tracker = crate::session::plan_mode::PlanModeTracker::new(dir.path().to_path_buf());
+        *tracker = crate::session::plan_mode::PlanModeTracker::new(plan_dir.clone());
         tracker.activate_from_tool();
     }
     actor
@@ -97,6 +111,7 @@ async fn seeded_active_plan_actor_with_edit_tools() -> (
             actor.tool_context.hunk_tracker_handle.clone(),
             actor.agent.borrow().tool_bridge().toolset(),
             None,
+            actor.tool_context.peer_influence.clone(),
         )
         .expect("bind_local_session must succeed");
 
@@ -302,6 +317,52 @@ async fn mixed_permission_cancel_skips_exit_reverse_request() {
                 "exit must not reverse-request after an earlier permission cancel"
             );
             responder.abort();
+        })
+        .await;
+}
+
+/// Round 3 (S6.3): the plan-file auto-approve in `tool_calls.rs` is skipped for a peer-influenced session, so the edit reaches
+/// the permission guard; a session that is not influenced still auto-approves it. The plan file sits in a protected rules
+/// directory so the guard has something to deny. The hub session gets its own, unset flag, so only the permission-handle
+/// guard (reached through `request()`) can stop the write: this isolates the skip from the hub guard.
+async fn plan_edit_in_protected_dir(influenced: bool) -> String {
+    let (actor, gateway_rx, _dir, plan_path) = seeded_active_plan_actor_in(".fuigo/rules").await;
+    let fuigo_workspace::WorkspaceOps::Local { handle } = &actor.workspace_ops else {
+        unreachable!("test workspace ops are local")
+    };
+    handle
+        .session(&actor.session_id_string())
+        .expect("hub session")
+        .bind_peer_influence(fuigo_workspace::permission::PeerInfluence::new());
+    if influenced {
+        actor.permissions.set_peer_influenced(true);
+    }
+    let (responder, _captured) = spawn_exit_capture(gateway_rx);
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        actor.execute_tool_calls(vec![search_replace_plan("call_write_plan", &plan_path.to_string_lossy())]),
+    )
+    .await
+    .expect("execute_tool_calls must not hang");
+    responder.abort();
+    std::fs::read_to_string(&plan_path).unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn r3_plan_file_auto_approve_is_skipped_when_peer_influenced() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            assert_eq!(
+                plan_edit_in_protected_dir(true).await,
+                SEED_PLAN,
+                "influenced: the edit reached the guard and was denied, the plan file is untouched"
+            );
+            assert_eq!(
+                plan_edit_in_protected_dir(false).await,
+                NEW_PLAN,
+                "not influenced: the plan-file auto-approve still applies"
+            );
         })
         .await;
 }

@@ -168,6 +168,9 @@ pub(super) fn parse_exit(
     }
 }
 
+/// How long a live `terminal/output` poll of a task snapshot, and then the read of its log file, may each take.
+const LIVE_OUTPUT_BOUND: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Wraps fuigo-shell's ACP gateway to satisfy fuigo-tools' TerminalBackend.
 pub struct AcpTerminalAdapter {
     gateway: GatewaySender,
@@ -328,14 +331,19 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 
     async fn get_task(&self, task_id: &str) -> Option<TaskSnapshot> {
-        let live = self
-            .gateway
-            .send(acp::TerminalOutputRequest::new(
+        // Astra r2 NEW-5: a client that does not answer `terminal/output` (the connection of a parked session
+        // holds it until the unpark) must not stall the caller, which is the session actor for a task list:
+        // after the bound the snapshot comes from the task's log file, like any failed live poll.
+        let live = tokio::time::timeout(
+            LIVE_OUTPUT_BOUND,
+            self.gateway.send(acp::TerminalOutputRequest::new(
                 self.session_id.clone(),
                 self.terminal_id(task_id),
-            ))
-            .await
-            .ok();
+            )),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
 
         // The std Mutex guard cannot be held across the await below, so resolve under the lock and read the log file after releasing it
         enum Resolved {
@@ -407,7 +415,13 @@ impl TerminalBackend for AcpTerminalAdapter {
                 output_file,
                 limit,
             } => {
-                if let Some(tail) = read_log_tail(&output_file, limit).await {
+                // Astra r3 F9: the log read answers under the same bound as the live poll (a log on a stalled
+                // mount must not stall the session actor that lists tasks); past it the snapshot keeps what it has.
+                let tail = tokio::time::timeout(LIVE_OUTPUT_BOUND, read_log_tail(&output_file, limit))
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(tail) = tail {
                     snapshot.output = tail.text;
                     snapshot.truncated = tail.truncated;
                 }
@@ -616,13 +630,12 @@ impl TerminalBackend for AcpTerminalAdapter {
             let tasks = self.tasks.lock().unwrap();
             tasks.keys().cloned().collect()
         };
-        let mut snapshots = Vec::new();
-        for task_id in task_ids {
-            if let Some(snapshot) = self.get_task(&task_id).await {
-                snapshots.push(snapshot);
-            }
-        }
-        snapshots
+        // Concurrently, so an unanswering client costs one bound, not one per task.
+        futures::future::join_all(task_ids.iter().map(|task_id| self.get_task(task_id)))
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     async fn kill_all_background_tasks(&self) {

@@ -33,6 +33,8 @@ pub(super) fn resolve<'a>(
     match authority {
         InputAuthority::HumanIntent => AuthorityResolution::HumanIntent { command_name, args },
         InputAuthority::RuntimeControl => AuthorityResolution::Inert,
+        // S1.2: a peer's leading `/` is plain text. No builtin (not even `/compact`), no skill, no plugin command.
+        InputAuthority::PeerUntrusted => AuthorityResolution::Inert,
         InputAuthority::ModelAuthoredUntrusted => builtins
             .iter()
             .find(|command| {

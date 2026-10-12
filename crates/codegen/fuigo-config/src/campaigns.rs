@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config_override::{
     CAMPAIGN_STRIP_KEYS, ConfigOverrideEntry, PatchPath, apply_patches, patch_touches_any,
+    strip_campaign_paths,
     take_patch_array,
 };
 
@@ -112,7 +113,12 @@ pub fn ids_touching_paths(active: &[CampaignEntry], paths: &[PatchPath]) -> Vec<
 pub fn apply_active_campaign_patches(effective: &mut toml::Value, active: &[CampaignEntry]) {
     apply_patches(
         effective,
-        active.iter().rev().map(|e| e.patch.clone()),
+        // The one place every campaign patch passes before it is merged
+        active.iter().rev().map(|e| {
+            let mut patch = e.patch.clone();
+            strip_campaign_paths(&mut patch);
+            patch
+        }),
         CAMPAIGN_STRIP_KEYS,
     );
 }
@@ -158,6 +164,75 @@ mod tests {
         apply_active_campaign_patches(&mut effective, &entries);
         assert_eq!(effective["models"]["default"].as_str(), Some("new-model"));
         assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(true));
+    }
+
+    fn peer_campaign(extra: &str) -> Vec<CampaignEntry> {
+        let mut layer = parse(&format!(
+            "[[campaigns]]\nid = \"p\"\n[campaigns.features]\npeer_messaging = true\n{extra}"
+        ));
+        take_campaign_entries(&mut layer, "managed")
+    }
+
+    fn peer_flag(effective: &toml::Value) -> Option<bool> {
+        effective
+            .get("features")
+            .and_then(|f| f.get("peer_messaging"))
+            .and_then(toml::Value::as_bool)
+    }
+
+    #[test]
+    fn campaign_cannot_enable_peer_messaging() {
+        let entries = peer_campaign("");
+        let mut effective = parse("[models]\ndefault = \"m\"\n");
+        apply_active_campaign_patches(&mut effective, &entries);
+        assert_eq!(peer_flag(&effective), None);
+    }
+
+    #[test]
+    fn campaign_cannot_override_users_explicit_peer_messaging() {
+        let entries = peer_campaign("");
+        let mut off = parse("[features]\npeer_messaging = false\n");
+        apply_active_campaign_patches(&mut off, &entries);
+        assert_eq!(peer_flag(&off), Some(false));
+
+        let mut on = parse("[features]\npeer_messaging = true\n");
+        let entries = [CampaignEntry {
+            id: "off".into(),
+            patch: toml::from_str("[features]\npeer_messaging = false\n").unwrap(),
+        }];
+        apply_active_campaign_patches(&mut on, &entries);
+        assert_eq!(peer_flag(&on), Some(true));
+    }
+
+    #[test]
+    fn campaign_peer_messaging_strip_keeps_sibling_features() {
+        let entries = peer_campaign("web_fetch = true\n");
+        let mut effective = parse("[features]\nweb_fetch = false\n");
+        apply_active_campaign_patches(&mut effective, &entries);
+        assert_eq!(effective["features"]["web_fetch"].as_bool(), Some(true));
+        assert_eq!(peer_flag(&effective), None);
+    }
+
+    #[test]
+    fn campaign_only_peer_messaging_leaves_no_empty_features_table() {
+        let mut patch: toml::Table = toml::from_str("[features]\npeer_messaging = true\n").unwrap();
+        crate::config_override::strip_campaign_paths(&mut patch);
+        assert!(patch.is_empty(), "{patch:?}");
+    }
+
+    /// `FUIGO_CAMPAIGNS_OVERRIDE` and remote settings both reduce to `CampaignEntry` patches before this point.
+    #[test]
+    fn layered_campaign_cannot_enable_peer_messaging_through_config_layers() {
+        use crate::config_layers::ConfigLayers;
+        let mut layers = ConfigLayers {
+            user: parse("[features]\npeer_messaging = false\n"),
+            ..Default::default()
+        };
+        layers.campaigns.user = peer_campaign("");
+        let remote = peer_campaign("");
+        let effective =
+            layers.effective_config_with_campaigns(&remote, &std::collections::HashSet::new());
+        assert_eq!(peer_flag(&effective), Some(false));
     }
 
     #[test]

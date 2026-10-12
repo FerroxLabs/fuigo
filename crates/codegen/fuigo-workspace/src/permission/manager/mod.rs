@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 use parking_lot::Mutex;
+use crate::permission::peer_guard::PeerInfluence;
 
 use agent_client_protocol as acp;
 use chrono::Utc;
@@ -45,6 +46,14 @@ use fuigo_tools::types::resources::resolve_model_path;
 
 #[cfg(test)]
 mod apply_patch_target_tests;
+#[cfg(test)]
+mod peer_denials_tests;
+#[cfg(test)]
+mod peer_guard_tests;
+#[cfg(test)]
+mod peer_guard_shell_tests;
+#[cfg(test)]
+mod peer_note_tests;
 #[cfg(test)]
 mod read_target_tests;
 #[cfg(test)]
@@ -108,6 +117,61 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// What `effective_mode()` needs beyond the yolo/auto flags. `base` is fixed at spawn from the resolved config;
+/// `session_edit_grant` mirrors the actor's `allow_edits_for_session` (set on `AllowEditsForSession`, cleared on `ResetState`).
+#[derive(Clone)]
+pub struct ModeView {
+    /// Fixed at spawn from the resolved config. The rule set it is derived from (incl. the catch-all `Allow Any`
+    /// check) cannot change afterwards: `compiled_policy` is an immutable `let` in the actor (below), "always
+    /// allow" answers write `PermissionState` and never rules, and no `PermissionCommand` carries a rule.
+    pub base: crate::permission::types::EffectivePermissionMode,
+    pub session_edit_grant: Arc<AtomicBool>,
+    /// yolo (bit 0) and auto (bit 1) in ONE atomic so a reader can never see a torn pair. Every writer of
+    /// `yolo_state` / `auto_state` also updates this through `pair_set_yolo` / `pair_set_auto`, each a single
+    /// `fetch_update`. Only the states those operations produce are ever stored, and a reader takes one load,
+    /// so it observes exactly one state that existed: never "neither" while moving between yolo and auto.
+    pub mode_pair: Arc<AtomicU8>,
+    /// Peer-influenced flag (S6.1), read by the guard on every request.
+    pub peer_influence: PeerInfluence,
+    /// Where a relative model path resolves when a request carries no path context (the session cwd at spawn).
+    pub fallback_cwd: Option<std::path::PathBuf>,
+}
+
+const PAIR_YOLO: u8 = 0b01;
+const PAIR_AUTO: u8 = 0b10;
+
+fn pair_set_yolo(pair: &AtomicU8, clamped: bool) {
+    let _ = pair.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+        Some(if clamped {
+            (v | PAIR_YOLO) & !PAIR_AUTO
+        } else {
+            v & !PAIR_YOLO
+        })
+    });
+}
+
+fn pair_set_auto(pair: &AtomicU8, enabled: bool) {
+    let _ = pair.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+        Some(if enabled {
+            (v | PAIR_AUTO) & !PAIR_YOLO
+        } else {
+            v & !PAIR_AUTO
+        })
+    });
+}
+
+impl Default for ModeView {
+    fn default() -> Self {
+        Self {
+            base: crate::permission::types::EffectivePermissionMode::Default,
+            session_edit_grant: Arc::new(AtomicBool::new(false)),
+            mode_pair: Arc::new(AtomicU8::new(0)),
+            peer_influence: PeerInfluence::new(),
+            fallback_cwd: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum PermissionHandle {
     Actor {
@@ -128,8 +192,11 @@ pub enum PermissionHandle {
         in_flight: Arc<AtomicUsize>,
         /// Prompt-start only; auto-allow paths never send.
         user_prompt_notify: Arc<Mutex<Option<mpsc::UnboundedSender<()>>>>,
+        /// Read-only view of the configured mode and the session edit grant, for `effective_mode()`.
+        mode_view: ModeView,
     },
-    AllowAll,
+    /// Allows everything, except what the peer guard denies: it carries the session's peer-influenced flag.
+    AllowAll(PeerInfluence),
 }
 
 /// True iff `name` is a valid qualified MCP ID whose server is in `servers`.
@@ -902,6 +969,26 @@ fn protected_target(
     }
 }
 
+/// S6.4: the peer guard's verdict for a shell command of a peer-influenced session. Write targets (redirects, `tee`,
+/// `cp`/`mv`/`ln` destinations, `sed -i`, rename-over, `git config`, ...) go through the same evaluator and resolver as the
+/// protected floor, with the peer-extended set added; a script the evaluator cannot parse counts as touching the set.
+pub(crate) fn peer_bash_denial(
+    cmd: &str,
+    real_cwd: &std::path::Path,
+    display_cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    crate::permission::shell_access::with_peer_extended_set(|| {
+        let evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
+        let unparseable = matches!(evaluation.segments, SegmentEvaluation::Unparseable);
+        let hit = bash_protected_write_target(&evaluation, real_cwd, display_cwd).is_some();
+        if unparseable || (hit && evaluation.write_facts.has_unresolved()) {
+            // The command could not be analysed: a distinct text, so a stalled lane is told how to go on.
+            return Some(crate::permission::peer_guard::peer_unanalysable_denial_text());
+        }
+        hit.then(|| crate::permission::peer_guard::peer_guard_denial_text("the command's write target"))
+    })
+}
+
 /// [`protected_target`] for a hub-routed call, which has no session grants: the bash command is classified against
 /// empty state, which only decides the protected floor here (P173).
 pub(crate) fn hub_protected_target(
@@ -913,6 +1000,12 @@ pub(crate) fn hub_protected_target(
         _ => None,
     };
     protected_target(access, evaluation.as_ref(), cwd, None)
+}
+
+/// The one tool that is `AccessKind::Tool` yet never prompts (design row 3a). A deny or ask rule still binds it: the policy
+/// step runs before the pre-decision that consults this.
+pub(crate) fn is_auto_allowed_tool(name: &str) -> bool {
+    name == "send_message"
 }
 
 /// What the local manager does, with no session grants, for a request that no rule denied or asked about and that is
@@ -930,6 +1023,7 @@ pub(crate) fn hub_needs_default_prompt(
 ) -> bool {
     match access {
         AccessKind::Read(_) | AccessKind::Grep { .. } | AccessKind::WebSearch(_) => false,
+        AccessKind::Tool(name) if is_auto_allowed_tool(name) => false,
         AccessKind::Bash(cmd) => {
             let mut evaluation = evaluate_bash(cmd, &PermissionState::default(), true);
             // The same ambient git scan the manager runs before any grant or allow decision (`git status` in a repo
@@ -977,7 +1071,62 @@ pub(crate) fn evaluate_bash_segments_inner(
 
 impl PermissionHandle {
     pub fn allow_all() -> Self {
-        PermissionHandle::AllowAll
+        PermissionHandle::AllowAll(PeerInfluence::new())
+    }
+
+    /// The live peer-influenced flag of this session (S6.1), shared by every clone of the handle.
+    pub fn peer_influence(&self) -> PeerInfluence {
+        match self {
+            PermissionHandle::AllowAll(flag) => flag.clone(),
+            PermissionHandle::Actor { mode_view, .. } => mode_view.peer_influence.clone(),
+        }
+    }
+
+    pub fn is_peer_influenced(&self) -> bool {
+        match self {
+            PermissionHandle::AllowAll(flag) => flag.is_set(),
+            PermissionHandle::Actor { mode_view, .. } => mode_view.peer_influence.is_set(),
+        }
+    }
+
+    pub fn set_peer_influenced(&self, influenced: bool) {
+        self.peer_influence().set(influenced);
+    }
+
+    /// Replace the flag with a shared one (right after spawn, before the handle is cloned), so the session's other
+    /// holders of the flag see the same value.
+    pub fn with_peer_influence(mut self, shared: PeerInfluence) -> Self {
+        match &mut self {
+            PermissionHandle::AllowAll(flag) => *flag = shared,
+            PermissionHandle::Actor { mode_view, .. } => mode_view.peer_influence = shared,
+        }
+        self
+    }
+
+    /// `Some(reason)` when the peer guard denies this request (S6.3). `None` for a session that is not peer-influenced.
+    pub fn peer_guard_denial_for(&self, request: &PermissionRequest) -> Option<String> {
+        if !self.is_peer_influenced() {
+            return None;
+        }
+        let fallback = match self {
+            PermissionHandle::Actor { mode_view, .. } => mode_view.fallback_cwd.clone(),
+            PermissionHandle::AllowAll(_) => None,
+        };
+        let (real, display) = match &request.path_context {
+            Some(c) => (c.real_cwd.clone(), c.display_cwd.clone()),
+            None => (
+                fallback
+                    .or_else(|| std::env::current_dir().ok())
+                    .unwrap_or_else(|| std::path::PathBuf::from("/")),
+                None,
+            ),
+        };
+        crate::permission::peer_guard::peer_guard_denial(
+            &request.access,
+            request.edit_targets.as_ref(),
+            &real,
+            display.as_deref(),
+        )
     }
 
     pub fn set_yolo_mode(&self, enabled: bool) {
@@ -986,6 +1135,7 @@ impl PermissionHandle {
             yolo_state,
             auto_state,
             yolo_pin,
+            mode_view,
             ..
         } = self
         {
@@ -996,6 +1146,7 @@ impl PermissionHandle {
             if clamped {
                 auto_state.store(false, Ordering::Relaxed);
             }
+            pair_set_yolo(&mode_view.mode_pair, clamped);
             if let Err(e) = cmd_tx.send(PermissionCommand::SetYoloMode(enabled)) {
                 tracing::error!(?e, "failed to send yolo mode command");
             }
@@ -1009,6 +1160,7 @@ impl PermissionHandle {
             cmd_tx,
             yolo_state,
             auto_state,
+            mode_view,
             ..
         } = self
         {
@@ -1016,6 +1168,7 @@ impl PermissionHandle {
             if enabled {
                 yolo_state.store(false, Ordering::Relaxed);
             }
+            pair_set_auto(&mode_view.mode_pair, enabled);
             if let Err(e) = cmd_tx.send(PermissionCommand::SetAutoMode(enabled)) {
                 tracing::error!(?e, "failed to send auto mode command");
             }
@@ -1095,6 +1248,10 @@ impl PermissionHandle {
 
     /// Reset per-tool permission state back to defaults.
     pub fn reset_state(&self) {
+        // Clear the mirrored grant here too so the very next report cannot still show it; the actor clears its own copy.
+        if let PermissionHandle::Actor { mode_view, .. } = self {
+            mode_view.session_edit_grant.store(false, Ordering::SeqCst);
+        }
         if let PermissionHandle::Actor { cmd_tx, .. } = self
             && let Err(e) = cmd_tx.send(PermissionCommand::ResetState)
         {
@@ -1120,14 +1277,57 @@ impl PermissionHandle {
 
     pub fn is_yolo_mode(&self) -> bool {
         match self {
-            PermissionHandle::AllowAll => true,
+            PermissionHandle::AllowAll(_) => true,
             PermissionHandle::Actor { yolo_state, .. } => yolo_state.load(Ordering::Relaxed),
+        }
+    }
+
+    /// The base mode right now, read from the live state on every call (never cached).
+    /// Order mirrors the actor: always-approve beats everything (even `dontAsk`, see the warn in spawn), then auto,
+    /// then the configured base. yolo/auto come from one packed atomic load (see [`ModeView::mode_pair`]).
+    /// Plan and the edit grant are separate dimensions: see [`Self::effective_peer_mode`].
+    pub fn effective_mode(&self) -> crate::permission::types::EffectivePermissionMode {
+        use crate::permission::types::EffectivePermissionMode as M;
+        match self {
+            PermissionHandle::AllowAll(_) => M::AllowAll,
+            PermissionHandle::Actor { mode_view, .. } => {
+                let pair = mode_view.mode_pair.load(Ordering::SeqCst);
+                if pair & PAIR_YOLO != 0 {
+                    M::Yolo
+                } else if pair & PAIR_AUTO != 0 {
+                    M::Auto
+                } else {
+                    mode_view.base
+                }
+            }
+        }
+    }
+
+    /// Whether the "allow edits for this session" answer is in force (live, every call).
+    pub fn session_edit_grant(&self) -> bool {
+        match self {
+            PermissionHandle::AllowAll(_) => false,
+            PermissionHandle::Actor { mode_view, .. } => {
+                mode_view.session_edit_grant.load(Ordering::SeqCst)
+            }
+        }
+    }
+
+    /// The full report with the plan flag supplied by the session (plan state lives outside the permission layer).
+    pub fn effective_peer_mode(
+        &self,
+        plan_active: bool,
+    ) -> crate::permission::types::EffectivePeerMode {
+        crate::permission::types::EffectivePeerMode {
+            plan_active,
+            base: self.effective_mode(),
+            session_edit_grant: self.session_edit_grant(),
         }
     }
 
     pub fn is_auto_mode(&self) -> bool {
         match self {
-            PermissionHandle::AllowAll => false,
+            PermissionHandle::AllowAll(_) => false,
             PermissionHandle::Actor { auto_state, .. } => auto_state.load(Ordering::Relaxed),
         }
     }
@@ -1136,7 +1336,7 @@ impl PermissionHandle {
     /// False when only the heuristic fallback is active.
     pub fn has_llm_side_query(&self) -> bool {
         match self {
-            PermissionHandle::AllowAll => false,
+            PermissionHandle::AllowAll(_) => false,
             PermissionHandle::Actor {
                 side_query_wired, ..
             } => side_query_wired.load(Ordering::Relaxed),
@@ -1147,16 +1347,79 @@ impl PermissionHandle {
     /// Subagents inherit these via the shared handle.
     pub fn deny_read_globs(&self) -> Vec<String> {
         match self {
-            PermissionHandle::AllowAll => Vec::new(),
+            PermissionHandle::AllowAll(_) => Vec::new(),
             PermissionHandle::Actor {
                 deny_read_globs, ..
             } => deny_read_globs.as_ref().clone(),
         }
     }
 
-    pub async fn request(&self, request: PermissionRequest) -> PermissionResolution {
+    /// Decide only (bang-controls): the reason of the configured rules/policy DENY for `access`, else `None`.
+    /// It is the same evaluation `request` runs before YOLO (`GatePreflight::policy_decision`), but it never prompts and
+    /// treats ask rules, `dontAsk`, plan mode and auto mode as "no refusal". Fails closed if the manager is gone.
+    pub async fn configured_deny(&self, access: AccessKind, cwd: std::path::PathBuf) -> Option<String> {
         match self {
-            PermissionHandle::AllowAll => {
+            PermissionHandle::AllowAll(_) => None,
+            PermissionHandle::Actor { cmd_tx, .. } => {
+                let (tx, rx) = oneshot::channel();
+                let msg = PermissionCommand::DecideOnly { access, cwd, respond_to: tx };
+                if cmd_tx.send(msg).is_err() {
+                    return Some("permission manager unavailable".to_owned());
+                }
+                match rx.await {
+                    Ok(verdict) => verdict,
+                    Err(_) => Some("failed to receive permission decision".to_owned()),
+                }
+            }
+        }
+    }
+
+    /// Decide a request, then remember a denial in the session's ring (S7.1: by the human, by policy, by `dontAsk` or by the
+    /// peer guard). The ring holds the tool kind and a hash only, in memory.
+    pub async fn request(&self, request: PermissionRequest) -> PermissionResolution {
+        use crate::permission::peer_denials as pd;
+        let denials = self.peer_influence().denials().clone();
+        // Keys are computed lazily: for the carried-list match (only when a list is carried), or for a denial to record.
+        // The match uses BOTH spellings of every path (`match_keys`); a denial is RECORDED with one key per target
+        // (`KeyBasis::keys`), so the two sets are computed apart.
+        let carried_keys = denials.has_carried().then(|| pd::match_keys(&request));
+        let basis = pd::KeyBasis::of(&request);
+        let resolution = self.request_decided(request, carried_keys.as_deref()).await;
+        if is_recordable_denial(&resolution) {
+            denials.record_keys(basis.keys(), pd::mono_secs());
+        }
+        resolution
+    }
+
+    async fn request_decided(
+        &self,
+        mut request: PermissionRequest,
+        carried_keys: Option<&[crate::permission::peer_denials::DenialKey]>,
+    ) -> PermissionResolution {
+        // S6.7: the classifier sees the session's own state, never what a caller put in the request.
+        request.peer_note = self.peer_influence().payload_note();
+        // S6.3: the peer guard runs before every approving path below (allow-all, yolo, auto, grants, rules,
+        // the classifier). It can only deny; a session that is not peer-influenced skips it after one atomic load.
+        // It runs first, so a protected write keeps the guard's refusal text.
+        if let Some(reason) = self.peer_guard_denial_for(&request) {
+            return PermissionResolution {
+                decision: Decision::PolicyDeny(reason),
+                event: None,
+            };
+        }
+        // S7.3: a request that matches a denial carried by a released peer message is denied before every approving path
+        // (allow-all, yolo, auto, grants, rules, the classifier), whatever the mode. A session that carries nothing has no
+        // keys here and finds nothing.
+        if let Some(keys) = carried_keys
+            && let Some(hit) = self.peer_influence().denials().match_carried_any(keys)
+        {
+            return PermissionResolution {
+                decision: Decision::PolicyDeny(crate::permission::peer_denials::laundering_refused_text(&hit.kind)),
+                event: None,
+            };
+        }
+        match self {
+            PermissionHandle::AllowAll(_) => {
                 if let Some(ask) = &request.hook_ask {
                     tracing::debug!(
                         hook_name = %ask.hook_name,
@@ -1200,6 +1463,34 @@ impl PermissionHandle {
             }
         }
     }
+}
+
+/// S7.1: what a resolution says about how the request ended, for the one recording rule ([`records_denial`]) the hub path
+/// shares. "Shown" is inferred (the prompt section ran and the requester stayed): the prompter reports no display signal.
+fn denial_cause(r: &PermissionResolution) -> Option<crate::permission::DenialCause> {
+    use crate::permission::DenialCause as C;
+    Some(match &r.decision {
+        Decision::PolicyDeny(_) => C::Policy,
+        Decision::FollowupMessage(_) => C::HumanFollowup,
+        Decision::Reject(_) if r.event.as_ref().is_some_and(|e| e.prompt_outcome.as_deref() == Some("error")) => C::PromptError,
+        Decision::Reject(text)
+            if r.event.is_none()
+                && matches!(text.as_str(), "permission manager unavailable" | "failed to receive permission decision") =>
+        {
+            C::ManagerFailure
+        }
+        Decision::Reject(_) => C::HumanReject,
+        Decision::Cancelled => match r.event.as_ref() {
+            Some(e) if e.decision_reason.as_deref() == Some(reasons::REQUESTER_GONE) => C::RequesterGone,
+            Some(e) if e.user_prompted && e.prompt_outcome.as_deref() == Some("cancelled") => C::ShownThenCancelled,
+            _ => C::NotShown,
+        },
+        Decision::Allow | Decision::Ask => return None,
+    })
+}
+
+fn is_recordable_denial(r: &PermissionResolution) -> bool {
+    denial_cause(r).is_some_and(crate::permission::records_denial)
 }
 
 /// Clamp requested yolo against the pin: the pin wins, so a client can never enable always-approve while it is set.
@@ -1693,6 +1984,17 @@ fn spawn_permission_manager_with_pin(
              ([ui] disable_bypass_permissions_mode = true) to enforce managed dontAsk."
         );
     }
+    let mode_view = ModeView {
+        base: crate::permission::types::base_mode_of(permission_config.as_ref()),
+        session_edit_grant: Arc::new(AtomicBool::new(false)),
+        mode_pair: Arc::new(AtomicU8::new(
+            (if initial_yolo { PAIR_YOLO } else { 0 }) | (if seed_auto { PAIR_AUTO } else { 0 }),
+        )),
+        peer_influence: PeerInfluence::new(),
+        fallback_cwd: Some(cwd.as_path().to_path_buf()),
+    };
+    let edit_grant_actor = mode_view.session_edit_grant.clone();
+    let mode_pair_actor = mode_view.mode_pair.clone();
     let auto_state = Arc::new(AtomicBool::new(seed_auto));
     let auto_state_actor = auto_state.clone();
     let side_query_wired = Arc::new(AtomicBool::new(false));
@@ -1745,6 +2047,20 @@ fn spawn_permission_manager_with_pin(
             .eq(DEFAULT_ALLOWED_DOMAINS.iter().copied());
         while let Some(cmd) = rx.recv().await {
             match cmd {
+                PermissionCommand::DecideOnly { access, cwd: decide_cwd, respond_to } => {
+                    let verdict = match GatePreflight::evaluate(
+                        compiled_policy.as_ref(),
+                        &access,
+                        &decide_cwd,
+                        false,
+                    )
+                    .policy_decision()
+                    {
+                        Some(Decision::Reject(reason)) => Some(reason),
+                        _ => None,
+                    };
+                    let _ = respond_to.send(verdict);
+                }
                 PermissionCommand::SetYoloMode(enabled) => {
                     let clamped = clamp_yolo(enabled, yolo_pin);
                     if enabled && !clamped && !pin_refusal_logged {
@@ -1758,11 +2074,13 @@ fn spawn_permission_manager_with_pin(
                         auto_mode = false;
                         auto_state_actor.store(false, Ordering::Relaxed);
                     }
+                    pair_set_yolo(&mode_pair_actor, clamped);
                 }
                 PermissionCommand::SetAutoMode(enabled) => {
                     tracing::info!("auto permission mode set to: {}", enabled);
                     auto_mode = enabled;
                     auto_state_actor.store(enabled, Ordering::Relaxed);
+                    pair_set_auto(&mode_pair_actor, enabled);
                     if enabled {
                         yolo_mode = false;
                         yolo_state_actor.store(false, Ordering::Relaxed);
@@ -1785,6 +2103,7 @@ fn spawn_permission_manager_with_pin(
                     state = PermissionState::default();
                     replace_state_on_disk(&cwd, &state, client_id_ref).await;
                     allow_edits_for_session = false;
+                    edit_grant_actor.store(false, Ordering::Relaxed);
                     tracing::info!(
                         "Permission state reset to defaults (including session edit allow)"
                     );
@@ -1801,6 +2120,7 @@ fn spawn_permission_manager_with_pin(
                             hook_ask,
                             edit_targets,
                             read_targets,
+                            peer_note,
                         },
                     mut respond_to,
                 } => {
@@ -2151,7 +2471,10 @@ fn spawn_permission_manager_with_pin(
                         continue;
                     }
 
-                    if auto_mode && preflight.admits_auto_classifier() {
+                    // The built-in `send_message` is decided before the classifier (design row 3a: auto-allowed in every mode):
+                    // the classifier is never asked about it. Rules, hooks and the peer guard have already run above.
+                    let auto_exempt = matches!(&access, AccessKind::Tool(name) if is_auto_allowed_tool(name));
+                    if auto_mode && !auto_exempt && preflight.admits_auto_classifier() {
                         use crate::permission::auto_mode::{
                             AutoFastPath, access_requires_user_interaction, auto_mode_fast_path,
                         };
@@ -2207,6 +2530,7 @@ fn spawn_permission_manager_with_pin(
                                             turns,
                                             project_instructions: project_instructions.clone(),
                                             security_findings: assessment.clone(),
+                                            peer: peer_note.clone(),
                                         },
                                     );
                                     tokio::select! {
@@ -2492,6 +2816,11 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::Read(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::WebSearch(_) => Some((Decision::Allow, reasons::SAFE_COMMAND)),
                         AccessKind::Grep { .. } => Some((Decision::Allow, reasons::SAFE_COMMAND)),
+                        // Peer messaging (design row 3a): `send_message` is auto-allowed in every mode, but only here, after the
+                        // policy step above: a deny rule has already rejected it and an ask rule (`policy_forced_prompt`) still prompts.
+                        AccessKind::Tool(name) if is_auto_allowed_tool(name) && !policy_forced_prompt => {
+                            Some((Decision::Allow, reasons::SAFE_COMMAND))
+                        }
                         AccessKind::MCPTool { name, .. } => mcp_pre_decision(
                             name,
                             &state,
@@ -2804,6 +3133,7 @@ fn spawn_permission_manager_with_pin(
                                 PromptOutcome::AllowOnce => Decision::Allow,
                                 PromptOutcome::AllowEditsForSession => {
                                     allow_edits_for_session = true;
+                                    edit_grant_actor.store(true, Ordering::Relaxed);
                                     Decision::Allow
                                 }
                                 PromptOutcome::AllowAlways => {
@@ -3008,6 +3338,7 @@ fn spawn_permission_manager_with_pin(
             deny_read_globs: Arc::new(deny_read_globs),
             in_flight,
             user_prompt_notify,
+            mode_view,
         },
         event_rx,
     )
@@ -3134,6 +3465,211 @@ mod tests {
                     handle.is_auto_mode(),
                     "prompt_policy Auto must seed auto mode"
                 );
+            })
+            .await;
+    }
+
+    fn mode_of(
+        config: Option<crate::permission::types::PermissionConfig>,
+        initial_yolo: bool,
+    ) -> crate::permission::types::EffectivePermissionMode {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+        match config {
+            Some(c) => test_manager_with_config(&cwd, c, initial_yolo).0,
+            None => test_manager(&cwd, initial_yolo, None).0,
+        }
+        .effective_mode()
+    }
+
+    /// Every source of every mode, through a real spawned handle: the exact enum value.
+    #[tokio::test]
+    async fn effective_mode_table_over_config_sources() {
+        use crate::permission::types::{
+            EffectivePermissionMode as M, PermissionConfig, PermissionRule, ResolvedBaseMode,
+            RuleAction, ToolFilter, PatternMode,
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let with = |f: &dyn Fn(&mut PermissionConfig)| {
+                    let mut c = PermissionConfig::new(vec![]);
+                    f(&mut c);
+                    Some(c)
+                };
+                assert_eq!(mode_of(None, false), M::Default);
+                assert_eq!(mode_of(with(&|_| {}), false), M::Default);
+                assert_eq!(
+                    mode_of(with(&|c| c.resolved_base = ResolvedBaseMode::AcceptEdits), false),
+                    M::AcceptEdits
+                );
+                assert_eq!(
+                    mode_of(with(&|c| c.resolved_base = ResolvedBaseMode::BypassPermissions), false),
+                    M::BypassPermissions
+                );
+                assert_eq!(
+                    mode_of(with(&|c| c.prompt_policy = PromptPolicy::Deny), false),
+                    M::DontAsk
+                );
+                assert_eq!(
+                    mode_of(with(&|c| c.prompt_policy = PromptPolicy::Allow), false),
+                    M::AlwaysAllow
+                );
+                assert_eq!(
+                    mode_of(with(&|c| c.prompt_policy = PromptPolicy::Auto), false),
+                    M::Auto
+                );
+                // CLI / startup always-approve flag (initial_yolo) wins over every configured mode.
+                assert_eq!(mode_of(None, true), M::Yolo);
+                assert_eq!(
+                    mode_of(with(&|c| c.prompt_policy = PromptPolicy::Deny), true),
+                    M::Yolo
+                );
+                // A user-written Allow Edit rule under default mode is a rule, not the mode.
+                let rule = PermissionRule {
+                    action: RuleAction::Allow,
+                    tool: ToolFilter::Edit,
+                    pattern: None,
+                    pattern_mode: PatternMode::Glob,
+                };
+                assert_eq!(
+                    mode_of(Some(PermissionConfig::new(vec![rule])), false),
+                    M::Default
+                );
+                assert_eq!(PermissionHandle::allow_all().effective_mode(), M::AllowAll);
+                // Finding 3: a catch-all `Allow Any` rule is its own base; narrower rules stay unreported.
+                let any = |tool: ToolFilter, pattern: Option<&str>| {
+                    Some(PermissionConfig::new(vec![PermissionRule {
+                        action: RuleAction::Allow,
+                        tool,
+                        pattern: pattern.map(str::to_owned),
+                        pattern_mode: PatternMode::Glob,
+                    }]))
+                };
+                assert_eq!(mode_of(any(ToolFilter::Any, None), false), M::AllowAnyRule);
+                assert_eq!(mode_of(any(ToolFilter::Any, Some("*")), false), M::AllowAnyRule);
+                assert_eq!(
+                    mode_of(any(ToolFilter::Bash, Some("git status")), false),
+                    M::Default,
+                    "narrower allow rules are not modes"
+                );
+                assert_eq!(mode_of(any(ToolFilter::Edit, None), false), M::Default);
+                assert_eq!(mode_of(any(ToolFilter::Any, Some("src/**")), false), M::Default);
+            })
+            .await;
+    }
+
+    /// Run-time changes are seen by the very next call: yolo toggle, auto toggle (both orders), the pin clamp,
+    /// and the session edit grant (flag the actor sets on AllowEditsForSession and clears on ResetState).
+    #[tokio::test]
+    async fn effective_mode_follows_runtime_changes() {
+        use crate::permission::types::EffectivePermissionMode as M;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (h, _ev) = test_manager(&cwd, false, None);
+                assert_eq!(h.effective_mode(), M::Default);
+                h.set_yolo_mode(true);
+                assert_eq!(h.effective_mode(), M::Yolo);
+                h.set_auto_mode(true);
+                assert_eq!(h.effective_mode(), M::Auto, "enabling auto clears yolo");
+                h.set_yolo_mode(true);
+                assert_eq!(h.effective_mode(), M::Yolo, "enabling yolo clears auto");
+                h.set_yolo_mode(false);
+                assert_eq!(h.effective_mode(), M::Default);
+                h.set_auto_mode(true);
+                h.set_auto_mode(false);
+                assert_eq!(h.effective_mode(), M::Default);
+
+                // Auto seeded from config, then turned off at run time: back to prompting, not "Auto".
+                let mut c = crate::permission::types::PermissionConfig::new(vec![]);
+                c.prompt_policy = PromptPolicy::Auto;
+                let (h2, _ev2) = test_manager_with_config(&cwd, c, false);
+                assert_eq!(h2.effective_mode(), M::Auto);
+                h2.set_auto_mode(false);
+                assert_eq!(h2.effective_mode(), M::Default);
+
+                // Managed pin: a requested yolo is clamped off, and the mode says so.
+                let (h3, _ev3) = test_manager(&cwd, false, Some("pinned"));
+                h3.set_yolo_mode(true);
+                assert_eq!(h3.effective_mode(), M::Default);
+
+                // Session edit grant is its own dimension, reported under every base (finding 2).
+                let PermissionHandle::Actor { mode_view, .. } = &h else {
+                    unreachable!()
+                };
+                let plain = h.effective_peer_mode(false);
+                mode_view.session_edit_grant.store(true, Ordering::Relaxed);
+                let granted = h.effective_peer_mode(false);
+                assert_ne!(plain, granted);
+                assert_eq!((granted.base, granted.session_edit_grant), (M::Default, true));
+                h.set_auto_mode(true);
+                let auto_grant = h.effective_peer_mode(false);
+                assert_eq!((auto_grant.base, auto_grant.session_edit_grant), (M::Auto, true));
+                h.set_auto_mode(false);
+                h.set_yolo_mode(true);
+                assert_ne!(h.effective_peer_mode(false), h.effective_peer_mode(true), "plan is a dimension");
+                h.set_yolo_mode(false);
+                // Finding 4: reset_state clears the mirrored grant at the call site, with no wait for the actor.
+                h.reset_state();
+                assert!(!h.session_edit_grant(), "next report after reset_state has no grant");
+                assert_eq!(h.effective_peer_mode(false), plain);
+
+                let mut d = crate::permission::types::PermissionConfig::new(vec![]);
+                d.prompt_policy = PromptPolicy::Deny;
+                let (h4, _ev4) = test_manager_with_config(&cwd, d, false);
+                let PermissionHandle::Actor { mode_view, .. } = &h4 else {
+                    unreachable!()
+                };
+                mode_view.session_edit_grant.store(true, Ordering::Relaxed);
+                let r = h4.effective_peer_mode(false);
+                assert_eq!((r.base, r.session_edit_grant), (M::DontAsk, true));
+            })
+            .await;
+    }
+
+    /// Finding 4: yolo and auto live in one packed atomic, so while the writers only ever move between the yolo
+    /// state and the auto state, a reader never sees "neither" (a state more restrictive-looking than both).
+    #[tokio::test]
+    async fn yolo_auto_pair_is_never_torn_under_hammering() {
+        use crate::permission::types::EffectivePermissionMode as M;
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (h, _ev) = test_manager(&cwd, true, None);
+                assert_eq!(h.effective_mode(), M::Yolo);
+                let stop = Arc::new(AtomicBool::new(false));
+                let mut readers = Vec::new();
+                for _ in 0..3 {
+                    let (h, stop) = (h.clone(), stop.clone());
+                    readers.push(std::thread::spawn(move || {
+                        let mut n = 0u64;
+                        while !stop.load(Ordering::Relaxed) {
+                            let m = h.effective_mode();
+                            assert!(matches!(m, M::Yolo | M::Auto), "torn read: {m:?}");
+                            n += 1;
+                        }
+                        n
+                    }));
+                }
+                let writer = {
+                    let h = h.clone();
+                    std::thread::spawn(move || {
+                        for _ in 0..20_000 {
+                            h.set_auto_mode(true);
+                            h.set_yolo_mode(true);
+                        }
+                    })
+                };
+                writer.join().unwrap();
+                stop.store(true, Ordering::Relaxed);
+                for r in readers {
+                    assert!(r.join().unwrap() > 0);
+                }
             })
             .await;
     }
@@ -4130,6 +4666,7 @@ mod tests {
             deny_read_globs: Arc::new(vec![]),
             in_flight: Arc::new(AtomicUsize::new(0)),
             user_prompt_notify: Arc::new(Mutex::new(None)),
+            mode_view: ModeView::default(),
         }
     }
 
@@ -4583,6 +5120,121 @@ mod tests {
                     "{name}: got {decision:?}"
                 );
             }
+        }))
+        .await;
+    }
+
+    /// Peer messaging (design row 3a): `send_message` never prompts in any mode, and a deny rule for it still denies.
+    #[tokio::test]
+    async fn send_message_is_auto_allowed_in_every_mode_but_a_deny_rule_still_denies() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::RuleAction;
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let send = || AccessKind::Tool("send_message".to_owned());
+            // Default mode, with a client that would record a prompt.
+            let client = RecordingClient::default();
+            let prompts = client.prompts.clone();
+            let (mgr, _e) = manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+            assert_eq!(decide(&mgr, send(), tool_call()).await, Decision::Allow, "default");
+            assert!(prompts.borrow().is_empty(), "default mode must not prompt");
+            // dontAsk: nothing may prompt, and it is still allowed.
+            let mut dont_ask = crate::permission::types::PermissionConfig::new(vec![]);
+            dont_ask.prompt_policy = PromptPolicy::Deny;
+            let (mgr, _e) = test_manager_with_config(&cwd, dont_ask, false);
+            assert_eq!(decide(&mgr, send(), tool_call()).await, Decision::Allow, "dontAsk");
+            // Always-approve.
+            let (mgr, _e) = test_manager(&cwd, true, None);
+            assert_eq!(decide(&mgr, send(), tool_call()).await, Decision::Allow, "yolo");
+            // A neighbouring side-effecting tool is NOT auto-allowed (the exception is one name).
+            let (mgr, _e) = test_manager_with_config(&cwd, {
+                let mut c = crate::permission::types::PermissionConfig::new(vec![]);
+                c.prompt_policy = PromptPolicy::Deny;
+                c
+            }, false);
+            assert!(matches!(decide(&mgr, AccessKind::Tool("scheduler_create".to_owned()), tool_call()).await, Decision::PolicyDeny(_)));
+            // A deny rule denies, in default mode and in always-approve.
+            for yolo in [false, true] {
+                let config = crate::permission::types::PermissionConfig::new(vec![
+                    parse_permission_rule("send_message", RuleAction::Deny).unwrap(),
+                ]);
+                let (mgr, _e) = test_manager_with_config(&cwd, config, yolo);
+                let d = decide(&mgr, send(), tool_call()).await;
+                assert!(matches!(d, Decision::Reject(_) | Decision::PolicyDeny(_)), "deny rule (yolo={yolo}): {d:?}");
+            }
+            // An ask rule still asks.
+            let config = crate::permission::types::PermissionConfig::new(vec![
+                parse_permission_rule("send_message", RuleAction::Ask).unwrap(),
+            ]);
+            let client = RecordingClient::default();
+            let prompts = client.prompts.clone();
+            let (mgr, _e) = manager_with_recording_client(&cwd, Some(config), client, ClientType::Generic);
+            let _ = decide(&mgr, send(), tool_call()).await;
+            assert_eq!(prompts.borrow().len(), 1, "an ask rule is honoured");
+        }))
+        .await;
+    }
+
+    /// Design row 3a, auto mode: the classifier is never consulted for the built-in `send_message` (it would `Block` any
+    /// side-effecting tool), so the call neither prompts nor is denied; an MCP tool of the same name is still classified.
+    #[tokio::test]
+    async fn send_message_in_auto_mode_skips_the_classifier_and_never_prompts() {
+        use crate::permission::auto_mode::{ClassifierFailure, ClassifierMessage, LlmPermissionClassifier};
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::RuleAction;
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            for ask_rule in [false, true] {
+                let config = ask_rule.then(|| {
+                    crate::permission::types::PermissionConfig::new(vec![parse_permission_rule("send_message", RuleAction::Ask).unwrap()])
+                });
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client(&cwd, config, client, ClientType::Generic);
+                let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let counter = calls.clone();
+                mgr.set_auto_mode(true);
+                mgr.set_classifier(Some(Arc::new(LlmPermissionClassifier {
+                    classify_text: Some(Arc::new(move |_: Vec<ClassifierMessage>| {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        Box::pin(async { Ok::<_, ClassifierFailure>(r#"{"shouldBlock":true,"reason":"no","thinking":"t"}"#.to_owned()) })
+                    })),
+                    ..LlmPermissionClassifier::default()
+                })));
+                let _ = decide(&mgr, AccessKind::Tool("send_message".to_owned()), tool_call()).await;
+                if ask_rule {
+                    assert_eq!(prompts.borrow().len(), 1, "an ask rule still prompts in auto mode");
+                } else {
+                    assert!(prompts.borrow().is_empty(), "auto mode must not prompt for send_message");
+                    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0, "the classifier is not consulted");
+                    let d = decide(&mgr, AccessKind::Tool("send_message".to_owned()), tool_call()).await;
+                    assert_eq!(d, Decision::Allow, "auto mode");
+                    // An MCP tool of the same name inherits nothing: it goes through the classifier.
+                    let mcp = AccessKind::MCPTool { name: "send_message".into(), input: serde_json::Value::Null };
+                    let _ = decide(&mgr, mcp, tool_call()).await;
+                    assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 1, "an MCP tool named send_message is classified");
+                }
+            }
+        }))
+        .await;
+    }
+
+    /// Design row 3a: an MCP tool named `send_message` is not the built-in tool and is not auto-allowed (dontAsk denies it).
+    #[tokio::test]
+    async fn an_mcp_tool_named_send_message_is_not_auto_allowed() {
+        let local = tokio::task::LocalSet::new();
+        agent_message_completes(local.run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let mut c = crate::permission::types::PermissionConfig::new(vec![]);
+            c.prompt_policy = PromptPolicy::Deny;
+            let (mgr, _e) = test_manager_with_config(&cwd, c, false);
+            let mcp = AccessKind::MCPTool { name: "send_message".into(), input: serde_json::Value::Null };
+            assert!(matches!(decide(&mgr, mcp, tool_call()).await, Decision::PolicyDeny(_) | Decision::Reject(_)));
         }))
         .await;
     }
@@ -10434,7 +11086,7 @@ mod tests {
 
         #[tokio::test]
         async fn ask_on_a_handle_that_cannot_prompt_allows() {
-            let resolution = PermissionHandle::AllowAll
+            let resolution = PermissionHandle::allow_all()
                 .request(PermissionRequest {
                     hook_ask: Some(ask()),
                     ..PermissionRequest::new(AccessKind::Read(Some("a.rs".into())), tool_call())

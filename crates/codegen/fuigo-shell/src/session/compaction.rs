@@ -1802,6 +1802,8 @@ impl SessionActor {
             .chat_state_handle
             .get_conversation_item_at(1)
             .await
+            // A peer state marker can sit at this index after a compaction; it is never the user's text.
+            .filter(|item| !item.is_peer_influence_marker())
             .and_then(|item| match item {
                 ConversationItem::User(parts) => {
                     parts.content.into_iter().next().and_then(|p| match p {

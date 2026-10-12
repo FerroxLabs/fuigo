@@ -722,6 +722,10 @@ pub struct PagerArgs {
     /// Headless only: `/flush` as `-p` text is not a reliable flush trigger.
     #[arg(long = "memory-flush", hide = true)]
     pub memory_flush: bool,
+    /// Headless only: opt this one-shot session in to peer messaging (needs `features.peer_messaging`). The session has no
+    /// operator, so a message that would be held is rejected instead.
+    #[arg(long = "peer", hide = true)]
+    pub peer: bool,
     /// Agent name or definition file path.
     #[arg(long = "agent", value_name = "NAME")]
     pub agent: Option<String>,
