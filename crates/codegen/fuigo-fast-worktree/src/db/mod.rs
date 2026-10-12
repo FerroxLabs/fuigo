@@ -196,6 +196,9 @@ pub fn classify_sqlite_error(error: &anyhow::Error) -> SqliteFailureKind {
 impl WorktreeDb {
     /// Open (or create) the DB at `fuigo_home/worktrees.db`.
     pub fn open(fuigo_home: &Path) -> Result<Self> {
+        // A missing home is created private (0700); an existing one is never touched.
+        fuigo_dirs::ensure_private_home(fuigo_home)
+            .with_context(|| format!("failed to create fuigo home: {}", fuigo_home.display()))?;
         Self::open_at(&fuigo_home.join(WORKTREES_DB_FILE))
     }
 

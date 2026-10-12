@@ -116,7 +116,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/settings.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/turn_completion.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/actions.rs", 133),
+    ("crates/codegen/fuigo-pager/src/app/actions.rs", 135), // R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep.
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 6), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.

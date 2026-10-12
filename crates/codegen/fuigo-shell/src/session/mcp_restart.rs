@@ -523,6 +523,7 @@ fn push(
         status,
         reason,
         detail,
+        failure_kind: None,
         tools: None,
     };
     actions.push_status(&payload);

@@ -22,6 +22,7 @@ use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 
+use crate::session_cgroup::{PLACE_SENTINEL_ERRNO, PlaceError, SessionCgroup, decide_placement, placement_enabled, probe};
 use crate::{HANGUP_GRACE, ProcessGroup, new_process_group};
 
 /// A `Send + Sync` kill-handle for one unit's child-process trees. Cheap to
@@ -44,6 +45,139 @@ struct ScopeInner {
     /// [`register`](ProcessScope::register) checks this under the `groups` lock
     /// and kills such a child on the spot instead of enrolling a leaked `Weak`.
     closed: AtomicBool,
+    /// The root session's cgroup (P189 packet C). `None` unless the process was
+    /// started with `FUIGO_SESSION_PARK_STOP=on` and the probe is usable; then
+    /// every spawn site that goes through [`ProcessScope::spawn_placed`] puts
+    /// its child in it. Subagents share the root's scope, hence this cgroup.
+    cgroup: Option<SessionCgroup>,
+}
+
+/// Handed to the `configure` closure of [`ProcessScope::spawn_placed`]. Placement
+/// itself is registered by `spawn_placed` right after `new_command` returns the
+/// bare `Command`, so no caller code can register a `pre_exec` before it; the
+/// hook only tells `configure` whether it may run a second time.
+pub struct PlaceHook {
+    retry_may_follow: bool,
+}
+
+impl PlaceHook {
+    fn off() -> Self {
+        Self { retry_may_follow: false }
+    }
+
+    /// True when a failed placement will be followed by a second `configure`
+    /// call (so one-shot inputs such as owned fd mappings must be duplicated,
+    /// not consumed). False when no cgroup applies or the gate refused
+    /// placement: then `configure` runs once and the spawn path is exactly the
+    /// pre-P189 one.
+    pub fn retry_may_follow(&self) -> bool {
+        self.retry_may_follow
+    }
+}
+
+/// Why [`ProcessScope::spawn_placed`] failed.
+#[derive(Debug)]
+pub enum SpawnPlacedError<E> {
+    /// The caller's `configure` closure failed (also on the unplaced fallback).
+    Build(E),
+    /// `spawn()` failed (never because of placement: that is retried unplaced).
+    Spawn(io::Error),
+    /// A stop is in progress on this session ([`SessionCgroup::begin_stop`]):
+    /// the spawn was REFUSED and nothing ran. Also returned while a kill holds the
+    /// gate, and after one until `reopen()`.
+    Stopping,
+}
+
+/// What `spawn_placed` needs from a command type (tokio or std).
+trait Placeable {
+    type Child;
+    fn std_mut(&mut self) -> &mut std::process::Command;
+    fn start(&mut self) -> io::Result<Self::Child>;
+}
+
+impl Placeable for tokio::process::Command {
+    type Child = tokio::process::Child;
+    fn std_mut(&mut self) -> &mut std::process::Command {
+        self.as_std_mut()
+    }
+    #[allow(clippy::disallowed_methods)] // the sanctioned placed/unplaced spawn of `spawn_placed`
+    fn start(&mut self) -> io::Result<Self::Child> {
+        self.spawn()
+    }
+}
+
+impl Placeable for std::process::Command {
+    type Child = std::process::Child;
+    fn std_mut(&mut self) -> &mut std::process::Command {
+        self
+    }
+    #[allow(clippy::disallowed_methods)] // the sanctioned placed/unplaced spawn of `spawn_placed`
+    fn start(&mut self) -> io::Result<Self::Child> {
+        self.spawn()
+    }
+}
+
+/// The one placement entry. See [`ProcessScope::spawn_placed`].
+fn spawn_placed_impl<C: Placeable, E>(
+    scope: Option<&ProcessScope>,
+    mut new_command: impl FnMut() -> C,
+    mut configure: impl FnMut(&mut C, &PlaceHook) -> Result<(), E>,
+) -> Result<C::Child, SpawnPlacedError<E>> {
+    let Some(cg) = scope.and_then(|s| s.inner.cgroup.as_ref()) else {
+        let mut cmd = new_command();
+        configure(&mut cmd, &PlaceHook::off()).map_err(SpawnPlacedError::Build)?;
+        return cmd.start().map_err(SpawnPlacedError::Spawn);
+    };
+    let mut cmd = new_command();
+    // Placement is the FIRST pre_exec: registered here, before `configure` runs.
+    // The lease (the gate's read side) is held until the LAST `start()` below has
+    // returned, placed or unplaced, and every latch happens under it (see THE
+    // LOCKING RULE in `session_cgroup/imp.rs`).
+    let lease = match cg.place_or_latch(cmd.std_mut()) {
+        Ok(lease) => lease,
+        Err(PlaceError::Stopping) => return Err(SpawnPlacedError::Stopping),
+        Err(why) => {
+            // Unreachable on Linux (`place_or_latch` only fails with `Stopping`).
+            // Never fail a working command: latch and run unplaced.
+            tracing::debug!(?why, "session cgroup gate unavailable; running unplaced, breached");
+            cg.latch_breached();
+            let configured = configure(&mut cmd, &PlaceHook::off());
+            configured.map_err(SpawnPlacedError::Build)?;
+            return cmd.start().map_err(SpawnPlacedError::Spawn);
+        }
+    };
+    let placed = lease.placed();
+    let hook = PlaceHook { retry_may_follow: placed };
+    let configured = configure(&mut cmd, &hook);
+    if !placed {
+        // Closed by session end: `breached` was latched under the lease already.
+        tracing::debug!("session cgroup gate closed; running unplaced, breached");
+        configured.map_err(SpawnPlacedError::Build)?;
+        return cmd.start().map_err(SpawnPlacedError::Spawn);
+    }
+    let spawned = match configured {
+        Ok(()) => cmd.start(),
+        Err(_) => Err(io::Error::from_raw_os_error(PLACE_SENTINEL_ERRNO)),
+    };
+    match spawned {
+        Ok(child) => Ok(child),
+        Err(e) if cg.record_spawn_error(&e) => {
+            // A failed placement write, or a configure failure on the placed
+            // attempt (e.g. an fd could not be duplicated for the retry): fall
+            // back to the exact base spawn path. `record_spawn_error` latched
+            // breached under the still-held lease, BEFORE the unplaced start.
+            // The latch is conservative (item 6): it is set before we can know
+            // whether the fallback starts a process, which is the only point at
+            // which it can be set race-free.
+            cg.fallback_point();
+            tracing::warn!("session cgroup placement failed; session is breached, command runs unplaced");
+            drop(cmd);
+            let mut cmd = new_command();
+            configure(&mut cmd, &PlaceHook::off()).map_err(SpawnPlacedError::Build)?;
+            cmd.start().map_err(SpawnPlacedError::Spawn)
+        }
+        Err(e) => Err(SpawnPlacedError::Spawn(e)),
+    }
 }
 
 impl ProcessScope {
@@ -54,8 +188,103 @@ impl ProcessScope {
             inner: Arc::new(ScopeInner {
                 groups: Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
+                cgroup: None,
             }),
         }
+    }
+
+    /// A scope for one ROOT session. Gets a session cgroup only when
+    /// [`placement_enabled`] (opt-in env var AND usable probe); a creation
+    /// failure is logged once and the session runs unplaced.
+    pub fn new_session() -> Self {
+        // `placement_enabled` reads the variable once and probes only when it is `on`.
+        Self::new_session_with(
+            placement_enabled().then_some("on"),
+            || {
+                match probe() {
+                    Ok(host) => host
+                        .create_session()
+                        .inspect_err(|e| tracing::warn!(reason = %e, "session cgroup creation failed; session runs unplaced"))
+                        .ok(),
+                    Err(_) => None,
+                }
+            },
+        )
+    }
+
+    /// [`new_session`](Self::new_session) with the variable's value and the
+    /// cgroup factory injected. `create` is not called unless `value` is `on`.
+    pub fn new_session_with(value: Option<&str>, create: impl FnOnce() -> Option<SessionCgroup>) -> Self {
+        let mut cgroup = None;
+        decide_placement(value, || {
+            cgroup = create();
+            cgroup.is_some()
+        });
+        Self::with_cgroup(cgroup)
+    }
+
+    /// A scope that places into `cgroup` (tests, and callers that made it).
+    pub fn with_session_cgroup(cgroup: SessionCgroup) -> Self {
+        Self::with_cgroup(Some(cgroup))
+    }
+
+    fn with_cgroup(cgroup: Option<SessionCgroup>) -> Self {
+        Self {
+            inner: Arc::new(ScopeInner {
+                groups: Mutex::new(Vec::new()),
+                closed: AtomicBool::new(false),
+                cgroup,
+            }),
+        }
+    }
+
+    /// This session's cgroup, if any.
+    pub fn session_cgroup(&self) -> Option<&SessionCgroup> {
+        self.inner.cgroup.as_ref()
+    }
+
+    /// Session end: close the cgroup gate and remove its directory if empty.
+    /// NEVER kills (a `nohup` server must survive closing a session); a
+    /// populated directory is left in place. No-op without a cgroup.
+    pub fn release_session_cgroup(&self) {
+        if let Some(cg) = &self.inner.cgroup {
+            let outcome = cg.teardown();
+            tracing::debug!(?outcome, "session cgroup released");
+        }
+    }
+
+    /// Spawn a session tool process, placed in this session's cgroup when there
+    /// is one: THE only public way to place (tokio commands; see
+    /// [`spawn_placed_std`](Self::spawn_placed_std) for std ones).
+    ///
+    /// `new_command` returns the bare `Command` (just `Command::new`);
+    /// placement is registered on it here, before anything else, then
+    /// `configure` sets it up. `scope` is `None` for sites without a session
+    /// (then, like a scope without a cgroup, the child is spawned exactly as
+    /// before P189, `configure` once).
+    ///
+    /// Any command of a session with a cgroup that starts unplaced latches
+    /// `breached` first (closed gate, failed write, failed `configure` on the
+    /// placed attempt); the command still runs. The one exception is a stop in
+    /// progress or finished and not reopened (`kill_and_wait`, `begin_stop`):
+    /// [`SpawnPlacedError::Stopping`], nothing runs. With a cgroup `new_command`/`configure` may run twice
+    /// (placed attempt, then the unplaced fallback). Synchronous on purpose: the
+    /// gate lease is held across no `.await` and until `spawn()` returns.
+    pub fn spawn_placed<E>(
+        scope: Option<&Self>,
+        new_command: impl FnMut() -> tokio::process::Command,
+        configure: impl FnMut(&mut tokio::process::Command, &PlaceHook) -> Result<(), E>,
+    ) -> Result<tokio::process::Child, SpawnPlacedError<E>> {
+        spawn_placed_impl(scope, new_command, configure)
+    }
+
+    /// [`spawn_placed`](Self::spawn_placed) for a `std::process::Command`.
+    pub fn spawn_placed_std<E>(
+        scope: Option<&Self>,
+        new_command: impl FnMut() -> std::process::Command,
+        configure: impl FnMut(&mut std::process::Command, &PlaceHook) -> Result<(), E>,
+    ) -> Result<std::process::Child, SpawnPlacedError<E>> {
+        spawn_placed_impl(scope, new_command, configure)
     }
 
     /// True once [`kill_all`](Self::kill_all) has run. Enrollment sites use

@@ -1434,6 +1434,18 @@ pub enum WorkspaceOps {
     /// Proxy mode: routes through hub RPC.
     Proxy { client: WorkspaceClient },
 }
+/// S6.1, proxy mode: the workspace server is another process, so its hub session cannot share this process's atomic and keeps
+/// the fresh flag it was created with. That is sound only because every tool call is judged by the shell-side permission
+/// handle (which holds THE flag) before it is sent to the hub (`fuigo-shell` `tool_calls.rs`, `permissions.request`, whose
+/// `peer_guard_denial_for` runs before `AllowAll`). Returns whether the session was already influenced at bind (logged).
+fn proxy_note_peer_influence(session_id: &str, peer_influence: &crate::permission::PeerInfluence) -> bool {
+    let influenced = peer_influence.is_set();
+    if influenced {
+        tracing::warn!(%session_id, "peer-influenced session bound to a remote hub: the hub-side guard cannot see the flag; the shell-side guard judges its edits");
+    }
+    influenced
+}
+
 impl WorkspaceOps {
     /// Extensions dispatch through the handle immediately.
     /// Tool calls require a workspace session.
@@ -1481,6 +1493,8 @@ impl WorkspaceOps {
     /// The backend created with the session stays idle and is what `drop_session`/evict cancel.
     /// That backend is deliberately never adopted from the external toolset, or teardown would SIGKILL a backend the shell shares.
     ///
+    /// `peer_influence` is the session's one peer-influenced flag (required, so no caller can forget it).
+    ///
     /// No-op in proxy mode (the workspace server owns sessions).
     pub fn bind_local_session(
         &self,
@@ -1489,8 +1503,10 @@ impl WorkspaceOps {
         hunk_tracker: fuigo_hunk_tracker::HunkTrackerHandle,
         toolset: Arc<fuigo_tools::registry::types::FinalizedToolset>,
         viewer_ctx: Option<fuigo_tool_runtime::WorkspaceViewerContext>,
+        peer_influence: crate::permission::PeerInfluence,
     ) -> WorkspaceResult<()> {
         let Self::Local { handle } = self else {
+            proxy_note_peer_influence(session_id, &peer_influence);
             return Ok(());
         };
         if handle.session(session_id).is_none() {
@@ -1507,6 +1523,9 @@ impl WorkspaceOps {
         let session = handle
             .session(session_id)
             .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
+        // S6.1: the hub session adopts the session's ONE peer-influenced flag (created before anything that needs it), so the
+        // hub-routed guard (`enforce_hub_policy`) and the permission handle read the same atomic whatever the creation order.
+        session.bind_peer_influence(peer_influence);
         session.replace(session.effective_tool_config(), toolset);
         Ok(())
     }
@@ -1751,6 +1770,16 @@ impl WorkspaceOps {
 }
 #[cfg(test)]
 mod tests {
+    /// Packet 6a (proxy bind): a remote hub session cannot adopt the flag; the bind notes it, never changes it, and a Local bind
+    /// of the same flag does share it (`end_local_session_drops_bound_toolset` and the shell `r3_bind_local_session_*` tests).
+    #[test]
+    fn p6a_proxy_bind_notes_but_never_alters_the_peer_influence_flag() {
+        let flag = crate::permission::PeerInfluence::new();
+        assert!(!super::proxy_note_peer_influence("p6a-proxy-1", &flag));
+        flag.set(true);
+        assert!(super::proxy_note_peer_influence("p6a-proxy-1", &flag), "reports an influenced session");
+        assert!(flag.is_set(), "the bind leaves the flag as it was");
+    }
     use super::*;
     /// Pins these workspace methods' `workspace.*` wire names.
     /// The request types live in `fuigo-workspace-types`, re-exported here for existing call sites.
@@ -1996,6 +2025,7 @@ mod tests {
             fuigo_hunk_tracker::HunkTrackerHandle::noop(),
             toolset,
             None,
+            crate::permission::PeerInfluence::new(),
         )
         .expect("bind should succeed");
         assert!(handle.session(sid).is_some(), "session must be bound");

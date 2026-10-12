@@ -10,6 +10,7 @@ anstream = "0.6"
 clap = { workspace = true }
 fuigo-secrets = { workspace = true }
 tokio = { workspace = true, features = ["process", "rt", "time"] }
+tracing = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal", "process"] }

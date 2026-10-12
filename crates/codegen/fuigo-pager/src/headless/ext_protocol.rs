@@ -75,6 +75,11 @@ pub(crate) enum ExtEvent {
     MonitorEvent,
     Lifecycle(Lifecycle),
     Stream(Box<StreamEvent>),
+    /// A configured MCP server failed to start (`fuigo/mcp/server_status`, `unavailable` + `handshake_failed`).
+    McpStartFailed {
+        name: String,
+        kind: fuigo_shell::extensions::mcp::McpFailureKind,
+    },
 }
 
 pub(crate) fn handle_ext_notification(
@@ -89,6 +94,7 @@ pub(crate) fn handle_ext_notification(
         "fuigo/task_backgrounded" => decode_task_backgrounded(method, params),
         "fuigo/task_completed" => decode_task_completed(method, params),
         "fuigo/monitor_event" => ExtEvent::MonitorEvent,
+        "fuigo/mcp/server_status" => decode_mcp_server_status(params),
         // The decoder strips the ACP `_`; the prefixed arm is defence in depth for a method that reaches here unstripped
         "fuigo/leader/version_mismatch" | "_fuigo/leader/version_mismatch" => {
             match crate::acp::version_mismatch_banner(params) {
@@ -100,6 +106,28 @@ pub(crate) fn handle_ext_notification(
             ExtEvent::None
         }
         _ => ExtEvent::None,
+    }
+}
+
+/// Only a failed start is news to a headless run; every other status push (ready, restarts, config changes) is ignored.
+/// The raw `detail` is never read here: the closed `failure_kind` is the only cause a headless run prints. A push without
+/// a kind (older sender) and a sign-in failure are both left out.
+fn decode_mcp_server_status(params: &str) -> ExtEvent {
+    use fuigo_shell::extensions::mcp::{McpServerStatus, McpServerStatusPayload, McpServerStatusReason};
+    match serde_json::from_str::<McpServerStatusPayload>(params) {
+        Ok(p) if p.status == McpServerStatus::Unavailable
+            && p.reason == McpServerStatusReason::HandshakeFailed =>
+        {
+            match p.failure_kind {
+                None | Some(fuigo_shell::extensions::mcp::McpFailureKind::NeedsAuth) => ExtEvent::None,
+                Some(kind) => ExtEvent::McpStartFailed { name: p.name, kind },
+            }
+        }
+        Ok(_) => ExtEvent::None,
+        Err(e) => {
+            tracing::warn!(error = %e, "headless: undecodable fuigo/mcp/server_status; ignoring");
+            ExtEvent::None
+        }
     }
 }
 

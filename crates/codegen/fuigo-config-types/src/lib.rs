@@ -15,6 +15,8 @@ mod mcp;
 pub use mcp::*;
 mod permission;
 pub use permission::*;
+mod peer;
+pub use peer::*;
 use serde::{Deserialize, Serialize};
 use fuigo_announcements::RemoteAnnouncement;
 /// A remote `campaigns[]` entry: an `id` gate plus a flattened patch that can set any config key.

@@ -365,7 +365,7 @@ An interrupt while a `Stop` hook is running kills that hook mid-flight, and the 
 
 Some turns report none of the three:
 
-- bash mode (`!`) and builtin slash commands that run to completion. Interrupting one still reports `user_interrupt`, without a preceding `UserPromptSubmit`.
+- bash mode (`!`) and builtin slash commands that run to completion. Interrupting one still reports `user_interrupt`. A `!` line does run `UserPromptSubmit`, `PreToolUse` and `PostToolUse` (see [Hooks for `!` commands](#hooks-for--commands)); it still has no turn-end report.
 - a cancel-and-send, a rewind, or a queued prompt removed before it ran.
 - session teardown, reported by the session-end `Stop` and `SessionEnd`.
 - a turn whose stop hooks kept the agent working until the per-turn continuation limit forced the stop.
@@ -653,3 +653,13 @@ echo '{"decision": "allow"}'
 - **Project hooks ignored?** The folder may be untrusted. Run `/hooks-trust` (or relaunch with `--trust`).
 - **Script not found?** Check the path is relative to the `.json` file and executable (`chmod +x`).
 - **See errors?** Capture logs by launching with `RUST_LOG=debug FUIGO_LOG_FILE=/tmp/fuigo.log fuigo`, then check `/tmp/fuigo.log`.
+
+## Hooks for `!` commands
+
+A shell command you type with `!` goes through the denying hooks that are configured in settings files (user, project and managed), in this order, and stops at the first that refuses. Hooks that an SDK client registers at run time do not run for a `!` line:
+
+1. `UserPromptSubmit` runs with the usual payload plus `shellCommand`, the command text. The `prompt` field holds the command without the leading `!`. A block refuses the command. A `!` line cannot be rewritten by this hook, and any context it adds is ignored.
+2. `PreToolUse` runs with the tool name of the shell tool and the command as `toolInput`, which also carries `"userTyped": true` so a hook can tell a typed line from a model call. A deny refuses the command. An `ask` answer does not prompt: for a `!` line it counts as allow. An updated input is ignored: the command that runs is the one you typed. Added context is ignored.
+3. After the command finishes, `PostToolUse` runs as for a `Bash` call (not for a command that was sent to the background). It only observes: it cannot undo the command, and nothing it adds reaches the model.
+
+A refused command does not run. You see one line naming what refused it (the hook, with its own message), where the output would have appeared. The model is told only that a command you tried was refused by policy; it never sees the hook's message. Only a prompt you typed runs a `!` line: a scheduled task or any other automated prompt never does.

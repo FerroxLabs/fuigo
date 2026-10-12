@@ -189,6 +189,8 @@ fn authorize_request(
 pub(crate) async fn dispatch(
     kind: SubscriptionKind,
     resolver: Option<&SharedSubscriptionResolver>,
+    gate: Option<&crate::config::SharedDispatchGate>,
+    admitted: crate::request_accounting::Admitted,
     mut request: Request,
 ) -> Result<Response> {
     // Reject a changed recipient before reading/refreshing credentials.
@@ -236,12 +238,21 @@ pub(crate) async fn dispatch(
         let client =
             fuigo_extra_ca::build_reqwest_client(|b| b.redirect(reqwest::redirect::Policy::none()))
                 .unwrap();
+        if let Some(gate) = gate {
+            gate.wait_open().await;
+        }
+        admitted.disarm();
         crate::request_accounting::dispatched();
         let response = fuigo_extra_ca::dispatch::execute(&client, request)
             .await
             .unwrap();
         return classify(response).await;
     }
+    // The resolver awaits above may have outlasted a park: re-check right before the send.
+    if let Some(gate) = gate {
+        gate.wait_open().await;
+    }
+    admitted.disarm();
     crate::request_accounting::dispatched();
     let response = client.execute(request).await.map_err(|_| {
         SamplingError::InvalidConfiguration("subscription transport failed; no API-key fallback")

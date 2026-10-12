@@ -608,6 +608,7 @@ pub const REQUIREMENTS_BOOL_FEATURES: &[&str] = &[
     "active_agent_messages",
     "repo_status_in_system_prompt",
     "terminal_theme",
+    "peer_messaging",
     "image_gen",
     "image_edit",
     "video_gen",

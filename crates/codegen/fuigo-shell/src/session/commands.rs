@@ -336,6 +336,10 @@ pub enum SessionCommand {
         send_now: bool,
         /// Actor-authoritative admission and deferred fallback for terminal task wakes.
         admission: Option<TaskWakeAdmission>,
+        /// The origin the SENDER asserts. Only code inside the shell sets this (task and subagent completion wakes, a
+        /// verified cron fire); the ACP boundary sends `User` for every client prompt. Mandatory: there is no silent
+        /// fallback to a typed prompt. The prompt id is never consulted for authority.
+        origin: super::PromptOrigin,
         tool_overrides_update: Option<fuigo_sampling_types::ToolOverridesUpdate>,
         respond_to: oneshot::Sender<PromptTurnResult>,
         /// Optional initial-child readiness signal.
@@ -361,6 +365,21 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<
             fuigo_tools::implementations::fuigo_build::task::coordinator::ActiveMessageAdmission,
         >,
+    },
+    /// A message from a peer session (peer messaging, in-process only). The run loop routes it through the admission decision
+    /// (`submit_peer_message`), the same as `PeerAdmission::Submit`: opt-in, policy, mode and operator are all checked.
+    PeerMessage {
+        envelope: Box<fuigo_peer::Envelope>,
+        respond_to: oneshot::Sender<crate::session::peer_admission::PeerSubmit>,
+        /// Counts this command against the session's in-flight cap until the actor is done with it.
+        slot: crate::session::message_delivery::PeerSlot,
+        /// Packet 11: a watch-only send. Judged by the same gate as a message (`probe_peer_watch`), never stored or queued.
+        probe: bool,
+    },
+    /// Peer admission (packet 4): submit, release, reject, list, configure. In-process only.
+    PeerAdmission {
+        cmd: crate::session::peer_admission::PeerAdminCmd,
+        respond_to: oneshot::Sender<crate::session::peer_admission::PeerAdminReply>,
     },
     SessionMode {
         session_mode: acp::SessionModeId,
@@ -670,6 +689,10 @@ pub enum SessionCommand {
     KillBackgroundTask {
         task_id: String,
         source: fuigo_tools::types::KillSource,
+        /// P189: the park that asked for the kill. The actor re-checks it when it RUNS the command, so a kill
+        /// queued before an unpark/withdraw is dropped (`None`: not a park's kill, always runs).
+        #[allow(private_interfaces)]
+        park: Option<crate::session::quiesce::ParkOp>,
         respond_to: oneshot::Sender<Result<fuigo_tools::types::KillOutcome, String>>,
     },
     DeleteScheduledTask {
@@ -684,6 +707,36 @@ pub enum SessionCommand {
     /// Used by the leader's idle-unload decision on client disconnect to avoid unloading a session that still has pending work.
     IsBusy {
         respond_to: oneshot::Sender<bool>,
+    },
+    /// P189 park probe, sent by `_fuigo/session/park` after it marked the session parking (see `crate::session::quiesce`).
+    /// Defers a running turn summary and title refresh to unpark and reports what the park holds.
+    /// `stop` also cancels this session's running subagents (the `mode: "stop"` park).
+    ///
+    /// `op` is the park operation that sent it: the actor re-validates it where it acts (under the registry
+    /// lock), so a probe that was queued behind a long actor step and arrives after the park was withdrawn or
+    /// replaced does nothing.
+    Quiesce {
+        #[allow(private_interfaces)]
+        op: crate::session::quiesce::ParkOp,
+        stop: bool,
+        #[allow(private_interfaces)]
+        respond_to: oneshot::Sender<crate::session::quiesce::QuiesceReport>,
+    },
+    /// P189 unpark: run the work the park deferred, in order (queued wakes, then the notification drain), and the owed side work.
+    QuiesceRelease {
+        /// The park op this release belongs to (Grok r4 #4). If a DIFFERENT park holds the session when the
+        /// actor runs it, the release must not reopen spawns, compact or kick the queue under that park.
+        op: u64,
+        #[allow(private_interfaces)]
+        owed: crate::session::quiesce::OwedWork,
+        /// The park was `mode: "stop"`, which closed subagent spawns; reopen them.
+        reopen_spawns: bool,
+        /// Promote the queue and drain notifications now (`_fuigo/session/unpark`).
+        /// `false` for the implicit unpark of a `session/prompt`: the prompt's own intake then applies the usual
+        /// user-first rules (queued wake turns are folded into the user's turn instead of running ahead of it).
+        kick: bool,
+        /// A `<system-reminder>` for the next turn (scheduled fires folded by an implicit unpark).
+        reminder: Option<String>,
     },
     GetHooksList {
         respond_to: oneshot::Sender<fuigo_hooks_plugins_types::HooksListResponse>,

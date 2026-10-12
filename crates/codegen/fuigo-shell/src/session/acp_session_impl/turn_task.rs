@@ -81,6 +81,8 @@ pub(crate) struct TurnCompletionMsg {
     pub(super) task_identity: TaskIdentity,
     pub(crate) result: PromptTurnResult,
     pub(crate) elapsed_ms: Option<u64>,
+    /// The turn ran a real admitted peer message (known from the stored origin, never from the prompt id).
+    pub(crate) completed_by_peer: bool,
     #[cfg(test)]
     pub(crate) processed: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -447,7 +449,43 @@ async fn run_task(
     started_at: std::time::Instant,
 ) {
     let prompt_id = request.prompt_id.clone();
-    let result = session.handle_turn_input(request).await;
+    let completed_by_peer = request.input_origin.as_prompt_origin().is_peer();
+    // S5.6: the turn's conversation comes from this turn's origin and is cleared on every way out (cancel, error, panic, abort).
+    let origin = request.input_origin.as_prompt_origin();
+    let _turn_conv = session.peer_admission.begin_turn(
+        matches!(origin, crate::session::PromptOrigin::User),
+        match origin {
+            crate::session::PromptOrigin::PeerMessage { message_id, .. } => Some(message_id.as_str()),
+            _ => None,
+        },
+    );
+    if completed_by_peer {
+        // S6.1: a turn that starts with peer text is peer-influenced, whatever happened to the flag since admission.
+        session.mark_peer_influenced();
+        session.peer_admission.set_peer_turn_in_flight(true);
+        session.set_root_peer_turn(true);
+    }
+    // S6.6: a write since the last tool batch (a background command) is seen at turn start.
+    session.recheck_peer_integrity().await;
+    // A turn started by a peer message must not run once the recheck tripped the hold: the row goes back to held (reason
+    // `integrity`). A human-started turn continues; the human got the warning.
+    let blocked = completed_by_peer && session.peer_admission.integrity_tripped() && !session.peer_turn_row_still_qualifies(&request);
+    let result = if blocked {
+        Ok(crate::session::commands::PromptTurnOk {
+            stop_reason: acp::StopReason::Cancelled,
+            total_tokens: 0,
+            turn_snapshot: None,
+            completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
+            structured_output: None,
+            usage: None,
+            tool_overrides: None,
+        })
+    } else {
+        session.handle_turn_input(request).await
+    };
+    // The turn (and any peer input that joined it) is over.
+    session.peer_admission.set_peer_turn_in_flight(false);
+    session.set_root_peer_turn(false);
     let elapsed_ms = elapsed_ms_saturating(started_at, std::time::Instant::now());
     let _ = completion_tx.send(TurnCompletionMsg {
         prompt_id,
@@ -455,6 +493,7 @@ async fn run_task(
         task_identity,
         result,
         elapsed_ms: Some(elapsed_ms),
+        completed_by_peer,
         #[cfg(test)]
         processed: None,
     });

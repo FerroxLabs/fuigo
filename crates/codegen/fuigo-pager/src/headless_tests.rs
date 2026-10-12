@@ -898,6 +898,7 @@ fn timeout_test_options(total_timeout: Option<std::time::Duration>) -> super::He
         background_wait_timeout: std::time::Duration::from_secs(600),
         total_timeout,
         memory_flush: false,
+        peer: false,
         memory_enabled_override: None,
     }
 }
@@ -1190,6 +1191,44 @@ async fn the_memory_flush_is_bounded_by_the_run_deadline() {
         err.to_string().contains("memory flush"),
         "the error must name the step, got: {err}"
     );
+}
+
+/// Packet 13: `--peer` sends exactly one configure request: opted in, operator `unattended` (no operator can release a hold),
+/// nothing the client could use to claim a human operator.
+#[test]
+fn the_peer_opt_in_request_is_unattended_and_names_only_the_session() {
+    let req = super::peer_opt_in_request(&acp::SessionId::new("sess-1")).expect("request");
+    assert_eq!(req.method.as_ref(), "fuigo/peer/configure");
+    let v: serde_json::Value = serde_json::from_str(req.params.get()).unwrap();
+    assert_eq!(
+        v,
+        serde_json::json!({"sessionId": "sess-1", "optIn": true, "operator": "unattended", "policy": "accept"})
+    );
+}
+
+/// The opt-in is part of the run: it is bounded by the run deadline and the error names the step.
+#[tokio::test]
+async fn the_peer_opt_in_is_bounded_by_the_run_deadline() {
+    let (acp_tx, _agent_rx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpAgentMessage>();
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        super::opt_in_to_peer_messaging(
+            &acp_tx,
+            &acp::SessionId::new("sess-1"),
+            super::RunDeadline::start(Some(std::time::Duration::from_millis(200))),
+        ),
+    )
+    .await
+    .expect("the opt-in ignored the run deadline")
+    .expect_err("an unanswered opt-in must fail");
+    assert!(err.to_string().contains("peer"), "{err}");
+}
+
+/// Without `--peer` the options carry no opt-in (the default of the test options is the default of the flag).
+#[test]
+fn headless_options_do_not_opt_in_by_default() {
+    assert!(!timeout_test_options(None).peer);
 }
 
 /// A stdout seam so a test can assert on the bytes a machine consumer actually reads.
@@ -3835,4 +3874,69 @@ fn p181_r3_the_resend_path_is_strictly_scrubbed_on_both_attempts() {
     emitter.flush_plain_pending();
     let out = captured.text();
     assert_eq!(out, "two  [30;40m three  [9m");
+}
+
+/// A server that failed to start is reported once per run, however often the shell says so, and the
+/// streaming-json stream carries it as the existing `config_notice` line, without the `warning:` prefix.
+#[test]
+fn mcp_start_failure_is_one_streaming_json_notice_per_server() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    let captured = CapturedOut::default();
+    let mut emitter = HeadlessEmitter::with_writer(
+        OutputFormat::StreamingJson,
+        false,
+        Box::new(captured.clone()),
+    );
+    emitter.on_mcp_start_failed("dead", K::ExitedBeforeAnswer);
+    emitter.on_mcp_start_failed("dead", K::Other);
+    emitter.on_mcp_start_failed("other", K::CommandNotStarted);
+    let lines: Vec<serde_json::Value> = captured
+        .text()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json line"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["type"], "config_notice");
+    assert_eq!(lines[0]["message"], "MCP server \"dead\" failed to start: the server exited before it answered. Run `fuigo mcp doctor`.");
+    eprintln!("streaming-json event: {}", lines[0]);
+}
+
+/// The JSON line stays valid for a name with quotes and backslashes, and two raw names that print alike give one line.
+#[test]
+fn mcp_start_failure_json_is_valid_for_odd_names_and_dedups_on_printed_name() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    let captured = CapturedOut::default();
+    let mut emitter = HeadlessEmitter::with_writer(
+        OutputFormat::StreamingJson,
+        false,
+        Box::new(captured.clone()),
+    );
+    emitter.on_mcp_start_failed("a\"b\\c", K::Other);
+    // same name once the quote is softened, and two names equal after the 80-character cap
+    emitter.on_mcp_start_failed("a'b\\c", K::Other);
+    let long_a = format!("{}A", "x".repeat(100));
+    let long_b = format!("{}B", "x".repeat(100));
+    emitter.on_mcp_start_failed(&long_a, K::Other);
+    emitter.on_mcp_start_failed(&long_b, K::Other);
+    let lines: Vec<serde_json::Value> = captured
+        .text()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid json line"))
+        .collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["message"], "MCP server \"a'b\\c\" failed to start: the start-up handshake failed. Run `fuigo mcp doctor`.");
+    let mut seen = std::collections::HashSet::new();
+    assert!(lines.iter().all(|l| seen.insert(l["message"].to_string())), "identical lines printed");
+}
+
+/// `json` keeps stdout untouched by the warning (it goes to stderr).
+#[test]
+fn mcp_start_failure_writes_nothing_to_stdout_in_text_and_json() {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    for format in [OutputFormat::Plain, OutputFormat::Json] {
+        let captured = CapturedOut::default();
+        let mut emitter = HeadlessEmitter::with_writer(format, false, Box::new(captured.clone()));
+        emitter.on_mcp_start_failed("dead", K::Other);
+        assert_eq!(captured.text(), "");
+    }
 }

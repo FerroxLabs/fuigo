@@ -17,6 +17,7 @@ pub mod rg_json;
 #[cfg(test)]
 pub(crate) mod rg_json_tests;
 #[cfg(test)]
+#[cfg(unix)]
 mod search_proof_tests;
 pub(crate) mod query_tools;
 pub mod remap;
@@ -43,8 +44,9 @@ pub use shell_env_policy::{
     EnvironmentVariablePattern, ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit,
     apply_shell_environment_policy,
 };
+pub use fuigo_tty_utils::session_cgroup;
 pub use spawn::{
-    ProcessGroup, ProcessScope, detach_command, detach_search_command, global_process_scope,
+    ProcessGroup, ProcessScope, SpawnPlacedError,  detach_command, detach_search_command, global_process_scope,
     new_process_group, reap_killed_search_child,
 };
 pub use truncate::{
@@ -53,3 +55,15 @@ pub use truncate::{
     truncate_str_with_marker,
 };
 pub use fuigo_tty_utils::detach_std_command;
+
+/// A lease on one operation: runs the closure only while the operation is still current (under the owner's
+/// lock) and returns whether it ran. Handed to crates that cannot see the session registry.
+pub type OpFence = std::sync::Arc<dyn Fn(&mut dyn FnMut()) -> bool + Send + Sync>;
+
+/// An [`OpFence`] that always runs the closure (tests, and callers with no operation yet).
+pub fn op_fence_always() -> OpFence {
+    std::sync::Arc::new(|f: &mut dyn FnMut()| {
+        f();
+        true
+    })
+}

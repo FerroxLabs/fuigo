@@ -635,6 +635,20 @@ impl LocalTerminalActor {
         }
     }
 
+    /// P189: moving a child into the memory cgroup would take it OUT of the
+    /// session cgroup, so when both apply the memory cgroup is skipped (and
+    /// logged). `with_memory_limit` has no production caller.
+    fn memory_cgroup_yields_to_session_cgroup(&self) -> bool {
+        let yields = memory_cgroup_yields(
+            self._cgroup_guard.is_active(),
+            self.session_scope.as_ref().is_some_and(|s| s.session_cgroup().is_some()),
+        );
+        if yields {
+            tracing::debug!("memory cgroup skipped: the child is placed in the session cgroup");
+        }
+        yields
+    }
+
     async fn spawn_command(
         &mut self,
         command: &str,
@@ -669,6 +683,7 @@ impl LocalTerminalActor {
             login_env,
             self.search_shadows,
             self.shell_env_policy.as_ref(),
+            self.session_scope.as_ref(),
         )?;
         Ok(SpawnResult {
             child,
@@ -722,39 +737,49 @@ impl LocalTerminalActor {
         use command_fds::CommandFdExt;
 
         let static_shell = self.static_shell.as_ref().unwrap();
-        let prep = static_shell
+        let mut prep = static_shell
             .prepare_command(command, self.search_shadows)
             .map_err(|e| ComputerError::io(format!("prepare static command: {e}")))?;
 
-        let mut cmd = tokio::process::Command::new(&prep.binary);
-        cmd.args(&prep.args)
-            .current_dir(cwd)
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let child = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || tokio::process::Command::new(&prep.binary), |cmd, hook| {
+            // P189: spawn_placed already registered the placement as the first pre_exec
+            // (before fd_mappings' dup2).
+            cmd.args(&prep.args)
+                .current_dir(cwd)
+                .stdin(fuigo_tty_utils::null_stdio())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
 
-        apply_child_env(
-            &mut cmd,
-            self.shell_env_policy.as_ref(),
-            self.login_env.as_ref(),
-            env,
-        );
+            apply_child_env(
+                cmd,
+                self.shell_env_policy.as_ref(),
+                self.login_env.as_ref(),
+                env,
+            );
 
-        cmd.fd_mappings(prep.fd_mappings)
-            .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
+            cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
+                .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-        unsafe {
-            cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
-        }
+            unsafe {
+                cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
+            }
 
-        fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
-
-        #[allow(clippy::disallowed_methods)] // attached to a process group below
-        let child = cmd.spawn().map_err(|e| {
-            ComputerError::io_with_kind(format!("spawn shell in {}: {e}", cwd.display()), e.kind())
+            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            Ok(())
+        })
+        .map_err(|e| match e {
+            fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
+            fuigo_tty_utils::SpawnPlacedError::Stopping => {
+                ComputerError::io("session is stopping; command not started".to_string())
+            }
+            fuigo_tty_utils::SpawnPlacedError::Spawn(e) => ComputerError::io_with_kind(
+                format!("spawn shell in {}: {e}", cwd.display()),
+                e.kind(),
+            ),
         })?;
-        drop(cmd);
+        // Release any fd mappings kept for an unplaced retry.
+        drop(std::mem::take(&mut prep.fd_mappings));
 
         let mut process_group = crate::util::ProcessGroup::new()
             .map_err(|e| ComputerError::io(format!("ProcessGroup::new: {e}")))?;
@@ -802,7 +827,7 @@ impl LocalTerminalActor {
         let init_cwd = previous_cwd.as_deref().unwrap_or(cwd);
         self.shell_state_generation = generation;
         let shell = shell_state::ShellKind::detect();
-        match shell_state::ShellState::init(shell, init_cwd, self.shell_env_policy.as_ref()).await {
+        match shell_state::ShellState::init(shell, init_cwd, self.shell_env_policy.as_ref(), self.session_scope.as_ref()).await {
             Ok(mut state) => {
                 // A re-initialization keeps the directory the session was in, even if a login
                 // startup file `cd`s elsewhere.
@@ -897,7 +922,7 @@ impl LocalTerminalActor {
                     )),
                 )
             };
-        let prep = shell_state
+        let mut prep = shell_state
             .prepare_command(
                 command,
                 cwd_override,
@@ -906,39 +931,44 @@ impl LocalTerminalActor {
             )
             .map_err(|e| ComputerError::io(format!("prepare persistent command: {e}")))?;
 
-        let mut cmd = tokio::process::Command::new(&prep.binary);
-        cmd.args(&prep.args)
-            .current_dir(&prep.cwd)
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+        let spawned = fuigo_tty_utils::ProcessScope::spawn_placed(self.session_scope.as_ref(), || tokio::process::Command::new(&prep.binary), |cmd, hook| {
+            // P189: spawn_placed already registered the placement as the first pre_exec
+            // (before fd_mappings' dup2).
+            cmd.args(&prep.args)
+                .current_dir(&prep.cwd)
+                .stdin(fuigo_tty_utils::null_stdio())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
 
-        // The persistent backend restores login state from its snapshot, so no
-        // login-env layering here.
-        apply_child_env(&mut cmd, self.shell_env_policy.as_ref(), None, env);
+            // The persistent backend restores login state from its snapshot, so no
+            // login-env layering here.
+            apply_child_env(cmd, self.shell_env_policy.as_ref(), None, env);
 
-        cmd.fd_mappings(prep.fd_mappings)
-            .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
+            cmd.fd_mappings(fd_mappings_for_spawn(hook, &mut prep.fd_mappings)?)
+                .map_err(|e| ComputerError::io(format!("fd mapping: {e}")))?;
 
-        unsafe {
-            cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
-        }
+            unsafe {
+                cmd.pre_exec(fuigo_tty_utils::detach_pre_exec_hook());
+            }
 
-        fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
-
-        #[allow(clippy::disallowed_methods)] // attached to a process group below
-        let spawned = cmd.spawn();
+            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            Ok(())
+        });
         drop(denylist_fence);
-        let child = spawned.map_err(|e| {
-            ComputerError::io_with_kind(
+        let child = spawned.map_err(|e| match e {
+            fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
+            fuigo_tty_utils::SpawnPlacedError::Stopping => {
+                ComputerError::io("session is stopping; command not started".to_string())
+            }
+            fuigo_tty_utils::SpawnPlacedError::Spawn(e) => ComputerError::io_with_kind(
                 format!("spawn shell in {}: {e}", prep.cwd.display()),
                 e.kind(),
-            )
+            ),
         })?;
         // Releases the FdMapping OwnedFds: otherwise the parent keeps the state-out
         // pipe's write end open and the dump reader never sees EOF.
-        drop(cmd);
+        drop(std::mem::take(&mut prep.fd_mappings));
 
         let mut process_group = crate::util::ProcessGroup::new()
             .map_err(|e| ComputerError::io(format!("ProcessGroup::new: {e}")))?;
@@ -1221,6 +1251,7 @@ impl LocalTerminalActor {
         };
 
         if let Some(pid) = child.id()
+            && !self.memory_cgroup_yields_to_session_cgroup()
             && let Err(e) = self._cgroup_guard.add_process(pid).await
         {
             tracing::debug!("Failed to add pid {pid} to cgroup (non-fatal): {e}");
@@ -1366,6 +1397,7 @@ impl LocalTerminalActor {
         };
 
         if let Some(pid) = child.id()
+            && !self.memory_cgroup_yields_to_session_cgroup()
             && let Err(e) = self._cgroup_guard.add_process(pid).await
         {
             tracing::debug!("Failed to add pid {pid} to cgroup (non-fatal): {e}");
@@ -3234,6 +3266,7 @@ async fn capture_login_env(
     );
 
     let result = tokio::time::timeout(Duration::from_secs(5), async {
+        // P189-unplaced: login-env probe; stays UNPLACED on purpose: it runs the user's login shell start-up files with a Fuigo-chosen fixed script (never a model-chosen command), and a stop must not kill an ssh-agent or similar started by the profile. Stated limit: a process detached by the user's shell start-up files is outside the session cgroup and survives a stop.
         let mut cmd = tokio::process::Command::new(shell.binary_path());
         cmd.args(["-lc", &script])
             .stdin(fuigo_tty_utils::null_stdio())
@@ -3244,6 +3277,7 @@ async fn capture_login_env(
         fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
         crate::util::apply_shell_environment_policy(&mut cmd, policy);
         cmd.envs(crate::util::pager_env());
+        // P189-unplaced: see the login-env probe note above (awaited helper, killed on drop).
         #[allow(clippy::disallowed_methods)] // probe killed on drop
         let mut child = cmd.spawn().ok()?;
 
@@ -3364,6 +3398,36 @@ fn apply_child_env(
 }
 
 /// Attaches the child to a [`ProcessGroup`] for whole-tree teardown.
+/// P189: the memory cgroup is skipped when the child is already placed in the
+/// session cgroup (a second `cgroup.procs` write would move it out again).
+pub(crate) fn memory_cgroup_yields(memory_cgroup_active: bool, session_cgroup_present: bool) -> bool {
+    memory_cgroup_active && session_cgroup_present
+}
+
+/// The fd mappings for one spawn attempt. When a placed spawn may be retried
+/// unplaced they are duplicated (the originals are kept for the retry);
+/// otherwise they are consumed, exactly as before P189.
+#[cfg(unix)]
+fn fd_mappings_for_spawn(
+    hook: &fuigo_tty_utils::PlaceHook,
+    slot: &mut Vec<command_fds::FdMapping>,
+) -> Result<Vec<command_fds::FdMapping>, ComputerError> {
+    if !hook.retry_may_follow() {
+        return Ok(std::mem::take(slot));
+    }
+    slot.iter()
+        .map(|m| {
+            Ok(command_fds::FdMapping {
+                parent_fd: m
+                    .parent_fd
+                    .try_clone()
+                    .map_err(|e| ComputerError::io(format!("dup fd mapping: {e}")))?,
+                child_fd: m.child_fd,
+            })
+        })
+        .collect()
+}
+
 fn spawn_shell_command(
     command: &str,
     cwd: &std::path::Path,
@@ -3371,22 +3435,28 @@ fn spawn_shell_command(
     login_env: Option<&HashMap<String, String>>,
     search_shadows: SearchShadowConfig,
     shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+    session_scope: Option<&crate::util::ProcessScope>,
 ) -> std::io::Result<(tokio::process::Child, crate::util::ProcessGroup)> {
     // Keep unix-only args live on Windows to avoid unused-arg warnings.
     #[cfg(not(unix))]
-    let _ = (&login_env, &search_shadows);
+    let _ = (&login_env, &search_shadows, &session_scope);
     #[cfg(unix)]
-    let mut cmd = {
-        let shell = shell_state::ShellKind::detect();
-        let wrapped_command = {
-            let inject = super::embedded_search_tools::search_injection(search_shadows);
-            if inject.is_empty() {
-                command.to_string()
-            } else {
-                format!("{inject}{command}")
-            }
-        };
-        let mut cmd = tokio::process::Command::new(shell.binary_path());
+    let shell = shell_state::ShellKind::detect();
+    #[cfg(unix)]
+    let wrapped_command = {
+        let inject = super::embedded_search_tools::search_injection(search_shadows);
+        if inject.is_empty() {
+            command.to_string()
+        } else {
+            format!("{inject}{command}")
+        }
+    };
+    #[cfg(unix)]
+    // P189-placed: handed to ProcessScope::spawn_placed below, which registers the placement.
+    let new_command = || tokio::process::Command::new(shell.binary_path());
+    #[cfg(unix)]
+    let configure = |cmd: &mut tokio::process::Command, _hook: &fuigo_tty_utils::PlaceHook| -> std::io::Result<()> {
+        // P189: spawn_placed already registered the placement as the first pre_exec.
         // Non-interactive zsh still defaults to NOMATCH; pass via argv like init's -o extendedglob.
         if matches!(shell, shell_state::ShellKind::Zsh) {
             cmd.arg("-o").arg("nonomatch");
@@ -3401,14 +3471,14 @@ fn spawn_shell_command(
             // hooks, so setsid() in the detach hook would fail with EPERM.
             .kill_on_drop(true);
 
-        apply_child_env(&mut cmd, shell_env_policy, login_env, env);
+        apply_child_env(cmd, shell_env_policy, login_env, env);
 
         // Detach from the controlling terminal so subprocesses cannot open
         // /dev/tty and compete with the TUI for terminal input.
-        crate::util::detach_command(&mut cmd);
+        crate::util::detach_command(cmd);
 
-        fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
-        cmd
+        fuigo_sandbox::child_net::restrict_child_network(cmd);
+        Ok(())
     };
 
     #[cfg(not(unix))]
@@ -3418,6 +3488,7 @@ fn spawn_shell_command(
         };
 
         let inv = fuigo_config::shell::shell_command_argv(command);
+        // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
         let mut cmd = tokio::process::Command::new(&inv.program);
         cmd.args(&inv.args)
             .current_dir(cwd)
@@ -3451,12 +3522,18 @@ fn spawn_shell_command(
     #[cfg(unix)]
     let mut group = crate::util::ProcessGroup::new()?;
     #[cfg(unix)]
-    #[allow(clippy::disallowed_methods)] // attached to the process group built above
-    let child = cmd.spawn().map_err(|e| {
-        std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
+    let child = fuigo_tty_utils::ProcessScope::spawn_placed(session_scope, new_command, configure).map_err(|e| match e {
+        fuigo_tty_utils::SpawnPlacedError::Build(e) => e,
+        fuigo_tty_utils::SpawnPlacedError::Stopping => {
+            std::io::Error::other("session is stopping; command not started")
+        }
+        fuigo_tty_utils::SpawnPlacedError::Spawn(e) => {
+            std::io::Error::new(e.kind(), format!("spawn shell in {}: {e}", cwd.display()))
+        }
     })?;
 
     #[cfg(not(unix))]
+    // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
     #[allow(clippy::disallowed_methods)] // attached to the process group built in this block
     let (child, mut group) = {
         let group = crate::util::ProcessGroup::new()?;
@@ -3469,6 +3546,7 @@ fn spawn_shell_command(
                 tracing::debug!(
                     "spawn with CREATE_BREAKAWAY_FROM_JOB returned ERROR_ACCESS_DENIED; \
                      retrying without breakaway (process-tree teardown disabled for this child)"
+                // P189-unplaced: non-unix (Windows) path; the session cgroup is Linux-only.
                 );
                 drop(cmd);
                 let mut cmd = build_cmd(false);
@@ -5394,6 +5472,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_login_env_capture() {
         let stdout = "motd noise\n\x01/opt/rc/bin:/usr/bin\x01\
@@ -5425,6 +5504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn test_parse_login_env_capture_path_only() {
         let (path, env) = parse_login_env_capture("\x01/usr/bin\x01");
         assert_eq!(path.as_deref(), Some("/usr/bin"));

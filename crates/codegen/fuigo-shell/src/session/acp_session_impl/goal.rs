@@ -83,7 +83,7 @@ impl SessionActor {
                 .ok_or_else(|| "goal state disappeared before evaluation".to_string())?;
             (snapshot.objective.clone(), snapshot.plan_file.clone())
         };
-        let transcript = bounded_goal_transcript(&self.chat_state_handle.get_conversation().await);
+        let transcript = crate::session::model_facing_reads::goal_transcript(&self.chat_state_handle).await;
         let plan = match plan_file {
             Some(path) => tokio::fs::read_to_string(path)
                 .await
@@ -493,7 +493,7 @@ impl SessionActor {
 
         let (final_response, anchor_to_persist) = {
             let current = {
-                let items = self.chat_state_handle.get_conversation().await;
+                let items = self.chat_state_handle.get_conversation_for_model().await;
                 crate::session::goal_classifier::evidence::extract_final_response(&items)
                     .unwrap_or_default()
             };

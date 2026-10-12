@@ -2245,6 +2245,8 @@ fn main() {
         exit_nonzero_if_stdout_failed();
         return;
     }
+    // Create the Fuigo home (mode 0700 whatever the umask) before anything else can create it implicitly.
+    let _ = fuigo_config::fuigo_home();
     // P195 (K26, Grok r1): raise the open-file limit, then refuse a start under the floor, BEFORE the subscription
     // commands (`login`, `logout`, `models`) and the requirements gate, so those never fail with a generic error or EMFILE.
     raise_fd_limit();
@@ -2761,6 +2763,7 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
         }
         let memory_enabled_override = args.memory_enabled_override();
         let memory_flush = args.memory_flush;
+        let peer = args.peer;
         return fuigo_pager::headless::run_single_turn(
             headless_prompt,
             args.verbatim,
@@ -2798,6 +2801,7 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
                 ),
                 total_timeout,
                 memory_flush,
+                peer,
                 memory_enabled_override,
             },
         )

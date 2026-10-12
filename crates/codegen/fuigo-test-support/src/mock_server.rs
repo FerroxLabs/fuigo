@@ -107,6 +107,7 @@ impl RequestLog {
 pub struct MockModelEntry {
     pub id: String,
     pub agent_type: Option<String>,
+    pub model_family: Option<String>,
     pub api_backend: Option<String>,
     pub supports_backend_search: bool,
     pub supports_reasoning_effort: bool,
@@ -121,6 +122,7 @@ impl MockModelEntry {
         Self {
             id: id.into(),
             agent_type: None,
+            model_family: None,
             api_backend: None,
             supports_backend_search: false,
             supports_reasoning_effort: false,
@@ -138,6 +140,11 @@ impl MockModelEntry {
 
     pub fn with_api_backend(mut self, api_backend: impl Into<String>) -> Self {
         self.api_backend = Some(api_backend.into());
+        self
+    }
+
+    pub fn with_model_family(mut self, family: impl Into<String>) -> Self {
+        self.model_family = Some(family.into());
         self
     }
 
@@ -170,6 +177,9 @@ impl MockModelEntry {
         });
         if let Some(ref at) = self.agent_type {
             obj["_meta"] = json!({ "agentType": at });
+        }
+        if let Some(ref family) = self.model_family {
+            obj["modelFamily"] = json!(family);
         }
         if let Some(ref backend) = self.api_backend {
             obj["apiBackend"] = json!(backend);

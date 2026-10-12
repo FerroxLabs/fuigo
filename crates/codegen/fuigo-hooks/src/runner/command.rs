@@ -142,57 +142,56 @@ pub async fn run_command_hook(
         ),
     );
 
-    let mut cmd = if is_shell_command {
-        let unresolved = find_unresolved_env_vars(&command_str, &child_env);
-        if !unresolved.is_empty() {
-            let elapsed = start.elapsed();
-            let list = unresolved
-                .iter()
-                .map(|v| format!("${{{v}}}"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            return (
-                HookRunnerResult::Failed(format!(
-                    "hook not executed: required env var(s) not set: {list}"
-                )),
-                elapsed,
-                None,
-            );
-        }
-        #[cfg(unix)]
-        {
-            let mut c = tokio::process::Command::new("sh");
-            c.arg("-c").arg(command_str.as_ref());
-            c
-        }
-        #[cfg(not(unix))]
-        {
-            let command_str = rewrite_hook_command_for_windows_shell(&command_str, &child_env);
-            let inv = fuigo_config::shell::shell_command_argv(command_str.as_ref());
-            let mut c = tokio::process::Command::new(&inv.program);
-            c.args(&inv.args).envs(inv.env);
-            c
-        }
-    } else {
-        let command_path = if command.is_absolute() {
-            command.clone()
+    // The base command as (program, args, fixed env), so it can be rebuilt for the
+    // unplaced retry after a failed session-cgroup placement (P189).
+    let (program, base_args, base_env): (std::ffi::OsString, Vec<std::ffi::OsString>, Vec<(&'static str, &'static str)>) =
+        if is_shell_command {
+            let unresolved = find_unresolved_env_vars(&command_str, &child_env);
+            if !unresolved.is_empty() {
+                let elapsed = start.elapsed();
+                let list = unresolved
+                    .iter()
+                    .map(|v| format!("${{{v}}}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return (
+                    HookRunnerResult::Failed(format!(
+                        "hook not executed: required env var(s) not set: {list}"
+                    )),
+                    elapsed,
+                    None,
+                );
+            }
+            #[cfg(unix)]
+            {
+                ("sh".into(), vec!["-c".into(), command_str.as_ref().into()], Vec::new())
+            }
+            #[cfg(not(unix))]
+            {
+                let command_str = rewrite_hook_command_for_windows_shell(&command_str, &child_env);
+                let inv = fuigo_config::shell::shell_command_argv(command_str.as_ref());
+                (
+                    inv.program.into(),
+                    inv.args.into_iter().map(Into::into).collect(),
+                    inv.env,
+                )
+            }
         } else {
-            spec.source_dir.join(command)
+            let command_path = if command.is_absolute() {
+                command.clone()
+            } else {
+                spec.source_dir.join(command)
+            };
+            if !command_path.exists() {
+                let elapsed = start.elapsed();
+                return (
+                    HookRunnerResult::Failed(format!("command not found: {}", command_path.display())),
+                    elapsed,
+                    None,
+                );
+            }
+            (command_path.into(), Vec::new(), Vec::new())
         };
-        if !command_path.exists() {
-            let elapsed = start.elapsed();
-            return (
-                HookRunnerResult::Failed(format!("command not found: {}", command_path.display())),
-                elapsed,
-                None,
-            );
-        }
-        tokio::process::Command::new(command_path)
-    };
-
-    fuigo_tools::util::apply_shell_environment_policy(&mut cmd, None);
-    fuigo_tools::util::detach_command(&mut cmd);
-    fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
 
     #[cfg(not(unix))]
     let env_root = {
@@ -206,24 +205,34 @@ pub async fn run_command_hook(
     #[cfg(unix)]
     let env_root = Cow::Borrowed(ctx.workspace_root);
 
-    #[allow(clippy::disallowed_methods)]
-    let mut child = match cmd
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .current_dir(ctx.workspace_root)
-        // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them. It is applied
-        // after `apply_shell_environment_policy`, which strips `FUIGO_API_KEY` by name, so the key reaches this child
-        // only through `child_env`, i.e. when this hook's config names it (P70a).
-        .envs(child_env.iter())
-        .env("FUIGO_HOOK_EVENT", envelope.hook_event_name.to_string())
-        .env("FUIGO_HOOK_NAME", &spec.name)
-        .env("FUIGO_SESSION_ID", ctx.session_id)
-        .env("FUIGO_WORKSPACE_ROOT", env_root.as_ref())
-        .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
-        .kill_on_drop(true)
-        .spawn()
-    {
+    let mut child = match fuigo_tools::util::ProcessScope::spawn_placed(ctx.process_scope.as_ref(), || tokio::process::Command::new(&program), |cmd, _hook| {
+        // P189: spawn_placed has already registered the placement as the first pre_exec
+        // (apply_shell_environment_policy, detach_command and restrict_child_network all register one).
+        cmd.args(&base_args).envs(base_env.iter().copied());
+        fuigo_tools::util::apply_shell_environment_policy(cmd, None);
+        fuigo_tools::util::detach_command(cmd);
+        fuigo_sandbox::child_net::restrict_child_network(cmd);
+        cmd.stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .current_dir(ctx.workspace_root)
+            // SECURITY: extra_env is applied before the FUIGO_* identity vars so a hook cannot spoof them. It is applied
+            // after `apply_shell_environment_policy`, which strips `FUIGO_API_KEY` by name, so the key reaches this child
+            // only through `child_env`, i.e. when this hook's config names it (P70a).
+            .envs(child_env.iter())
+            .env("FUIGO_HOOK_EVENT", envelope.hook_event_name.to_string())
+            .env("FUIGO_HOOK_NAME", &spec.name)
+            .env("FUIGO_SESSION_ID", ctx.session_id)
+            .env("FUIGO_WORKSPACE_ROOT", env_root.as_ref())
+            .env("CLAUDE_PROJECT_DIR", env_root.as_ref())
+            .kill_on_drop(true);
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .map_err(|e| match e {
+        fuigo_tools::util::SpawnPlacedError::Spawn(e) => e,
+        fuigo_tools::util::SpawnPlacedError::Build(never) => match never {},
+        fuigo_tools::util::SpawnPlacedError::Stopping => std::io::Error::other("session is stopping; command not started"),
+    }) {
         Ok(c) => c,
         Err(e) => {
             let elapsed = start.elapsed();
@@ -2215,6 +2224,55 @@ mod tests {
             process_scope: Some(scope),
             ..make_ctx()
         }
+    }
+
+    /// P189 packet C: a hook child (and its descendants) is placed in the
+    /// session cgroup. Skips unless a usable cgroup2 (a skip fails under
+    /// `FUIGO_TEST_REQUIRE_CGROUP=1`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn hook_child_is_in_the_session_cgroup() {
+        use fuigo_tools::util::session_cgroup::{ProbeEnv, probe_with};
+        let host = match probe_with(&ProbeEnv::system()) {
+            Ok(h) => h,
+            Err(r) => {
+                println!("P189-CGROUP-SKIP {r} (hook)");
+                assert!(std::env::var("FUIGO_TEST_REQUIRE_CGROUP").as_deref() != Ok("1"), "cgroup required: {r}");
+                return;
+            }
+        };
+        println!("P189-CGROUP-RAN hook");
+        let scope = fuigo_tools::util::ProcessScope::with_session_cgroup(host.create_session().unwrap());
+        let want = scope
+            .session_cgroup()
+            .unwrap()
+            .dir()
+            .strip_prefix("/sys/fs/cgroup")
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("cg");
+        let spec = make_shell_spec(&format!("cat /proc/self/cgroup > {}", out.display()));
+        let (result, _, _) =
+            run_command_hook(&spec, &make_envelope(), &make_scoped_ctx(scope.clone()), GateKind::Observe).await;
+        assert!(matches!(result, HookRunnerResult::Success), "{result:?}");
+        let seen = std::fs::read_to_string(&out).unwrap();
+        assert!(seen.contains(&want), "hook child not in session cgroup: {seen}");
+        scope.release_session_cgroup();
+    }
+
+    /// Guard: the hook child is spawned through the placement entry, with the
+    /// placement registered before any other `pre_exec`.
+    #[test]
+    fn hook_spawn_goes_through_spawn_placed_with_placement_first() {
+        let src = include_str!("command.rs");
+        let prod = &src[..src.find("\n#[cfg(test)]\nmod tests").unwrap()];
+        assert!(!prod.contains(".spawn()"), "raw `.spawn()` in the hooks runner; use ProcessScope::spawn_placed");
+        // Placement is registered by `spawn_placed` right after `new_command`, so the
+        // configure closure must hold no placement or pre_exec call of its own.
+        assert!(!prod.contains("hook.place("), "placement is registered by spawn_placed itself");
+        assert!(prod.contains("spawn_placed(") && prod.contains("|| tokio::process::Command::new(&program)"));
     }
 
     #[tokio::test]

@@ -139,9 +139,41 @@ pub(crate) type FirstConnectCallback = Box<dyn FnOnce() + Send + 'static>;
 pub struct RelayHandle {
     /// Cancel token to stop the relay connection loop
     cancel: CancellationToken,
+    /// S4.1: the peer-attach fact, shared with the relay task. It is released only when the task has finished.
+    peer_attach: std::sync::Arc<std::sync::Mutex<AttachSlot>>,
+}
+/// The attach guard and whether the relay task is done. Shared by the `RelayHandle` and the spawned task.
+#[derive(Default)]
+struct AttachSlot {
+    guard: Option<crate::peer_inbox::driver::RemoteAttachGuard>,
+    finished: bool,
+}
+/// The relay task is over (normally or by unwinding): release the fact, and drop any guard handed in later at once.
+fn finish_attach(slot: &std::sync::Mutex<AttachSlot>) {
+    let guard = {
+        let mut g = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        g.finished = true;
+        g.guard.take()
+    };
+    drop(guard);
+}
+/// Runs `finish_attach` when the relay task ends, also on a panic.
+struct FinishAttachOnDrop(std::sync::Arc<std::sync::Mutex<AttachSlot>>);
+impl Drop for FinishAttachOnDrop {
+    fn drop(&mut self) {
+        finish_attach(&self.0);
+    }
 }
 impl RelayHandle {
-    /// Stop the relay connection.
+    /// Record that this relay is attached to the leader (peer messaging stays closed until the relay task has finished).
+    pub(crate) fn hold_peer_attach(&mut self, guard: crate::peer_inbox::driver::RemoteAttachGuard) {
+        let rejected = {
+            let mut g = self.peer_attach.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if g.finished { Some(guard) } else { g.guard = Some(guard); None }
+        };
+        drop(rejected);
+    }
+    /// Stop the relay connection. Only cancels: the attach fact is released when the task has actually finished.
     pub fn stop(&self) {
         self.cancel.cancel();
     }
@@ -186,7 +218,10 @@ pub(crate) fn spawn_relay_connection_with_callback(
     let cancel = parent_cancel.map_or(CancellationToken::new(), |c| c.child_token());
     let cancel_clone = cancel.clone();
     let (agent_to_ws_tx, agent_to_ws_rx) = mpsc::unbounded_channel::<String>();
+    let peer_attach = std::sync::Arc::new(std::sync::Mutex::new(AttachSlot::default()));
+    let task_slot = FinishAttachOnDrop(peer_attach.clone());
     tokio::spawn(async move {
+        let _finish = task_slot;
         run_relay_loop(
             config,
             to_agent_tx,
@@ -196,7 +231,7 @@ pub(crate) fn spawn_relay_connection_with_callback(
         )
         .await;
     });
-    let handle = RelayHandle { cancel };
+    let handle = RelayHandle { cancel, peer_attach };
     (agent_to_ws_tx, handle)
 }
 /// Check if a connection error is an HTTP 401 from the WebSocket handshake.
@@ -1065,6 +1100,44 @@ fn declare_relay_client_capabilities(frame: &mut serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn handle() -> RelayHandle {
+        RelayHandle { cancel: CancellationToken::new(), peer_attach: Default::default() }
+    }
+    #[test]
+    fn peer_attach_is_held_until_the_relay_task_finishes_and_stop_alone_does_not_clear_it() {
+        let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+        let mut h = handle();
+        h.hold_peer_attach(crate::peer_inbox::driver::attach_remote());
+        assert!(crate::peer_inbox::driver::remote_attached());
+        h.stop();
+        assert!(!h.is_running());
+        assert!(crate::peer_inbox::driver::remote_attached(), "cancelled but the task may still be running");
+        finish_attach(&h.peer_attach);
+        assert!(!crate::peer_inbox::driver::remote_attached());
+    }
+    #[test]
+    fn peer_attach_handed_in_after_the_task_finished_is_dropped_at_once() {
+        let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+        let mut h = handle();
+        finish_attach(&h.peer_attach);
+        h.hold_peer_attach(crate::peer_inbox::driver::attach_remote());
+        assert!(!crate::peer_inbox::driver::remote_attached());
+    }
+    #[test]
+    fn dropping_the_handle_alone_keeps_the_fact_and_a_panicking_task_still_releases_it() {
+        let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+        let mut h = handle();
+        h.hold_peer_attach(crate::peer_inbox::driver::attach_remote());
+        let slot = h.peer_attach.clone();
+        drop(h);
+        assert!(crate::peer_inbox::driver::remote_attached());
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _finish = FinishAttachOnDrop(slot);
+            panic!("relay loop panicked");
+        }));
+        assert!(r.is_err());
+        assert!(!crate::peer_inbox::driver::remote_attached());
+    }
     /// P43 hostile: a relay that is not FluxRouter-operated gets neither the account id nor the
     /// client version on the handshake; `wss` to FluxRouter still does.
     #[test]

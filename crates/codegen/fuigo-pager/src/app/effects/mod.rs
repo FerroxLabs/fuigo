@@ -1129,7 +1129,7 @@ pub(crate) fn execute(
                             serde_json::json!({
                         "kind": if send_now { "send_now" } else { "blocks" },
                         "block_count": blocks.len(),
-                        "prompt_id": prompt_id,
+                        "prompt_id": crate::app::agent::loggable_prompt_id(&prompt_id),
                     }),
                         ),
                     );
@@ -1151,7 +1151,7 @@ pub(crate) fn execute(
                         "kind": if send_now { "send_now" } else { "blocks" },
                         "elapsed_ms": send_elapsed_ms,
                         "ok": result.is_ok(),
-                        "prompt_id": prompt_id,
+                        "prompt_id": crate::app::agent::loggable_prompt_id(&prompt_id),
                     }),
                         ),
                     );
@@ -1557,6 +1557,13 @@ pub(crate) fn execute(
                         result: result.map(|_| ()).map_err(|e| compact_error(&e)),
                     }
                 });
+        }
+        Effect::PeerRpc { agent_id, session_id, call } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let outcome = crate::peer_ui_state::perform(&tx, &session_id, call).await;
+                TaskResult::PeerRpcDone { agent_id, outcome }
+            });
         }
         Effect::FetchPromptHistory { agent_id, cwd, session_id } => {
             let tx = acp_tx.clone();

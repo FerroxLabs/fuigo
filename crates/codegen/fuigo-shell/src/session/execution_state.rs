@@ -387,6 +387,11 @@ pub(crate) enum Change {
     Abandon {
         attempt_id: String,
     },
+    /// Give back an admitted attempt that never left the process (cancelled between admission and the send).
+    Refund {
+        completion: bool,
+        attempt_id: String,
+    },
     Tools {
         ids: Vec<String>,
     },
@@ -809,6 +814,21 @@ fn transition(state: &mut Snapshot, change: Change, now_ms: i64) -> io::Result<(
             }
             if state.pending.contains(&attempt_id) {
                 state.abandoned.insert(attempt_id);
+            }
+        }
+        Change::Refund { completion, attempt_id } => {
+            // Only an attempt that is still pending and was never charged an estimate can be refunded.
+            if state.admitted.contains(&attempt_id)
+                && !state.estimated.contains_key(&attempt_id)
+                && state.pending.remove(&attempt_id)
+            {
+                state.abandoned.remove(&attempt_id);
+                state.optional_attempts.remove(&attempt_id);
+                state.admitted.remove(&attempt_id);
+                state.calls = state.calls.saturating_sub(1);
+                if completion {
+                    state.completion_admitted = false;
+                }
             }
         }
         Change::Tools { ids } => {
@@ -1674,6 +1694,9 @@ impl ExecutionAdmission for RequestAdmission {
     fn abandon(&self, attempt_id: String) -> AdmissionFuture<'_> {
         ExecutionAdmission::abandon(self.execution.as_ref(), attempt_id)
     }
+    fn refund(&self, purpose: RequestPurpose, attempt_id: String) -> AdmissionFuture<'_> {
+        ExecutionAdmission::refund(self.execution.as_ref(), purpose, attempt_id)
+    }
 }
 
 impl ExecutionAdmission for Execution {
@@ -1740,6 +1763,17 @@ impl ExecutionAdmission for Execution {
                 .await
                 .map(|_| ())
                 .map_err(|_| "execution settlement not durable".into())
+        })
+    }
+    fn refund(&self, purpose: RequestPurpose, attempt_id: String) -> AdmissionFuture<'_> {
+        Box::pin(async move {
+            if let Some(parent) = &self.parent_grant {
+                parent.parent.refund(purpose, attempt_id.clone()).await?;
+            }
+            self.change(Change::Refund { completion: purpose == RequestPurpose::Completion, attempt_id })
+                .await
+                .map(|_| ())
+                .map_err(|_| "execution refund not durable".into())
         })
     }
     fn abandon(&self, attempt_id: String) -> AdmissionFuture<'_> {
@@ -1839,6 +1873,26 @@ mod tests {
             transition(&mut state, Change::Terminal { succeeded }, 0).unwrap();
             assert_eq!(state.terminal.unwrap().partial, !recall || !succeeded || pending);
         }
+    }
+
+    /// P189 A2 r2: a refund gives the slot of a never-dispatched attempt back; a settled one is never refunded.
+    #[tokio::test]
+    async fn a_refunded_admission_gives_its_call_slot_back_and_a_settled_one_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = apply(dir.path(), mutation(&key(), Change::Open {
+            max_calls: 4, deadline_ms: None, max_tool_rounds: Some(3), limits: TokenLimits::default(),
+        })).await.unwrap();
+        let a = uuid::Uuid::new_v4().to_string();
+        transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: a.clone() }, 0).unwrap();
+        assert_eq!(state.calls, 1);
+        transition(&mut state, Change::Refund { completion: false, attempt_id: a.clone() }, 0).unwrap();
+        assert_eq!(state.calls, 0);
+        assert!(!state.pending.contains(&a) && !state.admitted.contains(&a));
+        let b = uuid::Uuid::new_v4().to_string();
+        transition(&mut state, Change::Admit { completion: false, optional: false, attempt_id: b.clone() }, 0).unwrap();
+        transition(&mut state, Change::Settle { attempt_id: b.clone(), usage: Some(Default::default()) }, 0).unwrap();
+        transition(&mut state, Change::Refund { completion: false, attempt_id: b }, 0).unwrap();
+        assert_eq!(state.calls, 1, "a settled attempt must not be refunded");
     }
 
     #[tokio::test]

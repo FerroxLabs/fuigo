@@ -862,6 +862,9 @@ impl SessionActor {
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
+            dispatch_gate: Some(std::sync::Arc::new(ParkGate {
+                session_id: self.session_info.id.0.to_string(),
+            })),
             mtls_cert_dir: cfg.mtls_cert_dir,
             rate_limit_retry_threshold: cfg.rate_limit_retry_threshold,
             reasoning_summary: cfg.reasoning_summary,
@@ -1205,6 +1208,8 @@ impl SessionActor {
         &self,
         force_http1: bool,
     ) -> Result<fuigo_sampler::SamplingClient, acp::Error> {
+        // P189: every side call (turn summary, title refresh, recap, compaction, memory, goal, laziness) waits while its session tree is parked
+        crate::session::quiesce::wait_model_allowed(self.session_info.id.0.as_ref()).await;
         // Check if the JWT token is expired/near-expiration and refresh from config if needed
         self.refresh_token_if_expired().await;
 
@@ -2102,6 +2107,8 @@ impl SessionActor {
         self: &Arc<Self>,
         mut request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, fuigo_sampler::SamplingErrorInfo> {
+        // P189: a subagent whose root was parked mid-turn blocks here, before its next model call, until unpark
+        crate::session::quiesce::wait_model_allowed(self.session_info.id.0.as_ref()).await;
         if request.purpose == fuigo_sampling_types::RequestPurpose::Unknown {
             request.purpose = fuigo_sampling_types::RequestPurpose::Work;
         }
@@ -2118,7 +2125,16 @@ impl SessionActor {
         let request_id_str = request_id.as_str().to_string();
         let collected = {
             let gate_span = region!("turn.sampling_gate", Parent::Inherit);
-            let _permit = acquire_subagent_sampling_permit(&self.sampling_gate).await;
+            // P189 (Astra r1 #5): re-check the park AFTER the permit, so a park acknowledged while this call
+            // queued for the permit still holds it; give the permit back while waiting for the unpark.
+            let _permit = loop {
+                crate::session::quiesce::wait_model_allowed(self.session_info.id.0.as_ref()).await;
+                let permit = acquire_subagent_sampling_permit(&self.sampling_gate).await;
+                if !crate::session::quiesce::is_parked(self.session_info.id.0.as_ref()) {
+                    break permit;
+                }
+                drop(permit);
+            };
             gate_span.close();
             let _sampling_span = region!("turn.sampling", Parent::Inherit);
             self.sampler_handle
@@ -2659,6 +2675,19 @@ struct ClassifierHelper {
     effort: Option<fuigo_sampling_types::ReasoningEffort>,
 }
 
+/// P189 (M3): holds every model HTTP request of a session tree at the single dispatch point while the tree is parked.
+/// Set on every `SamplerConfig` built for a session or its subagents, so the sampler's own retries and any side call
+/// that got past execution admission wait here, just before the request leaves the process.
+pub(crate) struct ParkGate {
+    pub(crate) session_id: String,
+}
+
+impl fuigo_sampling_types::DispatchGate for ParkGate {
+    fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
+        Box::pin(crate::session::quiesce::wait_model_allowed(&self.session_id))
+    }
+}
+
 #[cfg(test)]
 #[path = "sampler_turn_tests.rs"]
 mod tests;
@@ -2714,4 +2743,3 @@ mod stream_drain_tests {
         assert_eq!(result.status_code, None);
     }
 }
-

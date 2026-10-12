@@ -182,6 +182,8 @@ pub struct WorkspaceSession {
     pub(crate) viewer_ctx: Option<WorkspaceViewerContext>,
     /// Auto-approve (YOLO) state. Seeded from `session.bind` metadata, refreshed by each before-turn hook.
     pub(crate) yolo_mode: std::sync::atomic::AtomicBool,
+    /// Peer-influenced (S6.1): the hub-routed path denies protected edits while this holds (S6.3).
+    pub(crate) peer_influence: parking_lot::RwLock<crate::permission::PeerInfluence>,
     /// Session-lifetime terminal backend (background-task registry and persistent shell).
     /// Created once at session construction; every toolset re-resolve reuses it, so background tasks and shell state survive toolset swaps.
     /// Its child processes die only via `kill_task`, [`Self::shutdown_terminal_backend`] (`drop_session`/evict), or process exit.
@@ -344,6 +346,7 @@ impl WorkspaceSession {
             mcp_native_tool_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
             viewer_ctx,
             yolo_mode: std::sync::atomic::AtomicBool::new(false),
+            peer_influence: parking_lot::RwLock::new(crate::permission::PeerInfluence::new()),
             system_notifications,
             system_notify_handle,
             #[allow(dead_code)]
@@ -464,6 +467,19 @@ impl WorkspaceSession {
     }
     pub fn yolo_mode(&self) -> bool {
         self.yolo_mode.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    /// The peer-influenced flag of this hub session.
+    /// A clone shares the one atomic.
+    pub fn peer_influence(&self) -> crate::permission::PeerInfluence {
+        self.peer_influence.read().clone()
+    }
+    /// Adopt the owning session's ONE peer-influenced flag (called from `WorkspaceOps::bind_local_session`). A state already
+    /// set on the flag this session was created with is carried over, never lost.
+    pub fn bind_peer_influence(&self, shared: crate::permission::PeerInfluence) {
+        let previous = std::mem::replace(&mut *self.peer_influence.write(), shared.clone());
+        if previous.is_set() {
+            shared.set(true);
+        }
     }
     pub fn set_yolo_mode(&self, enabled: bool) {
         self.yolo_mode

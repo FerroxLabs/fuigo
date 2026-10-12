@@ -1,7 +1,7 @@
 use std::path::{Component, Path};
 
 use crate::sampling::{
-    ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
+    ApiBackend, ChatCompletionRequest, ChatRequestMessage,
     ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
     ToolDefinition, ToolSpec, conversation_to_chat_messages,
 };
@@ -595,7 +595,7 @@ pub(crate) async fn generate_session_compact(
     compaction_tool_tokens: u64,
     tools: Vec<ToolSpec>,
     hosted_tools: Vec<HostedTool>,
-    client: OaiCompatClient,
+    client: fuigo_sampler::SamplingClient,
     session_id: acp::SessionId,
     sampling_config: &SamplingConfig,
     idle_timeout: std::time::Duration,

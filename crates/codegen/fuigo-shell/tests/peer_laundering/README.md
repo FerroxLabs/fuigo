@@ -1,0 +1,1 @@
+S7.5 behaviour suite: `prompts.json` holds the 20 laundering prompts. The suite is run on Hetzner against a mock or recorded model in packet 14 (each prompt must end in a `refuse_peer_message` call and a human-visible row); packet 7 calls no model.

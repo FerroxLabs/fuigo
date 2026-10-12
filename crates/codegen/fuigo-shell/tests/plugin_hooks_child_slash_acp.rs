@@ -1,12 +1,18 @@
-//! P07a F1: a subagent whose task text is a typed `/hooks-untrust` (or `/hooks-trust`) reloads its hooks; that reload must
-//! not install plugin hooks from the subagent's stored plugin registry, which is the process-wide snapshot rather than its
-//! parent's view of the workspace.
+//! A subagent's task text cannot run hook commands, so no hook reload can be triggered from it.
 //!
-//! Setup: a user plugin `userleak` (one `PreToolUse` hook) is enabled process-wide, but the workspace's own config disables
-//! it, so the parent session's view has no `userleak`. A global hook file gives the parent (and so its child) a registry, which
-//! makes the typed hook commands available in the child. The parent spawns a foreground child whose task text is the slash
-//! command; the child's reply ("... Hooks reloaded: N hook(s) loaded.") is read back from the child's own transcript.
-//! Green: N == 1 (the global hook only). Red with plugins taken from the child's stored snapshot: N == 2.
+//! History: P07a F1 spawned a child whose task text was a typed `/hooks-untrust` (or `/hooks-trust`) and expected the child to
+//! EXECUTE it and reload its hooks (without installing the process-wide snapshot's plugin hooks). The task text is written by the
+//! parent MODEL, so executing a slash command from it was itself the escalation: `subagent-task-authority` makes that text
+//! model-authored, so it reaches the child's model as plain prompt text and no command runs.
+//!
+//! Setup is the P07a one: a user plugin `userleak` is enabled process-wide but disabled by the workspace config, and a global hook
+//! file gives the parent (and so its child) a hook registry. The parent spawns a foreground child whose task text is the slash
+//! command. The child now makes a model turn (scripted below).
+//! Asserts, for each of `/hooks-untrust` and `/hooks-trust`: (1) the child made its model request and that request carries the
+//! task text as a user message; (2) no "Hooks reloaded: N hook(s) loaded." reply exists in any session transcript; (3)
+//! `$FUIGO_HOME/trusted_folders.toml` is byte-for-byte unchanged.
+//! Fails on the pre-fix code: there the child runs the command with zero model turns, so the child's scripted model step is never
+//! consumed (the scripted "done" lands on the child instead) and two "Hooks reloaded: 1 hook(s) loaded." replies are recorded.
 #![cfg(unix)]
 
 #[allow(dead_code)]
@@ -68,8 +74,47 @@ fn reload_replies(dir: &std::path::Path) -> Vec<String> {
     out
 }
 
+/// True when any session transcript under `dir` contains `needle`.
+fn transcript_contains(dir: &std::path::Path, needle: &str) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == "updates.jsonl")
+                && std::fs::read_to_string(&path).is_ok_and(|t| t.contains(needle))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Text of every user-role message in a chat-completions request body.
+fn user_texts(body: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for m in body["messages"].as_array().into_iter().flatten() {
+        if m["role"] != "user" {
+            continue;
+        }
+        match &m["content"] {
+            serde_json::Value::String(t) => out.push(t.clone()),
+            serde_json::Value::Array(parts) => {
+                out.extend(parts.iter().filter_map(|p| p["text"].as_str().map(str::to_string)));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 #[test]
-fn a_subagents_typed_hook_command_reloads_no_process_snapshot_plugins() {
+fn a_subagents_task_text_cannot_run_hook_commands() {
     run_agent_test(|cwd, mock| async move {
         let fuigo_home = std::path::PathBuf::from(std::env::var("FUIGO_HOME").expect("FUIGO_HOME"));
         // A global hook file: the parent, and so its child, has a registry and the typed hook commands
@@ -114,6 +159,9 @@ fn a_subagents_typed_hook_command_reloads_no_process_snapshot_plugins() {
         // The process snapshot is rebuilt from the agent's [plugins], which enables userleak; the session's view stays without it
         ext_method(&conn, "fuigo/plugins/reload", json!({})).await;
 
+        let trust_file = fuigo_home.join("trusted_folders.toml");
+        let trust_before = std::fs::read(&trust_file).ok();
+
         let fg = || InferenceRequestMatcher::foreground(InferenceEndpoint::ChatCompletions);
         for (i, task) in ["/hooks-untrust", "/hooks-trust"].into_iter().enumerate() {
             let steps = [
@@ -121,6 +169,15 @@ fn a_subagents_typed_hook_command_reloads_no_process_snapshot_plugins() {
                     format!("spawn-{i}"),
                     fg(),
                     spawn_child(&format!("call_spawn_{i}"), task),
+                ),
+                // The child's own model turn: the task text arrives as a plain prompt, nothing executes it
+                mock.expect_response(
+                    format!("child-{i}"),
+                    fg(),
+                    ScriptedResponse::sse(chat_completion_script_exact(
+                        &format!("child saw the task {i}"),
+                        "test-model",
+                    )),
                 ),
                 mock.expect_response(
                     format!("done-{i}"),
@@ -145,25 +202,37 @@ fn a_subagents_typed_hook_command_reloads_no_process_snapshot_plugins() {
                 step.assert_satisfied();
             }
         }
-        // Each child's reply to its slash command is in its own transcript under $FUIGO_HOME/sessions (persisted asynchronously)
-        let mut replies = Vec::new();
+        // The child's own turn is persisted asynchronously: wait for the last child's model reply to reach a transcript, so the
+        // absence checks below look at a transcript that exists
+        let sessions = fuigo_home.join("sessions");
+        let mut persisted = false;
         for _ in 0..100 {
-            replies = reload_replies(&fuigo_home.join("sessions"));
-            if replies.len() >= 2 {
+            if transcript_contains(&sessions, "child saw the task 1") {
+                persisted = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        assert_eq!(
-            replies.len(),
-            2,
-            "one reload reply per child (/hooks-untrust, /hooks-trust): {replies:?}"
+        assert!(persisted, "the second child's model reply never reached a transcript");
+        let replies = reload_replies(&sessions);
+        assert!(
+            replies.is_empty(),
+            "a subagent's task text must not run /hooks-untrust or /hooks-trust (no reload reply): {replies:?}"
         );
-        for reply in &replies {
-            assert_eq!(
-                reply, "Hooks reloaded: 1 hook(s) loaded.",
-                "a subagent's typed hook command must reload only the global hook, never the process \
-                 snapshot's plugin: {replies:?}"
+        assert_eq!(
+            std::fs::read(&trust_file).ok(),
+            trust_before,
+            "the hook trust store must be untouched by a subagent's task text"
+        );
+        // The task text reached the model as plain text, in the child's own request (not only the parent's "Spawn ..." prompt)
+        let bodies = mock.request_bodies();
+        for task in ["/hooks-untrust", "/hooks-trust"] {
+            assert!(
+                bodies
+                    .iter()
+                    .flat_map(user_texts)
+                    .any(|t| !t.starts_with("Spawn a child") && t.contains(task)),
+                "the child's model request must carry the task text {task:?} as a user message"
             );
         }
     });

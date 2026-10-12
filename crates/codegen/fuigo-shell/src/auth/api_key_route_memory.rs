@@ -86,7 +86,11 @@ struct Unsaved {
     path: PathBuf,
     url_level: bool,
     e: Rejected,
+    /// The file's (modified time, length) when our write failed; `None` when there was no file.
+    seen: Option<FileStamp>,
 }
+
+type FileStamp = (std::time::SystemTime, u64);
 
 fn unsaved() -> std::sync::MutexGuard<'static, Vec<Unsaved>> {
     UNSAVED.lock().unwrap_or_else(|e| e.into_inner())
@@ -169,20 +173,32 @@ impl RouteMemory {
     }
 
     fn load(&self) -> Store {
-        let Ok(file) = std::fs::File::open(&self.path) else {
-            return Store::default();
-        };
+        self.load_checked().unwrap_or_default()
+    }
+
+    /// The file's contents, or `None` when it is missing, unreadable, corrupt or oversized (then nothing is known).
+    fn load_checked(&self) -> Option<Store> {
+        let file = std::fs::File::open(&self.path).ok()?;
         let mut bytes = Vec::new();
         if file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_FILE_BYTES {
-            return Store::default();
+            return None;
         }
-        serde_json::from_slice(&bytes).unwrap_or_default()
+        serde_json::from_slice(&bytes).ok()
+    }
+
+    fn stamp(&self) -> Option<FileStamp> {
+        let m = std::fs::metadata(&self.path).ok()?;
+        Some((m.modified().ok()?, m.len()))
     }
 
     /// One load-modify-save under the cross-process lock. `f` returns whether anything changed (nothing is written
     /// otherwise). Returns `None` when nothing changed, else whether the file was written.
     fn update(&self, now: u64, f: impl FnOnce(&mut Store) -> bool) -> Option<bool> {
         let _lock = self.lock();
+        #[cfg(test)]
+        if _lock.is_none() {
+            test_clock::note_unlocked(&self.path);
+        }
         let mut store = self.load();
         if !f(&mut store) {
             return None;
@@ -202,13 +218,25 @@ impl RouteMemory {
         if let Some(parent) = lock_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        #[cfg(windows)]
+        let existed = lock_path.exists();
         let file = fuigo_config::owner_only_file_options(
             std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false),
         )
         .open(&lock_path)
         .ok()?;
         fuigo_config::tighten_own_regular_file_owner_only(&file, &lock_path);
-        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        // Windows has no mode bits: give a lock file we just created the same owner-only ACL as the data file
+        // (`save`). Not compiled or run by the author; a failure is ignored.
+        #[cfg(windows)]
+        if !existed && let Err(e) = fuigo_secrets::owner_only::set_windows_owner_only_acl(&lock_path) {
+            tracing::debug!(error = %e, "api key probe lock: owner-only ACL not applied");
+        }
+        #[cfg(test)]
+        let wait = test_clock::lock_wait();
+        #[cfg(not(test))]
+        let wait = LOCK_WAIT;
+        let deadline = std::time::Instant::now() + wait;
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Some(HeldFlock(file)),
@@ -321,8 +349,25 @@ impl RouteMemory {
     /// table applies to every credential at position n-3. The longer of the two wins. Future-dated entries are ignored.
     pub(crate) fn models_wait(&self, url: &str, credential: &[&str], now: u64) -> Option<u64> {
         let url = normalise(url)?;
-        let mut store = self.load();
-        for u in unsaved().iter().filter(|u| u.path == self.path) {
+        let stamp = self.stamp();
+        let loaded = self.load_checked();
+        let mut held = unsaved();
+        // Rule for a row whose write failed (kept only in this process): after a SUCCESSFUL read of the file, drop
+        // every such row the file does not have, but only if the file changed since our write failed (its modified
+        // time or length differs from the stamp taken then). A changed file is another process's newer truth (for
+        // example a 200 that cleared the row). An unchanged file, or one we cannot read, proves nothing (our own
+        // write failed and nobody else wrote), so the row stays.
+        if let (Some(file), Some(now_stamp)) = (&loaded, stamp) {
+            held.retain(|u| {
+                if u.path != self.path || u.seen == Some(now_stamp) {
+                    return true;
+                }
+                let list = if u.url_level { &file.models_401_url } else { &file.models_401 };
+                list.iter().any(|f| f.h == u.e.h)
+            });
+        }
+        let mut store = loaded.unwrap_or_default();
+        for u in held.iter().filter(|u| u.path == self.path) {
             let list = if u.url_level { &mut store.models_401_url } else { &mut store.models_401 };
             match list.iter_mut().find(|f| f.h == u.e.h) {
                 Some(f) if f.t < u.e.t => *f = u.e.clone(),
@@ -330,6 +375,7 @@ impl RouteMemory {
                 None => list.push(u.e.clone()),
             }
         }
+        drop(held);
         let ch = cred_hash(&url, credential);
         let uh = hash(&["models-401-url-v1", &url]);
         let mut remaining = 0u64;
@@ -364,7 +410,7 @@ impl RouteMemory {
                     .unwrap_or(0);
                 list.retain(|e| e.h != h);
                 let e = Rejected { h, n: from_file.max(from_memory).saturating_add(1), t: now };
-                written.push(Unsaved { path: self.path.clone(), url_level, e: e.clone() });
+                written.push(Unsaved { path: self.path.clone(), url_level, e: e.clone(), seen: None });
                 list.push(e);
             }
             true
@@ -372,7 +418,8 @@ impl RouteMemory {
         let mut held = unsaved();
         held.retain(|u| !(u.path == self.path && written.iter().any(|w| w.e.h == u.e.h)));
         if saved == Some(false) {
-            held.extend(written);
+            let seen = self.stamp();
+            held.extend(written.into_iter().map(|w| Unsaved { seen, ..w }));
             // A bounded handful: an unwritable home must not grow this without limit.
             let excess = held.len().saturating_sub(2 * MAX_ENTRIES);
             held.drain(..excess);
@@ -422,6 +469,24 @@ pub(crate) mod test_clock {
     pub(crate) static MODELS_MEMORY_OFF: AtomicBool = AtomicBool::new(false);
     /// Microseconds every `update` sleeps between its load and its save (widens the lost-update window for a test).
     pub(crate) static SLEEP_BETWEEN_LOAD_AND_SAVE_US: AtomicU64 = AtomicU64::new(0);
+    /// Paths whose `update` ran without the lock (a stall of 200 ms, or an unopenable lock file).
+    static UNLOCKED: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+    pub(super) fn note_unlocked(path: &std::path::Path) {
+        UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).push(path.to_path_buf());
+    }
+    /// How many updates of `path` proceeded without the lock so far.
+    pub(crate) fn unlocked_updates(path: &std::path::Path) -> usize {
+        UNLOCKED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|p| *p == path).count()
+    }
+    /// Milliseconds `lock` waits before giving up; 0 means the production 200 ms. The concurrency test raises it so a
+    /// loaded machine can never make a writer give up (the product still does, by design).
+    pub(crate) static LOCK_WAIT_MS: AtomicU64 = AtomicU64::new(0);
+    pub(super) fn lock_wait() -> std::time::Duration {
+        match LOCK_WAIT_MS.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => super::LOCK_WAIT,
+            ms => std::time::Duration::from_millis(ms),
+        }
+    }
     pub(super) fn between_load_and_save() {
         let us = SLEEP_BETWEEN_LOAD_AND_SAVE_US.load(std::sync::atomic::Ordering::SeqCst);
         if us > 0 {

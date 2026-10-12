@@ -24,7 +24,6 @@ use fuigo_chat_state::compaction_utils::{
     CompactionAttempt, MAX_CAPTURED_SUMMARY_CHARS, bound_captured_output,
 };
 
-use crate::sampling::Client as OaiCompatClient;
 use crate::sampling::error::acp_error_message;
 use crate::session::helpers::prepared_compaction_history::{
     PreparedCompactionHistory, build_compaction_chat_history,
@@ -60,7 +59,7 @@ pub(crate) struct ShellCompactionSampler {
     tools: Vec<ToolSpec>,
     hosted_tools: Vec<HostedTool>,
     compaction_tool_tokens: u64,
-    client: OaiCompatClient,
+    client: fuigo_sampler::SamplingClient,
     session_id: acp::SessionId,
     sampling_config: SamplingConfig,
     /// Per-chunk idle timeout forwarded to `generate_session_compact`.
@@ -81,7 +80,7 @@ impl ShellCompactionSampler {
         tools: Vec<ToolSpec>,
         hosted_tools: Vec<HostedTool>,
         compaction_tool_tokens: u64,
-        client: OaiCompatClient,
+        client: fuigo_sampler::SamplingClient,
         session_id: acp::SessionId,
         sampling_config: SamplingConfig,
         idle_timeout: Duration,

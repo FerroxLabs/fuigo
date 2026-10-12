@@ -443,6 +443,9 @@ async fn handle_notification(
                         json_schema: None,
                         send_now: false,
                         tool_overrides_update: None,
+                        origin: crate::session::PromptOrigin::TaskCompleted {
+                            task_id: task_id.clone(),
+                        },
                         admission: Some(crate::session::commands::TaskWakeAdmission {
                             respond_to: admission_tx,
                             fallback: crate::session::commands::TaskWakeFallback {
@@ -698,6 +701,17 @@ async fn handle_notification(
                     "prompt": &fired.prompt,
                     "humanSchedule": &fired.human_schedule,
                     "nextFireAt": &fired.next_fire_at,
+                    // Single-use proof that this fire came from the shell: the pager echoes it in the prompt id
+                    // (`scheduler-fired-<ticket>`). The ticket is bound to the exact framed text the pager sends; a prompt without a live
+                    // ticket for that text is an ordinary user prompt.
+                    "fireTicket": crate::session::cron_fire_tickets::mint(
+                        config.session_id.0.as_ref(),
+                        &crate::session::cron_fire_tickets::scheduled_prompt_text(
+                            &fired.prompt,
+                            &fired.task_id,
+                            &fired.human_schedule,
+                        ),
+                    ),
                 });
                 if let Ok(params) = serde_json::value::to_raw_value(&inject_payload) {
                     config

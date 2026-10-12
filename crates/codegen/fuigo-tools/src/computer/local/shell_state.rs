@@ -337,6 +337,7 @@ impl ShellState {
         shell: ShellKind,
         cwd: &Path,
         shell_env_policy: Option<&crate::util::ShellEnvironmentPolicy>,
+        session_scope: Option<&crate::util::ProcessScope>,
     ) -> Result<Self, crate::computer::types::ComputerError> {
         let dump_script = shell.dump_script();
         let dump_fn = shell.dump_function_name();
@@ -354,21 +355,30 @@ impl ShellState {
         // and piping it would risk a deadlock if the user's rc files write >64KB
         // to stderr (fills the pipe buffer, child blocks on write, parent blocks
         // on stdout read).
-        let mut cmd = tokio::process::Command::new(shell.binary_path());
-        cmd.args(&args)
-            .current_dir(cwd)
-            .stdin(fuigo_tty_utils::null_stdio())
-            .stdout(Stdio::piped())
-            .stderr(fuigo_tty_utils::null_stdio())
-            .kill_on_drop(true);
-        crate::util::detach_command(&mut cmd);
-        fuigo_sandbox::child_net::restrict_child_network(&mut cmd);
-        // Filter helper entry and remove provider exports again during capture,
-        // including values supplied by startup files.
-        crate::util::apply_shell_environment_policy(&mut cmd, shell_env_policy);
-        cmd.envs(crate::util::pager_env());
-        #[allow(clippy::disallowed_methods)] // one-shot init run, waited on here
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = fuigo_tty_utils::ProcessScope::spawn_placed(session_scope, || tokio::process::Command::new(shell.binary_path()), |cmd, _hook| {
+            // P189: spawn_placed has already registered the placement as the first pre_exec.
+            cmd.args(&args)
+                .current_dir(cwd)
+                .stdin(fuigo_tty_utils::null_stdio())
+                .stdout(Stdio::piped())
+                .stderr(fuigo_tty_utils::null_stdio())
+                .kill_on_drop(true);
+            crate::util::detach_command(cmd);
+            fuigo_sandbox::child_net::restrict_child_network(cmd);
+            // Filter helper entry and remove provider exports again during capture,
+            // including values supplied by startup files.
+            crate::util::apply_shell_environment_policy(cmd, shell_env_policy);
+            cmd.envs(crate::util::pager_env());
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .map_err(|e| {
+            let e = match e {
+                fuigo_tty_utils::SpawnPlacedError::Spawn(e) => e,
+                fuigo_tty_utils::SpawnPlacedError::Build(never) => match never {},
+                fuigo_tty_utils::SpawnPlacedError::Stopping => {
+                    std::io::Error::other("session is stopping; command not started")
+                }
+            };
             crate::computer::types::ComputerError::io(format!(
                 "failed to spawn {shell:?} for shell state init: {e}"
             ))
@@ -1007,7 +1017,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
         assert!(state.cwd.is_absolute());
         // The snapshot should contain at least some env var exports
         assert!(
@@ -1026,7 +1036,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Run "export FUIGO_TEST_VAR=hello" and capture the new state
         let prep = state
@@ -1134,7 +1144,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // cd to /tmp (macOS resolves to /private/tmp via symlink)
         let (code, _) = run_command(&mut state, "cd /tmp").await;
@@ -1157,7 +1167,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Export a variable
         let (code, _) = run_command(&mut state, "export MY_TEST_VAR=persistent_value").await;
@@ -1176,7 +1186,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/fuigo-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1196,7 +1206,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None).await.unwrap();
 
         let (code, _) = run_command(&mut state, "export GPG_TTY=/fuigo-sentinel-tty").await;
         assert_eq!(code, 0);
@@ -1216,7 +1226,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None).await.unwrap();
 
         let prep = state
             .prepare_command(
@@ -1261,7 +1271,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Define a function
         let (code, _) = run_command(&mut state, "greet() { echo \"hello $1\"; }").await;
@@ -1289,7 +1299,7 @@ mod tests {
         std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
 
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         let (code, stdout) = run_command(
             &mut state,
@@ -1314,7 +1324,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Turn on allexport; the option is captured by the dump and replayed
         // into every subsequent command's shell.
@@ -1349,7 +1359,7 @@ mod tests {
         std::fs::write(&probe, "echo \"SOURCED_ARGC=$#\"\n").unwrap();
 
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Zsh, &cwd, None, None).await.unwrap();
 
         let (code, stdout) = run_command(
             &mut state,
@@ -1370,7 +1380,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Define an alias
         let (code, _) = run_command(&mut state, "alias ll='ls -la'").await;
@@ -1397,7 +1407,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         let prep = state.prepare_command("true", None, shadows, None).unwrap();
         // Shadows enabled → the self-resolving find/grep functions are always
@@ -1436,7 +1446,7 @@ mod tests {
             return;
         }
         let cwd = std::env::current_dir().unwrap();
-        let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
+        let mut state = ShellState::init(ShellKind::Bash, &cwd, None, None).await.unwrap();
 
         // Set up some state
         let (_, _) = run_command(&mut state, "export SURVIVE_TEST=yes").await;

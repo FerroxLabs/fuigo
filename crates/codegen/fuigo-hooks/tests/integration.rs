@@ -30,6 +30,8 @@ fn pre_tool_use_envelope(tool_name: &str) -> HookEventEnvelope {
             tool_input: serde_json::json!({"command": "echo hello"}),
             tool_input_truncated: false,
             subagent_type: None,
+            origin: None,
+            peer_influenced: None,
         },
     }
 }

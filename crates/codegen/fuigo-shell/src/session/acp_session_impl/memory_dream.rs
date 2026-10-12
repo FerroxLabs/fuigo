@@ -123,7 +123,7 @@ impl SessionActor {
         let mut total_chunks_at_end = 0usize;
         if let Some(storage) = self.memory.storage() {
             let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
-            let conversation = self.chat_state_handle.get_conversation().await;
+            let conversation = self.chat_state_handle.get_conversation_for_model().await;
             let result = crate::session::memory::hooks::on_session_end(
                 &storage,
                 &conversation,
@@ -894,7 +894,7 @@ impl SessionActor {
     pub(super) async fn snapshot_memory_flush_state(&self) -> MemoryFlushSnapshot {
         let (counts, conversation) = tokio::join!(
             self.chat_state_handle.get_conversation_counts(),
-            self.chat_state_handle.get_conversation(),
+            self.chat_state_handle.get_conversation_for_model(),
         );
         let chat_history =
             fuigo_chat_state::compaction_utils::prepare_conversation_for_summarization(

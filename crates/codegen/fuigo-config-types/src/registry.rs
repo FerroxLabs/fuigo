@@ -48,6 +48,8 @@ pub enum Feature {
     RepoStatusInSystemPrompt,
     /// The transparent `terminal` theme (rollout gate; hidden and unparseable while off).
     TerminalTheme,
+    /// Named sessions that message each other (1.0.25 rollout gate; no listener or tool exists while off).
+    PeerMessaging,
 }
 
 /// How one feature is written on each surface it can be set from.
@@ -237,6 +239,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         // A rollout gate: off until asked for, so an upgrade never silently repaints a working terminal.
         default_enabled: false,
         // Fuigo has no remote settings host for this key; the gate is pin/env/config only.
+        remote: None,
+    },
+    FeatureSpec {
+        id: Feature::PeerMessaging,
+        key: "peer_messaging",
+        path: "features.peer_messaging",
+        env: "FUIGO_PEER_MESSAGING",
+        // A rollout gate: off until asked for; peer messaging opens no inbox and registers no tool while off.
+        default_enabled: false,
+        // Local-only feature: pin/env/config only, no remote tier.
         remote: None,
     },
 ];

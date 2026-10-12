@@ -153,7 +153,51 @@ pub(crate) enum Lifecycle {
     },
 }
 
+/// Longest server name (in characters) a start-failure warning carries.
+const MCP_START_FAILED_NAME_MAX_CHARS: usize = 80;
+
+/// Cut `text` to `max` characters, marking the cut.
+fn cap_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+/// The fixed, safe-to-print reason for a start failure. The raw error text is never used: it can hold URL passwords,
+/// header values, tokens, env strings and command-line arguments.
+pub(crate) fn mcp_start_failed_reason(kind: fuigo_shell::extensions::mcp::McpFailureKind) -> String {
+    use fuigo_shell::extensions::mcp::McpFailureKind as K;
+    match kind {
+        K::CommandNotStarted => "the command could not be started".to_string(),
+        K::ExitedBeforeAnswer => "the server exited before it answered".to_string(),
+        K::Timeout { secs } => format!("the server did not answer within {secs} s"),
+        K::Unreachable => "the server could not be reached".to_string(),
+        K::ServerRejected => "the server rejected the connection (it may need sign-in)".to_string(),
+        K::NeedsAuth | K::Other | K::Unknown => "the start-up handshake failed".to_string(),
+    }
+}
+
 impl Lifecycle {
+    /// The warning for an MCP server that failed to start, with the name as printed (the de-duplication key). Rides the
+    /// existing `ConfigNotice` path: a `warning:` line on stderr for `plain`/`json`, a lifecycle line for the streaming formats.
+    pub(crate) fn mcp_start_failed(
+        name: &str,
+        kind: fuigo_shell::extensions::mcp::McpFailureKind,
+    ) -> (String, Self) {
+        let name = fuigo_tty_utils::scrub_unsafe_display(name, Some(' '));
+        let name = cap_chars(name.trim(), MCP_START_FAILED_NAME_MAX_CHARS).replace('"', "'");
+        let reason = mcp_start_failed_reason(kind);
+        let notice = Lifecycle::ConfigNotice {
+            message: format!(
+                "MCP server \"{name}\" failed to start: {reason}. Run `fuigo mcp doctor`."
+            ),
+        };
+        (name, notice)
+    }
+
     /// The human-readable `plain` line for this lifecycle event.
     pub(crate) fn plain_message(&self) -> String {
         match self {

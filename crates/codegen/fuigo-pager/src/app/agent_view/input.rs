@@ -353,6 +353,9 @@ impl AgentView {
         registry: &ActionRegistry,
         prompt_paging: bool,
     ) -> InputOutcome {
+        if let Some(outcome) = self.peer_input(ev) {
+            return outcome;
+        }
         if self.scrollback_drag_latched() {
             match ev {
                 Event::Mouse(MouseEvent {

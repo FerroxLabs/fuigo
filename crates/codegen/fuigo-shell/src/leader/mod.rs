@@ -55,10 +55,10 @@ mod client;
 #[cfg(feature = "test-support")]
 pub mod in_process;
 mod lock;
-mod peer_check;
+pub(crate) mod peer_check;
 #[cfg(all(test, windows))]
 mod starter_identity_tests;
-mod peer_auth;
+pub(crate) mod peer_auth;
 #[cfg(all(test, windows))]
 mod peer_auth_tests;
 pub mod protocol;

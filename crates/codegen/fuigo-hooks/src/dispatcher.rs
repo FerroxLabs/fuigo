@@ -1036,6 +1036,8 @@ mod tests {
                 tool_input: serde_json::json!({"command": "ls"}),
                 tool_input_truncated: false,
                 subagent_type: None,
+                origin: None,
+                peer_influenced: None,
             },
         }
     }
@@ -1488,7 +1490,11 @@ mod tests {
             permission_mode: None,
             payload: HookPayload::UserPromptSubmit {
                 prompt: Some("deploy to prod".into()),
+                shell_command: None,
                 subagent_type: None,
+                origin: None,
+                peer_sender: None,
+                peer_claimed_mode: None,
             },
         }
     }

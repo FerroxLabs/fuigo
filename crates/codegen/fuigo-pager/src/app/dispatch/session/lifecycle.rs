@@ -1195,6 +1195,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
+        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &session_id_clone.to_string()));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),
@@ -1304,6 +1305,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
             cwd: cwd.clone(),
             session_id: session_id_clone.to_string(),
         });
+        effects.extend(crate::app::dispatch::peer::startup_effects(agent, agent_id, &session_id_clone.to_string()));
         effects.push(Effect::FetchSessionAgentName {
             agent_id,
             session_id: session_id_clone.clone(),

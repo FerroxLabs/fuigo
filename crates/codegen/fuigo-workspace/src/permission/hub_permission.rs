@@ -1,3 +1,4 @@
+use crate::permission::peer_denials::DenialCause;
 use crate::permission::prompter::{PromptOutcome, tool_name_for_access};
 use crate::permission::types::{AccessKind, EditTargets, HookAsk};
 use async_trait::async_trait;
@@ -703,7 +704,7 @@ fn hub_access_verdict(access: &AccessKind, ctx: &HubPolicyContext<'_>) -> HubPol
         return HubPolicyVerdict::Allow;
     } else if preflight.policy_forced_prompt() {
         Some(hub_ask_reason::ASK_RULE)
-    } else if matches!(access, AccessKind::Tool(_))
+    } else if matches!(access, AccessKind::Tool(name) if !crate::permission::manager::is_auto_allowed_tool(name))
         && !matches!(decision, Some(Decision::Allow))
     {
         Some(hub_ask_reason::SIDE_EFFECTING_TOOL)
@@ -860,9 +861,23 @@ pub(crate) async fn settle_hub_asks(
     tool_call_id: &str,
     tool_name: &str,
 ) -> Result<(), fuigo_tool_runtime::ToolError> {
+    settle_hub_asks_caused(transport, asks, accesses, prompt_accesses, tool_call_id, tool_name)
+        .await
+        .map_err(|(e, _)| e)
+}
+
+/// [`settle_hub_asks`] that also says how a refusal ended, so the caller applies the shared recording rule.
+pub(crate) async fn settle_hub_asks_caused(
+    transport: Option<&dyn PermissionHookTransport>,
+    asks: &[(&'static str, usize)],
+    accesses: &[AccessKind],
+    prompt_accesses: &[AccessKind],
+    tool_call_id: &str,
+    tool_name: &str,
+) -> Result<(), (fuigo_tool_runtime::ToolError, DenialCause)> {
     for &(reason, index) in asks {
         let prompt_access = prompt_accesses.get(index).unwrap_or(&accesses[index]);
-        settle_hub_ask(transport, prompt_access, tool_call_id, tool_name, reason).await?;
+        settle_hub_ask_caused(transport, prompt_access, tool_call_id, tool_name, reason).await?;
     }
     Ok(())
 }
@@ -876,6 +891,27 @@ pub(crate) async fn settle_hub_ask(
     tool_name: &str,
     reason: &str,
 ) -> Result<(), fuigo_tool_runtime::ToolError> {
+    settle_hub_ask_caused(transport, access, tool_call_id, tool_name, reason).await.map_err(|(e, _)| e)
+}
+
+/// How a hub prompt outcome that is not an approval ended, for the shared recording rule. A hub reply (cancel included)
+/// came from a client that was shown the prompt; a transport error or timeout is a prompt failure.
+pub(crate) fn hub_denial_cause(outcome: &PromptOutcome) -> DenialCause {
+    match outcome {
+        PromptOutcome::Error(_) => DenialCause::PromptError,
+        PromptOutcome::Cancelled => DenialCause::ShownThenCancelled,
+        PromptOutcome::FollowupMessage(_) => DenialCause::HumanFollowup,
+        _ => DenialCause::HumanReject,
+    }
+}
+
+pub(crate) async fn settle_hub_ask_caused(
+    transport: Option<&dyn PermissionHookTransport>,
+    access: &AccessKind,
+    tool_call_id: &str,
+    tool_name: &str,
+    reason: &str,
+) -> Result<(), (fuigo_tool_runtime::ToolError, DenialCause)> {
     use fuigo_tool_runtime::{ToolError, ToolErrorKind};
     let Some(transport) = transport else {
         tracing::warn!(
@@ -883,11 +919,14 @@ pub(crate) async fn settle_hub_ask(
             reason,
             "hub tool call needs approval under the local permission policy, but there is no hub permission prompt; refusing"
         );
-        return Err(ToolError::new(
-            ToolErrorKind::PermissionDenied,
-            format!(
-                "tool permission unavailable: {tool_name} needs approval because {reason}, and no hub permission prompt is available"
+        return Err((
+            ToolError::new(
+                ToolErrorKind::PermissionDenied,
+                format!(
+                    "tool permission unavailable: {tool_name} needs approval because {reason}, and no hub permission prompt is available"
+                ),
             ),
+            DenialCause::NotShown,
         ));
     };
     let outcome = request_permission_via_hub(transport, access, tool_call_id, None).await;
@@ -904,7 +943,7 @@ pub(crate) async fn settle_hub_ask(
         PromptOutcome::FollowupMessage(msg) => format!("tool permission redirected: {msg}"),
         _ => format!("tool permission denied for {tool_name}"),
     };
-    Err(ToolError::new(ToolErrorKind::PermissionDenied, detail))
+    Err((ToolError::new(ToolErrorKind::PermissionDenied, detail), hub_denial_cause(&outcome)))
 }
 
 pub fn prompt_outcome_allows(outcome: &PromptOutcome) -> bool {
@@ -1305,6 +1344,46 @@ mod tests {
             walk_searches: false,
             patch_targets: &[],
             read_spellings: &[],
+        }
+    }
+
+    /// Design row 3a on the hub-routed path: the built-in `send_message` is allowed with no prompt in every mode; a deny rule
+    /// denies, an ask rule asks (except under always-approve, as locally), and an MCP tool of the same name is not allowed.
+    #[test]
+    fn hub_send_message_is_allowed_in_every_mode_but_rules_still_win() {
+        use crate::permission::types::PromptPolicy;
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path();
+        let send = AccessKind::Tool("send_message".to_owned());
+        let mcp = AccessKind::MCPTool { name: "send_message".into(), input: serde_json::Value::Null };
+        let none = compiled("[permission]\nallow = []\n");
+        let deny = compiled("[permission]\ndeny = [\"send_message\"]\n");
+        let ask = compiled("[permission]\nask = [\"send_message\"]\n");
+        for policy_mode in [PromptPolicy::Ask, PromptPolicy::Deny, PromptPolicy::Allow, PromptPolicy::Auto] {
+            for yolo in [false, true] {
+                for default_prompts in [false, true] {
+                    let label = format!("{policy_mode:?} yolo={yolo} default_prompts={default_prompts}");
+                    let mk = |p| {
+                        let mut c = ctx(p, cwd, yolo, default_prompts);
+                        c.prompt_policy = policy_mode;
+                        c
+                    };
+                    assert_eq!(hub_policy_verdict(&send, &mk(None)), HubPolicyVerdict::Allow, "no policy: {label}");
+                    assert_eq!(hub_policy_verdict(&send, &mk(Some(&none))), HubPolicyVerdict::Allow, "empty policy: {label}");
+                    assert!(matches!(hub_policy_verdict(&send, &mk(Some(&deny))), HubPolicyVerdict::Deny(_)), "deny rule: {label}");
+                    let asked = hub_policy_verdict(&send, &mk(Some(&ask)));
+                    if yolo {
+                        assert_eq!(asked, HubPolicyVerdict::Allow, "ask rule under always-approve: {label}");
+                    } else if policy_mode == PromptPolicy::Deny {
+                        assert!(matches!(asked, HubPolicyVerdict::Deny(_)), "ask rule under dontAsk: {label}");
+                    } else if policy_mode != PromptPolicy::Allow {
+                        assert!(matches!(asked, HubPolicyVerdict::Ask(_)), "ask rule asks: {label}");
+                    }
+                    if !yolo && policy_mode == PromptPolicy::Ask && default_prompts {
+                        assert_ne!(hub_policy_verdict(&mcp, &mk(None)), HubPolicyVerdict::Allow, "MCP tool named send_message: {label}");
+                    }
+                }
+            }
         }
     }
 
@@ -1902,6 +1981,39 @@ mod tests {
             assert_eq!(seen["tool_call_id"], "tc-2");
             assert_eq!(seen["tool_name"], "image_gen");
         }
+    }
+
+    /// Round 3 (packet 7, item 1): the hub path records exactly what `request()` records, by the one shared rule
+    /// (`records_denial`). Table over every outcome `settle_hub_ask` can end in; mirrors
+    /// `p7r2_denial_recording_table_over_every_prompt_outcome`.
+    #[tokio::test]
+    async fn p7r3_hub_denial_recording_table_over_every_outcome() {
+        use crate::permission::peer_denials::records_denial;
+        let access = AccessKind::MCPTool { name: "srv__deploy".into(), input: serde_json::json!({}) };
+        // (hub reply, recorded?)
+        let table: Vec<(Result<Value, String>, bool, &str)> = vec![
+            (Ok(serde_json::json!({"outcome": "reject"})), true, "human reject"),
+            (Ok(serde_json::json!({"outcome": "always_reject", "scope": {"kind": "bash_command", "value": "x"}})), true, "human always-reject"),
+            (Ok(serde_json::json!({"outcome": "reject", "followup_message": "do it differently"})), true, "human follow-up"),
+            (Ok(serde_json::json!({"outcome": "cancelled"})), true, "shown, then cancelled by the human"),
+            (Ok(serde_json::json!({"outcome": "nonsense"})), true, "unknown reply word is a reject"),
+            (Err("request timed out after 600s".to_owned()), false, "timeout"),
+            (Err("connection lost".to_owned()), false, "prompt error"),
+            (Err("tool server gone (weak upgrade failed)".to_owned()), false, "requester/server gone"),
+        ];
+        for (reply, want, name) in table {
+            let transport = StubTransport { reply, seen: Mutex::new(None) };
+            let (_, cause) = settle_hub_ask_caused(Some(&transport), &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL)
+                .await
+                .expect_err(name);
+            assert_eq!(records_denial(cause), want, "{name}: {cause:?}");
+        }
+        // No hub prompt at all: never shown, not recorded.
+        let (_, cause) = settle_hub_ask_caused(None, &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL).await.expect_err("no prompt");
+        assert!(!records_denial(cause), "{cause:?}");
+        // An approval is not a refusal at all.
+        let ok = StubTransport { reply: Ok(serde_json::json!({"outcome": "approve"})), seen: Mutex::new(None) };
+        assert!(settle_hub_ask_caused(Some(&ok), &access, "tc", "srv__deploy", hub_ask_reason::SIDE_EFFECTING_TOOL).await.is_ok());
     }
 
     /// Answers each prompt from a script, in order, and records the prompts.

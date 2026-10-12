@@ -1905,6 +1905,7 @@ impl MvpAgent {
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
             gateway,
+            park_hold: crate::agent::park_hold::ParkFrameHold::new(),
             launch_cwd: std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             launch_dir_trust: std::cell::OnceCell::new(),
@@ -3918,7 +3919,8 @@ impl MvpAgent {
                 session_env,
             )
             .with_hunk_tracking_enabled(hunk_tracking_enabled);
-        tool_ctx.process_scope = Some(ProcessScope::new());
+        // P189: a session cgroup only with FUIGO_SESSION_PARK_STOP=on and a usable probe.
+        tool_ctx.process_scope = Some(ProcessScope::new_session());
         let workspace_ops = self
             .resolve_workspace_ops()
             .map_err(|_| {
@@ -4614,6 +4616,7 @@ impl MvpAgent {
             && let Some(scope) = &old.tool_context.process_scope
         {
             scope.kill_all();
+            scope.release_session_cgroup();
         }
         if is_headless {
             self.session_registry.mark_headless(&session_info.id);

@@ -99,6 +99,8 @@ pub async fn fork_session(
     .await
     .map_err(|e| io::Error::other(format!("spawn_blocking panicked: {e}")))??;
 
+    // S6.1: the peer-influenced state is stored IN the copied transcript (item kinds), so the fork inherits it.
+
     let copy_ms = t0.elapsed().as_millis() as u64;
 
     // Register the fork with the backend from a spawned task

@@ -66,6 +66,7 @@ pub(crate) fn build_instruction_items(
     instruction: String,
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
+    let conversation = fuigo_chat_state::compaction_utils::drop_peer_state_markers(conversation);
     let mut items = if strip_reasoning {
         fuigo_chat_state::compaction_utils::strip_reasoning_blocks(conversation)
     } else {

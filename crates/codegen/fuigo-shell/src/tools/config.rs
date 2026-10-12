@@ -238,6 +238,7 @@ impl ShellToolsetConfig {
             subscription: None,
             subscription_resolver: None,
             header_injector: None,
+            dispatch_gate: None,
             mtls_cert_dir: None,
             rate_limit_retry_threshold: None,
             reasoning_summary: None,

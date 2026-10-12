@@ -629,7 +629,12 @@ fn maybe_drain_queue_rows(agent: &mut AgentView) -> QueueDrain {
             }
         }
         QueueEntryKind::Cron => {
-            let prompt_id = format!("scheduler-fired-{prompt_id}");
+            // The shell's single-use ticket replaces the generated suffix, so the shell can verify the fire. An older shell sends
+            // none; the id keeps the generated suffix and the shell treats it as it always did.
+            let prompt_id = format!(
+                "scheduler-fired-{}",
+                queued.fire_ticket.as_ref().map_or(prompt_id.as_str(), |t| t.expose())
+            );
             agent.note_self_originated_prompt(&prompt_id);
             agent.start_turn_boundary(Some(&prompt_id));
             agent.session.current_prompt_id = Some(prompt_id.clone());

@@ -36,6 +36,11 @@ pub use fuigo_http as http;
 pub mod inspect;
 pub mod instrumentation;
 pub mod leader;
+mod peer_inbox;
+/// Windows evidence hooks for packet 10 (doc-hidden; no host code calls them).
+#[cfg(windows)]
+#[doc(hidden)]
+pub use peer_inbox::win_evidence as win_peer_evidence;
 pub mod managed_config;
 pub mod mcp_doctor;
 pub use fuigo_models as models;

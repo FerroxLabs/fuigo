@@ -257,6 +257,32 @@ fn synthesize_replay_turn_marker(
         })
     })
 }
+/// Packet 12b: a `peer_*` session update feeds the matching agent's peer state and shows at most one notice row.
+/// `None`: not a peer event (or the flag is off), carry on with the normal path. `Some(redraw)`: consumed. An unknown `peer_*` name
+/// or a malformed payload is consumed and ignored. Nothing in the payload is executed, expanded or put in the prompt.
+pub(super) fn handle_peer_event(params: &str, app: &mut AppView) -> Option<bool> {
+    if !crate::peer_ui::peer_ui_enabled() || !params.contains("\"peer_") {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(params).ok()?;
+    let sid = crate::peer_ui_state::peer_update_session_id(&v)?;
+    let Some(SessionMatch::Root(agent_id)) = find_session_match(app, &acp::SessionId::new(sid)) else {
+        return Some(false);
+    };
+    let Some(event) = v.get("update").and_then(crate::peer_ui_state::parse_event) else {
+        return Some(false);
+    };
+    let is_active = is_matched_agent_active(app, agent_id);
+    let agent = app.agents.get_mut(&agent_id)?;
+    if !agent.owns_peer_ui() {
+        return Some(false);
+    }
+    if let Some(line) = agent.peer.apply_event(event) {
+        agent.peer_notice_row(line);
+    }
+    Some(is_active)
+}
+
 /// Handle `fuigo/session_notification` and replay-path `fuigo/session/update`.
 ///
 /// Routes by `session_id` so events for an inactive agent still mutate that agent's state.
@@ -269,6 +295,10 @@ pub(super) fn handle_session_notification_with_origin(
     app: &mut AppView,
     origin: LifecycleOrigin,
 ) -> bool {
+    // Packet 12b: peer events (flag on only; with it off the payload takes the exact path it always did).
+    if let Some(redraw) = handle_peer_event(notif.params.get(), app) {
+        return redraw;
+    }
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
         tracing::warn!("Failed to parse {}", notif.method.as_ref());
         return false;

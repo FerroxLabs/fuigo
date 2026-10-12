@@ -55,3 +55,4 @@ Automate, script, and integrate Fuigo with other systems.
 | 25 | [Status Line](25-status-line.md) | The bottom status row: built-in segments, command scripts, and the stdin JSON contract |
 | 26 | [Configuration Reference](26-config-reference.md) | Field list for `config.toml`, `managed_config.toml`, and `requirements.toml` |
 | 27 | [fuigo clone](27-fuigo-clone.md) | Depth-1 Grove clone, `--full-history`, and safe deepen/switch commands |
+| 28 | [Named Sessions and Peer Messaging](28-named-sessions.md) | Sessions on one machine list each other and send messages; off by default, `/peers`, holds, and limits |

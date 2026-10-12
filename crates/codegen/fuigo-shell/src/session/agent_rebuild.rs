@@ -275,6 +275,7 @@ impl AgentRebuildSpec {
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
         .with_active_agent_messages_enabled(*active_agent_messages_enabled)
+        .with_peer_messaging_tools(crate::session::peer_message::peer_messaging_enabled())
         .with_fs(fs_backend.clone())
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())

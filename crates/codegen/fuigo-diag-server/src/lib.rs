@@ -392,6 +392,101 @@ fn router(ctx: DiagContext) -> Router {
         .with_state(ctx)
 }
 
+#[cfg(unix)]
+fn set_owner_only(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+/// Bind a Unix socket at `path` so that it never exists there with a mode wider than 0600.
+///
+/// Same recipe as `bind_private` in `crates/codegen/fuigo-shell/src/leader/peer_check.rs` (this crate cannot
+/// depend on fuigo-shell): bind a temporary name inside a fresh 0700 directory next to `path`, set the mode
+/// (`set_mode`, a seam for tests), then rename into place. Nobody but the owner can reach the socket before the
+/// rename, and unlike `umask` nothing process-wide changes.
+///
+/// An existing entry at `path` is only replaced when it is a socket owned by the current user (a stale socket
+/// from a crashed earlier run of the same user). A directory, regular file, symlink (never followed) or another
+/// user's socket is refused and left untouched. In a sticky directory such as `/tmp` the rename over an entry
+/// owned by someone else fails; that surfaces as a bind error too.
+/// Test-only seam: pretend our uid differs, so a socket we own looks foreign (a unit test cannot create
+/// another user's socket without root). Thread-local, so parallel tests do not interfere.
+#[cfg(all(unix, test))]
+mod test_uid_override {
+    use std::cell::Cell;
+    thread_local!(static UID: Cell<Option<u32>> = const { Cell::new(None) });
+    pub(super) fn get() -> Option<u32> {
+        UID.with(Cell::get)
+    }
+    pub(super) fn set(v: Option<u32>) {
+        UID.with(|c| c.set(v));
+    }
+}
+
+#[cfg(unix)]
+fn bind_unix_private(
+    path: &Path,
+    set_mode: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::{DirBuilderExt as _, FileTypeExt as _, MetadataExt as _};
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let pid = process::id();
+    let mut dir = None;
+    for attempt in 0u32..16 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tag = (pid ^ nanos ^ attempt.wrapping_mul(0x9e37)) & 0xffff;
+        let candidate = parent.join(format!(".d{tag:04x}"));
+        match fs::DirBuilder::new().mode(0o700).create(&candidate) {
+            Ok(()) => {
+                dir = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let dir = dir.ok_or_else(|| io::Error::other("could not create a private bind directory"))?;
+    let result = (|| {
+        // The directory is ours, so its owner is the current uid (no libc call needed).
+        let our_uid = fs::metadata(&dir)?.uid();
+        #[cfg(test)]
+        let our_uid = test_uid_override::get().unwrap_or(our_uid);
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if !meta.file_type().is_socket() {
+                    return Err(io::Error::other(
+                        "path exists and is not a socket (refusing to replace it)",
+                    ));
+                }
+                if meta.uid() != our_uid {
+                    return Err(io::Error::other(
+                        "path is a socket owned by another user (refusing to replace it)",
+                    ));
+                }
+                // A socket of ours: stale after a crash, or an older instance. Replaced by the rename below.
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        let temp_sock = dir.join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&temp_sock)?;
+        set_mode(&temp_sock)?;
+        fs::rename(&temp_sock, path).map_err(|e| {
+            io::Error::new(e.kind(), format!("cannot move the socket into place (is the path owned by another user?): {e}"))
+        })?;
+        Ok(listener)
+    })();
+    let _ = fs::remove_file(dir.join("s"));
+    let _ = fs::remove_dir(&dir);
+    result
+}
+
 /// Bind the listener and spawn the server task.
 /// Binding happens before this returns, so a bind failure surfaces synchronously.
 /// `log_file` is the daemon log served by `/logs` (`None` means `/logs` is 404).
@@ -407,17 +502,11 @@ pub async fn serve(
     match listener {
         #[cfg(unix)]
         DiagListener::Unix(path) => {
-            let _ = fs::remove_file(&path);
-            let listener =
-                UnixListener::bind(&path).map_err(|e| anyhow!("bind {}: {e}", path.display()))?;
-            use std::os::unix::fs::PermissionsExt as _;
-            if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to restrict diagnostics socket permissions"
-                );
-            }
+            // Fail closed: any error here (including a failed chmod) is a bind failure and nothing listens.
+            let std_listener = bind_unix_private(&path, set_owner_only)
+                .map_err(|e| anyhow!("bind {}: {e}", path.display()))?;
+            std_listener.set_nonblocking(true)?;
+            let listener = UnixListener::from_std(std_listener)?;
             let task = tokio::spawn(async move {
                 if let Err(e) = axum::serve(listener, router(ctx)).await {
                     tracing::warn!(error = %e, "diagnostics server exited");
@@ -460,6 +549,127 @@ pub struct BoundDiag {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    mod private_bind {
+        use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+
+        use super::super::*;
+
+        fn leftovers(dir: &Path) -> Vec<String> {
+            fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+
+        #[test]
+        fn mode_is_0600_at_first_observation_and_temp_name_is_gone() {
+            let tmp = tempfile::tempdir().unwrap();
+            let sock = tmp.path().join("d.sock");
+            let seen = std::cell::Cell::new(0u32);
+            let _l = bind_unix_private(&sock, |p| {
+                // Before the rename the final path does not exist at all.
+                assert!(!sock.exists());
+                set_owner_only(p)?;
+                seen.set(fs::metadata(p).unwrap().permissions().mode() & 0o777);
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(seen.get(), 0o600);
+            let meta = fs::symlink_metadata(&sock).unwrap();
+            assert!(meta.file_type().is_socket());
+            assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+            assert_eq!(leftovers(tmp.path()), vec!["d.sock".to_owned()]);
+        }
+
+        #[test]
+        fn chmod_failure_returns_error_and_nothing_listens() {
+            let tmp = tempfile::tempdir().unwrap();
+            let sock = tmp.path().join("d.sock");
+            let err = bind_unix_private(&sock, |_| Err(io::Error::other("injected chmod failure"))).unwrap_err();
+            assert!(err.to_string().contains("injected chmod failure"));
+            assert!(!sock.exists());
+            assert!(std::os::unix::net::UnixStream::connect(&sock).is_err());
+            assert!(leftovers(tmp.path()).is_empty());
+        }
+
+        #[test]
+        fn regular_file_directory_and_symlink_are_refused_and_untouched() {
+            let tmp = tempfile::tempdir().unwrap();
+            let file = tmp.path().join("file");
+            fs::write(&file, b"keep").unwrap();
+            let sub = tmp.path().join("dir");
+            fs::create_dir(&sub).unwrap();
+            let target = tmp.path().join("target");
+            fs::write(&target, b"target").unwrap();
+            let link = tmp.path().join("link");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            for p in [&file, &sub, &link] {
+                let err = bind_unix_private(p, set_owner_only).unwrap_err();
+                assert!(err.to_string().contains("not a socket"), "{err}");
+            }
+            assert_eq!(fs::read(&file).unwrap(), b"keep");
+            assert!(sub.is_dir());
+            assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(fs::read(&target).unwrap(), b"target");
+            let mut names = leftovers(tmp.path());
+            names.sort();
+            assert_eq!(names, vec!["dir", "file", "link", "target"]);
+        }
+
+        #[test]
+        fn socket_owned_by_another_uid_is_refused_and_untouched() {
+            use std::os::unix::fs::MetadataExt as _;
+            let tmp = tempfile::tempdir().unwrap();
+            let sock = tmp.path().join("d.sock");
+            let _live = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+            let before = fs::symlink_metadata(&sock).unwrap();
+            // Seam: our uid is reported as different from the socket owner's.
+            test_uid_override::set(Some(before.uid().wrapping_add(1)));
+            let res = bind_unix_private(&sock, set_owner_only);
+            test_uid_override::set(None);
+            let err = res.unwrap_err();
+            assert!(err.to_string().contains("owned by another user"), "{err}");
+            let after = fs::symlink_metadata(&sock).unwrap();
+            assert!(after.file_type().is_socket());
+            assert_eq!((after.ino(), after.dev()), (before.ino(), before.dev()));
+            assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+            assert_eq!(leftovers(tmp.path()), vec!["d.sock".to_owned()]);
+        }
+
+        #[test]
+        fn symlink_to_our_own_socket_is_refused_and_both_untouched() {
+            use std::os::unix::fs::MetadataExt as _;
+            let tmp = tempfile::tempdir().unwrap();
+            let real = tmp.path().join("real.sock");
+            drop(std::os::unix::net::UnixListener::bind(&real).unwrap()); // stale socket of ours
+            let link = tmp.path().join("link.sock");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let real_before = fs::symlink_metadata(&real).unwrap();
+            let err = bind_unix_private(&link, set_owner_only).unwrap_err();
+            assert!(err.to_string().contains("not a socket"), "{err}");
+            assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(fs::read_link(&link).unwrap(), real);
+            let real_after = fs::symlink_metadata(&real).unwrap();
+            assert!(real_after.file_type().is_socket());
+            assert_eq!(real_after.ino(), real_before.ino());
+            assert_eq!(real_after.permissions().mode(), real_before.permissions().mode());
+            let mut names = leftovers(tmp.path());
+            names.sort();
+            assert_eq!(names, vec!["link.sock", "real.sock"]);
+        }
+
+        #[test]
+        fn stale_own_socket_is_replaced() {
+            let tmp = tempfile::tempdir().unwrap();
+            let sock = tmp.path().join("d.sock");
+            drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
+            let _l = bind_unix_private(&sock, set_owner_only).unwrap();
+            assert!(std::os::unix::net::UnixStream::connect(&sock).is_ok());
+            assert_eq!(fs::metadata(&sock).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+    }
     use serde_json::Value;
 
     use super::*;

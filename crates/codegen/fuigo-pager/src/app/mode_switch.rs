@@ -29,6 +29,7 @@ pub(crate) fn reseed_screen_mode(app: &mut AppView, mode: ScreenMode) {
         tracing::info!(?late_theme, "mode switch: resolved regular theme");
     }
 
+    app.note_screen_disturbed();
     app.screen_mode = mode;
     app.registry = crate::actions::ActionRegistry::defaults_with_config_for(
         mode,

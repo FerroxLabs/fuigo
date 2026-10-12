@@ -31,6 +31,12 @@ impl SessionActor {
         {
             return;
         }
+        // P189: a turn that ended while the session parks owes its summary to unpark instead of calling the model now
+        let session_id = self.session_info.id.0.as_ref();
+        if crate::session::quiesce::owe(session_id, |o| o.turn_summary = Some(prompt_id.clone())) {
+            return;
+        }
+        crate::session::quiesce::note_turn_summary(session_id, &prompt_id);
         self.abort_turn_summary();
         let generation = self.turn_summary_generation.get().wrapping_add(1);
         self.turn_summary_generation.set(generation);
@@ -64,7 +70,7 @@ impl SessionActor {
     async fn generate_turn_summary(&self, prompt_id: &str, generation: u64) {
         use crate::session::helpers::turn_summary;
 
-        let conversation = self.chat_state_handle.get_conversation().await;
+        let conversation = crate::session::model_facing_reads::turn_summary_conversation(&self.chat_state_handle).await;
         let Some(anchor) = turn_summary::last_user_anchor(&conversation) else {
             return;
         };

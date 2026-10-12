@@ -92,10 +92,21 @@ mod secret_key_tests {
     }
 }
 
+/// What a key of the peer hold row or dialog asks for. The token is never carried here: dispatch takes it from the dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerUiAction {
+    /// Ask the shell for the held rows (fresh tokens) and open the dialog on the first.
+    OpenDialog,
+    /// Release (`refuse: false`) or refuse the dialog's message with its token.
+    Decide { refuse: bool },
+}
+
 /// Consumed by [`super::dispatch::dispatch`] to mutate state and return effects.
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Action {
+    /// Packet 12b: a key of the peer hold row / dialog (flag on only).
+    PeerUi(PeerUiAction),
     /// Quit the application.
     Quit,
     /// Restart the binary to pick up a downloaded update.
@@ -1434,6 +1445,12 @@ pub enum AfterSessionDelete {
 /// The event loop spawns these into a `JoinSet`; completions come back through [`TaskResult`] as `Action::TaskComplete`.
 #[derive(Debug)]
 pub enum Effect {
+    /// Packet 12b: one `fuigo/peer/*` request for an agent's session (tokens are redacted in `Debug`).
+    PeerRpc {
+        agent_id: AgentId,
+        session_id: String,
+        call: crate::peer_ui_state::PeerCall,
+    },
     /// Run a `command` status line.
     RunStatusLineCommand(StatusLineRun),
     /// Create a new ACP session.
@@ -2345,6 +2362,11 @@ pub enum ConfigWriteReport {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    /// Packet 12b: the answer to an [`Effect::PeerRpc`].
+    PeerRpcDone {
+        agent_id: AgentId,
+        outcome: crate::peer_ui_state::PeerRpcOutcome,
+    },
     /// A `command` status line finished.
     StatusLineCommandFinished {
         id: crate::app::status_line::RunId,
