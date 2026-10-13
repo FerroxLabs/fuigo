@@ -3886,25 +3886,41 @@ fn tool_update_in_progress_bg(id: &str, output_bytes: &[u8]) -> acp::SessionUpda
             }))),
     ))
 }
-/// P195 (U11, skipped as not live): upstream's `raw_input_requests_background` lets `block_until_ms: 0` and `timeout: 0` mean
-/// "background". Fuigo's shell tool has neither meaning: its input is `command`, `timeout` and `is_background`
-/// (`BashToolInput`), `timeout: 0` on a foreground call is the default timeout (`resolve_effective_timeout`), and
-/// `block_until_ms` is not an input field at all, so a call carrying it runs in the foreground. Detecting any of them as a
-/// background call here would hide a foreground command's row. Pins the detection to what the tool really does.
+/// `block_until_ms: 0` is the background request; the retired `is_background` / `background` booleans still defer a call
+/// when `block_until_ms` is absent, and an explicit `block_until_ms` wins over them. `timeout: 0` on a foreground call is
+/// the default timeout, so it never defers a call (that would hide a foreground command's row).
 #[test]
-fn only_the_is_background_flags_defer_an_execute_call_as_a_background_task() {
+fn block_until_ms_zero_and_the_retired_flags_defer_an_execute_call_as_a_background_task() {
     let call = |raw: serde_json::Value| {
         acp::ToolCall::new(acp::ToolCallId::new(Arc::from("t1")), "run_terminal_command".to_string())
             .kind(acp::ToolKind::Execute)
             .raw_input(Some(raw))
     };
-    assert!(is_bg_tool(&call(serde_json::json!({"command": "x", "is_background": true}))));
-    assert!(is_bg_tool(&call(serde_json::json!({"command": "x", "background": true}))));
+    for background in [
+        serde_json::json!({"command": "x", "block_until_ms": 0}),
+        serde_json::json!({"command": "x", "block_until_ms": "0"}),
+        serde_json::json!({"command": "x", "block_until_ms": 0, "is_background": false}),
+        serde_json::json!({"command": "x", "is_background": true}),
+        serde_json::json!({"command": "x", "background": true}),
+        // String-typed booleans and numbers parse as the runner parses them.
+        serde_json::json!({"command": "x", "is_background": "true"}),
+        serde_json::json!({"command": "x", "is_background": "yes"}),
+        serde_json::json!({"command": "x", "is_background": "1"}),
+        serde_json::json!({"command": "x", "background": "TRUE"}),
+        serde_json::json!({"command": "x", "block_until_ms": "0", "is_background": "false"}),
+    ] {
+        assert!(is_bg_tool(&call(background.clone())), "a background call: {background}");
+    }
     for foreground in [
         serde_json::json!({"command": "x"}),
         serde_json::json!({"command": "x", "timeout": 0}),
-        serde_json::json!({"command": "x", "block_until_ms": 0}),
-        serde_json::json!({"command": "x", "is_background": false, "timeout": 0, "block_until_ms": 0}),
+        serde_json::json!({"command": "x", "block_until_ms": 5000}),
+        serde_json::json!({"command": "x", "block_until_ms": 5000, "is_background": true}),
+        serde_json::json!({"command": "x", "is_background": false, "timeout": 0}),
+        serde_json::json!({"command": "x", "is_background": "false"}),
+        serde_json::json!({"command": "x", "is_background": "no"}),
+        serde_json::json!({"command": "x", "is_background": "0"}),
+        serde_json::json!({"command": "x", "block_until_ms": "5000", "is_background": "true"}),
     ] {
         assert!(!is_bg_tool(&call(foreground.clone())), "a foreground call: {foreground}");
     }

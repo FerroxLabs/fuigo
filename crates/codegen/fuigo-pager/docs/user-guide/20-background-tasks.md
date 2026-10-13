@@ -6,11 +6,11 @@ Fuigo runs long-lived processes without blocking the conversation. This document
 
 ## Background Commands
 
-Set `background: true` on the `run_terminal_command` tool to run a command in the background. It returns a task ID immediately; retrieve output with `get_command_or_subagent_output`.
+Set `block_until_ms: 0` on the `run_terminal_command` tool to run a command in the background. It returns a task ID immediately; retrieve output with `get_command_or_subagent_output`. A positive `block_until_ms` is how long the call waits for the command (default: the foreground timeout, 120 s, set by `toolset.bash.default_block_until_ms` or `timeout_secs`). A command that finishes in time returns its output. One still running when the wait ends follows your `toolset.bash.auto_background_on_timeout` setting, exactly as a foreground timeout always did: with it on, the command keeps running in the background and the call returns a task ID; with it off, the command is stopped and the result says so and points to `block_until_ms: 0`. A positive wait never starts a background task on its own beyond what that setting allows, and Esc / cancel ends it exactly as it ended a foreground command. The older `background: true` / `is_background: true` is still accepted and means `block_until_ms: 0`.
 
 ### How It Works
 
-1. The agent calls `run_terminal_command` with `background: true`.
+1. The agent calls `run_terminal_command` with `block_until_ms: 0`.
 2. The command starts in the background.
 3. The agent receives a `task_id` for later reference.
 4. When the command completes, a notification appears in the conversation.
@@ -220,7 +220,7 @@ Start a dev server in the background and continue coding:
 Start the dev server with `npm run dev` in the background, then implement the login form.
 ```
 
-The agent runs the dev server with `background: true` and continues writing code. When the server starts, you see a notification.
+The agent runs the dev server with `block_until_ms: 0` and continues writing code. When the server starts, you see a notification.
 
 ### Continuous Test Monitoring
 

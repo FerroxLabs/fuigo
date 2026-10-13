@@ -714,6 +714,11 @@ pub fn report_refusals(refusals: &[RefusedKeyReference]) {
     record_notes(refusals.iter().map(RefusedKeyReference::note));
 }
 
+/// Record one plain note (see [`crate::mcp_bearer_file::record_note`]).
+pub(crate) fn record_plain_note(note: String) {
+    record_notes(std::iter::once(note));
+}
+
 fn record_notes(new_notes: impl Iterator<Item = String>) {
     let scope = NoticeScope::current();
     let mut notes = NOTES.lock().unwrap_or_else(|e| e.into_inner());

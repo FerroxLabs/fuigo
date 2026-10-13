@@ -1183,6 +1183,7 @@ impl acp::Agent for MvpAgent {
                             restore_model_id.clone(),
                         ),
                         crate::agent::handlers::model_switch::SwitchEffort::Preserve,
+                        crate::agent::handlers::model_switch::SwitchContextWindow::Preserve,
                         crate::agent::handlers::model_switch::ConfigNotice::Send,
                     )
                     .await
@@ -3147,6 +3148,29 @@ mod tool_overrides_capability_tests {
     }
 }
 
+/// Rejects a `_meta.contextWindow` that is malformed or that the model does not support.
+fn resolve_switch_window(
+    meta: Option<&acp::Meta>,
+    info: &crate::agent::config::ModelInfo,
+    model_id: &acp::ModelId,
+) -> Result<crate::agent::handlers::model_switch::SwitchContextWindow, acp::Error> {
+    use crate::agent::handlers::model_switch::SwitchContextWindow;
+    let Some(raw) = meta.and_then(|meta| meta.get(fuigo_sampling_types::CONTEXT_WINDOW_META_KEY))
+    else {
+        return Ok(SwitchContextWindow::Preserve);
+    };
+    let window = raw
+        .as_u64()
+        .and_then(std::num::NonZeroU64::new)
+        .filter(|window| info.supports_context_window(*window))
+        .ok_or_else(|| {
+            crate::acp_error::invalid_params(format!(
+                "model '{}' does not support context window {raw}",
+                model_id.0
+            ))
+        })?;
+    Ok(SwitchContextWindow::Set(Some(window)))
+}
 impl MvpAgent {
     pub(crate) async fn set_model_gated(
         &self,
@@ -3169,10 +3193,13 @@ impl MvpAgent {
  Some(effort) => crate::agent::handlers::model_switch::SwitchEffort::Set(Some(effort)),
  None => crate::agent::handlers::model_switch::SwitchEffort::Preserve,
  };
+        let switch_window =
+            resolve_switch_window(args.meta.as_ref(), &model.info, &args.model_id)?;
         let res = crate::agent::handlers::model_switch::apply(
                 self,
                 args,
                 effort_override,
+                switch_window,
                 crate::agent::handlers::model_switch::ConfigNotice::Send,
             )
             .await;
@@ -3188,5 +3215,71 @@ impl MvpAgent {
             );
         }
         res
+    }
+}
+#[cfg(test)]
+mod context_window_meta_tests {
+    use super::*;
+    use crate::agent::handlers::model_switch::SwitchContextWindow;
+
+    fn info() -> crate::agent::config::ModelInfo {
+        let mut info = crate::agent::config::ModelInfo::fallback("m");
+        info.context_window = std::num::NonZeroU64::new(100_000).unwrap();
+        info.context_windows = vec![
+            std::num::NonZeroU64::new(100_000).unwrap(),
+            std::num::NonZeroU64::new(400_000).unwrap(),
+        ];
+        info
+    }
+
+    fn meta(value: serde_json::Value) -> acp::Meta {
+        let mut m = acp::Meta::new();
+        m.insert(
+            fuigo_sampling_types::CONTEXT_WINDOW_META_KEY.to_owned(),
+            value,
+        );
+        m
+    }
+
+    #[test]
+    fn absent_key_preserves_the_selection() {
+        let id = acp::ModelId::new("m");
+        assert_eq!(
+            resolve_switch_window(None, &info(), &id).unwrap(),
+            SwitchContextWindow::Preserve
+        );
+        assert_eq!(
+            resolve_switch_window(Some(&acp::Meta::new()), &info(), &id).unwrap(),
+            SwitchContextWindow::Preserve
+        );
+    }
+
+    #[test]
+    fn a_listed_window_is_selected() {
+        let id = acp::ModelId::new("m");
+        for window in [100_000u64, 400_000] {
+            let got = resolve_switch_window(Some(&meta(window.into())), &info(), &id).unwrap();
+            assert_eq!(
+                got,
+                SwitchContextWindow::Set(std::num::NonZeroU64::new(window))
+            );
+        }
+    }
+
+    #[test]
+    fn unlisted_zero_and_malformed_windows_are_refused() {
+        let id = acp::ModelId::new("m");
+        for bad in [
+            serde_json::json!(250_000),
+            serde_json::json!(0),
+            serde_json::json!(-1),
+            serde_json::json!("400k"),
+            serde_json::json!(null),
+        ] {
+            assert!(
+                resolve_switch_window(Some(&meta(bad.clone())), &info(), &id).is_err(),
+                "{bad} must be refused"
+            );
+        }
     }
 }

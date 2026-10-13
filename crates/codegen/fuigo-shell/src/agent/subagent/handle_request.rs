@@ -1244,6 +1244,7 @@ pub(crate) async fn run_shell_child(
             model_id: effective_model_id.clone(),
             agent_name: Some(definition.name.clone()),
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
+            context_window: None,
         });
     crate::waterfall::mark(&request.id, crate::waterfall::stage::SESSION_SPAWN);
     spawn_timer.record(SubagentSpawnPhase::SpawnPrepare, start.elapsed());

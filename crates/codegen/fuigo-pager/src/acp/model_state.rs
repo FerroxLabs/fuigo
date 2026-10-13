@@ -1,7 +1,7 @@
 use agent_client_protocol as acp;
 use fuigo_shell::sampling::types::{
-    ReasoningEffort, ReasoningEffortOption, parse_reasoning_effort_meta,
-    parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
+    ModelNotice, ReasoningEffort, ReasoningEffortOption, parse_context_window_meta,
+    parse_context_windows_meta, parse_model_notice_meta, parse_reasoning_effort_meta, parse_reasoning_efforts_meta, supports_reasoning_effort_meta,
 };
 use indexmap::IndexMap;
 
@@ -51,6 +51,10 @@ pub struct ModelState {
     /// When set, `get_context_window()` returns this instead of reading from the current model's metadata.
     /// Used for subagent views where SubagentProgress reports the actual window size.
     context_window_override: Option<u64>,
+    /// The window the session selected with `/context-window`; `None` means the model default.
+    pub(crate) context_window_selection: Option<u64>,
+    /// Set when a `ModelChanged` arrives while a local switch is in flight, so its completion keeps the broadcast selection.
+    pub(crate) model_changed_during_switch: bool,
 }
 
 impl ModelState {
@@ -71,16 +75,6 @@ impl ModelState {
     /// Machine-readable model ID string for the current model (e.g. "grok-4.5").
     pub fn current_model_id_str(&self) -> Option<&str> {
         Some(self.current.as_ref()?.0.as_ref())
-    }
-
-    /// Total context window tokens for the current model (if available).
-    fn current_context_window_tokens(&self) -> Option<u64> {
-        let meta = self.available.get(self.current.as_ref()?)?.meta.as_ref()?;
-        meta.get("totalContextTokens")
-            .and_then(|value| match value {
-                serde_json::Value::Number(number) => number.as_u64(),
-                _ => None,
-            })
     }
 
     /// Whether the current model accepts image input, read from the model's `meta` (the ACP extension point, same source as `totalContextTokens`).
@@ -107,10 +101,61 @@ impl ModelState {
         true
     }
 
-    /// The effective context window size (tokens): the override if set, else the current model's metadata.
+    /// Returns the override, else the selection if the current model supports it, else the model default.
     pub fn get_context_window(&self) -> Option<u64> {
-        self.context_window_override
-            .or_else(|| self.current_context_window_tokens())
+        if let Some(window) = self.context_window_override {
+            return Some(window);
+        }
+        let id = self.current.as_ref()?;
+        let default = self.model_default_window(id);
+        match self.context_window_selection {
+            Some(selection)
+                if default == Some(selection)
+                    || self.context_window_options_for(id).contains(&selection) =>
+            {
+                Some(selection)
+            }
+            _ => default,
+        }
+    }
+
+    /// The window a switch to `id` uses without a pick: the selection if `id` lists it, else its default.
+    pub(crate) fn window_after_switch_to(&self, id: &acp::ModelId) -> Option<u64> {
+        self.context_window_selection
+            .filter(|selection| self.context_window_options_for(id).contains(selection))
+            .or_else(|| self.model_default_window(id))
+    }
+
+    /// The model's catalog default (`totalContextTokens`).
+    pub(crate) fn model_default_window(&self, id: &acp::ModelId) -> Option<u64> {
+        self.available
+            .get(id)
+            .and_then(|info| info.meta.as_ref())
+            .and_then(|meta| meta.get("totalContextTokens"))
+            .and_then(|value| value.as_u64())
+    }
+
+    /// The notice the current model carries in `meta.notice`, if any.
+    /// It arrives over ACP from the agent, so it is scrubbed again here as untrusted text before it is held.
+    pub fn current_notice(&self) -> Option<ModelNotice> {
+        let info = self.available.get(self.current.as_ref()?)?;
+        crate::views::model_notice_banner::sanitize(parse_model_notice_meta(info.meta.as_ref())?)
+    }
+
+    /// The selectable windows for the current model, empty when the catalog lists none.
+    pub fn context_window_options(&self) -> Vec<u64> {
+        match self.current.as_ref() {
+            Some(id) => self.context_window_options_for(id),
+            None => Vec::new(),
+        }
+    }
+
+    pub(crate) fn context_window_options_for(&self, id: &acp::ModelId) -> Vec<u64> {
+        self.available
+            .get(id)
+            .and_then(|info| parse_context_windows_meta(info.meta.as_ref()))
+            .map(|windows| windows.into_iter().map(|w| w.get()).collect())
+            .unwrap_or_default()
     }
 
     /// Used for subagent views where SubagentProgress reports an actual window that may differ from the inherited model's metadata.
@@ -271,11 +316,18 @@ impl From<Option<acp::SessionModelState>> for ModelState {
                     .as_ref()
                     .and_then(|id| models.get(id))
                     .and_then(|info| parse_reasoning_effort_meta(info.meta.as_ref()));
+                let context_window_selection = current_model
+                    .as_ref()
+                    .and_then(|id| models.get(id))
+                    .and_then(|info| parse_context_window_meta(info.meta.as_ref()))
+                    .map(std::num::NonZeroU64::get);
                 Self {
                     available: models,
                     current: current_model,
                     reasoning_effort,
                     context_window_override: None,
+                    context_window_selection,
+                    model_changed_during_switch: false,
                 }
             })
             .unwrap_or_default()
@@ -535,5 +587,71 @@ mod tests {
             !state_with_meta(Some(serde_json::json!({ "inputModalities": ["text"] })))
                 .current_model_accepts_images()
         );
+    }
+
+    fn windowed_state() -> ModelState {
+        let mut state = state_with_meta(Some(serde_json::json!({
+            "totalContextTokens": 100_000,
+            "contextWindows": [100_000, 400_000],
+        })));
+        state.current = state.available.keys().next().cloned();
+        state
+    }
+
+    #[test]
+    fn context_window_defaults_to_the_model_and_follows_a_listed_selection() {
+        let mut state = windowed_state();
+        assert_eq!(state.context_window_options(), vec![100_000, 400_000]);
+        assert_eq!(state.get_context_window(), Some(100_000));
+        state.context_window_selection = Some(400_000);
+        assert_eq!(state.get_context_window(), Some(400_000));
+        // A selection the model does not list is not shown
+        state.context_window_selection = Some(250_000);
+        assert_eq!(state.get_context_window(), Some(100_000));
+        // The subagent override still wins
+        state.context_window_selection = Some(400_000);
+        state.override_context_window(77_000);
+        assert_eq!(state.get_context_window(), Some(77_000));
+    }
+
+    #[test]
+    fn window_after_switch_keeps_a_selection_only_when_the_target_lists_it() {
+        let mut state = windowed_state();
+        let a = state.current.clone().unwrap();
+        let other = acp::ModelId::new(Arc::from("other"));
+        let mut info = acp::ModelInfo::new(other.clone(), "Other".to_string());
+        info.meta = serde_json::json!({
+            "totalContextTokens": 128_000,
+            "contextWindows": [128_000, 400_000],
+        })
+        .as_object()
+        .cloned();
+        state.available.insert(other.clone(), info);
+        let plain = acp::ModelId::new(Arc::from("plain"));
+        let mut info = acp::ModelInfo::new(plain.clone(), "Plain".to_string());
+        info.meta = serde_json::json!({ "totalContextTokens": 64_000 }).as_object().cloned();
+        state.available.insert(plain.clone(), info);
+
+        state.context_window_selection = Some(400_000);
+        assert_eq!(state.window_after_switch_to(&a), Some(400_000));
+        assert_eq!(state.window_after_switch_to(&other), Some(400_000));
+        assert_eq!(state.window_after_switch_to(&plain), Some(64_000));
+    }
+
+    #[test]
+    fn selection_comes_from_the_current_models_meta_on_load() {
+        let id = acp::ModelId::new(Arc::from("m"));
+        let mut info = acp::ModelInfo::new(id.clone(), "M".to_string());
+        info.meta = serde_json::json!({
+            "totalContextTokens": 100_000,
+            "contextWindows": [100_000, 400_000],
+            "contextWindow": 400_000,
+        })
+        .as_object()
+        .cloned();
+        let state: ModelState =
+            Some(acp::SessionModelState::new(id, vec![info])).into();
+        assert_eq!(state.context_window_selection, Some(400_000));
+        assert_eq!(state.get_context_window(), Some(400_000));
     }
 }

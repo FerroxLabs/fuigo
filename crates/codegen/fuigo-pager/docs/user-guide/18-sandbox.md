@@ -214,14 +214,23 @@ Profile resolution order for a **new** session:
 | -------- | --------- | ---------------------- |
 | Linux    | Landlock  | Kernel 5.13 or later   |
 | macOS    | Seatbelt  | macOS (all versions)   |
+| Windows  | None      | Not available          |
 
-If the sandbox cannot be applied (e.g., unsupported kernel, missing entitlements), Fuigo logs a warning and continues without enforcement. The exception is an explicitly-requested **custom profile**: on **both macOS and Linux**, if it cannot be applied (unknown profile, malformed `sandbox.toml`, or — on Linux — `bubblewrap` unavailable for a non-empty `deny`), Fuigo refuses to start rather than run with its denied paths exposed.
+The sandbox is available on Linux and macOS only. On Windows no sandbox can exist, so a configured profile other than `off` is not applied: Fuigo still starts and runs, and prints this warning on stderr at every start (also in headless runs, before the first model request, and before a `fuigo wrap` command starts), shows it as a notice when a session starts (the TUI and ACP clients receive it as a config notice; in headless `plain` output the stderr line is shown once), and lists it as a `Sandbox warning` line in the `/status` view:
+
+```text
+warning: Sandbox profile workspace is set but sandboxing is not available on Windows: commands and file tools run unsandboxed.
+```
+
+With profile `off` or no profile, nothing is shown. For `fuigo wrap`, the warning follows the profile in your configuration; a `--sandbox` option on the command line is not consulted.
+
+On Linux and macOS, if the sandbox cannot be applied (e.g., unsupported kernel, missing entitlements), Fuigo continues without enforcement only for the `off` and `devbox` profiles, and records that in its log. For every other profile (`workspace` and the other built-in enforcing profiles, and any **custom profile**), Fuigo refuses to start rather than run with its protections missing. A custom profile that cannot be applied (unknown profile, malformed `sandbox.toml`, or, on Linux, `bubblewrap` unavailable for a non-empty `deny`) is refused the same way.
 
 ---
 
 ## Network Restrictions
 
-On Linux, profiles with `restrict_network` block network access in **child processes** (bash commands, scripts) via seccomp. On macOS, network blocking is a no-op. Built-in tools that make HTTP requests in-process (web search, LLM API calls) are never affected -- the agent needs network access to function.
+On Linux, profiles with `restrict_network` block network access in **child processes** (bash commands, scripts) via seccomp. On macOS, network blocking is a no-op: the profiles marked "Blocked" do not restrict child-process network access there (the seccomp filter is installed only on Linux). Built-in tools that make HTTP requests in-process (web search, LLM API calls) are never affected -- the agent needs network access to function.
 
 In practice, on Linux this means:
 

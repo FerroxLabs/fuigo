@@ -6,7 +6,7 @@ network access: reconnect and start again. If you can't reconnect, contact your 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManagedPolicyRefusal {
-    Compromised,
+    Compromised(fuigo_config::ManagedPolicyCompromise),
     Busy,
     LockUnavailable { home: std::path::PathBuf },
 }
@@ -14,7 +14,8 @@ pub enum ManagedPolicyRefusal {
 impl std::fmt::Display for ManagedPolicyRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Compromised => f.write_str(MANAGED_POLICY_MISSING_MSG),
+            // Fixed sentence per category: no path, signature or claim value.
+            Self::Compromised(reason) => write!(f, "{MANAGED_POLICY_MISSING_MSG}\nReason: {reason}."),
             Self::Busy => f.write_str(
                 "Managed policy is being updated by another fuigo process or a \
                  background policy sync in this one, and could not be verified in \
@@ -33,16 +34,18 @@ impl std::fmt::Display for ManagedPolicyRefusal {
 /// Named fields: adjacent bools would silently transpose.
 pub(super) struct GateSnapshot {
     pub(super) managed_principal_present: bool,
-    pub(super) policy_compromised: bool,
+    pub(super) policy_compromised: Option<fuigo_config::ManagedPolicyCompromise>,
 }
 
 pub(super) fn managed_policy_gate_decision(
     snapshot: GateSnapshot,
 ) -> Result<(), ManagedPolicyRefusal> {
-    if snapshot.managed_principal_present && snapshot.policy_compromised {
-        return Err(ManagedPolicyRefusal::Compromised);
+    match snapshot.policy_compromised {
+        Some(reason) if snapshot.managed_principal_present => {
+            Err(ManagedPolicyRefusal::Compromised(reason))
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 pub(super) fn auth_mode(

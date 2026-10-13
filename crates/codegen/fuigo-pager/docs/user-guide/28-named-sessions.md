@@ -295,7 +295,13 @@ runs do nothing new.
   session's limit of peer-started turns.
 - Fuigo catches the same action being re-sent after a denial. It does not catch a reworded action.
 - In testing, a model occasionally ended a turn started by a message from another session with no reply instead of
-  refusing the message. Nothing was run.
+  refusing the message. Nothing was run. Now, when such a turn ends with an empty reply or a refusal from the model
+  provider, you see one notice in the transcript. A turn that was started by a message from another session and makes
+  no tool call at all (an empty reply, a provider refusal or a reply with only text) is recorded as refused
+  automatically with the reason "no action taken": the sender is told. This applies to that message only; later
+  messages from that sender are not held because of it (unlike a refusal the model makes with `refuse_peer_message`,
+  which holds the sender for the rest of the session). A turn in which the model used a tool is not refused this way. The model can still reply with text and take
+  no action; the rule judges the turn by whether any tool was called, not by whether the model's text was a refusal.
 - Session park in this release is hold only.
 
 ---
@@ -308,7 +314,7 @@ Type `/peers status`. It prints `Peer inbox: ready.` or `Peer inbox: unavailable
 | --- | --- |
 | the feature is off | Turn on `features.peer_messaging`, check for a requirements pin, and restart Fuigo. |
 | the Fuigo home is a symbolic link | Point `FUIGO_HOME` at a real folder that you own. |
-| the Fuigo home is not private to this user | Run the `chmod go-w` command shown after the reason (for an unusual path with spaces or shell characters no command is shown: remove write access for group and others from that directory yourself). On Windows, remove write access for other users and groups in the folder's Security settings (Properties, Security, Advanced); only you, SYSTEM and Administrators should have it. A home made by an older version on a system with umask 002 (for example Ubuntu) needs `chmod go-w ~/.fuigo` once; homes made by this version are private. |
+| the Fuigo home is not private to this user | Run the `chmod go-w` command shown after the reason (for an unusual path with spaces or shell characters no command is shown: remove write access for group and others from that directory yourself). On Windows the reason reads "remove write access for group and others from the Fuigo home: <path>" and no command is shown: remove write access for other users and groups in the folder's Security settings (Properties, Security, Advanced); only you, SYSTEM and Administrators should have it. A home made by an older version on a system with umask 002 (for example Ubuntu) needs `chmod go-w ~/.fuigo` once; homes made by this version are private. |
 | a parent directory of the Fuigo home is not trusted | Check the owner and permissions of the folders above the Fuigo home. |
 | the Fuigo home is missing or not a directory | Create it, or fix `FUIGO_HOME`. |
 | the Fuigo home path is not a plain absolute path | Use an absolute path with no `.` or `..` parts. |

@@ -895,6 +895,9 @@ pub fn expand_env_vars_in_toml(value: &mut toml::Value) {
 
 fn expand_env_vars_in_toml_at(value: &mut toml::Value, path: &mut Vec<String>) {
     match value {
+        // `mcp_servers.<name>.bearer_token_file` is a literal path: never expanded, so the environment cannot choose which
+        // credential file is sent (a `$` stays in the path and is then just a character of it).
+        toml::Value::String(_) if is_bearer_token_file_path(path) => {}
         toml::Value::String(s) => {
             let expanded = expand_env_vars_in_string_keeping(s, key_default_resolves_at(path));
             if expanded != *s {
@@ -915,6 +918,13 @@ fn expand_env_vars_in_toml_at(value: &mut toml::Value, path: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// `mcp_servers.<name>.bearer_token_file`, wherever the `mcp_servers` table sits (top level or inside a patch).
+fn is_bearer_token_file_path(path: &[String]) -> bool {
+    path.iter().position(|seg| seg == "mcp_servers").is_some_and(|i| {
+        path.len() == i + 3 && path[i + 2] == "bearer_token_file"
+    })
 }
 
 /// Whether a config value at `path` is resolved against the saved key where it is used (see

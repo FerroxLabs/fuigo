@@ -470,6 +470,7 @@ async fn run_task(
     // A turn started by a peer message must not run once the recheck tripped the hold: the row goes back to held (reason
     // `integrity`). A human-started turn continues; the human got the warning.
     let blocked = completed_by_peer && session.peer_admission.integrity_tripped() && !session.peer_turn_row_still_qualifies(&request);
+    let peer_origin = request.input_origin.as_prompt_origin().clone();
     let result = if blocked {
         Ok(crate::session::commands::PromptTurnOk {
             stop_reason: acp::StopReason::Cancelled,
@@ -483,6 +484,9 @@ async fn run_task(
     } else {
         session.handle_turn_input(request).await
     };
+    if completed_by_peer && !blocked {
+        session.finish_peer_started_turn(&peer_origin, &result);
+    }
     // The turn (and any peer input that joined it) is over.
     session.peer_admission.set_peer_turn_in_flight(false);
     session.set_root_peer_turn(false);

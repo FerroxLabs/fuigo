@@ -3260,3 +3260,57 @@ fn a_finished_provider_write_is_reported_in_the_agents_scrollback() {
     );
     assert_eq!(app.agents[&AgentId(0)].scrollback.len(), before + 1);
 }
+#[test]
+fn context_window_set_records_the_selection_and_reports_it() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = acp::ModelId::new(std::sync::Arc::from("windowed"));
+    let mut info = acp::ModelInfo::new(model_id.clone(), "Windowed".to_string());
+    info.meta = serde_json::json!({
+        "totalContextTokens": 100_000,
+        "contextWindows": [100_000, 400_000],
+    })
+    .as_object()
+    .cloned();
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.models.available.insert(model_id.clone(), info);
+    agent.session.models.current = Some(model_id);
+    agent.session.model_switch_pending = true;
+    let before = agent.scrollback.len();
+    assert_eq!(agent.session.models.get_context_window(), Some(100_000));
+
+    let window = std::num::NonZeroU64::new(400_000).unwrap();
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextWindowSet {
+            agent_id: id,
+            window,
+            result: Ok(()),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(!agent.session.model_switch_pending);
+    assert_eq!(agent.session.models.context_window_selection, Some(400_000));
+    assert_eq!(agent.session.models.get_context_window(), Some(400_000));
+    assert_eq!(agent.scrollback.len(), before + 1);
+}
+#[test]
+fn context_window_set_failure_leaves_the_selection_alone() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.model_switch_pending = true;
+    let before = agent.scrollback.len();
+    dispatch(
+        Action::TaskComplete(TaskResult::ContextWindowSet {
+            agent_id: id,
+            window: std::num::NonZeroU64::new(400_000).unwrap(),
+            result: Err("model 'windowed' does not support context window 400000".to_string()),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(!agent.session.model_switch_pending);
+    assert_eq!(agent.session.models.context_window_selection, None);
+    assert_eq!(agent.scrollback.len(), before + 1);
+}

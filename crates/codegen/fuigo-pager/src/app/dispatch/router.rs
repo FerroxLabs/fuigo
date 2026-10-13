@@ -924,6 +924,45 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
                 prev_model_id: None,
             }]
         }
+        Action::SetContextWindow { model_id, window } => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            if agent.session.model_switch_pending {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Model switch in progress; retry once it completes",
+                    ));
+                return vec![];
+            }
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        "Context window applies once the session starts; run /context-window then",
+                    ));
+                return vec![];
+            };
+            if !agent
+                .session
+                .models
+                .context_window_options_for(&model_id)
+                .contains(&window.get())
+            {
+                return vec![];
+            }
+            agent.session.model_switch_pending = true;
+            vec![Effect::SetContextWindow {
+                agent_id: id,
+                session_id,
+                model_id,
+                window,
+            }]
+        }
         Action::AnnouncementsHide => {
             let shown_key = crate::views::announcements::first_session_announcement(
                 &app.active_announcements,

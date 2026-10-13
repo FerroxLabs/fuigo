@@ -319,7 +319,10 @@ fn vendor_blocked_keys(
 /// and a note recorded. `None` (the server is dropped) when the cleaned definition cannot be rebuilt: fail closed.
 /// fuigo-mcp resolves such references from the key store at spawn, so a server that holds none is never handed the key.
 pub(crate) fn refuse_saved_key_in_server(server: acp::McpServer, origin: &str) -> Option<acp::McpServer> {
-    fuigo_config::key_naming::refuse_key_references_in_server_value(server, origin)
+    let mut server = fuigo_config::key_naming::refuse_key_references_in_server_value(server, origin)?;
+    // The same sources may not make Fuigo read a file of their choosing either: no `bearer_token_file` from them.
+    fuigo_mcp::bearer_token_file::strip_from_server(&mut server, origin);
+    Some(server)
 }
 
 /// Rename client servers whose name cannot be a tool-id segment (see
@@ -704,7 +707,7 @@ fn load_plugin_mcp_servers_from_value(
 }
 
 /// [`load_plugin_mcp_servers_from_value`] with the label a refusal note carries (the manifest path).
-fn load_plugin_mcp_servers_from_value_labelled(
+pub(crate) fn load_plugin_mcp_servers_from_value_labelled(
     root: &serde_json::Value,
     source_label: &str,
     plugin_name: &str,

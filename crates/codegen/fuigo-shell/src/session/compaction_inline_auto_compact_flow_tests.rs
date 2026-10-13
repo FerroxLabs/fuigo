@@ -270,6 +270,7 @@ async fn create_test_actor(
             threshold_percent: std::cell::Cell::new(threshold_percent),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),
@@ -1042,6 +1043,7 @@ async fn family_switch_compacts_lossy_with_new_model() {
                     false,
                     true,
                     85,
+                    Default::default(),
                 )
                 .await
                 .expect("compact failure is log-only; the switch must succeed");
@@ -2335,7 +2337,7 @@ async fn actor_with_prepared_client() -> (
         .await
         .expect("mock inference server");
     actor
-        .handle_set_session_model(switch_target_config("gate-model", server.url()), false, false, false, true, 85)
+        .handle_set_session_model(switch_target_config("gate-model", server.url()), false, false, false, true, 85, Default::default())
         .await
         .expect("switch");
     let client = actor.prepare_chat_completion(false).await.expect("client");

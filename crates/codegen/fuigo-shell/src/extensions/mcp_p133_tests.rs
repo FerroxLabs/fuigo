@@ -174,3 +174,20 @@ fn p152_the_note_for_an_added_server_fits_its_source() {
         "the note says what keeps the saved entry untrusted: {note}"
     );
 }
+
+/// 26-6c: a client-supplied `bearer_token_file` is dropped before the definition is persisted (with a visible note), so
+/// the user's own config.toml never holds a path and URL the client chose, whatever happens to the untrusted mark later.
+#[test]
+fn an_upserted_bearer_token_file_is_not_persisted() {
+    let req = request(serde_json::json!({
+        "session_id": "s", "server_name": "b266c-up-file", "url": "https://m.b266c.invalid/mcp",
+        "bearer_token_file": "/home/u/.secrets/token"
+    }));
+    let req = untrusted_upsert(req).expect("cleaned");
+    assert_eq!(req.config.bearer_token_file(), None);
+    let written = toml::Value::try_from(&req.config).expect("serializes");
+    assert!(written.get("bearer_token_file").is_none(), "{written}");
+    assert!(!written.to_string().contains("/home/u/.secrets"), "{written}");
+    let notes = fuigo_config::key_naming::refusal_notes();
+    assert!(notes.iter().any(|n| n.contains("`b266c-up-file`") && n.contains("bearer_token_file ignored")), "{notes:?}");
+}

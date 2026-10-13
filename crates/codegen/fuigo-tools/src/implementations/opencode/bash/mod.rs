@@ -222,6 +222,7 @@ impl From<BashInput> for ToolInput {
             timeout: value.timeout,
             description: value.description,
             is_background: false,
+            block_until_ms: None,
             // Kept for the permission check: the command runs here (P173).
             workdir: value.workdir,
         })

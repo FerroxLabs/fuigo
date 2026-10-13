@@ -963,7 +963,7 @@ pub use fuigo_config::{
     is_managed_config_hard_stale_for, is_managed_config_stale_for, load_config_file,
     load_from_disk, load_managed_config, load_merged_requirements, load_system_managed_config,
     load_toml_file, managed_config_identity_changed_at, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
+    managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
     normalize_identity, requirements_layers, resolved_env_overlay, system_config_dir,
     user_fuigo_home,
 };
@@ -1569,6 +1569,33 @@ fn route_bwrap_startup<T>(
         None => BwrapStartup::Continue,
     }
 }
+/// The stderr line for the "sandbox unavailable" warning (`warning:` like the other startup warnings).
+pub(crate) fn sandbox_unavailable_stderr_line(warning: &str) -> String {
+    format!(
+        "warning: {}",
+        fuigo_tty_utils::scrub_unsafe_display(warning, Some(' '))
+    )
+}
+/// The stderr line for `fuigo wrap` (which returns before `apply_sandbox` and runs its command unsandboxed) for `profile`.
+/// `None` off Windows and for profile `off`.
+pub(crate) fn wrap_sandbox_warning_line_for(profile: &str, on_windows: bool) -> Option<String> {
+    fuigo_sandbox::unavailable_warning_for(profile, on_windows)
+        .map(|w| sandbox_unavailable_stderr_line(&w))
+}
+/// `fuigo wrap`: on Windows with a sandbox profile set, the warning line to print before the wrapped command starts.
+/// Does nothing (no config read) on other platforms, so their behaviour is unchanged.
+pub fn wrap_sandbox_warning_line() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let config = crate::agent::config::SandboxSettingsConfig::from_effective_config();
+    let req = load_merged_requirements();
+    let profile_req = req
+        .as_ref()
+        .and_then(|v| v.get("sandbox")?.get("profile")?.as_str());
+    let resolved = config.resolve_profile(None, profile_req);
+    wrap_sandbox_warning_line_for(&resolved.value, true)
+}
 /// Resolve sandbox profile and apply OS-level enforcement. Called once at startup.
 ///
 /// `cli_profile` is the resumed/forced base profile (a resumed session's saved profile, or an explicit `--sandbox`).
@@ -1600,6 +1627,10 @@ pub fn apply_sandbox(
         fuigo_sandbox::ProfileName::Off
     });
     fuigo_sandbox::set_configured_profile(&resolved.value);
+    // A profile is set but this platform or build cannot enforce it: say so on stderr at every start (headless included).
+    if let Some(warning) = fuigo_sandbox::unavailable_warning() {
+        fuigo_tty_utils::cli_eprintln!("{}", sandbox_unavailable_stderr_line(&warning));
+    }
     let workspace = cwd
         .and_then(|p| dunce::canonicalize(p).ok())
         .or_else(|| std::env::current_dir().ok())

@@ -2623,6 +2623,7 @@ mod tests {
             timeout: None,
             description: "list files".into(),
             is_background: false,
+            block_until_ms: None,
             workdir: None,
         });
         let merged = merge_tool_meta(
@@ -2810,7 +2811,7 @@ mod tests {
                 .expect("run_terminal_cmd definition not found")
                 .clone();
             let desc = bash.function.description.clone().unwrap_or_default();
-            let field_desc = bash.function.parameters["properties"]["is_background"]["description"]
+            let field_desc = bash.function.parameters["properties"]["block_until_ms"]["description"]
                 .as_str()
                 .unwrap_or_default()
                 .to_string();
@@ -2841,7 +2842,7 @@ mod tests {
         );
         assert!(
             field_off.contains("get_task_output"),
-            "reminders off: is_background description should name get_task_output: {field_off}"
+            "reminders off: block_until_ms description should name get_task_output: {field_off}"
         );
     }
     /// Each assertion pattern-matches on the exact `ToolOutput::SearchReplace`
@@ -4010,8 +4011,8 @@ mod tests {
             .and_then(|p| p.as_object())
             .expect("bash schema must have properties");
         assert!(
-            !properties.contains_key("background"),
-            "disabled background should hide is_background from exported schema"
+            !properties.contains_key("block_until_ms") && !properties.contains_key("is_background"),
+            "disabled background should hide block_until_ms from exported schema"
         );
         let desc = bash_def
             .function
@@ -4080,8 +4081,12 @@ mod tests {
             .and_then(|p| p.as_object())
             .expect("bash schema must have properties");
         assert!(
-            properties.contains_key("is_background"),
-            "enabled background should preserve is_background in exported schema"
+            properties.contains_key("block_until_ms"),
+            "enabled background should advertise block_until_ms in exported schema"
+        );
+        assert!(
+            !properties.contains_key("is_background") && !properties.contains_key("timeout"),
+            "the single knob replaces is_background and timeout in the exported schema"
         );
         let desc = bash_def
             .function
@@ -4132,7 +4137,7 @@ mod tests {
         for d in &defs {
             let desc = d.function.description.as_deref().unwrap_or("");
             assert!(
-                !desc.contains(" =true"),
+                !desc.contains(" =true") && !desc.contains(" =0"),
                 "tool `{}` renders a blank background param (mistyped `params.*` key?):\n{desc}",
                 d.function.name
             );
@@ -4149,14 +4154,14 @@ mod tests {
                 .unwrap_or_default()
         };
         assert!(
-            desc_of("run_terminal_cmd").contains("is_background"),
-            "bash description must resolve params.execute.is_background"
+            desc_of("run_terminal_cmd").contains("block_until_ms=0"),
+            "bash description must resolve params.execute.block_until_ms"
         );
         for name in ["get_task_output", "wait_tasks"] {
             let desc = desc_of(name);
             assert!(
-                desc.contains("is_background"),
-                "`{name}` description must resolve params.execute.is_background"
+                desc.contains("block_until_ms=0"),
+                "`{name}` description must resolve params.execute.block_until_ms"
             );
             assert!(
                 desc.contains("run_in_background"),
@@ -4253,8 +4258,8 @@ mod tests {
             .and_then(|p| p.as_object())
             .expect("bash schema must have properties");
         assert!(
-            !properties.contains_key("background"),
-            "disabled background should hide is_background from exported schema even with override"
+            !properties.contains_key("block_until_ms") && !properties.contains_key("is_background"),
+            "disabled background should hide block_until_ms from exported schema even with override"
         );
         assert_eq!(
             bash_def.function.description.as_deref(),

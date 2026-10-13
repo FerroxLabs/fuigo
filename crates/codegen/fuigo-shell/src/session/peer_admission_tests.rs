@@ -763,3 +763,36 @@ fn p13r2_a_released_sender_denied_row_is_delivered_but_every_other_reason_is_rec
     let s = store(PeerInboundPolicy::Accept, OperatorPresence::None);
     assert!(matches!(s.release("m1", "x", T0, &live(r0)), Err(ReleaseError::NoOperator)));
 }
+
+/// 26-4/26-5 round 2: an automatic refusal (a peer-started turn that ended without a tool call) refuses that one message. It
+/// does not hold the sender: the sender is only the envelope's claimed `from`, so a forged "thanks!" must not silence the real one.
+#[test]
+fn r2_automatic_refusal_is_per_message_and_does_not_hold_the_sender() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    assert_eq!(outcome_of(s.submit(env_from("m1", ae()), T0, &live(ae()))), DeliveryOutcome::Delivered {});
+    s.note_delivered(&env_from("m1", ae()));
+    let _g = s.begin_turn(false, Some("m1"));
+    s.note_model_response(0, true, false);
+    assert!(s.finish_peer_turn("m1", false), "the message is recorded refused");
+    let n = s.take_notices(now_mono());
+    assert_eq!(n.last().map(|n| n.kind), Some(NoticeKind::ModelRefused));
+    assert_eq!(n.last().and_then(|n| n.detail.as_deref()), Some("no action taken"));
+    assert_eq!(s.refused_sender_count(), 0, "no per-sender state");
+    // A second message claiming the same `from`, in the same mode, is delivered normally.
+    assert_eq!(outcome_of(s.submit(env_from("m2", ae()), T0 + 1, &live(ae()))), DeliveryOutcome::Delivered {});
+    assert_eq!(s.held_count(), 0);
+}
+
+/// The tool path keeps its full consequences (pinned): the sender is held for the rest of the session.
+#[test]
+fn r2_tool_refusal_still_holds_the_sender() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    assert_eq!(outcome_of(s.submit(env_from("m1", ae()), T0, &live(ae()))), DeliveryOutcome::Delivered {});
+    s.note_delivered(&env_from("m1", ae()));
+    s.refuse_by_model("m1", "not mine").expect("refused");
+    assert_eq!(s.refused_sender_count(), 1);
+    let out = s.submit(env_from("m2", ae()), T0 + 1, &live(ae()));
+    assert!(matches!(out, Submitted::Done(DeliveryOutcome::Held { reason: HoldReason::SenderDenied, .. })), "{out:?}");
+}

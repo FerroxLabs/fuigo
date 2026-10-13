@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use std::num::NonZeroU64;
 
 use super::config::{ConfigModelOverride, EnvKeys};
 use super::config_model_override_parse::{ConfigWarning, ConfigWarningKind};
@@ -28,6 +29,8 @@ pub struct ModelProviderConfig {
     pub auth_provider: Option<String>,
     pub auth: Option<crate::auth::AuthProviderConfig>,
     pub context_window: Option<u64>,
+    /// Selectable context windows inherited by models that set neither `context_window` nor `context_windows`.
+    pub context_windows: Option<Vec<NonZeroU64>>,
     /// Ceiling on generated tokens for models routed through this provider,
     /// inherited by every `[model.<id>]` that sets none of its own.
     ///
@@ -61,6 +64,7 @@ impl std::fmt::Debug for ModelProviderConfig {
             auth_provider,
             auth,
             context_window,
+            context_windows,
             max_completion_tokens,
         } = self;
         f.debug_struct("ModelProviderConfig")
@@ -76,6 +80,7 @@ impl std::fmt::Debug for ModelProviderConfig {
             .field("auth_provider", auth_provider)
             .field("auth", auth)
             .field("context_window", context_window)
+            .field("context_windows", context_windows)
             .field("max_completion_tokens", max_completion_tokens)
             .finish()
     }
@@ -121,6 +126,30 @@ pub(crate) fn auth_config_issues(
         ));
     }
     issues
+}
+
+/// Bounds a configured `context_windows` list in place: drops windows above `MAX_CONTEXT_WINDOW_TOKENS`, repeats, and entries past `MAX_CONTEXT_WINDOW_CHOICES`.
+/// (Zero is refused earlier, by the non-zero element type.) Returns a warning text when anything was dropped.
+pub(crate) fn sanitize_context_windows(listed: &mut Vec<NonZeroU64>) -> Option<String> {
+    use fuigo_sampling_types::{MAX_CONTEXT_WINDOW_CHOICES, MAX_CONTEXT_WINDOW_TOKENS};
+    let before = listed.len();
+    let mut kept: Vec<NonZeroU64> = Vec::with_capacity(before.min(MAX_CONTEXT_WINDOW_CHOICES));
+    for window in listed.iter().copied() {
+        if window.get() > MAX_CONTEXT_WINDOW_TOKENS || kept.contains(&window) {
+            continue;
+        }
+        if kept.len() == MAX_CONTEXT_WINDOW_CHOICES {
+            break;
+        }
+        kept.push(window);
+    }
+    *listed = kept;
+    (listed.len() != before).then(|| {
+        format!(
+            "context_windows: dropped {} value(s) above {MAX_CONTEXT_WINDOW_TOKENS} tokens, repeated, or beyond the first {MAX_CONTEXT_WINDOW_CHOICES}",
+            before - listed.len()
+        )
+    })
 }
 
 pub(crate) fn parse_model_providers(
@@ -206,6 +235,20 @@ pub(crate) fn parse_model_providers(
                          provider takes precedence, so the inline helper never runs"
                             .to_owned(),
                     ));
+                }
+                let mut provider = provider;
+                if let Some(listed) = provider.context_windows.as_mut() {
+                    if let Some(reason) = sanitize_context_windows(listed) {
+                        warnings.push(ConfigWarning::model_provider(
+                            id,
+                            Some("context_windows"),
+                            ConfigWarningKind::InvalidValue,
+                            reason,
+                        ));
+                    }
+                    if listed.is_empty() {
+                        provider.context_windows = None;
+                    }
                 }
                 providers.insert(id.clone(), provider);
             }
@@ -345,6 +388,7 @@ impl ConfigModelOverride {
             auth_provider,
             auth,
             context_window,
+            context_windows,
             max_completion_tokens,
         } = provider;
 
@@ -354,7 +398,11 @@ impl ConfigModelOverride {
         merged.api_base_url = merged.api_base_url.or_else(|| api_base_url.clone());
         merged.api_backend = merged.api_backend.or_else(|| api_backend.clone());
         merged.auth_scheme = merged.auth_scheme.or(*auth_scheme);
-        merged.context_window = merged.context_window.or(*context_window);
+        // Inherited wholesale only when the model sets none of its own.
+        if merged.context_window.is_none() && merged.context_windows.is_none() {
+            merged.context_window = *context_window;
+            merged.context_windows = context_windows.clone();
+        }
         // Same shape as `context_window` above, and deliberately independent of
         // it: an output ceiling is not computed from a context window.
         merged.max_completion_tokens = merged.max_completion_tokens.or(*max_completion_tokens);
@@ -1458,5 +1506,234 @@ mod p70_redacted_debug {
             ..Default::default()
         };
         assert_redacted(&base, &["p70bq-FAKE-1e2f3a4b", "p70bk-FAKE-5c6d7e8f"]);
+    }
+}
+#[cfg(test)]
+mod context_window_tests {
+    use crate::agent::config::{Config, resolve_model_list};
+    use crate::agent::config_model_override_parse::WarningTarget;
+
+    // ---- /context-window: the selectable windows come from local configuration only ----
+
+    fn windows_of(cfg: &toml::Value, key: &str) -> (u64, Vec<u64>) {
+        let cfg = Config::new_from_toml_cfg(cfg).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get(key).expect("model should exist");
+        (
+            model.info.context_window.get(),
+            model.info.context_windows.iter().map(|w| w.get()).collect(),
+        )
+    }
+
+    #[test]
+    fn model_context_windows_list_sets_default_and_choices() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.m]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_windows = [100000, 400000]
+            "#,
+        )
+        .unwrap();
+        // No scalar: the first listed window is the default
+        assert_eq!(windows_of(&raw, "m"), (100_000, vec![100_000, 400_000]));
+
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.m]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_window = 250000
+            context_windows = [100000, 400000]
+            "#,
+        )
+        .unwrap();
+        // The scalar is the default and is part of the menu, listed first
+        assert_eq!(
+            windows_of(&raw, "m"),
+            (250_000, vec![250_000, 100_000, 400_000])
+        );
+    }
+
+    #[test]
+    fn model_without_a_list_has_no_choices() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.m]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_window = 250000
+            "#,
+        )
+        .unwrap();
+        assert_eq!(windows_of(&raw, "m"), (250_000, vec![]));
+    }
+
+    #[test]
+    fn model_inherits_provider_context_windows_unless_it_sets_its_own() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model_providers.gateway]
+            base_url = "https://gateway.example/v1"
+            context_window = 100000
+            context_windows = [100000, 400000]
+
+            [model.inherits]
+            model = "a"
+            model_provider = "gateway"
+
+            [model.own-scalar]
+            model = "b"
+            model_provider = "gateway"
+            context_window = 200000
+            "#,
+        )
+        .unwrap();
+        assert_eq!(windows_of(&raw, "inherits"), (100_000, vec![100_000, 400_000]));
+        assert_eq!(windows_of(&raw, "own-scalar"), (200_000, vec![]));
+    }
+
+    #[test]
+    fn context_windows_bounds_drop_zero_absurd_repeated_and_excess_values() {
+        use fuigo_sampling_types::{MAX_CONTEXT_WINDOW_CHOICES, MAX_CONTEXT_WINDOW_TOKENS};
+        // Zero is refused by the element type: the field is skipped with a warning, the model survives
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.zero]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_window = 100000
+            context_windows = [0, 400000]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert!(cfg.config_warnings.iter().any(|w| matches!(
+            &w.target,
+            WarningTarget::Model { field, .. } if field.as_deref() == Some("context_windows")
+        )));
+        assert_eq!(windows_of(&raw, "zero"), (100_000, vec![]));
+
+        // Above the cap, repeated: dropped, with a warning
+        let too_big = MAX_CONTEXT_WINDOW_TOKENS + 1;
+        let raw: toml::Value = toml::from_str(&format!(
+            r#"
+            [model.big]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_windows = [100000, {too_big}, 100000, 400000]
+            "#
+        ))
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        assert!(cfg.config_warnings.iter().any(|w| matches!(
+            &w.target,
+            WarningTarget::Model { field, .. } if field.as_deref() == Some("context_windows")
+        )));
+        assert_eq!(windows_of(&raw, "big"), (100_000, vec![100_000, 400_000]));
+
+        // More than the allowed count: the first ones stay
+        let many: Vec<String> = (1..=(MAX_CONTEXT_WINDOW_CHOICES as u64 + 4))
+            .map(|n| (n * 1000).to_string())
+            .collect();
+        let raw: toml::Value = toml::from_str(&format!(
+            "[model.many]\nmodel = \"m\"\nbase_url = \"https://x.example/v1\"\ncontext_windows = [{}]\n",
+            many.join(", ")
+        ))
+        .unwrap();
+        let (_, windows) = windows_of(&raw, "many");
+        assert_eq!(windows.len(), MAX_CONTEXT_WINDOW_CHOICES);
+        assert_eq!(windows[0], 1000);
+
+        // A list of only absurd values leaves no list at all
+        let raw: toml::Value = toml::from_str(&format!(
+            r#"
+            [model.none]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_window = 100000
+            context_windows = [{too_big}]
+            "#
+        ))
+        .unwrap();
+        assert_eq!(windows_of(&raw, "none"), (100_000, vec![]));
+    }
+
+    #[test]
+    fn provider_context_windows_are_bounded_too() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model_providers.gateway]
+            base_url = "https://gateway.example/v1"
+            context_windows = [100000, 100000, 999999999999]
+
+            [model.m]
+            model = "m"
+            model_provider = "gateway"
+            "#,
+        )
+        .unwrap();
+        // Left with one size: the default only, nothing to choose
+        assert_eq!(windows_of(&raw, "m"), (100_000, vec![100_000]));
+    }
+
+    #[test]
+    fn only_a_model_with_several_windows_advertises_them_in_meta() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.multi]
+            model = "a"
+            base_url = "https://x.example/v1"
+            context_windows = [100000, 400000]
+
+            [model.single]
+            model = "b"
+            base_url = "https://x.example/v1"
+            context_window = 100000
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let infos = crate::agent::config::to_acp_model_info(&resolved);
+        let meta_of = |key: &str| {
+            infos
+                .iter()
+                .find(|(id, _)| id.0.as_ref() == key)
+                .and_then(|(_, info)| info.meta.clone())
+                .expect("meta")
+        };
+        assert_eq!(
+            meta_of("multi")[fuigo_sampling_types::CONTEXT_WINDOWS_META_KEY],
+            serde_json::json!([100_000, 400_000])
+        );
+        assert!(
+            meta_of("single")
+                .get(fuigo_sampling_types::CONTEXT_WINDOWS_META_KEY)
+                .is_none()
+        );
+        assert_eq!(meta_of("multi")["totalContextTokens"], 100_000);
+    }
+
+    #[test]
+    fn supports_context_window_matches_default_and_menu_only() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [model.m]
+            model = "m"
+            base_url = "https://x.example/v1"
+            context_windows = [100000, 400000]
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let info = &resolved.get("m").unwrap().info;
+        let w = |n: u64| std::num::NonZeroU64::new(n).unwrap();
+        assert!(info.supports_context_window(w(100_000)));
+        assert!(info.supports_context_window(w(400_000)));
+        assert!(!info.supports_context_window(w(250_000)));
+        assert!(!info.supports_context_window(w(800_000)));
     }
 }

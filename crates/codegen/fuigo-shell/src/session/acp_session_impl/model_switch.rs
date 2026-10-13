@@ -2,16 +2,41 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use fuigo_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_set_session_model(
         self: &std::sync::Arc<Self>,
-        sampling_config: fuigo_sampler::SamplerConfig,
+        mut sampling_config: fuigo_sampler::SamplerConfig,
         use_concise: bool,
         is_family_switch: bool,
         apply_prompt_override: bool,
         skip_prompt_rewrite: bool,
         auto_compact_threshold_percent: u8,
+        context_window: crate::session::ContextWindowSwitch,
     ) -> Result<acp::ModelId, acp::Error> {
         let model_id = acp::ModelId::new(sampling_config.model.clone());
+        let crate::session::ContextWindowSwitch {
+            selection: context_window_selection,
+            supported: supported_context_windows,
+        } = context_window;
+        let supported = |window: &std::num::NonZeroU64| supported_context_windows.contains(window);
+        let selection = match context_window_selection {
+            crate::session::SwitchContextWindow::Preserve => {
+                crate::session::handle::load_context_window_selection(
+                    &self.compaction.context_window_selection,
+                )
+            }
+            crate::session::SwitchContextWindow::Set(selection) => {
+                let selection = selection.filter(supported);
+                self.compaction.context_window_selection.store(
+                    selection.map_or(0, std::num::NonZeroU64::get),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                selection
+            }
+        };
+        if let Some(window) = selection.filter(supported) {
+            sampling_config.context_window = window.get();
+        }
         // F8: the family the session is leaving, read before the new config replaces it.
         let old_model = self
             .chat_state_handle
@@ -135,6 +160,7 @@ impl SessionActor {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(sampling_config.reasoning_effort),
+                context_window: Some(selection),
             });
         self.emit_status_snapshot_detached();
         let turn_in_flight = self.state.lock().await.running_task.is_some();
@@ -230,6 +256,7 @@ impl SessionActor {
                 model_id: model_id.clone(),
                 agent_name: Some(agent_name),
                 reasoning_effort: Some(Some(effort)),
+                context_window: None,
             });
         self.emit_status_snapshot_detached();
         Ok(model_id)

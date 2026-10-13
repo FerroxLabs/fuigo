@@ -66,6 +66,11 @@ pub enum McpServerTransportConfig {
         /// Name of the environment variable to read and set for `Authorization: Bearer <token>`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bearer_token_env_var: Option<String>,
+        /// Path (absolute or `~/`) of an owner-only file holding the bearer token, read again for every request.
+        /// Honoured only for a definition in the user's own config; see [`McpServerConfig::to_acp_mcp_server`].
+        /// This holds a PATH, never the token.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bearer_token_file: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         headers: Option<HashMap<String, String>>,
         /// OAuth client ID for providers that don't support Dynamic Client Registration.
@@ -106,11 +111,12 @@ impl std::fmt::Debug for McpServerTransportConfig {
                 .field("env", &env.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
                 .field("cwd", cwd)
                 .finish(),
-            Self::StreamableHttp { url, transport_type, bearer_token_env_var, headers, oauth_client_id, oauth_client_secret_env_var, oauth_scopes } => f
+            Self::StreamableHttp { url, transport_type, bearer_token_env_var, bearer_token_file, headers, oauth_client_id, oauth_client_secret_env_var, oauth_scopes } => f
                 .debug_struct("StreamableHttp")
                 .field("url", &url_without_credentials(url))
                 .field("transport_type", transport_type)
                 .field("bearer_token_env_var", bearer_token_env_var)
+                .field("bearer_token_file", bearer_token_file)
                 .field("headers", &headers.as_ref().map(|m| m.keys().map(|k| (k, "<redacted>")).collect::<Vec<_>>()))
                 .field("oauth_client_id", oauth_client_id)
                 .field("oauth_client_secret_env_var", oauth_client_secret_env_var)
@@ -144,6 +150,7 @@ pub struct McpServerConfigProblem {
 pub const KNOWN_MCP_SERVER_FIELDS: &[&str] = &[
     "args",
     "bearer_token_env_var",
+    "bearer_token_file",
     "command",
     "cwd",
     "enabled",
@@ -583,12 +590,24 @@ impl McpServerConfig {
                 url,
                 transport_type,
                 bearer_token_env_var,
+                bearer_token_file,
                 headers,
                 ..
             } => {
                 if url.is_empty() {
                     return None;
                 }
+                // `bearer_token_file`: kept only for a definition in the user's own config, and only when nothing else
+                // supplies the Authorization header. A refusal skips THIS server; others start normally.
+                let bearer_file_meta = match self.checked_bearer_token_file(
+                    &name,
+                    bearer_token_file.as_deref(),
+                    bearer_token_env_var.as_deref(),
+                    headers.as_ref(),
+                ) {
+                    Ok(meta) => meta,
+                    Err(()) => return None,
+                };
                 let mut http_headers: Vec<acp::HttpHeader> = headers
                     .as_ref()
                     .map(|h| {
@@ -624,15 +643,95 @@ impl McpServerConfig {
 
                 Some(if is_sse {
                     acp::McpServer::Sse(
-                        acp::McpServerSse::new(name, url.clone()).headers(http_headers),
+                        acp::McpServerSse::new(name, url.clone())
+                            .headers(http_headers)
+                            .meta(bearer_file_meta),
                     )
                 } else {
                     acp::McpServer::Http(
-                        acp::McpServerHttp::new(name, url.clone()).headers(http_headers),
+                        acp::McpServerHttp::new(name, url.clone())
+                            .headers(http_headers)
+                            .meta(bearer_file_meta),
                     )
                 })
             }
         }
+    }
+
+    /// The configured `bearer_token_file` path string, if this is an HTTP definition that sets one.
+    pub fn bearer_token_file(&self) -> Option<&str> {
+        match &self.transport {
+            McpServerTransportConfig::StreamableHttp { bearer_token_file, .. } => bearer_token_file.as_deref(),
+            McpServerTransportConfig::Stdio { .. } => None,
+        }
+    }
+
+    /// Remove a configured `bearer_token_file` because `source` may not supply one (only the user's own `config.toml`
+    /// may), recording a visible note. Returns whether one was removed.
+    pub fn drop_bearer_token_file(&mut self, name: &str, source: &str) -> bool {
+        let McpServerTransportConfig::StreamableHttp { bearer_token_file, .. } = &mut self.transport else {
+            return false;
+        };
+        if bearer_token_file.take().is_none() {
+            return false;
+        }
+        fuigo_config::mcp_bearer_file::record_note(format!(
+            "MCP server `{name}`: bearer_token_file ignored: it is honoured only in your own config.toml, not in {source}"
+        ));
+        true
+    }
+
+    /// Remove a configured `bearer_token_file` because the server's entry is not exactly the one the user's own
+    /// `config.toml` defines (another layer changed it), recording a visible note naming the server.
+    pub fn drop_bearer_token_file_changed(&mut self, name: &str) -> bool {
+        let McpServerTransportConfig::StreamableHttp { bearer_token_file, .. } = &mut self.transport else {
+            return false;
+        };
+        if bearer_token_file.take().is_none() {
+            return false;
+        }
+        fuigo_config::mcp_bearer_file::record_note(format!(
+            "MCP server `{name}`: bearer_token_file ignored: another configuration layer changed this server; the token file is not used"
+        ));
+        true
+    }
+
+    /// The `_meta` that carries a configured `bearer_token_file` to the MCP client, or `Ok(None)` when none applies.
+    ///
+    /// * not set: `Ok(None)`.
+    /// * from a source that is not the user's own config (`untrusted_source`: a project config, a plugin, a project
+    ///   `.mcp.json`, a managed or client-supplied definition): IGNORED with a visible warning; the server still starts,
+    ///   without this credential.
+    /// * on Windows, a relative path, or together with `bearer_token_env_var` or an `Authorization` header: this server is
+    ///   refused (`Err`) with a one-line warning naming the server and the reason.
+    fn checked_bearer_token_file(
+        &self,
+        name: &str,
+        file: Option<&str>,
+        env_var: Option<&str>,
+        headers: Option<&HashMap<String, String>>,
+    ) -> Result<Option<acp::Meta>, ()> {
+        use fuigo_mcp::bearer_token_file::{BearerTokenFileError, BearerTokenPath, bearer_token_file_meta};
+        let Some(file) = file else { return Ok(None) };
+        let note = |text: String| fuigo_config::mcp_bearer_file::record_note(text);
+        if self.untrusted_source {
+            note(format!(
+                "MCP server `{name}`: bearer_token_file ignored: it is honoured only in your own config.toml, not in a project, plugin, managed or client-supplied definition"
+            ));
+            return Ok(None);
+        }
+        let refuse = |reason: BearerTokenFileError| {
+            note(format!("MCP server `{name}` skipped: {reason}"));
+        };
+        if env_var.is_some() || headers.is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("authorization"))) {
+            refuse(BearerTokenFileError::ConflictsWithAuthorization);
+            return Err(());
+        }
+        if let Err(reason) = BearerTokenPath::parse(file, fuigo_config::mcp_bearer_file::home_dir().as_deref()) {
+            refuse(reason);
+            return Err(());
+        }
+        Ok(Some(bearer_token_file_meta(file)))
     }
 
     /// The credential the variable `var` names, as this definition may have it (P136, Astra r3 #1). Every place a
@@ -811,6 +910,7 @@ mod tests {
                 url: "https://x/mcp".into(),
                 transport_type: Some("http".into()),
                 bearer_token_env_var: Some("TOK".into()),
+                bearer_token_file: None,
                 headers: Some(HashMap::from([("H".into(), "v".into())])),
                 oauth_client_id: Some("id".into()),
                 oauth_client_secret_env_var: Some("SEC".into()),
@@ -919,6 +1019,7 @@ mod tests {
                 url: "{{url}}".into(),
                 transport_type: None,
                 bearer_token_env_var: None,
+                bearer_token_file: None,
                 headers: None,
                 oauth_client_id: None,
                 oauth_client_secret_env_var: None,
@@ -978,6 +1079,7 @@ mod tests {
                 url: "https://example.com".into(),
                 transport_type: None,
                 bearer_token_env_var: None,
+                bearer_token_file: None,
                 headers: None,
                 oauth_client_id: None,
                 oauth_client_secret_env_var: None,
@@ -1044,6 +1146,7 @@ mod p70_redacted_debug {
                 url: "https://mcp.p70.invalid/mcp".into(),
                 transport_type: None,
                 bearer_token_env_var: Some("P70A_MCP_BEARER_TEST_VAR".into()),
+                bearer_token_file: None,
                 headers: None,
                 oauth_client_id: None,
                 oauth_client_secret_env_var: None,
@@ -1070,6 +1173,7 @@ mod p70_redacted_debug {
                 url: "https://mcp.p70.invalid/mcp".into(),
                 transport_type: None,
                 bearer_token_env_var: None,
+                bearer_token_file: None,
                 headers: None,
                 oauth_client_id: Some("p70a-client".into()),
                 oauth_client_secret_env_var: Some("P70A_MCP_BEARER_TEST_VAR".into()),
@@ -1102,6 +1206,7 @@ mod p70_redacted_debug {
             url: "https://p70u:p70mu-FAKE-5b6c7d8e@p70.invalid/mcp/@team?key=p70mq-FAKE-9f0a1b2c".into(),
             transport_type: None,
             bearer_token_env_var: Some("P70_ENV_NAME".into()),
+            bearer_token_file: None,
             headers: Some([("Authorization".to_owned(), "Bearer p70mh-FAKE-1a2b3c4d".to_owned())].into_iter().collect()),
             oauth_client_id: None,
             oauth_client_secret_env_var: None,

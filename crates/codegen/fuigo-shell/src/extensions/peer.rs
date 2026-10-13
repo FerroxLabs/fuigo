@@ -391,7 +391,14 @@ pub(crate) fn held_event(session_id: &str, h: &HeldSummary, total_held: usize) -
 pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
     let escaped_id = display_escape(&n.message_id, TEXT_CAP);
     let held_id = (!n.message_id.is_empty()).then(|| held_ref(&n.from, &n.message_id));
-    let detail = n.detail.as_deref().map(|d| display_escape(d, TEXT_CAP));
+    let detail = n.detail.as_deref().filter(|_| !matches!(n.kind, NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined)).map(|d| display_escape(d, TEXT_CAP));
+    // 26-4: the sentence names the sender; `detail` is the sender's `name [ref]`, already escaped by the session with `display_escape`.
+    let label = n.detail.as_deref().unwrap_or("a peer session");
+    let turn_text = match &n.kind {
+        NoticeKind::PeerTurnNoReply => Some(format!("The model ended the turn started by a message from {label} without a reply.")),
+        NoticeKind::PeerTurnDeclined => Some(format!("The model declined to act on the message from {label}.")),
+        _ => None,
+    };
     let (kind, text): (&str, Option<&str>) = match &n.kind {
         NoticeKind::Released => ("peer_released", None),
         NoticeKind::Expired => ("peer_expired", None),
@@ -409,13 +416,15 @@ pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
             "peer_warning",
             Some("a tool request matched a denial carried by a peer message and was refused"),
         ),
+        NoticeKind::PeerTurnNoReply | NoticeKind::PeerTurnDeclined => ("peer_warning", turn_text.as_deref()),
         #[allow(unreachable_patterns)]
         _ => ("peer_warning", Some("a peer messaging notice")),
     };
     let mut update = json!({ "sessionUpdate": kind, "heldId": held_id, "detail": detail });
     if let Some(t) = text {
         update["text"] = json!(t);
-        update["subject"] = json!(escaped_id);
+        // The turn notices carry the sender in the sentence; a subject would only repeat the message id.
+        update["subject"] = json!(if turn_text.is_some() { String::new() } else { escaped_id });
     }
     if let NoticeKind::Refused(r) = &n.kind {
         update["reason"] = json!(format!("{r:?}"));

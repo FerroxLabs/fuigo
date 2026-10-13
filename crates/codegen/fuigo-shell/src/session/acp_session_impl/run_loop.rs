@@ -822,8 +822,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, context_window_selection, supported_context_windows, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, crate::session::ContextWindowSwitch { selection: context_window_selection, supported: supported_context_windows }).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::SetReasoningEffort { effort, responds_to } => {

@@ -93,3 +93,52 @@ fn s1_2_peer_untrusted_slash_is_inert_for_every_command() {
         );
     }
 }
+
+/// `/context-window` is a human command: neither model-authored nor peer-authored text can run it or select a window.
+#[test]
+fn context_window_command_is_human_only() {
+    assert!(crate::session::slash_commands::PAGER_COMMAND_KEYS.contains(&"context-window"));
+    assert!(
+        BUILTIN_COMMANDS
+            .iter()
+            .all(|command| command.name != "context-window"
+                || command.model_authored_eligibility == ModelAuthoredEligibility::Denied)
+    );
+    for text in ["/context-window 400k", "/context-window", "/Context-Window 1m"] {
+        assert!(matches!(
+            resolve(
+                InputAuthority::ModelAuthoredUntrusted,
+                &[text_block(text)],
+                BUILTIN_COMMANDS,
+            ),
+            AuthorityResolution::ModelAuthoredSkillCandidate { .. }
+        ));
+        assert!(matches!(
+            resolve(
+                InputAuthority::PeerUntrusted,
+                &[text_block(text)],
+                BUILTIN_COMMANDS,
+            ),
+            AuthorityResolution::Inert
+        ));
+        assert!(matches!(
+            resolve(
+                InputAuthority::RuntimeControl,
+                &[text_block(text)],
+                BUILTIN_COMMANDS,
+            ),
+            AuthorityResolution::Inert
+        ));
+    }
+    // The skill resolver has no builtin to dispatch, so the text stays plain prompt text.
+    let blocks = vec![text_block("/context-window 400k")];
+    let out = crate::session::slash_commands::resolve_model_authored_skill(
+        blocks.clone(),
+        "context-window",
+        "400k",
+        &[],
+        crate::session::slash_commands::CommandAvailability::default(),
+        true,
+    );
+    assert!(matches!(out, Ok(ref b) if b.len() == 1));
+}

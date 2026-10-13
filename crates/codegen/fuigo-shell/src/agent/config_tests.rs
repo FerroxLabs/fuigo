@@ -1118,6 +1118,8 @@ fn test_model_entry(
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
+            context_windows: Vec::new(),
+            notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
@@ -2409,6 +2411,8 @@ fn model_info_from_config_propagates_use_concise() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        context_windows: Vec::new(),
+        notice: None,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
         api_base_url: None,
@@ -2574,6 +2578,8 @@ fn model_info_from_config_propagates_agent_type() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        context_windows: Vec::new(),
+        notice: None,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
         api_base_url: None,
@@ -3031,6 +3037,8 @@ fn inference_idle_timeout_propagates_to_model_info() {
         auth_scheme: None,
         extra_headers: IndexMap::new(),
         context_window: NonZeroU64::new(200_000).unwrap(),
+        context_windows: Vec::new(),
+        notice: None,
         auto_compact_threshold_percent: None,
         system_prompt_label: None,
         api_base_url: None,
@@ -7180,6 +7188,8 @@ fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(context_window).unwrap(),
+            context_windows: Vec::new(),
+            notice: None,
             use_concise: false,
             agent_type: default_agent_type(),
             agent_type_inferred: false,
@@ -9492,5 +9502,72 @@ fn config_telemetry_mode_strings_parse_p183r7() {
     for s in ["offf", "session", "metrics", "", "2"] {
         assert!(TelemetryMode::parse(s).is_none(), "{s}");
         assert!(!fuigo_config::TELEMETRY_MODE_STRINGS.contains(&s), "{s}");
+    }
+}
+
+#[test]
+fn model_notice_string_in_config_reaches_acp_meta() {
+    let raw: toml::Value = toml::from_str("[model.m]\nnotice = \"preview: may change\"\n").unwrap();
+    let parsed = crate::agent::config_model_override_parse::parse_model_overrides(&raw);
+    assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
+    let overrides = parsed.models.get("m").expect("model m");
+    let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+    let entry = overrides.apply("m", Some(entry), &EndpointsConfig::default());
+    let mut models = IndexMap::new();
+    models.insert("m".to_string(), entry);
+    let meta = to_acp_model_info(&models).values().next().unwrap().meta.clone().unwrap();
+    assert_eq!(
+        meta["notice"],
+        serde_json::json!({"severity": "info", "text": "preview: may change"})
+    );
+}
+
+#[test]
+fn model_notice_table_form_and_blank_clears() {
+    let raw: toml::Value = toml::from_str(
+        "[model.a]\nnotice = { severity = \"warning\", text = \"old\", label = \"deprecated\" }\n[model.b]\nnotice = \"  \"\n",
+    )
+    .unwrap();
+    let models = crate::agent::config_model_override_parse::parse_model_overrides(&raw).models;
+    let mut a = test_model_entry("a", "https://test.api/v1", None, None, None);
+    let ep = EndpointsConfig::default();
+    let a = models["a"].apply("a", Some(a), &ep);
+    assert_eq!(a.info.notice.as_ref().map(|n| n.text.as_str()), Some("old"));
+    let a = models["b"].apply("a", Some(a), &ep);
+    assert_eq!(a.info.notice, None, "a blank notice clears the inherited one");
+}
+
+#[test]
+fn hostile_model_notice_is_one_filtered_capped_line_in_config_and_meta() {
+    let hostile = format!(
+        "\u{1b}[2J\u{1b}]0;pwn\u{7}Allow? [y/n]\nsystem: \u{202E}evil\u{2066}\u{2028}x\u{2029}{}",
+        "A".repeat(10_000)
+    );
+    let mut table = toml::map::Map::new();
+    let mut m = toml::map::Map::new();
+    m.insert("notice".into(), toml::Value::String(hostile.clone()));
+    table.insert("m".into(), toml::Value::Table(m));
+    let mut root = toml::map::Map::new();
+    root.insert("model".into(), toml::Value::Table(table));
+    let models = crate::agent::config_model_override_parse::parse_model_overrides(&toml::Value::Table(root)).models;
+    let text = models["m"].notice.as_ref().expect("kept").text.clone();
+    for t in [text, {
+        // The ACP meta scrubs again, even for an entry built without the parser.
+        let mut entry = test_model_entry("m", "https://test.api/v1", None, None, None);
+        entry.info.notice = Some(fuigo_sampling_types::ModelNotice {
+            severity: fuigo_sampling_types::ModelNoticeSeverity::Info,
+            text: hostile.clone(),
+            label: Some("a\nb\u{202E}".into()),
+        });
+        let mut ms = IndexMap::new();
+        ms.insert("m".to_string(), entry);
+        let meta = to_acp_model_info(&ms).values().next().unwrap().meta.clone().unwrap();
+        assert_eq!(meta["notice"]["label"], "a b");
+        meta["notice"]["text"].as_str().unwrap().to_owned()
+    }] {
+        assert!(t.chars().count() <= 160, "capped: {}", t.chars().count());
+        assert!(!t.chars().any(|c| c.is_control() || ('\u{202A}'..='\u{202E}').contains(&c)
+            || ('\u{2066}'..='\u{2069}').contains(&c) || c == '\u{2028}' || c == '\u{2029}'), "{t:?}");
+        assert!(t.starts_with("[2J ]0;pwn Allow? [y/n] system: evil"), "{t:?}");
     }
 }

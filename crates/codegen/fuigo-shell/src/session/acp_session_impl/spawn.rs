@@ -626,6 +626,7 @@ pub(crate) async fn spawn_session_actor(
         },
         |mc| mc.pruning.clone(),
     );
+    let context_window_selection = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let context_window_override = std::env::var("FUIGO_DEBUG_CONTEXT_WINDOW")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
@@ -1933,6 +1934,7 @@ pub(crate) async fn spawn_session_actor(
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
             force_compact: force_compact.clone(),
             context_window_override,
+            context_window_selection: context_window_selection.clone(),
             count: std::sync::atomic::AtomicU64::new(0),
             validation_tokens_before: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
@@ -2500,6 +2502,7 @@ pub(crate) async fn spawn_session_actor(
             spawn_snapshot,
             scheduler_background_loops,
             reasoning_effort: sampling_config.reasoning_effort,
+            context_window_selection,
             yolo_mode: session_yolo_mode,
             origin_client: origin_client.clone(),
             code_nav_enabled,
