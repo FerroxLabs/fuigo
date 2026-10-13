@@ -210,6 +210,7 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                     threshold_percent: std::cell::Cell::new(85),
                     force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     context_window_override: None,
+                    context_window_selection: Default::default(),
                     count: std::sync::atomic::AtomicU64::new(0),
                     auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
                     previous_model: std::cell::Cell::new(None),

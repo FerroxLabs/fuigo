@@ -4259,3 +4259,32 @@ fn post_install_auto_enable_names_the_install_under_a_restriction() {
     assert_eq!(auto_enable_target(true, &repo, "not-in-repo"), None);
     assert_eq!(auto_enable_target(false, &repo, "not-in-repo").as_deref(), Some("not-in-repo"));
 }
+
+#[test]
+fn sandbox_unavailable_stderr_line_is_the_warning_with_a_prefix_and_no_control_bytes() {
+    let w = fuigo_sandbox::unavailable_warning_for("workspace", true).unwrap();
+    assert_eq!(
+        sandbox_unavailable_stderr_line(&w),
+        "warning: Sandbox profile workspace is set but sandboxing is not available on Windows: \
+         commands and file tools run unsandboxed."
+    );
+    assert!(!sandbox_unavailable_stderr_line("a\x1b[2Jb\nc").contains(['\x1b', '\n']));
+}
+
+#[test]
+fn no_sandbox_unavailable_line_for_profile_off() {
+    assert_eq!(fuigo_sandbox::unavailable_warning_for("off", true), None);
+}
+
+#[test]
+fn wrap_prints_the_sandbox_warning_on_windows_only() {
+    assert_eq!(
+        wrap_sandbox_warning_line_for("workspace", true).as_deref(),
+        Some(
+            "warning: Sandbox profile workspace is set but sandboxing is not available on Windows: \
+             commands and file tools run unsandboxed."
+        )
+    );
+    assert_eq!(wrap_sandbox_warning_line_for("workspace", false), None);
+    assert_eq!(wrap_sandbox_warning_line_for("off", true), None);
+}

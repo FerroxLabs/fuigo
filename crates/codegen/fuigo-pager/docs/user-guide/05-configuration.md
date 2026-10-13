@@ -208,6 +208,7 @@ Each setting also has an environment-variable override, applied on first load on
 [toolset.bash]
 timeout_secs = 120.0                   # foreground command timeout in seconds (default: 120)
 output_byte_limit = 20000              # max captured output in bytes (default: 20000)
+default_block_until_ms = 120000        # wait when the model does not set block_until_ms (default: the foreground timeout, 120000)
 
 [toolset.ask_user_question]
 timeout_enabled = true                 # false = wait forever for answers (default: true)

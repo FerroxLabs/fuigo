@@ -306,6 +306,29 @@ fn parse_model_override_table(
         }
     };
 
+    let mut entry = entry;
+    if let Some(listed) = entry.context_windows.as_mut() {
+        if let Some(reason) = crate::agent::model_providers::sanitize_context_windows(listed) {
+            warnings.push(ConfigWarning::model(
+                model_key,
+                Some("context_windows"),
+                ConfigWarningKind::InvalidValue,
+                reason,
+            ));
+        }
+        if listed.is_empty() {
+            entry.context_windows = None;
+        }
+    }
+
+    // `notice` is config text shown in a terminal: scrub it as it is parsed (a blank one stays `Some`, to clear an inherited notice).
+    if let Some(notice) = entry.notice.take() {
+        let blank = notice.text.trim().is_empty();
+        entry.notice = crate::agent::config::sanitize_model_notice(notice.clone()).or_else(|| {
+            blank.then_some(notice)
+        });
+    }
+
     if entry.auth_provider.is_some() {
         // A non-empty `api_key` always shadows; an `env_key` only shadows when its variable resolves at runtime, which parse time can't know
         // Warn accordingly so the message matches what actually happens
@@ -711,6 +734,11 @@ mod tests {
             mtls_cert_dir: Some("/run/model-identity".into()),
             name: Some("Model M".into()),
             description: Some("desc".into()),
+            notice: Some(fuigo_sampling_types::ModelNotice {
+                severity: fuigo_sampling_types::ModelNoticeSeverity::Warning,
+                text: "Deprecated".into(),
+                label: Some("deprecated".into()),
+            }),
             api_key: Some("key".into()),
             env_key: Some(crate::agent::config::EnvKeys::single("ENV_KEY")),
             auth_provider: Some("corp-gateway".into()),
@@ -731,6 +759,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             context_window: Some(200_000),
+            context_windows: None,
             auto_compact_threshold_percent: Some(80),
             system_prompt_label: Some("label".into()),
             use_concise: Some(true),

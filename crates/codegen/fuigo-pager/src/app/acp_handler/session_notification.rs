@@ -1173,6 +1173,7 @@ pub(super) fn handle_session_notification_with_origin(
         FuigoSessionUpdate::ModelChanged {
             model_id,
             reasoning_effort,
+            context_window_selection,
         } => {
             if agent.session.model_switch_pending {
                 tracing::debug!(
@@ -1180,7 +1181,14 @@ pub(super) fn handle_session_notification_with_origin(
                     model_id = %model_id,
                     "ignoring ModelChanged broadcast — local switch is in flight"
                 );
-                return false;
+                let models = &mut agent.session.models;
+                models.model_changed_during_switch = true;
+                let selection_changed = models.context_window_selection != context_window_selection;
+                models.context_window_selection = context_window_selection;
+                if selection_changed {
+                    agent.refresh_context_total();
+                }
+                return selection_changed;
             }
             use fuigo_shell::sampling::types::ReasoningEffort;
             let new_model_id = acp::ModelId::new(model_id.clone());
@@ -1204,15 +1212,19 @@ pub(super) fn handle_session_notification_with_origin(
                 .and_then(|s| s.parse::<ReasoningEffort>().ok());
             let prev_model = agent.session.models.current.clone();
             let prev_effort = agent.session.models.reasoning_effort;
+            let prev_selection = agent.session.models.context_window_selection;
             agent
                 .session
                 .models
                 .set_current(new_model_id.clone(), effort);
+            agent.session.models.context_window_selection = context_window_selection;
             agent.session.user_model_preference = Some(new_model_id.clone());
             let resolved_effort = agent.session.models.reasoning_effort;
-            let actually_changed =
-                prev_model.as_ref() != Some(&new_model_id) || prev_effort != resolved_effort;
+            let actually_changed = prev_model.as_ref() != Some(&new_model_id)
+                || prev_effort != resolved_effort
+                || prev_selection != context_window_selection;
             if actually_changed {
+                agent.refresh_context_total();
                 tracing::info!(
                     session_id = session_notif.session_id.0.as_ref(),
                     model_id = %model_id,

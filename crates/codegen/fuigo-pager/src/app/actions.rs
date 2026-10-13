@@ -461,6 +461,11 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    /// Select one of the current model's context windows (`/context-window`). The model is unchanged.
+    SetContextWindow {
+        model_id: acp::ModelId,
+        window: std::num::NonZeroU64,
+    },
     /// Cancel the currently running turn.
     CancelTurn,
     /// User confirmed a cancel-turn choice from the panel.
@@ -1660,6 +1665,13 @@ pub enum Effect {
         /// Threaded through to `SwitchModelComplete` so `IncompatibleAgent` can roll back.
         prev_model_id: Option<acp::ModelId>,
     },
+    /// Ask the session to use one of the model's context windows.
+    SetContextWindow {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        model_id: acp::ModelId,
+        window: std::num::NonZeroU64,
+    },
     /// Fetch changelog from CDN (both markdown and structured JSON).
     /// Runs off the render path via `spawn_blocking`.
     /// Result is cached on `AppView` so `/release-notes` and the welcome screen share it.
@@ -2653,6 +2665,12 @@ pub enum TaskResult {
         result: Result<(), SwitchModelError>,
         /// Forwarded from `Effect::SwitchModel.prev_model_id` for rollback on `IncompatibleAgent`.
         prev_model_id: Option<acp::ModelId>,
+    },
+    /// A `/context-window` selection finished; `Err` carries the user-facing reason.
+    ContextWindowSet {
+        agent_id: AgentId,
+        window: std::num::NonZeroU64,
+        result: Result<(), String>,
     },
     /// Changelog fetched from CDN (both formats).
     ChangelogFetched {

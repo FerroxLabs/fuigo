@@ -2228,6 +2228,13 @@ impl MvpAgent {
                 .cmd_tx
                 .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
         }
+        // A sandbox profile is set but this platform or build cannot enforce it: tell the user at every session start.
+        // Reaches the TUI as a system note and ACP clients as the existing `ConfigNotice` session update.
+        if let Some(notice) = fuigo_sandbox::unavailable_warning() {
+            let _ = handle
+                .cmd_tx
+                .send(crate::session::SessionCommand::NotifyConfigNotice { notice });
+        }
         self.forward_models_auth_notice(handle.cmd_tx.clone());
     }
 
@@ -2886,6 +2893,21 @@ impl MvpAgent {
                 reasoning_effort_meta_value(override_effort),
             );
             info.meta = Some(map);
+        }
+        // The session's `/context-window` selection rides on the current model's meta
+        if let Some(window) = session_id
+            .and_then(|sid| self.resident_handle(sid))
+            .and_then(|h| {
+                crate::session::handle::load_context_window_selection(&h.context_window_selection)
+            })
+            && let Some(info) = available_models
+                .iter_mut()
+                .find(|info| info.model_id == model_id)
+        {
+            info.meta.get_or_insert_default().insert(
+                fuigo_sampling_types::CONTEXT_WINDOW_META_KEY.to_string(),
+                fuigo_sampling_types::context_window_meta_value(window),
+            );
         }
         acp::SessionModelState::new(model_id, available_models)
     }
@@ -4389,6 +4411,7 @@ impl MvpAgent {
                     model_id: session_model_id.clone(),
                     agent_name: Some(agent_definition.name.clone()),
                     reasoning_effort: reasoning_effort_to_persist,
+                    context_window: None,
                 });
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,

@@ -2338,6 +2338,9 @@ struct McpUpsertRequest {
 /// The upsert as an untrusted source supplied it (P133): every reference to the saved API key removed.
 fn untrusted_upsert(mut req: McpUpsertRequest) -> Option<McpUpsertRequest> {
     req.config = req.config.without_saved_key_references(&req.server_name)?;
+    // A `bearer_token_file` names a path and, with the URL, where its content goes: a client may not choose that for the
+    // user's own config.toml, where the untrusted mark that makes it inert is something a refusal note tells users to delete.
+    req.config.drop_bearer_token_file(&req.server_name, "a definition supplied by an ACP client (`mcp/upsert`)");
     Some(req)
 }
 

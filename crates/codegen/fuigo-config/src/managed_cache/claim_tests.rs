@@ -1,7 +1,7 @@
 //! The is-managed claim in the gate decision and the staleness refetch: removing the policy sidecar must not downgrade a claimed principal.
 
 use super::super::*;
-use super::team;
+use super::{compromised_at, decision_is_compromised, team};
 
 /// A stripped policy sidecar plus an imposing claim refuses even over a fully forged permissive marker.
 /// Without the claim that same state is the documented marker downgrade.
@@ -17,7 +17,7 @@ fn claim_refuses_stripped_sidecar_even_with_forged_marker() {
         ..Default::default()
     };
     assert!(
-        managed_policy_compromised_decision(
+        decision_is_compromised(
             SignedVerdict::NoAuthenticSidecar,
             || true,
             false,
@@ -28,7 +28,7 @@ fn claim_refuses_stripped_sidecar_even_with_forged_marker() {
         "an imposing claim outranks the forged marker when the policy sidecar is gone"
     );
     assert!(
-        !managed_policy_compromised_decision(
+        !decision_is_compromised(
             SignedVerdict::NoAuthenticSidecar,
             || false,
             false,
@@ -54,7 +54,7 @@ fn claim_not_consulted_on_sidecar_read_blip() {
         ..Default::default()
     };
     assert!(
-        !managed_policy_compromised_decision(
+        !decision_is_compromised(
             SignedVerdict::SidecarUnreadable,
             || true,
             false,
@@ -93,7 +93,7 @@ fn garbage_claim_body() {
     )
     .unwrap();
     assert!(
-        !managed_policy_compromised_for_at(home, &team("team-a")),
+        !compromised_at(home, &team("team-a")),
         "garbage claim without fail-closed must not make the gate fail closed"
     );
     assert!(
@@ -125,7 +125,7 @@ fn claim_paths_are_inert_in_dark_build() {
         )
         .unwrap();
         assert!(
-            !managed_policy_compromised_for_at(home, &team("team-a")),
+            !compromised_at(home, &team("team-a")),
             "dark build: a claim file must not make the gate fail closed"
         );
         assert!(

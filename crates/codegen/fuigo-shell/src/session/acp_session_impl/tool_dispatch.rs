@@ -287,6 +287,7 @@ impl SessionActor {
             timeout: None,
             description: title_command.clone().into_owned(),
             is_background: false,
+            block_until_ms: None,
             workdir: None,
         });
         // Bash mode has no model-issued wire name; resolve the toolset's execute tool by kind so the fuigo/tool identity still stamps

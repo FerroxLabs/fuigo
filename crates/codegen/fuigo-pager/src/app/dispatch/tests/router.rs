@@ -2771,3 +2771,62 @@ fn toggle_scroll_log_flips_recorder_and_reports_path() {
         "disable must be confirmed, got {texts:?}"
     );
 }
+fn seed_windowed_model(app: &mut AppView, id: AgentId) -> acp::ModelId {
+    let model_id = acp::ModelId::new(std::sync::Arc::from("windowed"));
+    let mut info = acp::ModelInfo::new(model_id.clone(), "Windowed".to_string());
+    info.meta = serde_json::json!({
+        "totalContextTokens": 100_000,
+        "contextWindows": [100_000, 400_000],
+    })
+    .as_object()
+    .cloned();
+    let models = &mut app.agents.get_mut(&id).unwrap().session.models;
+    models.available.insert(model_id.clone(), info);
+    models.current = Some(model_id.clone());
+    model_id
+}
+#[test]
+fn set_context_window_dispatch_produces_effect_and_sets_pending() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = seed_windowed_model(&mut app, id);
+    let window = std::num::NonZeroU64::new(400_000).unwrap();
+    let effects = dispatch(
+        Action::SetContextWindow {
+            model_id: model_id.clone(),
+            window,
+        },
+        &mut app,
+    );
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        &effects[0],
+        Effect::SetContextWindow { model_id: mid, window: w, .. } if mid == &model_id && *w == window
+    ));
+    assert!(app.agents[&id].session.model_switch_pending);
+}
+#[test]
+fn set_context_window_dispatch_refuses_unlisted_window_and_pending_switch() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let model_id = seed_windowed_model(&mut app, id);
+    let unlisted = std::num::NonZeroU64::new(250_000).unwrap();
+    let effects = dispatch(
+        Action::SetContextWindow { model_id: model_id.clone(), window: unlisted },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(!app.agents[&id].session.model_switch_pending);
+
+    app.agents.get_mut(&id).unwrap().session.model_switch_pending = true;
+    let before = app.agents[&id].scrollback.len();
+    let effects = dispatch(
+        Action::SetContextWindow {
+            model_id,
+            window: std::num::NonZeroU64::new(400_000).unwrap(),
+        },
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.agents[&id].scrollback.len(), before + 1, "a retry message is shown");
+}

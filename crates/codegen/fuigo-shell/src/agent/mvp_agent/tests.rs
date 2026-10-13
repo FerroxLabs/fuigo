@@ -1246,6 +1246,7 @@ fn make_test_handle(
         },
         scheduler_background_loops: true,
         reasoning_effort: None,
+        context_window_selection: Default::default(),
         yolo_mode: yolo,
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
             product: s.to_string(),
@@ -3493,6 +3494,8 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: std::num::NonZeroU64::new(200_000).unwrap(),
+            context_windows: Vec::new(),
+            notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,

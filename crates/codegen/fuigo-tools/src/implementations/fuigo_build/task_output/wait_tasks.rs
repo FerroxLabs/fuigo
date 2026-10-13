@@ -37,7 +37,8 @@ impl crate::types::tool_metadata::ToolMetadata for WaitTasksTool {
         static DESC: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             fuigo_tool_types::build_wait_tasks_description(&fuigo_tool_types::WaitTasksToolNaming {
                 background_retrieval_tool: "get_task_output",
-                bash_background_param: Some("is_background"),
+                bash_background_param: None,
+                bash_block_param: Some("block_until_ms"),
                 subagent_background_param: Some("run_in_background"),
             })
         });
@@ -96,6 +97,7 @@ fn wait_tasks_description(
             .tool_for_kind(ToolKind::BackgroundTaskAction)
             .unwrap_or("get_task_output"),
         bash_background_param: renderer.param_for_kind(ToolKind::Execute, "is_background"),
+        bash_block_param: renderer.param_for_kind(ToolKind::Execute, "block_until_ms"),
         subagent_background_param: renderer.param_for_kind(ToolKind::Task, "run_in_background"),
     })
 }

@@ -126,17 +126,37 @@ async fn supervisor_slot_respawns_a_dead_task_and_keeps_a_live_one() {
 
 #[test]
 fn gate_blocks_only_managed_principal_with_compromised_policy() {
+    use fuigo_config::ManagedPolicyCompromise as C;
     let snapshot = |managed_principal_present, policy_compromised| GateSnapshot {
         managed_principal_present,
         policy_compromised,
     };
-    assert!(
-        managed_policy_gate_decision(snapshot(true, true)).is_err(),
+    assert_eq!(
+        managed_policy_gate_decision(snapshot(true, Some(C::PolicyFileMissing))),
+        Err(ManagedPolicyRefusal::Compromised(C::PolicyFileMissing)),
         "managed principal + compromised policy must fail closed"
     );
-    assert!(managed_policy_gate_decision(snapshot(true, false)).is_ok());
-    assert!(managed_policy_gate_decision(snapshot(false, true)).is_ok());
-    assert!(managed_policy_gate_decision(snapshot(false, false)).is_ok());
+    assert!(managed_policy_gate_decision(snapshot(true, None)).is_ok());
+    assert!(managed_policy_gate_decision(snapshot(false, Some(C::SignatureInvalid))).is_ok());
+    assert!(managed_policy_gate_decision(snapshot(false, None)).is_ok());
+}
+
+#[test]
+fn compromised_refusal_names_one_fixed_reason_sentence() {
+    use fuigo_config::ManagedPolicyCompromise as C;
+    for (reason, sentence) in [
+        (C::SignatureInvalid, "Reason: signed managed policy is invalid."),
+        (C::SignatureMissing, "Reason: managed policy signature is missing."),
+        (C::PolicyFileMissing, "Reason: managed policy file is missing."),
+        (C::DeploymentKeyChanged, "Reason: managed deployment key changed."),
+    ] {
+        let text = ManagedPolicyRefusal::Compromised(reason).to_string();
+        assert!(text.starts_with("Managed policy is required for this account"));
+        assert!(text.ends_with(sentence), "{text}");
+        assert_eq!(text.matches("Reason:").count(), 1);
+    }
+    // The other refusals carry no compromise reason.
+    assert!(!ManagedPolicyRefusal::Busy.to_string().contains("Reason:"));
 }
 
 #[test]

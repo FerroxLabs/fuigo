@@ -2204,6 +2204,9 @@ impl Drop for TurnMetrics {
 #[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
 mod auth_error_no_retry_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/context_window_switch_tests.rs"]
+mod context_window_switch_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/p42_session_delivery_wire_tests.rs"]
 mod p42_session_delivery_wire_tests;
 #[cfg(test)]

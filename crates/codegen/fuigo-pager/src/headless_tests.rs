@@ -3940,3 +3940,15 @@ fn mcp_start_failure_writes_nothing_to_stdout_in_text_and_json() {
         assert_eq!(captured.text(), "");
     }
 }
+
+#[test]
+fn plain_mode_prints_the_sandbox_warning_once() {
+    let w = fuigo_sandbox::unavailable_warning_for("workspace", true).unwrap();
+    let notice = Lifecycle::ConfigNotice { message: w.clone() };
+    // The startup stderr line already said it: the session notice is dropped in `plain`.
+    assert_eq!(plain_lifecycle_line(&notice, Some(&w)), None);
+    // Any other config notice, and the same text when there was no startup line, still print.
+    let other = Lifecycle::ConfigNotice { message: "something else".to_string() };
+    assert_eq!(plain_lifecycle_line(&other, Some(&w)), Some(other.plain_message()));
+    assert_eq!(plain_lifecycle_line(&notice, None), Some(notice.plain_message()));
+}

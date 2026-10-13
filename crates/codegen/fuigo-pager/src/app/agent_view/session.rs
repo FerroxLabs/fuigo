@@ -1163,6 +1163,15 @@ impl AgentView {
     /// Update context state from a streaming notification carrying only `used` and `total` fields.
     ///
     /// No-op for gateway/chat-kind sessions (same policy as [`Self::apply_full_context_info`]).
+    /// Re-applies the context count against the current model window, after a switch or a window selection changed it.
+    pub(crate) fn refresh_context_total(&mut self) {
+        if let Some(used) = self.context_state.as_ref().map(|c| c.used)
+            && let Some(window) = self.session.models.get_context_window()
+        {
+            self.apply_context_used(used, window);
+        }
+    }
+
     pub fn apply_context_used(&mut self, used: u64, total: u64) {
         if self.chat_kind {
             self.context_state = None;

@@ -378,3 +378,66 @@
         );
     }
 
+
+    /// The broadcast carries the session's window selection; the pager mirrors it, and clears it when the field is absent.
+    #[test]
+    fn model_changed_carries_the_context_window_selection() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        seed_models(agent, "windowed", &["windowed"]);
+        let id = acp::ModelId::new(std::sync::Arc::from("windowed"));
+        agent.session.models.available.get_mut(&id).unwrap().meta = serde_json::json!({
+            "totalContextTokens": 100_000,
+            "contextWindows": [100_000, 400_000],
+        })
+        .as_object()
+        .cloned();
+        assert_eq!(agent.session.models.get_context_window(), Some(100_000));
+
+        let with_selection = acp::ExtNotification::new(
+            "fuigo/session_notification",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&SessionNotification {
+                    session_id: acp::SessionId::new("sess-1"),
+                    update: FuigoSessionUpdate::model_changed("windowed", None, Some(400_000)),
+                    meta: None,
+                })
+                .unwrap(),
+            ),
+        );
+        assert!(handle_ext_notification(&with_selection, &mut app));
+        let models = &app.agents.get(&AgentId(0)).unwrap().session.models;
+        assert_eq!(models.context_window_selection, Some(400_000));
+        assert_eq!(models.get_context_window(), Some(400_000));
+
+        let without = model_changed_ext("sess-1", "windowed", None);
+        assert!(handle_ext_notification(&without, &mut app));
+        let models = &app.agents.get(&AgentId(0)).unwrap().session.models;
+        assert_eq!(models.context_window_selection, None);
+        assert_eq!(models.get_context_window(), Some(100_000));
+    }
+
+    /// A broadcast arriving while this client's own switch is in flight records the selection and the flag, and leaves the pending state to the switch's completion.
+    #[test]
+    fn model_changed_during_a_local_switch_keeps_the_broadcast_selection() {
+        let mut app = make_app_with_agent("sess-1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        seed_models(agent, "windowed", &["windowed"]);
+        agent.session.model_switch_pending = true;
+        let notif = acp::ExtNotification::new(
+            "fuigo/session_notification",
+            std::sync::Arc::from(
+                serde_json::value::to_raw_value(&SessionNotification {
+                    session_id: acp::SessionId::new("sess-1"),
+                    update: FuigoSessionUpdate::model_changed("windowed", None, Some(400_000)),
+                    meta: None,
+                })
+                .unwrap(),
+            ),
+        );
+        handle_ext_notification(&notif, &mut app);
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.model_switch_pending);
+        assert!(agent.session.models.model_changed_during_switch);
+        assert_eq!(agent.session.models.context_window_selection, Some(400_000));
+    }

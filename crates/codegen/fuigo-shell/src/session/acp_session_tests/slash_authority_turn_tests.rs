@@ -1833,3 +1833,6 @@ fn human_file_mention_still_expands_and_verified_fire_slash_stays_inert() {
         assert!(!actor.permissions.is_yolo_mode(), "a verified fire's slash text is inert");
     });
 }
+
+#[path = "peer_auto_refuse_tests.rs"]
+mod peer_auto_refuse_tests;

@@ -2714,6 +2714,7 @@ impl SessionActor {
         self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
             .record_turn_start(chrono::Utc::now().timestamp_millis());
+        self.apply_supported_context_window_selection().await;
         {
             let span = tracing::Span::current();
             if let Some(agent) = self.active_agent_type.lock().clone() {
@@ -2783,6 +2784,8 @@ impl SessionActor {
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut length_salvage_streak = LengthSalvageStreak::default();
+        // 26-4/26-5: one flag read per turn; with the feature off nothing of the packet runs.
+        let peer_turn_bookkeeping = crate::session::peer_message::peer_messaging_enabled();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
         let mut rate_limit_waits = self.rate_limit_wait_budget(
             sampling_config
@@ -3734,6 +3737,14 @@ impl SessionActor {
             let stop_reason = response.stop_reason;
             let response_is_empty = response.is_empty();
             let turn_refused = stop_reason == Some(fuigo_sampling_types::StopReason::ContentFilter);
+            // 26-4/26-5: what this reply did, for the end-of-turn rules of a turn started by a peer message.
+            if peer_turn_bookkeeping {
+                self.peer_admission.note_model_response(
+                    tool_calls.len() + response.backend_tool_items().count(),
+                    !response.assistant_text().trim().is_empty(),
+                    turn_refused,
+                );
+            }
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
             match length_salvage_streak.on_sample(

@@ -451,6 +451,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
                     url: url.to_string(),
                     transport_type: (transport == McpTransport::Sse).then(|| "sse".to_string()),
                     bearer_token_env_var: None,
+                    bearer_token_file: None,
                     headers: (!headers.is_empty()).then_some(headers),
                     oauth_client_id: None,
                     oauth_client_secret_env_var: None,

@@ -239,6 +239,10 @@ pub enum NoticeKind {
     LaunderingRefused,
     /// S7.4: the model refused this message with `refuse_peer_message`; the sender is held for the rest of the session.
     ModelRefused,
+    /// 26-4: a turn started by a peer message ended with an empty model reply (`detail` is the escaped `name [ref]` of the sender).
+    PeerTurnNoReply,
+    /// 26-4: a turn started by a peer message ended with a provider refusal stop (`detail` as above).
+    PeerTurnDeclined,
     /// A notice about a message THIS session sent, from the receiving host (packet 8e). Only the typed kind; the
     /// `message_id` is the one this session sent (never a peer string: the host matched it against its own book).
     SentMessage(fuigo_peer::NoticeKind),
@@ -339,6 +343,10 @@ struct Inner {
     sender_of: HashMap<String, String>,
     /// Message id -> (conversation id, hop) for the ids in `received` (same bound): what a reply continues (S5.6).
     conv_of: HashMap<String, (String, u32)>,
+    /// Message id -> the sender's claimed (name, ref) for the ids in `received` (same bound): RAW, escaped when shown.
+    label_of: HashMap<String, (String, String)>,
+    /// What the running turn did (26-4, 26-5): read once when a peer-started turn ends.
+    turn_obs: TurnObs,
     /// The (conversation id, hop) of the peer message that started or joined the running turn (the highest hop if several);
     /// `None` for a turn no peer message is part of. Set by the session at turn start / join, never from a tool argument.
     turn_conv: Arc<Mutex<Option<(String, u32)>>>,
@@ -491,6 +499,22 @@ fn hold_name(r: HoldReason) -> &'static str {
         HoldReason::PolicyHold => "policy_hold",
     }
 }
+
+/// What the running turn did, for the end-of-turn rules of a turn started by a peer message (26-4, 26-5).
+#[derive(Debug, Clone, Copy, Default)]
+struct TurnObs {
+    /// Tool calls the model made in the turn, of any kind (including backend-hosted ones).
+    tool_calls: u32,
+    /// Some model reply of the turn carried text.
+    text_seen: bool,
+    /// Some model reply of the turn stopped with the provider's refusal (content filter).
+    provider_refused: bool,
+    /// The model called `refuse_peer_message` in this turn.
+    model_refused: bool,
+}
+
+/// Reason recorded for an automatic refusal (a peer-started turn that ended without a tool call).
+pub(crate) const AUTO_REFUSE_REASON: &str = "no action taken";
 
 /// What `refuse_peer_message` did, for the tool result and the human row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -826,6 +850,8 @@ impl PeerAdmissionState {
             received: VecDeque::new(),
             sender_of: HashMap::new(),
             conv_of: HashMap::new(),
+            label_of: HashMap::new(),
+            turn_obs: TurnObs::default(),
             turn_conv: Arc::default(),
             chain: Arc::default(),
             pinned_senders: Vec::new(),
@@ -1253,7 +1279,8 @@ impl PeerAdmissionState {
     pub(crate) fn begin_turn(&self, human_typed: bool, peer_message_id: Option<&str>) -> TurnConvGuard {
         let handle = self.turn_conv_handle();
         {
-            let g = lock(&self.inner);
+            let mut g = lock(&self.inner);
+            g.turn_obs = TurnObs::default();
             let mut ch = g.chain.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if human_typed {
                 *ch = None;
@@ -1573,10 +1600,12 @@ impl PeerAdmissionState {
             {
                 g.sender_of.remove(&old);
                 g.conv_of.remove(&old);
+                g.label_of.remove(&old);
             }
             g.received.push_back(id.clone());
         }
         g.conv_of.insert(id.clone(), (env.conversation_id.clone(), env.hop));
+        g.label_of.insert(id.clone(), (env.from_name.clone(), env.from_ref.clone()));
         // A message that carried denials stays nameable until the human clears the influence, however many arrive after it.
         if !env.denied_recently.is_empty() && !g.pinned_senders.iter().any(|(i, _)| *i == id) {
             if g.pinned_senders.len() >= PINNED_SENDERS {
@@ -1611,20 +1640,67 @@ impl PeerAdmissionState {
     /// ids only is written. The `reason` text is capped at 200 characters and escaped; it is not audited.
     pub(crate) fn refuse_by_model(&self, message_id: &str, reason: &str) -> Result<ModelRefusal, UnknownMessage> {
         let mut g = lock(&self.inner);
-        let Some(from) = Self::sender_for(&g, message_id) else {
+        g.turn_obs.model_refused = true;
+        Self::refuse_locked(&mut g, message_id, reason, false)
+    }
+
+    /// The refusal itself, shared by the tool and the automatic path. The tool path (`automatic == false`) also holds the sender
+    /// for the session; the automatic path refuses that one message only (notice, audit line `automatic`, settled watch).
+    fn refuse_locked(g: &mut Inner, message_id: &str, reason: &str, automatic: bool) -> Result<ModelRefusal, UnknownMessage> {
+        let Some(from) = Self::sender_for(g, message_id) else {
             return Err(UnknownMessage);
         };
         let id = message_id.to_owned();
         let from_s = from.clone();
-        g.refused_senders.insert(from.clone());
-        g.state_dirty = true;
-        let ev = AuditEvent::from_key(&(from, id.clone()), g.audit.to_session(), AuditOutcome::ModelRefused, None::<&String>, now_secs());
+        if !automatic {
+            // Only the model's own decision holds the sender. The sender is just the envelope's claimed `from`, which any
+            // same-user process can forge, so an automatic refusal never writes per-sender state (26-4/26-5 round 2).
+            g.refused_senders.insert(from.clone());
+            g.state_dirty = true;
+        }
+        let why = automatic.then_some("automatic");
+        let ev = AuditEvent::from_key(&(from, id.clone()), g.audit.to_session(), AuditOutcome::ModelRefused, why.as_ref(), now_secs());
         g.audit.emit(ev);
         let cut: String = reason.chars().take(REFUSE_REASON_SHOWN_CHARS).collect();
         let shown_reason = super::peer_message::escape_attr(&cut);
         // The reason is for the human's row only: not in the audit line above, not forwarded to the sender.
         g.notice_with(&from_s, &id, NoticeKind::ModelRefused, Some(shown_reason.clone()));
         Ok(ModelRefusal { shown_reason })
+    }
+
+    /// 26-4/26-5: fold one model reply of the running turn into the turn's record.
+    pub(crate) fn note_model_response(&self, tool_calls: usize, has_text: bool, provider_refused: bool) {
+        let mut g = lock(&self.inner);
+        g.turn_obs.tool_calls = g.turn_obs.tool_calls.saturating_add(u32::try_from(tool_calls).unwrap_or(u32::MAX));
+        g.turn_obs.text_seen |= has_text;
+        g.turn_obs.provider_refused |= provider_refused;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn turn_observed_anything(&self) -> bool {
+        let o = lock(&self.inner).turn_obs;
+        o.tool_calls > 0 || o.text_seen || o.provider_refused || o.model_refused
+    }
+
+    /// 26-4/26-5: a turn started by the peer message `message_id` ended normally. When it made no tool call of any kind and the
+    /// model did not refuse the message itself, the message is recorded refused automatically (the notice, audit and settled watch of
+    /// `refuse_peer_message`, but it does NOT hold the sender), and an empty reply or a refusal stop also puts one notice in the user's transcript.
+    /// Returns true when it recorded the refusal.
+    pub(crate) fn finish_peer_turn(&self, message_id: &str, refusal_stop: bool) -> bool {
+        let mut g = lock(&self.inner);
+        let obs = std::mem::take(&mut g.turn_obs);
+        if obs.tool_calls > 0 || obs.model_refused {
+            return false;
+        }
+        let Some(from) = Self::sender_for(&g, message_id) else { return false };
+        let declined = refusal_stop || obs.provider_refused;
+        if declined || !obs.text_seen {
+            let (name, sref) = g.label_of.get(message_id).cloned().unwrap_or_default();
+            let label = format!("{} [{}]", fuigo_peer::host::display_escape(&name, 64), fuigo_peer::host::display_escape(&sref, 64));
+            let kind = if declined { NoticeKind::PeerTurnDeclined } else { NoticeKind::PeerTurnNoReply };
+            g.notice_with(&from, message_id, kind, Some(label));
+        }
+        Self::refuse_locked(&mut g, message_id, AUTO_REFUSE_REASON, true).is_ok()
     }
 
     /// S7.3: tool requests were denied `laundering_refused`. One human notice and one audit line (message id and tool kind)

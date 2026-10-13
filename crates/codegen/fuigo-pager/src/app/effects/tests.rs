@@ -2960,3 +2960,16 @@ fn format_acp_error_disk_full_verdict_outranks_scrubbed_text() {
         fuigo_fast_worktree::ENOSPC_OS_MESSAGE
     );
 }
+#[test]
+fn session_info_fields_show_the_sandbox_warning_only_when_given() {
+    let info = make_session_info("auto", None, 1000, 10000);
+    let warning = fuigo_sandbox::unavailable_warning_for("workspace", true).unwrap();
+    let with = session_info_fields_with_sandbox_warning(&info, None, false, Some(&warning));
+    let line = with.iter().find(|f| f.label == "Sandbox warning").expect("warning line");
+    assert_eq!(line.value, warning);
+    let without = session_info_fields_with_sandbox_warning(&info, None, false, None);
+    assert!(without.iter().all(|f| f.label != "Sandbox warning"));
+    let off = fuigo_sandbox::unavailable_warning_for("off", true);
+    let none = session_info_fields_with_sandbox_warning(&info, None, false, off.as_deref());
+    assert!(none.iter().all(|f| f.label != "Sandbox warning"));
+}

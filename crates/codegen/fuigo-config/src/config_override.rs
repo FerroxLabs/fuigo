@@ -99,7 +99,52 @@ pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
 
 /// Dotted paths a campaign patch (remote, `[[campaigns]]` in any layer, `FUIGO_CAMPAIGNS_OVERRIDE`) may never set:
 /// `features.peer_messaging` lets sessions message each other and only the user or the machine's admin may turn it on.
-pub const CAMPAIGN_STRIP_PATHS: &[&str] = &["features.peer_messaging"];
+///
+/// `*` matches every key of a table (MCP server names are dynamic). A campaign may never set a server's token settings
+/// (`bearer_token_file`, `bearer_token_env_var`), on any server, new or existing. What else a campaign may do to MCP
+/// servers is decided by [`strip_campaign_mcp_servers`], which also needs the pre-campaign set of server names.
+///
+/// `model.*.notice` is text shown in a banner above the prompt: only the user's own layers may set it.
+pub const CAMPAIGN_STRIP_PATHS: &[&str] = &[
+    "features.peer_messaging",
+    "mcp_servers.*.bearer_token_file",
+    "mcp_servers.*.bearer_token_env_var",
+    "model.*.notice",
+];
+
+/// A campaign patch may not modify ANY key of an MCP server that already exists before campaigns are applied
+/// (`existing`): its whole `mcp_servers.<name>` sub-table is dropped from the patch. A server the patch ADDS (a name not
+/// in `existing`) keeps every field a campaign could set before, except the token settings, which
+/// [`strip_campaign_paths`] removes. A non-table `mcp_servers` or server entry is dropped. Returns the names the strip
+/// dropped or altered, so the caller can tell the user; it is called before [`strip_campaign_paths`].
+pub fn strip_campaign_mcp_servers(patch: &mut toml::Table, existing: &std::collections::HashSet<String>) -> Vec<String> {
+    let mut touched = Vec::new();
+    match patch.get_mut("mcp_servers") {
+        None => return touched,
+        Some(toml::Value::Table(servers)) => {
+            let names: Vec<String> = servers.keys().cloned().collect();
+            for name in names {
+                let drop_whole = existing.contains(&name) || !matches!(servers.get(&name), Some(toml::Value::Table(_)));
+                if drop_whole {
+                    servers.remove(&name);
+                    touched.push(name);
+                } else if let Some(toml::Value::Table(entry)) = servers.get_mut(&name)
+                    && (entry.contains_key("bearer_token_file") || entry.contains_key("bearer_token_env_var"))
+                {
+                    touched.push(name);
+                }
+            }
+            if servers.is_empty() {
+                patch.remove("mcp_servers");
+            }
+        }
+        Some(_) => {
+            patch.remove("mcp_servers");
+            touched.push("mcp_servers".to_owned());
+        }
+    }
+    touched
+}
 
 /// Remove [`CAMPAIGN_STRIP_PATHS`] from `patch`; a table the removal leaves empty is dropped too.
 pub fn strip_campaign_paths(patch: &mut toml::Table) {
@@ -114,6 +159,27 @@ fn remove_nested(patch: &mut toml::Table, path: &[&str]) {
     let Some((key, rest)) = path.split_first() else {
         return;
     };
+    if *key == "*" {
+        let keys: Vec<String> = patch.keys().cloned().collect();
+        for k in keys {
+            if rest.is_empty() {
+                patch.remove(&k);
+                continue;
+            }
+            match patch.get_mut(&k) {
+                Some(toml::Value::Table(nested)) => {
+                    remove_nested(nested, rest);
+                    if nested.is_empty() {
+                        patch.remove(&k);
+                    }
+                }
+                _ => {
+                    patch.remove(&k);
+                }
+            }
+        }
+        return;
+    }
     if rest.is_empty() {
         patch.remove(*key);
         return;
@@ -520,6 +586,27 @@ fn strip_path(patch: &mut toml::Table, path: PatchPath) {
     let Some((key, rest)) = path.split_first() else {
         return;
     };
+    if *key == "*" {
+        let keys: Vec<String> = patch.keys().cloned().collect();
+        for k in keys {
+            if rest.is_empty() {
+                patch.remove(&k);
+                continue;
+            }
+            match patch.get_mut(&k) {
+                Some(toml::Value::Table(nested)) => {
+                    remove_nested(nested, rest);
+                    if nested.is_empty() {
+                        patch.remove(&k);
+                    }
+                }
+                _ => {
+                    patch.remove(&k);
+                }
+            }
+        }
+        return;
+    }
     if rest.is_empty() {
         patch.remove(*key);
         return;

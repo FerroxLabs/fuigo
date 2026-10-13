@@ -115,6 +115,15 @@ Set reasoning effort on the **current** model without reselecting it. Levels are
 /effort high
 ```
 
+### `/context-window [size]`
+
+Choose one of the context windows the current model lists in your configuration (`context_windows`, see [Custom Models](11-custom-models.md)). With no argument it lists the choices for the current model, marking the model default and the window in use. With a size (`400k`, `1m` or a plain token count) it selects that window for this session; a size the model does not list is refused and the list is shown. A model with fewer than two listed sizes has nothing to choose, and the command says so. The selection moves the point at which auto-compaction starts, is kept when you switch to another model that lists the same size, and is restored when you resume the session. Only you can run it: text written by the model or by another session never does.
+
+```
+/context-window
+/context-window 400k
+```
+
 ### `/always-approve` and `/auto`
 
 Both are real toggles for the permission mode: they stay in the menu, and running the mode you're already in turns it back off.

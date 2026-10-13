@@ -20,6 +20,7 @@ pub mod import_claude_modal;
 pub mod jump;
 pub mod list_pane;
 pub mod mcps_modal;
+pub mod model_notice_banner;
 pub mod memory_modal;
 pub mod modal;
 pub mod modal_window;

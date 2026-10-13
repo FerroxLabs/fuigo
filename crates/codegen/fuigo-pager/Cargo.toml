@@ -202,6 +202,8 @@ fuigo-agent = { workspace = true }
 fuigo-pager-pty-harness = { path = "../fuigo-pager-pty-harness" }
 # Wire types for the raw inbox client in tests/peer_real_process.rs.
 fuigo-peer = { workspace = true }
+# Denial-stamp hashes in tests/peer_laundering_live.rs.
+sha2 = { workspace = true }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # fuigo-test-support depends on neither the pager nor the shell).
 fuigo-test-support = { workspace = true, features = [] }

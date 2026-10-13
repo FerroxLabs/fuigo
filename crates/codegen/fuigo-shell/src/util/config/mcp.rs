@@ -1261,9 +1261,11 @@ pub(crate) fn parse_mcp_servers_with_problems(root: &TomlValue) -> ParsedMcpServ
         _ => return ParsedMcpServers { servers, problems },
     };
 
+    let mut user_servers: Option<HashMap<String, TomlValue>> = None;
     for (name, value) in entries {
         match deserialize_mcp_server_config(value) {
-            Ok((config, unknown_fields)) => {
+            Ok((mut config, unknown_fields)) => {
+                enforce_bearer_file_provenance(name, value, &mut config, &mut user_servers);
                 // P113 (E2): a token variable this server names is denied to children from parse on, before any
                 // server (this one or another) is built or spawned, enabled or not.
                 config.deny_credential_env_vars_to_children();
@@ -1299,6 +1301,52 @@ pub(crate) fn parse_mcp_servers_with_problems(root: &TomlValue) -> ParsedMcpServ
         }
     }
     ParsedMcpServers { servers, problems }
+}
+
+/// The raw `[mcp_servers.<name>]` tables of the user's OWN `config.toml` (the user layer alone: not the managed, system,
+/// requirements or campaign layers, and not the `FUIGO_CONFIG` overlay, which cannot carry `mcp_servers`) that set a
+/// `bearer_token_file`, by server name.
+fn user_layer_bearer_servers() -> HashMap<String, TomlValue> {
+    let Ok(layers) = fuigo_config::ConfigLayers::load() else {
+        return HashMap::new();
+    };
+    user_bearer_servers_in(&layers.user)
+}
+
+fn user_bearer_servers_in(user: &TomlValue) -> HashMap<String, TomlValue> {
+    let Some(TomlValue::Table(servers)) = user.get("mcp_servers") else {
+        return HashMap::new();
+    };
+    servers
+        .iter()
+        .filter(|(_, server)| server.get("bearer_token_file").is_some())
+        .map(|(name, server)| (name.clone(), server.clone()))
+        .collect()
+}
+
+/// Rule 1 for TOML sources, the WHOLE-ENTRY rule: `bearer_token_file` is honoured for a server only if the merged raw
+/// table `mcp_servers.<name>` is, key for key, the raw table the user's own `config.toml` defines for that name. The
+/// comparison is on the TOML tables, before any setup/template rewriting, expansion or conversion, so every key counts
+/// (`url`, `setup`, `url_template`, `command`, `args`, `env`, `headers`, `oauth`, `enabled`, and any field added later).
+/// The effective config merges the managed, system, requirements and campaign layers into one table; any difference
+/// means another layer changed the server, so the token file is dropped for it, with a visible note, and the server
+/// still starts without it. Because the entry is identical, the rewriting that follows (setup variables come from the
+/// same entry and the user's own saved preferences) yields the user's own URL, so the final origin is the user's too.
+/// A definition from a project config or any other marked source is dropped later, at conversion
+/// (`McpServerConfig::to_acp_mcp_server`); its marker key also makes the tables differ.
+pub(crate) fn enforce_bearer_file_provenance(
+    name: &str,
+    raw: &TomlValue,
+    config: &mut McpServerConfig,
+    user_servers: &mut Option<HashMap<String, TomlValue>>,
+) {
+    if config.bearer_token_file().is_none() || config.untrusted_source {
+        return;
+    }
+    let owned = user_servers.get_or_insert_with(user_layer_bearer_servers).get(name).is_some_and(|user| user == raw);
+    if !owned {
+        config.drop_bearer_token_file_changed(name);
+    }
 }
 
 /// Wrapper that logs problems and returns only the valid servers.
@@ -1679,7 +1727,10 @@ fn mcp_config_from_json_value(value: &serde_json::Value) -> McpConfig {
     if let Some(entries) = value.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, entry) in entries {
             match serde_json::from_value::<McpServerConfig>(entry.clone()) {
-                Ok(config) => {
+                Ok(mut config) => {
+                    // A JSON source (`.mcp.json`, `~/.claude.json`, Cursor, a plugin) is never the user's own Fuigo
+                    // config.toml: `bearer_token_file` is not honoured in it.
+                    config.drop_bearer_token_file(name, "a JSON MCP config");
                     // P113 (E2): as for `[mcp_servers.*]`, at parse, enabled or awaiting setup.
                     config.deny_credential_env_vars_to_children();
                     mcp_servers.insert(name.clone(), config);
@@ -3027,3 +3078,7 @@ mod p113_tests;
 #[cfg(test)]
 #[path = "mcp_p118_tests.rs"]
 mod p118_tests;
+
+#[cfg(test)]
+#[path = "mcp_bearer_file_tests.rs"]
+mod bearer_file_tests;

@@ -668,6 +668,7 @@ impl MvpAgent {
                     self,
                     acp::SetSessionModelRequest::new(session_id.clone(), acp::ModelId::new(model_id)),
                     crate::agent::handlers::model_switch::SwitchEffort::Set(switch_effort),
+                    crate::agent::handlers::model_switch::SwitchContextWindow::Preserve,
                     crate::agent::handlers::model_switch::ConfigNotice::Skip,
                 )
                 .await
@@ -1888,10 +1889,27 @@ impl MvpAgent {
         {
             let _timer = crate::instrumentation_timer!("session.restore_model");
             let restore_effort = initial_reasoning_effort.or(summary.reasoning_effort);
+            // A saved window is applied once the catalog is known; without one the selection is kept and applied at the next turn
+            let catalog_ready = summary.context_window.is_none()
+                || self.models_manager.wait_for_first_catalog().await;
+            let restore_window = if catalog_ready {
+                crate::agent::handlers::model_switch::SwitchContextWindow::Set(
+                    summary.context_window,
+                )
+            } else {
+                if let Some(handle) = self.resident_handle(&session_id) {
+                    handle.context_window_selection.store(
+                        summary.context_window.map_or(0, std::num::NonZeroU64::get),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                crate::agent::handlers::model_switch::SwitchContextWindow::Preserve
+            };
             if let Err(err) = crate::agent::handlers::model_switch::apply(
                 self,
                 acp::SetSessionModelRequest::new(session_id.to_owned(), model_id),
                 crate::agent::handlers::model_switch::SwitchEffort::Set(restore_effort),
+                restore_window,
                 crate::agent::handlers::model_switch::ConfigNotice::Skip,
             )
             .await

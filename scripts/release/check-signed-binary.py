@@ -8,6 +8,7 @@ Runs on ubuntu with no network. For each file it auto-detects PE or Mach-O:
           --windows-subject (default "Ferrox Labs"). Certificates are listed with
           `openssl pkcs7 -print_certs`; if openssl is absent, a raw DER substring search
           for the subject text is used (weaker, and said so in the output).
+          The optional header's stack reserve must be at least 8 MiB (the /STACK link argument).
   Mach-O  (thin or fat) every slice must have an LC_CODE_SIGNATURE whose CodeDirectory has
           the hardened-runtime flag, is not ad-hoc, and has team id --team-id
           (default PX6SP9GPWJ).
@@ -78,8 +79,30 @@ def pe_subjects(blob):
     return [l[len("subject="):].strip() for l in out.splitlines() if l.startswith("subject=")]
 
 
+# The main thread's stack reserve the Windows release executable must have (`/STACK:8388608` in .cargo/config.toml).
+MIN_PE_STACK_RESERVE = 8 * 1024 * 1024
+
+
+def pe_stack_reserve(data):
+    """SizeOfStackReserve from the optional header (offset 72 in both PE32 and PE32+; 4 or 8 bytes)."""
+    (e_lfanew,) = struct.unpack_from("<I", data, 0x3C)
+    opt = e_lfanew + 24
+    (magic,) = struct.unpack_from("<H", data, opt)
+    if magic == 0x20B:
+        (reserve,) = struct.unpack_from("<Q", data, opt + 72)
+    elif magic == 0x10B:
+        (reserve,) = struct.unpack_from("<I", data, opt + 72)
+    else:
+        raise Fail("unknown PE optional header magic 0x%x" % magic)
+    return reserve
+
+
 def check_pe(data, subject):
     blob = pe_certificate_blob(data)
+    reserve = pe_stack_reserve(data)
+    if reserve < MIN_PE_STACK_RESERVE:
+        raise Fail("PE stack reserve is %d bytes; expected at least %d (the /STACK link argument is missing)"
+                   % (reserve, MIN_PE_STACK_RESERVE))
     subs = pe_subjects(blob)
     if subs is None:
         # Fail closed: a raw byte search for the subject text would accept a forged certificate table.
@@ -87,7 +110,7 @@ def check_pe(data, subject):
     hit = [s for s in subs if subject in s]
     if not hit:
         raise Fail("no certificate subject contains %r; subjects: %s" % (subject, subs))
-    return "certificate table %d bytes; signer subject: %s" % (len(blob), hit[0])
+    return "certificate table %d bytes; signer subject: %s; stack reserve %d" % (len(blob), hit[0], reserve)
 
 
 # ---------------------------------------------------------------- Mach-O

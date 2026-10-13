@@ -606,7 +606,9 @@ impl HeadlessEmitter {
     fn on_lifecycle(&mut self, event: Lifecycle) {
         match self.format {
             OutputFormat::Plain => {
-                crate::best_effort_stderr::eprint_line(&event.plain_message());
+                if let Some(line) = plain_lifecycle_line(&event, fuigo_sandbox::unavailable_warning().as_deref()) {
+                    crate::best_effort_stderr::eprint_line(&line);
+                }
             }
             // stdout stays one JSON document; a refused reference to the saved key is a warning for the person at the
             // terminal, so it goes to stderr (the other lifecycle events have no stderr line in these formats).
@@ -3433,6 +3435,16 @@ fn handle_headless_acp_message(
     }
 }
 
+/// The `plain` stderr line for a lifecycle event, or `None` when it would repeat the startup sandbox warning
+/// that `apply_sandbox` already printed on stderr (so the warning appears once in this mode).
+fn plain_lifecycle_line(event: &Lifecycle, startup_sandbox_warning: Option<&str>) -> Option<String> {
+    match (event, startup_sandbox_warning) {
+        (Lifecycle::ConfigNotice { message }, Some(w)) if message == w => None,
+        _ => Some(event.plain_message()),
+    }
+}
+
 #[cfg(test)]
 #[path = "headless_tests.rs"]
 mod tests;
+

@@ -324,6 +324,7 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | --- | --- | --- | --- | --- |
 | `mcp_servers.<name>.args` | `string[]` | `yes` | `user` | `[mcp_servers.<name>]` `args` on a stdio or HTTP MCP server. |
 | `mcp_servers.<name>.bearer_token_env_var` | `string` | `yes` | `user` | `[mcp_servers.<name>]` `bearer_token_env_var` on a stdio or HTTP MCP server. |
+| `mcp_servers.<name>.bearer_token_file` | `string` | `no` | `user` | `[mcp_servers.<name>]` `bearer_token_file` on an HTTP MCP server: path (absolute or `~/`) of an owner-only file (mode 0600 or 0400, at most 16 KiB, not a symlink) holding the bearer token, read again for every request. Honoured only in your own `config.toml`, and only while the merged server entry equals your own (a higher layer that changes `url`, `headers` or auth drops it, with a warning); ignored with a warning elsewhere; campaigns cannot set it. `$VAR` in the path is not expanded; the token must be at least 16 characters. Not supported on Windows. See the MCP chapter. |
 | `mcp_servers.<name>.command` | `string` | `yes` | `user` | `[mcp_servers.<name>]` `command` on a stdio or HTTP MCP server. |
 | `mcp_servers.<name>.cwd` | `string` | `yes` | `user` | `[mcp_servers.<name>]` `cwd` on a stdio or HTTP MCP server. |
 | `mcp_servers.<name>.enabled` | `boolean` | `yes` | `user` | `[mcp_servers.<name>]` `enabled` on a stdio or HTTP MCP server. |
@@ -362,6 +363,8 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | `model.<id>.compaction_at_tokens` | `number / table` | `yes` | `user` | Token threshold that triggers compaction for this model. |
 | `model.<id>.compactions_remaining` | `string / table` | `yes` | `user` | How compaction leftover context is sent. Alias `send_compactions_remaining`. |
 | `model.<id>.context_window` | `number` | `yes` | `user` | Context window tokens; drives auto-compact timing. |
+| `model.<id>.context_windows` | `array<number>` | `yes` | `user` | Context window sizes `/context-window` can select (at most 16, each 1 to 16,000,000 tokens). |
+| `model.<id>.notice` | `string` or `table` | `yes` | `user` | Short plain-text message (at most 160 characters, one line) shown in a banner above the prompt while the model is selected; the table form takes `text`, `severity` (`info`, `warning`, `critical`) and `label`. Sent to ACP clients as `_meta.notice`. |
 | `model.<id>.description` | `string` | `yes` | `user` | Optional description shown in the picker. |
 | `model.<id>.env_http_headers` | `map<string,string>` | `yes` | `user` | HTTP headers populated from environment variables when set. |
 | `model.<id>.env_key` | `string / string[]` | `yes` | `user` | Environment variable name(s) holding the provider API key. |
@@ -535,7 +538,8 @@ User-level configuration lives in `$FUIGO_HOME/config.toml` (default `~/.fuigo/c
 | Key | Type / Values | Requirements | Managed | Details |
 | --- | --- | --- | --- | --- |
 | `toolset.ask_user_question.timeout_secs` | `number` | `yes` | `user` | Timeout for the ask_user_question tool. |
-| `toolset.bash.auto_background_on_timeout` | `boolean` | `yes` | `user` | Background the command when the foreground timeout fires. |
+| `toolset.bash.auto_background_on_timeout` | `boolean` | `yes` | `user` | Background the command when the foreground timeout or a positive `block_until_ms` wait ends (off: the command is stopped). |
+| `toolset.bash.default_block_until_ms` | `number` | `yes` | `user` | How long a command blocks, in milliseconds, when the model does not set `block_until_ms` (default: the foreground timeout, 120000; capped at the block ceiling). What happens when the wait ends follows `auto_background_on_timeout`. |
 | `toolset.bash.login_shell_capture` | `boolean` | `yes` | `user` | Capture the user's login shell environment for bash. Overlay-allowlisted. |
 | `toolset.bash.max_timeout_secs` | `number` | `yes` | `user` | Cap on model-requested foreground timeouts. |
 | `toolset.bash.output_byte_limit` | `number` | `yes` | `user` | Max captured bash output in bytes. |

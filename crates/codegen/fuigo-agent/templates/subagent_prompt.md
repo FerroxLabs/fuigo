@@ -24,7 +24,7 @@ ${%- endif %}
 ${%- if tools.by_kind.execute and tools.by_kind.background_task_action %}
 
 <background_tasks>
-For long-running commands, use `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` in ${{ tools.by_kind.execute }}, then continue independent work; use `${{ tools.by_kind.background_task_action }}` for a snapshot or one bounded wait — do not poll repeatedly.
+For long-running commands, use `${%- if params is defined and params.execute is defined and params.execute.block_until_ms %}${{ params.execute.block_until_ms }}${%- else %}block_until_ms${%- endif %}: 0` in ${{ tools.by_kind.execute }}, then continue independent work; use `${{ tools.by_kind.background_task_action }}` for a snapshot or one bounded wait — do not poll repeatedly.
 </background_tasks>
 ${%- endif %}
 ${%- if tools.by_kind.edit %}

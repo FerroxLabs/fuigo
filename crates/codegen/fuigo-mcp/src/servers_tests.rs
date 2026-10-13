@@ -492,6 +492,7 @@ async fn acp_clients_are_not_liveness_watched() {
             url: "http://localhost/api/mcp".to_string(),
             headers: vec![],
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         None,
         None,
@@ -763,6 +764,7 @@ fn test_tool_timeout_for_returns_per_tool_override() {
             url: String::new(),
             headers: vec![],
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         Some(&overrides),
         None,
@@ -787,6 +789,7 @@ fn test_tool_timeout_for_empty_map_returns_default() {
             url: String::new(),
             headers: vec![],
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         Some(&overrides),
         None,
@@ -1582,6 +1585,7 @@ async fn recover_and_retry_surfaces_original_error_when_recover_fails() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -2072,6 +2076,7 @@ fn fake_http_client_with_overrides(
             url: url.to_string(),
             headers: vec![],
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         Some(&overrides),
         None,
@@ -2498,6 +2503,7 @@ async fn fake_http_auth_client_with_overrides(
             url: url.to_string(),
             headers: vec![],
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         Arc::new(tokio::sync::Mutex::new(manager)),
         crate::credentials::ObservedAccessToken::default(),
@@ -2592,6 +2598,7 @@ async fn the_fallback_gate_and_its_budget_read_the_same_transport_fact() {
         url: "http://127.0.0.1:1/mcp".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let auth_manager = Arc::new(tokio::sync::Mutex::new(
         crate::http_policy::auth_manager("http://127.0.0.1:1/mcp")
@@ -3394,6 +3401,7 @@ async fn test_reset_transport_succeeds_for_http_client() {
         url: "http://127.0.0.1:9/api/mcp".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
     assert!(client.reset_transport().await);
@@ -3411,6 +3419,7 @@ async fn test_reset_transport_is_idempotent() {
         url: "http://127.0.0.1:9/api/mcp".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let client = McpClient::new_http("example-mcp".to_string(), config, None, None);
 
@@ -3425,6 +3434,7 @@ async fn test_reset_transport_makes_ensure_initialized_retry_handshake() {
         url: "http://127.0.0.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let client = McpClient::new_http("test".to_string(), config, None, None);
 
@@ -3710,6 +3720,7 @@ async fn watched_live_client(name: &str) -> Arc<McpClient> {
             url: "http://127.0.0.1:0/".to_string(),
             headers: Vec::new(),
             local_agent_endpoint: false,
+            bearer_token_file: None,
         },
         None,
         None,
@@ -3930,6 +3941,7 @@ fn new_http_propagates_expose_image_base64_override_to_getter() {
         url: "http://localhost/api/mcp".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         expose_image_base64: Some(true),
@@ -3970,6 +3982,7 @@ async fn ensure_initialized_concurrent_callers_never_see_legacy_fast_fail() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -4012,6 +4025,7 @@ async fn ensure_initialized_parked_caller_retries_after_notify() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(1),
@@ -4062,6 +4076,7 @@ async fn ensure_initialized_inflight_wait_times_out_when_holder_silent() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(0),
@@ -4105,6 +4120,7 @@ async fn ensure_initialized_drop_guard_restores_state_after_holder_aborted() {
         url: format!("http://{addr}/mcp"),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(10),
@@ -4237,6 +4253,7 @@ async fn is_healthy_pending_returns_false() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let client = McpClient::new_http("pending".to_string(), config, None, None);
     assert!(matches!(
@@ -4261,6 +4278,7 @@ async fn is_healthy_pending_does_not_block_on_handshake() {
         url: "http://192.0.2.1:1/unreachable".to_string(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let overrides = McpClientTimeoutOverrides {
         startup_timeout_sec: Some(10),
@@ -5534,6 +5552,7 @@ async fn probe_connect_failure_surfaces_instead_of_legacy_fallback() {
         url: url.clone(),
         headers: vec![],
         local_agent_endpoint: false,
+        bearer_token_file: None,
     };
     let http_client = McpClient::build_http_client(
         &config,
