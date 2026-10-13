@@ -71,12 +71,20 @@ fuigo-tool-types = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# The one Windows file-ACL checker (shared with the peer locator in fuigo-shell). No dependency on this crate: no cycle.
+[target.'cfg(windows)'.dependencies]
+fuigo-win-acl = { workspace = true }
+
 [dev-dependencies]
 # Serializes the integration tests that share the process-global $FUIGO_HOME.
 serial_test = { workspace = true }
 # `test-util` enables `tokio::time::pause` / `advance`, required by
 # the deterministic timing tests in `liveness.rs`.
 tokio = { workspace = true, features = ["test-util"] }
+
+# Tests create files with a chosen DACL (no icacls, no loose files).
+[target.'cfg(windows)'.dev-dependencies]
+fuigo-win-acl = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

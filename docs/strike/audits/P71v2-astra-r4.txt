@@ -36,7 +36,7 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `2eb33c17..9c65f054`, one commit on `strike/p71v2-s19`. Read-only; no Cargo commands or file modifications. **No current production storage-upload bypass found. One MEDIUM guard defect remains.**
 
 **MEDIUM — The tripwire still misses valid upload forms outside its documented residuals.**  
-[upload_gate_guard.rs:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:320), [line 366](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:366), [line 388](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:388).
+[upload_gate_guard.rs:320](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:320), [line 366](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:366), [line 388](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:388).
 
 The new `squeezed` scanner treats comment markers inside string literals as comments. This valid code produces no upload match in either scanner:
 

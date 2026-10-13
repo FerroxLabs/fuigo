@@ -26,7 +26,7 @@ Audited `a84e3234..a9d5723f` read-only. No Cargo commands or tests run; no files
 
 1. **MEDIUM — Mixed credential spellings can still give one HTTP MCP server two key versions.**
 
-   Locations: [servers.rs:5379](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5379), [mcp.rs:496](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:496).
+   Locations: [servers.rs:5379](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5379), [mcp.rs:496](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:496).
 
    Concrete configuration:
    ```toml

@@ -24,8 +24,8 @@ Compaction, chat-state, token estimation, Chat Completions folding, and empty-re
 
 Two **pre-existing limitations** remain:
 
-- The [headless reducer](/Volumes/Mando/WaylandBots/Fuigo/wt-p160/crates/codegen/fuigo-pager/src/headless/reducer/messages/mod.rs:151) can merge consecutive text-bearing thinking blocks; its wire enum also lacks redacted thinking. Headless output therefore remains unsuitable for guaranteed lossless replay under [Anthropic’s block-preservation requirement](https://platform.claude.com/docs/en/docs/build-with-claude/extended-thinking).
-- The legacy [single-item conversion](/Volumes/Mando/WaylandBots/Fuigo/wt-p160/crates/codegen/fuigo-sampling-types/src/conversation/messages.rs:431) still returns only the assistant. Non-streaming callers needing reasoning must use the new helper.
+- The [headless reducer](<project>/Fuigo/wt-p160/crates/codegen/fuigo-pager/src/headless/reducer/messages/mod.rs:151) can merge consecutive text-bearing thinking blocks; its wire enum also lacks redacted thinking. Headless output therefore remains unsuitable for guaranteed lossless replay under [Anthropic’s block-preservation requirement](https://platform.claude.com/docs/en/docs/build-with-claude/extended-thinking).
+- The legacy [single-item conversion](<project>/Fuigo/wt-p160/crates/codegen/fuigo-sampling-types/src/conversation/messages.rs:431) still returns only the assistant. Non-streaming callers needing reasoning must use the new helper.
 
 Source audit and inspection of 12 added tests completed; `git diff --check` passed. No Cargo, tests, or live-provider calls ran. No files were edited.
 

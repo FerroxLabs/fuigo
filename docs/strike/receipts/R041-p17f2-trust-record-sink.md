@@ -26,7 +26,7 @@ before the first write, and an app that never installs one gets only `tracing` (
 | 17-20 | R008/R011/queue-plan receipts, commit-message timing | SKIPPED: not P17 files (contract/receipt docs owned by the coordinator) |
 Other `OnceLock` hits in the tree describe real `OnceLock`s (`fuigo_home()`, rg path) and are correct.
 
-## Evidence (rp.sh p17f2, Hetzner, `slot-run.sh`; log: `/root/fuigo-builds/p17f2.out`)
+## Evidence (rp.sh p17f2, Hetzner, `slot-run.sh`; log: `<build>/p17f2.out`)
 | run | pkg | exit | derived == headers | failures | log sha256 |
 |---|---|---|---|---|---|
 | parent bf8514ee | fuigo-shell-base | 0 | 4 == 4, 0 unfinished | 0 | 4ff36585b9dd66ccd4fddbd9d35a1414332693f5d5216abec9b95f424be45468 |
@@ -38,7 +38,7 @@ Clippy `--all-targets` both pkgs: parent exit 0, 23 warnings; tip exit 0, 23 war
 Run completed 2026-10-01T08:43:39Z. Single full run per side (claim is about this packet, not suite stability);
 baseline `2eb306e` control not run.
 
-## Mutants (`/root/fuigo-builds/p17f2-mut.sh`, `/root/fuigo-builds/p17f2m.out`, tip `8253794a`)
+## Mutants (`<build>/p17f2-mut.sh`, `<build>/p17f2m.out`, tip `8253794a`)
 Control: exit 0, 1 passed (sha256 6ef772c2…23f0). An earlier mutant run was INVALID: my test had an orphan-rule
 compile error (E0117), so control and all mutants exited 101 with the same log; fixed in `8253794a`, rerun below.
 | mutant | result |
@@ -76,7 +76,7 @@ The "proposal" in the previous section is implemented:
 - New test `fuigo-pager-bin` `trust_record_sink_wiring::main_installs_the_trust_record_sink_first` (source scan of
   `main()`: call present and ahead of `parse_cli` and `validate_requirements`).
 
-Mutants (tip `493fe1d8`, `/root/fuigo-builds/p17f2-mut2.sh`, own target dir, deleted after): controls pass
+Mutants (tip `493fe1d8`, `<build>/p17f2-mut2.sh`, own target dir, deleted after): controls pass
 (shell exit 0 sha256 ae82073d…b0a7; pager exit 0 sha256 8d700280…8700).
 | mutant | result |
 |---|---|
@@ -87,8 +87,8 @@ Mutants (tip `493fe1d8`, `/root/fuigo-builds/p17f2-mut2.sh`, own target dir, del
 Astra on the new commit (`P17-F2-astra-r4.txt`): "No BLOCKER/HIGH/MEDIUM/LOW defects found." Final line quoted:
 "VERDICT: PASS — source audit; build/runtime verification pending."
 
-Gate (`/root/fuigo-builds/rp.sh p17f2rp ac7bfe92… strike/p17f2 /root/fuigo-builds/p17f2.bundle fuigo-shell-base
-fuigo-shell fuigo-pager-bin`; log `/root/fuigo-builds/p17f2rp.out`; finished 2026-10-01T10:09:05Z; toolchain digest
+Gate (`<build>/rp.sh p17f2rp ac7bfe92… strike/p17f2 <build>/p17f2.bundle fuigo-shell-base
+fuigo-shell fuigo-pager-bin`; log `<build>/p17f2rp.out`; finished 2026-10-01T10:09:05Z; toolchain digest
 `b75985398e5509a90a7d5d68f8ec6690675f703c5cfa11893b04fc9c3fceca69`):
 | side | pkg | exit | derived == headers | failures | log sha256 |
 |---|---|---|---|---|---|

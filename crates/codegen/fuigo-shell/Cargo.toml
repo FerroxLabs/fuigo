@@ -33,6 +33,7 @@ anyhow = { workspace = true }
 fuigo-announcements = { workspace = true }
 fuigo-prompt-queue = { workspace = true }
 fuigo-version = { workspace = true }
+fuigo-win-acl = { workspace = true }
 
 async-openai = { workspace = true }
 async-trait = { workspace = true }
@@ -200,6 +201,10 @@ nix = { workspace = true, features = ["dir"] }
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
 windows = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+# Config tests create token files with a chosen DACL (fuigo-win-acl test helpers).
+[target.'cfg(windows)'.dev-dependencies]
+fuigo-win-acl = { workspace = true, features = ["test-support"] }
 
 [dev-dependencies]
 fuigo-secrets = { workspace = true, features = ["test-support"] }

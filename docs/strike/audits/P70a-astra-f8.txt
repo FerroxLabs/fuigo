@@ -30,7 +30,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..2dee597ecf518ca5b266b64f53dd2a701b267307`. Found **one HIGH and two MEDIUM defects**. Read-only source review; no Cargo or tests run, no files modified.
 
 1. **HIGH — An expanded alias can turn an escaped reference into consent.**  
-   [fuigo-config/src/credential_env.rs:142](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:142), [fuigo-hooks/src/env_expand.rs:295](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:295)
+   [fuigo-config/src/credential_env.rs:142](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:142), [fuigo-hooks/src/env_expand.rs:295](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:295)
 
    Concrete hook configuration:
 
@@ -46,7 +46,7 @@ Audited `a84e3234..2dee597ecf518ca5b266b64f53dd2a701b267307`. Found **one HIGH a
    **Existing tests:** Do not catch this. Alias and private-use-character tests never place an alias yielding `$` immediately before a preserved run. Escape provenance must survive concatenation; recomputing parity from the resulting string loses it.
 
 2. **MEDIUM — HTTP hook URLs never perform the final escape/reference resolution.**  
-   [fuigo-hooks/src/runner/http.rs:183](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:183)
+   [fuigo-hooks/src/runner/http.rs:183](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:183)
 
    With the saved key available, `https://hooks.example/h?k=$$${FUIGO_API_KEY}` is correctly detected as consent, but `expand_hook_url` calls the same expander that preserves every multi-dollar run. Both parsing and request-time expansion therefore leave `$$${FUIGO_API_KEY}` literal. The destination receives no key. Likewise, `$${FUIGO_API_KEY}` retains two dollars instead of becoming the documented literal `${FUIGO_API_KEY}`.
 
@@ -55,7 +55,7 @@ Audited `a84e3234..2dee597ecf518ca5b266b64f53dd2a701b267307`. Found **one HIGH a
    **Existing tests:** Do not catch this. The HTTP test has no odd-run case; its mixed plain/escaped assertion checks the key count without checking the escaped value’s exact spelling.
 
 3. **MEDIUM — Cutting strings inside parameter expressions breaks ordinary environment expansion.**  
-   [fuigo-config/src/credential_env.rs:141](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:141)
+   [fuigo-config/src/credential_env.rs:141](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:141)
 
    With process variable `OTHER=ready`, consider:
 

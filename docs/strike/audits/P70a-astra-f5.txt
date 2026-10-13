@@ -27,7 +27,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Two findings in `a84e3234..e0ca18ea`. Source review only: no cargo execution or file changes.
 
 1. **HIGH — Escaped hook references still resolve when the same hook also contains a plain reference.**  
-   Locations: [runner/command.rs:135](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:135), [runner/http.rs:171](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:171).
+   Locations: [runner/command.rs:135](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:135), [runner/http.rs:171](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:171).
 
    Consider:
 
@@ -35,14 +35,14 @@ Two findings in `a84e3234..e0ca18ea`. Source review only: no cargo execution or 
    command = 'private-hook "$FUIGO_API_KEY"; public-hook "$${FUIGO_API_KEY}"'
    ```
 
-   Hook parsing still collapses `$$` to `$` through its separate expander ([config.rs:720](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/config.rs:720)). The raw-command detector finds the first, legitimate reference and supplies the saved key to the child. The executed command now contains **two plain references**, so `public-hook` also receives the key despite its explicitly escaped argument.
+   Hook parsing still collapses `$$` to `$` through its separate expander ([config.rs:720](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/config.rs:720)). The raw-command detector finds the first, legitimate reference and supplies the saved key to the child. The executed command now contains **two plain references**, so `public-hook` also receives the key despite its explicitly escaped argument.
 
    HTTP hooks have the same problem: a URL containing both `${FUIGO_API_KEY}` and `$${FUIGO_API_KEY}` resolves both occurrences during the runtime pass. Inspecting raw text only to decide whether to supply a key does not preserve escaping at individual occurrences.
 
    **Existing coverage:** No test covers mixed plain/escaped references through production hook parsing and execution. The detector test checks isolated strings; the Murage escaped-reference assertion covers MCP environment values. This refutes F0c’s complete escape protection.
 
 2. **MEDIUM — Hook env aliases stop working after production parsing.**  
-   Locations: [env_expand.rs:298](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:298), [runner/command.rs:135](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:135).
+   Locations: [env_expand.rs:298](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:298), [runner/command.rs:135](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:135).
 
    With:
 
@@ -55,7 +55,7 @@ Two findings in `a84e3234..e0ca18ea`. Source review only: no cargo execution or 
 
    The HTTP equivalent also fails: parsing replaces the URL’s alias with `${FUIGO_API_KEY}`, while runtime expansion supplies only the alias variable, leaving the key reference literal.
 
-   **Existing coverage:** The Murage test’s [via-env assertion at line 2771](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2771) should catch the command failure against this exact HEAD. I did not execute it. Both hook unit-test helpers construct `HookSpec` directly, bypassing the parser and therefore missing this failure. F3/F4’s alias-success claims are unsupported for the production path.
+   **Existing coverage:** The Murage test’s [via-env assertion at line 2771](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2771) should catch the command failure against this exact HEAD. I did not execute it. Both hook unit-test helpers construct `HookSpec` directly, bypassing the parser and therefore missing this failure. F3/F4’s alias-success claims are unsupported for the production path.
 
 The shared resolver, exclusion of runtime inference keys, model catalogue restrictions, and ACP `getApiKey` rationale are supported by the inspected source. I found no saved-key write into the agent environment in this delta.
 

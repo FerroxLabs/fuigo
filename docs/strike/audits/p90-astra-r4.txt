@@ -1,10 +1,10 @@
 Astra round 4 (codex 0.160.0 project-local, model gpt-6-astra, --sandbox read-only, run from the Mac worktree), audited fc3ccb94..672f9573.
-Brief: docs/strike/audits/p90-astra-brief-r4.txt. Raw transcript (10053 lines) not committed; sha256 ff8955d70f88272b7090fd8ea3cf4e72567e6f6119f0f407ab6a45eccd5e896e; copy at hetzner-dsm:/root/fuigo-builds/p90-audits/p90-astra-r4.raw.txt
+Brief: docs/strike/audits/p90-astra-brief-r4.txt. Raw transcript (10053 lines) not committed; sha256 ff8955d70f88272b7090fd8ea3cf4e72567e6f6119f0f407ab6a45eccd5e896e; copy at hetzner-dsm:<build>/p90-audits/p90-astra-r4.raw.txt
 
 **Three HIGH defects remain in F6.** Audited `fc3ccb94..672f9573` and all six commit messages. No builds, Cargo, tests, or file modifications were performed.
 
 1. **HIGH — Summary helpers bypass the off-catalog guard.**  
-   [agent_ops.rs:197](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:197)
+   [agent_ops.rs:197](<project>/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:197)
 
    During a ChatGPT subscription session, configure `session_summary = "private-summary"` without a corresponding catalog entry, while a deployment key or `FUIGO_API_KEY` remains available. The resolver returns a gateway configuration using that key. Because the choice is explicit, stamping preserves it, and session content goes to the gateway.
 
@@ -13,7 +13,7 @@ Brief: docs/strike/audits/p90-astra-brief-r4.txt. Raw transcript (10053 lines) n
    **Test coverage:** Not caught. `explicit_helper_off_the_catalog_is_unusable_in_a_subscription_session` calls the guard directly; the summary fallback test calls only `summary_fallback_config`. Neither exercises this production decision. Apply the catalog guard before the summary’s `Some`/`None` match, preserving the approved fallback.
 
 2. **HIGH — A cached classifier bypasses subscription routing after a model switch.**  
-   [sampler_turn.rs:908](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:908), [sampler_turn.rs:944](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:944)
+   [sampler_turn.rs:908](<project>/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:908), [sampler_turn.rs:944](<project>/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/sampler_turn.rs:944)
 
    Start an API session with Auto enabled and a remote-settings default classifier that resolves using a paid key. Switch the session to ChatGPT subscription. The worker continues cloning its previously constructed classifier client; it never reapplies the subscription/default rule. Subsequent classifications—including subagent requests—still use the paid route.
 
@@ -22,7 +22,7 @@ Brief: docs/strike/audits/p90-astra-brief-r4.txt. Raw transcript (10053 lines) n
    **Test coverage:** Not caught. The new tests exercise stamping and refusal predicates with fixed configurations, without wiring a classifier and switching the session model. Revalidate the route against the active session before each classification, or invalidate the cached client when that context changes.
 
 3. **HIGH — Settings refresh leaves image routing on stale helper provenance.**  
-   [agent_ops.rs:1163](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:1163), [prompt_build.rs:964](/Volumes/Mando/WaylandBots/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/prompt_build.rs:964)
+   [agent_ops.rs:1163](<project>/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/agent/mvp_agent/agent_ops.rs:1163), [prompt_build.rs:964](<project>/Fuigo/wt-p90/crates/codegen/fuigo-shell/src/session/acp_session_impl/prompt_build.rs:964)
 
    Suppose the user configures a local image helper, and a remote campaign temporarily overrides it. When settings refresh withdraws that campaign, `reapply_config_after_settings_refresh` correctly restores the explicit local helper in `self.cfg`. However, `ModelsManager` was updated **before** this re-resolution and is not updated afterwards.
 

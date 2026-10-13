@@ -3,8 +3,8 @@
 
 No new BLOCKER/HIGH/MEDIUM/LOW findings.
 
-- [tests.rs:2316](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2316): The allow applies only to the following `let` statement. `Command::spawn()` is its only disallowed call.
-- [tests.rs:2311](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2311): Successful spawning immediately transfers ownership into `Probe`. Its destructor calls `kill()` and `wait()` on normal exit and panic unwinding. Spawn failure leaves no child requiring this guard. The justification is supported for these paths; cleanup errors are ignored.
+- [tests.rs:2316](<project>/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2316): The allow applies only to the following `let` statement. `Command::spawn()` is its only disallowed call.
+- [tests.rs:2311](<project>/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2311): Successful spawning immediately transfers ownership into `Probe`. Its destructor calls `kill()` and `wait()` on normal exit and panic unwinding. Spawn failure leaves no child requiring this guard. The justification is supported for these paths; cleanup errors are ignored.
 - `66a29b0d` changes exactly that one line. `4ee9994f` adds only the round-10 report.
 - HEAD advanced to `a6a8886b` during inspection. Its only additional change wraps two declarations in `theme_pin_guard_tests.rs`; literal contents and behavior are unchanged.
 

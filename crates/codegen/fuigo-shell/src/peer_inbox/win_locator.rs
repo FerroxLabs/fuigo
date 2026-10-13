@@ -19,28 +19,26 @@ use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Security::{SECURITY_ATTRIBUTES, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation};
+use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_CREATION_DISPOSITION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL,
+    FILE_CREATION_DISPOSITION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
     FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_INFO_BY_HANDLE_CLASS, FILE_GENERIC_WRITE, FILE_SHARE_DELETE, FILE_SHARE_MODE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK, GetFileInformationByHandle, GetFileType, LOCKFILE_EXCLUSIVE_LOCK,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK,
     LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     OPEN_ALWAYS, OPEN_EXISTING, SetFileInformationByHandle, UnlockFileEx,
 };
 use windows::Win32::System::IO::OVERLAPPED;
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows::core::PCWSTR;
 
-use super::win_pipe::sys::owner_and_dacl;
-use super::win_policy::{locator_dacl_ok, locator_owner_ok, owner_only_sddl};
+use super::win_policy::owner_only_sddl;
 use super::{CheckedDir, Disabled, MAX_LOCATOR_BYTES, Reject};
 use crate::leader::peer_auth::win as auth;
+use fuigo_win_acl::{FileAclRefusal, check_owner_only_file_capped};
 
 /// `DELETE` access right (needed to mark a file for deletion through its own handle).
 const DELETE_ACCESS: u32 = 0x1_0000;
@@ -109,29 +107,7 @@ fn wide(p: &Path) -> Result<Vec<u16>, Disabled> {
 
 /// The user SID text of this process (cached).
 fn our_sid() -> Result<&'static str, Disabled> {
-    static SID: OnceLock<Result<String, u32>> = OnceLock::new();
-    match SID.get_or_init(auth::own_sid) {
-        Ok(s) => Ok(s.as_str()),
-        Err(c) => Err(Disabled::Io(*c as i32)),
-    }
-}
-
-/// Is our token elevated? (An elevated process owns what it creates as BUILTIN\Administrators by default.)
-fn token_elevated() -> bool {
-    static ELEVATED: OnceLock<bool> = OnceLock::new();
-    *ELEVATED.get_or_init(|| {
-        let mut token = HANDLE::default();
-        // SAFETY: the pseudo handle of the current process needs no closing; `token` is writable.
-        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
-            return false;
-        }
-        let token = auth::Owned(token);
-        match auth::token_info_buf(token.0, TokenElevation) {
-            // SAFETY: on success the buffer starts with a TOKEN_ELEVATION (8-byte aligned storage).
-            Ok(buf) => unsafe { (*buf.as_ptr().cast::<TOKEN_ELEVATION>()).TokenIsElevated != 0 },
-            Err(_) => false,
-        }
-    })
+    fuigo_win_acl::our_sid().map_err(|c| Disabled::Io(c as i32))
 }
 
 /// `CreateFileW` with the raw Win32 error code on failure.
@@ -163,36 +139,17 @@ fn owner_only_security() -> Result<auth::PipeSecurity, Disabled> {
 
 /// Judge an open file ON ITS HANDLE: regular disk file (no reparse point, no directory), one link, within `cap`,
 /// owned by us, DACL for nobody else. Returns the size. Never reads the content.
+/// The rule itself lives in `fuigo-win-acl` (one checker, shared with the bearer token file); this maps its refusals.
 fn check_handle(h: &OwnedHandle, cap: Option<u64>) -> Result<u64, Disabled> {
-    let raw = HANDLE(h.as_raw_handle());
-    let mut info = BY_HANDLE_FILE_INFORMATION::default();
-    // SAFETY: `raw` is a live file handle; `info` is a writable out structure.
-    unsafe { GetFileInformationByHandle(raw, &mut info) }.map_err(|e| Disabled::Io(code_of(&e)))?;
-    let attrs = info.dwFileAttributes;
-    if attrs & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
-        return Err(Disabled::Rejected(Reject::Symlink));
-    }
-    // SAFETY: live handle.
-    if attrs & FILE_ATTRIBUTE_DIRECTORY.0 != 0 || unsafe { GetFileType(raw) } != FILE_TYPE_DISK {
-        return Err(Disabled::Rejected(Reject::NotRegular));
-    }
-    if info.nNumberOfLinks != 1 {
-        return Err(Disabled::Rejected(Reject::HardLinked));
-    }
-    let size = (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow);
-    if cap.is_some_and(|c| size > c) {
-        return Err(Disabled::Rejected(Reject::TooLarge));
-    }
-    let ours = our_sid()?;
-    // A NULL DACL (everyone) comes back as code 0: that is a wrong mode, not an I/O error.
-    let (owner, dacl) = owner_and_dacl(raw).map_err(|c| if c == 0 { Disabled::Rejected(Reject::WrongMode) } else { Disabled::Io(c as i32) })?;
-    if !locator_owner_ok(&owner, ours, token_elevated()) {
-        return Err(Disabled::Rejected(Reject::WrongOwner));
-    }
-    if !locator_dacl_ok(&dacl, ours) {
-        return Err(Disabled::Rejected(Reject::WrongMode));
-    }
-    Ok(size)
+    check_owner_only_file_capped(h, cap).map_err(|r| match r {
+        FileAclRefusal::Io(c) => Disabled::Io(c),
+        FileAclRefusal::ReparsePoint => Disabled::Rejected(Reject::Symlink),
+        FileAclRefusal::NotRegular => Disabled::Rejected(Reject::NotRegular),
+        FileAclRefusal::MultipleLinks => Disabled::Rejected(Reject::HardLinked),
+        FileAclRefusal::TooLarge => Disabled::Rejected(Reject::TooLarge),
+        FileAclRefusal::WrongOwner => Disabled::Rejected(Reject::WrongOwner),
+        FileAclRefusal::OtherPrincipals => Disabled::Rejected(Reject::WrongMode),
+    })
 }
 
 /// Read `<dir>\<name>`. `exclusive_share`: a writer under the lock holds the file without write or delete sharing
@@ -519,6 +476,7 @@ pub(crate) fn update_locator_rewriting(
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    use crate::peer_inbox::win_pipe::sys::owner_and_dacl;
     use std::sync::mpsc;
     use std::sync::Arc;
     use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW};

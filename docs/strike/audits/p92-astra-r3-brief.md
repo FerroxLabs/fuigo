@@ -3,7 +3,7 @@
 You are an independent read-only auditor. Do NOT build, compile or run anything. Audit the diff
 `fc3ccb94..900d7434` in this worktree (branch `codex/fuigo-p92`), focusing on `a71654f0..900d7434` (the round-2
 fixes). Background and earlier briefs: `docs/strike/audits/p92-astra-r1-brief.md`, `p92-astra-r2-brief.md`; findings
-R3/R4 in `/Volumes/Mando/WaylandBots/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`. Ignore `P92-CODEX-NOTES.md`.
+R3/R4 in `<project>/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`. Ignore `P92-CODEX-NOTES.md`.
 
 Round 2 findings and the gate's fixes (verify each, and what it broke):
 1. MEDIUM slug masking hid `fuigo-abcd1234-...` keys: slug parts must now be all letters or all digits.

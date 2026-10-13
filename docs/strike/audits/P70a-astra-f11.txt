@@ -25,7 +25,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 One **MEDIUM** correctness finding in `a84e3234..f64d4852`. No confirmed BLOCKER/HIGH disclosure defect. Read-only review; no Cargo commands or tests run.
 
 1. **MEDIUM — Concurrent key rotation can give one MCP server inconsistent credentials.**  
-   Locations: [servers.rs:5296](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5296), [servers.rs:5203](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5203), [servers.rs:5365](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5365).
+   Locations: [servers.rs:5296](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5296), [servers.rs:5203](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5203), [servers.rs:5365](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5365).
 
    Each argument, environment value, and HTTP header independently reads the mutable key store. Session threads can launch/rebuild MCP servers concurrently with `fuigo/setApiKey`. If rotation occurs between reads, the same child can receive key A in `--key` and key B in `FUIGO_API_KEY`; similarly, two authentication headers can contain different keys. A server requiring matching credentials can reject authentication, and an HTTP client retains those mismatched values until rebuilt.
 

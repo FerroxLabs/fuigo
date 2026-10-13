@@ -4,7 +4,7 @@ Raw transcript (7010 lines) not committed; sha256 ff02f9c089d3c49474a23302548005
 Audited `8b1a0192..4c990764` at HEAD `4c990764ca7022e3c35ed17340fb62e5beb4ed47`. Read-only; no builds or tests run. **Three findings prevent landing.**
 
 1. **HIGH — Moving an initialized agent still invalidates every bound pointer.**  
-   [local_ref.rs:140](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:140)
+   [local_ref.rs:140](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:140)
 
    `spawn_bound(&self)` records the agent’s current address without enforcing address stability. The public `acp::Agent::initialize(&self)` starts bound tasks, yet callers can subsequently move the `MvpAgent` into another allocation, return it from a helper, or swap it with another agent.
 
@@ -15,7 +15,7 @@ Audited `8b1a0192..4c990764` at HEAD `4c990764ca7022e3c35ed17340fb62e5beb4ed47`.
    **Tests:** Not caught. The by-value teardown test calls `drop(agent)` at line 176, but its probe never dereferences the agent; `_agent_ref` is unused. Require stable internal storage or enforced pinning, plus a relocation regression.
 
 2. **HIGH — A destructor panic abandons the remaining bound futures, reopening use-after-free.**  
-   [local_ref.rs:95](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:95), particularly `drop(future)` at line 110.
+   [local_ref.rs:95](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:95), particularly `drop(future)` at line 110.
 
    Concrete scenario under unwinding: register pending futures A and B; A contains a destructor that panics, while B holds an agent reference or guard. Dropping the agent removes the entire weak-slot vector, then drops A. Its panic exits the loop. Unwinding drops the remaining **weak references**, while B’s driver still strongly owns B’s slot. The agent’s remaining fields are destroyed, but B can subsequently run or be dropped with dangling references.
 
@@ -24,7 +24,7 @@ Audited `8b1a0192..4c990764` at HEAD `4c990764ca7022e3c35ed17340fb62e5beb4ed47`.
    **Tests:** Not caught. All probes have non-panicking destructors. Teardown must drain safely despite a destructor panic, or reliably abort before unwinding can abandon outstanding futures.
 
 3. **MEDIUM — Agent teardown does not wake emptied drivers; JoinHandles can hang indefinitely.**  
-   [local_ref.rs:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:110) and [local_ref.rs:122](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:122)
+   [local_ref.rs:110](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:110) and [local_ref.rs:122](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:122)
 
    Concrete scenario: poll a bound future waiting on a channel or `pending()` until it returns `Pending`, then drop the agent while retaining its JoinHandle and running the LocalSet. Teardown clears the slot but stores no driver waker and issues no wake. The driver therefore need never observe `None`, and awaiting its handle need never return `Ok(())`.
 

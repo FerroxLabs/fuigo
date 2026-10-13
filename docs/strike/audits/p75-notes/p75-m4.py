@@ -1,5 +1,5 @@
-exec(open('/root/fuigo-builds/p75/mutants.py').read().split('M=[')[0])
-M=[("MU10","crates/codegen/fuigo-shared/src/clipboard.rs",'no_data_control.is_some() || matches!(wayland_debug, Some(v) if v == "1" || v == "client")','no_data_control.is_some() && wayland_debug.is_some() && false',["/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-shared --lib wayland_debug"])]
+exec(open('<build>/p75/mutants.py').read().split('M=[')[0])
+M=[("MU10","crates/codegen/fuigo-shared/src/clipboard.rs",'no_data_control.is_some() || matches!(wayland_debug, Some(v) if v == "1" || v == "client")','no_data_control.is_some() && wayland_debug.is_some() && false',["<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-shared --lib wayland_debug"])]
 only=sys.argv[1:]
 log("### mutants at %s"%sh("git rev-parse HEAD")[1].strip())
 for mid,f,old,new,cmds in M:

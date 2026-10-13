@@ -25,7 +25,7 @@ the last weak sender** are both gone (the receiver already is). Dropping the las
 only closes the list and wakes the receiver (`Tx::drop`); it drains nothing. *(Corrected by P38-F,
 R021 §4: this paragraph first said "the last sender", which omitted weak senders.)*
 
-Experiment (`/root/fuigo-builds/p38/race/src/main.rs`, tokio `=1.52.3`, release build): one thread drops
+Experiment (`<build>/p38/race/src/main.rs`, tokio `=1.52.3`, release build): one thread drops
 the receiver while another sends a `oneshot::Sender` through it, released by a barrier, 3 × 200,000
 iterations. After both threads finish, the reply receiver is checked:
 
@@ -133,7 +133,7 @@ instead of hanging:
 plus `a_reply_the_host_already_received_is_still_awaited_after_its_channel_closes`, which pins the
 design choice against give-up-on-close.
 
-Mutants, each in its own worktree and target dir (`/root/fuigo-builds/p38/mut`, `target-mut`), filter
+Mutants, each in its own worktree and target dir (`<build>/p38/mut`, `target-mut`), filter
 `stranded a_reply_the_host`:
 
 | mutant | change | result | log sha256 |
@@ -168,7 +168,7 @@ statistically decisive on its own; the deterministic `stranded_*` tests and thei
 
 `cargo test --locked --no-fail-fast -p <pkg>`, env `RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg
 CARGO_TERM_COLOR=never`, rustc 1.94.0, `nice -n 10`, `CARGO_BUILD_JOBS=16`; `fuigo-shell` under
-`flock /root/fuigo-builds/.shell-test.lock`; `P38_DONE` appended after cargo exits. Parent built in
+`flock <build>/.shell-test.lock`; `P38_DONE` appended after cargo exits. Parent built in
 `target-parent`, tip in `target` (see §7.1 for why).
 
 | pkg | rev | exit | derived | headers / unfinished | failing | log sha256 |
@@ -187,7 +187,7 @@ Tip failing: `handle_falls_back_to_id_lookup_for_divergent_cwd` plus five tip-on
 set is not a subset of the parent's**, so each tip-only name was checked. None is in
 `fuigo-workflow` or `session/workflow`, and the diff touches only `fuigo-workflow/src/engine.rs`.
 
-| tip-only name | sightings in other `/root/fuigo-builds/**/*.failset` (of them labelled parent/base) | 3 × `--exact` at tip |
+| tip-only name | sightings in other `<build>/**/*.failset` (of them labelled parent/base) | 3 × `--exact` at tip |
 |---|---|---|
 | `agent::models::startup_prefetch::tests::no_auth_boot_is_not_a_degraded_start` | 6 (2) | 3/3 pass |
 | `agent::models::startup_prefetch::tests::wait_settings_leaves_the_fetch_for_accept` | 22 (11) | 3/3 pass |
@@ -213,7 +213,7 @@ ulimit 65536; `fuigo-shell` with `--skip session::workflow::manager::tests` at b
 clippy 23 = 23, 0 new. Tip-only `fuigo-shell` names: `embedded_otel_gate_keeps_a_session_user_fail_closed` (6 prior sightings),
 `client_cursor_server_kept_when_cursor_mcps_enabled` (9), `toml_claim_survives_when_client_cursor_insert_skipped` (11),
 `attempted_settings_fetch_failure_is_a_degraded_start` (0 prior sightings) — each passed 3/3 `--exact` at the tip, and the
-unsighted one also 3/3 at the parent `cca0969f`. Logs: `/root/fuigo-builds/p38rp2.out`.
+unsighted one also 3/3 at the parent `cca0969f`. Logs: `<build>/p38rp2.out`.
 
 An earlier re-proof at `cca0969f` (`p38rp.out`) had 3/150 tip stress failures, all `expected spawn, timed out` (the test
 helper's 2 s bound), under host load ~100. To attribute them, a controlled **interleaved A/B** of the manager module

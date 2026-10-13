@@ -1,4 +1,4 @@
-# P84 Astra round 2 — final report (range e0145e0f..9bdbe369; raw transcript sha256 25534da0487ef730384fe394e6e1d09d083903357a4fc904317b6f2ec2e281e3, copy at hetzner-dsm:/root/fuigo-builds/p84/audits/p84-astra-r2.raw)
+# P84 Astra round 2 — final report (range e0145e0f..9bdbe369; raw transcript sha256 25534da0487ef730384fe394e6e1d09d083903357a4fc904317b6f2ec2e281e3, copy at hetzner-dsm:<build>/p84/audits/p84-astra-r2.raw)
 
 No P84-introduced blocker found. **One pre-existing HIGH internal soundness hole remains.**
 
@@ -7,7 +7,7 @@ No P84-introduced blocker found. **One pre-existing HIGH internal soundness hole
 | Overall execution goal | ✅ Done | Audited `e0145e0f..9bdbe369`, relevant callers, ACP dependency and tests. Read-only; no Cargo or runtime tests. |
 
 **HIGH — `LocalRef` can escape its bound future through safe crate code.**  
-Locations: [local_ref.rs:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:214), [handle.rs:38](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:38).
+Locations: [local_ref.rs:214](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:214), [handle.rs:38](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:38).
 
 `spawn_bound` passes an owned, clonable `LocalRef` to an unrestricted closure. The closure can save it outside the returned future. This source-level example fits inside the existing test’s `LocalSet`:
 

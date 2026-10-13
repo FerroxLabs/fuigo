@@ -25,7 +25,7 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Audited `8b1a0192..051d5243` read-only. No Cargo or tests run; worktree remains clean. No BLOCKER/HIGH/MEDIUM defect found within the stated P70a boundaries.
 
 1. **LOW — Debug guard misses credentials after function-pointer fields.**  
-   [secret_debug_guard.rs:256](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:256) treats the `>` in `->` as a closing generic bracket. This valid declaration escapes detection:
+   [secret_debug_guard.rs:256](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:256) treats the `>` in `->` as a closing generic bracket. This valid declaration escapes detection:
    ```rust
    #[derive(Debug)]
    struct Config {
@@ -36,9 +36,9 @@ Audited `8b1a0192..051d5243` read-only. No Cargo or tests run; worktree remains 
    Depth becomes negative, so the scanner merges both fields and inspects only `callback`. Derived Debug exposes `api_key`, contradicting C2’s guard guarantee. Existing scanner controls do **not** catch this. Add this counterexample and handle arrows separately.
 
 2. **LOW — Relay regression test does not exercise the production logging path.**  
-   [relay.rs:1460](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:1460) calls `note_relay_proxy` directly. Reverting the production call at [relay.rs:274](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:274) to the original `info!(proxy = %url, ...)`, while retaining the helper, restores the proxy-password leak **without failing this test**. This is a concrete counterexample to C7. The current production call is correct; exercise that path in the regression test.
+   [relay.rs:1460](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:1460) calls `note_relay_proxy` directly. Reverting the production call at [relay.rs:274](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:274) to the original `info!(proxy = %url, ...)`, while retaining the helper, restores the proxy-password leak **without failing this test**. This is a concrete counterexample to C7. The current production call is correct; exercise that path in the regression test.
 
-C2 also overstates exhaustive destructuring: touched implementations such as [FuigoAuth’s Debug](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/auth/model.rs:107) and [AgentSessionConfig’s Debug](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-workspace/src/config.rs:934) still access `self` directly.
+C2 also overstates exhaustive destructuring: touched implementations such as [FuigoAuth’s Debug](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/auth/model.rs:107) and [AgentSessionConfig’s Debug](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-workspace/src/config.rs:934) still access `self` directly.
 
 C1 and C3–C6 are consistent with the inspected source. C5’s named files are unchanged; all six C6 count changes match their explanations. The expressly excluded upstream-text handling was not treated as a defect.
 

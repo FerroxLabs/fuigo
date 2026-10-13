@@ -2,13 +2,13 @@ P64 Astra audit (gpt-6-astra, codex exec --sandbox read-only < /dev/null), diff 
 
 P64 fixes the two targeted methods. No BLOCKER/HIGH/MEDIUM findings.
 
-- **LOW — existing registration gap:** [manager.rs:1586](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1586) returns disk credentials without registration through `read_disk_auth_with_state` and its `read_disk_auth` wrapper. The private `read_disk_auth_silent` at line 1537 also returns unregistered credentials. Thus the broader invariant remains incomplete, though inspected adoption paths register through `hot_swap` or persistence before returning usable credentials. This predates P64 and does not block this scoped fix.
+- **LOW — existing registration gap:** [manager.rs:1586](<project>/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1586) returns disk credentials without registration through `read_disk_auth_with_state` and its `read_disk_auth` wrapper. The private `read_disk_auth_silent` at line 1537 also returns unregistered credentials. Thus the broader invariant remains incomplete, though inspected adoption paths register through `hot_swap` or persistence before returning usable credentials. This predates P64 and does not block this scoped fix.
 
 Verified by source inspection:
 
-- **Return coverage:** [manager.rs:1064](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1064) registers the sole disk-return branch in `update_unless_superseded`; line 1099 registers every successfully returned disk edit. Write failures return errors; memory fallbacks already register.
-- **Memory and locks:** [manager.rs:919](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:919) only inserts a bearer digest—no `inner` write. The only bearer-set lock sites are insertion and lookup; neither acquires another lock while holding it. Taking it under `auth_state_lock` introduces no lock cycle.
-- **Regression sensitivity:** Without the respective additions, the assertions at [cross_process_race_tests.rs:878](/Volumes/Mando/WaylandBots/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:878) and line 897 would fail: the fixture explicitly establishes the disk bearer is unknown, and intervening operations register only the distinct memory bearer. Both tests also assert memory retains its original key.
+- **Return coverage:** [manager.rs:1064](<project>/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:1064) registers the sole disk-return branch in `update_unless_superseded`; line 1099 registers every successfully returned disk edit. Write failures return errors; memory fallbacks already register.
+- **Memory and locks:** [manager.rs:919](<project>/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/manager.rs:919) only inserts a bearer digest—no `inner` write. The only bearer-set lock sites are insertion and lookup; neither acquires another lock while holding it. Taking it under `auth_state_lock` introduces no lock cycle.
+- **Regression sensitivity:** Without the respective additions, the assertions at [cross_process_race_tests.rs:878](<project>/Fuigo/wt-p64/crates/codegen/fuigo-shell/src/auth/cross_process_race_tests.rs:878) and line 897 would fail: the fixture explicitly establishes the disk bearer is unknown, and intervening operations register only the distinct memory bearer. Both tests also assert memory retains its original key.
 
 Read-only review of `57e0b6d0..7e36f78d`; no Cargo or tests executed.
 

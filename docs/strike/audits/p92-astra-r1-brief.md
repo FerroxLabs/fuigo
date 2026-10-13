@@ -8,7 +8,7 @@ storage.rs,index.rs,dream.rs,filter_tests.rs,filter_corpus.txt,lib.rs}`, `crates
 `crates/codegen/fuigo-shell/src/session/acp_session_tests/memory_config_tests.rs`,
 `crates/codegen/fuigo-shell/src/session/memory/hooks.rs`. Ignore `P92-CODEX-NOTES.md`.
 
-Background: audit findings R3/R4 in `/Volumes/Mando/WaylandBots/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`.
+Background: audit findings R3/R4 in `<project>/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`.
 R3: the memory admission filter (`is_safe_memory`) was a substring denylist, bypassed by rewording, doubled spaces,
 zero-width characters, and missed GitHub/AWS tokens. R4: the filter ran on the whole resulting file at write time, so
 one flagged line (even a false positive like "password: min 8 chars") made every later write fail, dropped the whole

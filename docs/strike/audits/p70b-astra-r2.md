@@ -1,13 +1,13 @@
 # P70b Astra round 2 (gpt-6-astra, read-only, codex 0.160)
 
-Raw transcript (837 KB, not committed): `hetzner-dsm:/root/fuigo-builds/p70b/p70b-astra-r2.raw.txt`, sha256 `59c0a77e1104311cdaa8a90fb5c6fb2e229027e43d20e61278a097c71d653b85`.
+Raw transcript (837 KB, not committed): `hetzner-dsm:<build>/p70b/p70b-astra-r2.raw.txt`, sha256 `59c0a77e1104311cdaa8a90fb5c6fb2e229027e43d20e61278a097c71d653b85`.
 
 Audited: `7bc6912a..fef55ec8` (and the whole packet `e0145e0f..fef55ec8`). Verdict: **DO-NOT-LAND**. What was done per finding: receipt R088 §5.
 
 ## Brief
 
 ```
-Independent audit, round 2, of Fuigo packet P70b. Repo: /Volumes/Mando/WaylandBots/Fuigo/wt-p70b (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p70b, HEAD fef55ec8. Round 1 audited e0145e0f..7bc6912a and ended DO-NOT-LAND (10 HIGH, 4 MEDIUM). Audit the fixes: `git diff 7bc6912a..fef55ec8`, and re-check each round-1 finding against the code at fef55ec8. The whole packet is `git diff e0145e0f..fef55ec8` (parent e0145e0f = strike/integration).
+Independent audit, round 2, of Fuigo packet P70b. Repo: <project>/Fuigo/wt-p70b (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p70b, HEAD fef55ec8. Round 1 audited e0145e0f..7bc6912a and ended DO-NOT-LAND (10 HIGH, 4 MEDIUM). Audit the fixes: `git diff 7bc6912a..fef55ec8`, and re-check each round-1 finding against the code at fef55ec8. The whole packet is `git diff e0145e0f..fef55ec8` (parent e0145e0f = strike/integration).
 
 The accepted design ("option A", Sean's decision; audit against it, do not re-propose scrubbing before classification): (1) CLASSIFY FIRST: error text is untouched while the sampler and the shell classify it; (2) SCRUB ONLY AT DISPLAY AND LOG SINKS; (3) EXACT-MATCH replacement of the credentials ACTUALLY SENT, 8 chars or more; (4) NO token-shaped heuristic.
 

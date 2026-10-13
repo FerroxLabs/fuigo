@@ -25,17 +25,17 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Audited `8b1a0192..d6416ba0` read-only. No Cargo or Rust tests run; worktree remains clean.
 
 1. **MEDIUM — Verification URLs remain exposed by the new Debug implementation.**  
-   [device_code.rs:99](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/auth/device_code.rs:99)  
+   [device_code.rs:99](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/auth/device_code.rs:99)  
    `DeviceCode` prints `verification_uri` and `verification_uri_complete` verbatim. For example, an issuer response containing `https://login.example/device?key=P70_SECRET` passes `validate_verification_uri`, which checks controls and scheme but permits query strings and userinfo. Formatting that `DeviceCode` exposes the credential. Both fields need URL redaction. This contradicts C2 for a credential-bearing type explicitly changed by this packet.  
    **Existing tests:** No Debug-redaction test covers these fields; the guard ignores hand-written implementations. I did not establish a current production log call rendering this type.
 
 2. **LOW — The guard does not cover helper command lines as claimed.**  
-   [secret_debug_guard.rs:276](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:276)  
+   [secret_debug_guard.rs:276](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:276)  
    In an auth-named type, generic-field detection recognizes only `key`, `value`, and `token`. Neither `command` nor `args` matches another rule. Consequently, restoring derived Debug on `AuthProviderConfig` would escape this guard despite a command such as `helper --token SECRET`. I checked both field predicates: neither matches.  
    **Existing tests:** `shell_credential_configs_debug_redact` catches that particular reversion. The guard’s scanner fixtures do not cover this omission, leaving equivalent new helper types unprotected.
 
 3. **LOW — C7 needs another compatibility-test exception.**  
-   [murage_conformance_acp.rs:2309](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2309)  
+   [murage_conformance_acp.rs:2309](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2309)  
    `injected_env_key_outranks_the_auth_json_key` also passes with the old environment-copy implementation: the injected key makes the old initialization condition skip copying `auth.json`, and inference uses the injected key exactly as this test expects.  
    **Existing tests:** This test is useful and non-vacuous, but cannot detect reverting the memory-store fix. Its documentation accurately describes compatibility; C7’s exception list is incomplete.
 

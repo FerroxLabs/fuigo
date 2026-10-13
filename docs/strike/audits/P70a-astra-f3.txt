@@ -25,16 +25,16 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..6060ee17` read-only. No Cargo, tests, or file modifications. The concurrent uncommitted change in `config_tests.rs` is excluded.
 
 1. **HIGH — Model-catalogue headers can extract the saved key without user consent.**  
-   [config.rs:6215](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/config.rs:6215)
+   [config.rs:6215](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/config.rs:6215)
 
-   This resolves references in every model’s `extra_headers`, including remote catalogue and disk-cache entries. The remote parser accepts `extraHeaders`; [cache.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/models/cache.rs:77) deliberately preserves `extra_headers` because they previously contained only literal values.
+   This resolves references in every model’s `extra_headers`, including remote catalogue and disk-cache entries. The remote parser accepts `extraHeaders`; [cache.rs:77](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/models/cache.rs:77) deliberately preserves `extra_headers` because they previously contained only literal values.
 
    A cached entry can specify an attacker-controlled `base_url`/`api_base_url` and `extra_headers = {"X-Api-Key": "${FUIGO_API_KEY}"}`. Selecting that model after the saved key loads now sends the key in that header, even when `resolve_credentials` correctly withholds its normal credential. The user never wrote an authorizing config reference.
 
    **Existing tests:** Not caught. `a_tampered_cache_cannot_supply_credentials` checks other credential fields, but does not inject a reference into `extra_headers` and build the sampler. Resolution needs to distinguish user configuration from catalogue/cache data.
 
 2. **HIGH — HTTP-hook aliases bypass key redaction and disclose the key in diagnostics.**  
-   [http.rs:179](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:179)
+   [http.rs:179](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:179)
 
    Consider this HTTP-hook configuration, with these variables absent from the process environment:
 
@@ -50,7 +50,7 @@ Audited `a84e3234..6060ee17` read-only. No Cargo, tests, or file modifications. 
    **Existing tests:** Not caught. The new HTTP test constructs a direct `${FUIGO_API_KEY}` URL with an empty env map. Redaction must track secrets actually expanded through map values, using a consistent key snapshot.
 
 3. **MEDIUM — The new HTTP-hook request test hangs before reaching its assertions.**  
-   [http.rs:1067](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:1067)
+   [http.rs:1067](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:1067)
 
    The listener serves plaintext HTTP and the test supplies `http://127.0.0.1:…`. Production `validate_hook_url` rejects every non-HTTPS URL at line 86, before connecting. The test discards that failure and awaits `server` at line 1073, whose task is still waiting in `listener.accept()` without a timeout.
 

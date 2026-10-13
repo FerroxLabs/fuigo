@@ -31,7 +31,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..f49bcf24` read-only. No Cargo or tests run; worktree remains clean.
 
 1. **HIGH — HTTP URL expansion bypasses an explicit hook-local key override.**  
-   [http.rs:186](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:186), [env_expand.rs:315](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:315)
+   [http.rs:186](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:186), [env_expand.rs:315](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:315)
 
    Concrete hook configuration:
    ```json
@@ -48,7 +48,7 @@ Audited `a84e3234..f49bcf24` read-only. No Cargo or tests run; worktree remains 
    **Existing tests:** Do not catch it. The HTTP test covers odd runs with an empty environment, never an explicit `FUIGO_API_KEY` override. Expansion must respect the effective environment while retaining the saved-key snapshot separately for redaction.
 
 2. **MEDIUM — Escaped-only hook values never undergo destination escape decoding.**  
-   [env_expand.rs:298](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:298), [http.rs:188](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:188)
+   [env_expand.rs:298](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:298), [http.rs:188](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:188)
 
    With a saved key available, configure only:
    ```json

@@ -29,14 +29,14 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands or file modifications. I found no current production storage-upload bypass under the checked release configuration. The defects are in release-seam enforcement, test coverage, portability, and notice frequency.
 
 1. **MEDIUM — C3’s “cannot be active in a shipped build” guarantee is not enforced.**  
-   [destination_gate.rs:60](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:60), [upload_gate_guard.rs:306](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:306).
+   [destination_gate.rs:60](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:60), [upload_gate_guard.rs:306](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:306).
 
    A non-test release build that selects `fuigo-file-utils` with `--all-features`, or explicitly enables `fuigo-file-utils/test-loopback-operator`, admits `http://127.0.0.1:PORT` as FluxRouter. A local storage gateway can then receive archives and their object-path headers, contrary to the production predicate. Resolver 2 isolates unused dev-dependencies; it does not prohibit explicit feature activation. [Cargo feature rules](https://doc.rust-lang.org/cargo/reference/features.html#command-line-feature-options).
 
-   **Existing tests:** do not catch this. The guard scans manifests beneath `crates/` and `prod/`, excluding root workspace dependency declarations and build commands. The current [release workflow:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/.github/workflows/release.yml:214) uses an ordinary package release build, so I found no evidence that the present release command activates it. This is a conditional release-hardening defect, not evidence of a shipped leak.
+   **Existing tests:** do not catch this. The guard scans manifests beneath `crates/` and `prod/`, excluding root workspace dependency declarations and build commands. The current [release workflow:214](<project>/Fuigo/wt-p71v2/.github/workflows/release.yml:214) uses an ordinary package release build, so I found no evidence that the present release command activates it. This is a conditional release-hardening defect, not evidence of a shipped leak.
 
 2. **MEDIUM — C4’s guard misses ordinary ways to add callers or bypass the gate.**  
-   [upload_gate_guard.rs:46](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:46), [upload_gate_guard.rs:160](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:160), [upload_gate_guard.rs:235](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:235).
+   [upload_gate_guard.rs:46](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:46), [upload_gate_guard.rs:160](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:160), [upload_gate_guard.rs:235](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:235).
 
    The guard recognizes literal text, not resolved calls. An in-memory reproduction of its matching rules confirmed zero matches for the following examples:
 
@@ -56,7 +56,7 @@ Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands 
    **Existing tests:** do not catch these forms. I found no such production bypass currently present.
 
 3. **MEDIUM — Signed-upload positive controls never verify delivery of the payload.**  
-   [gate_testkit.rs:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:45), [gcs.rs:1170](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1170), [p71_gate_tests.rs:92](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:92).
+   [gate_testkit.rs:45](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:45), [gcs.rs:1170](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1170), [p71_gate_tests.rs:92](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:92).
 
    The recording endpoint always returns an ordinary `UploadResponse`, not a `SignedUploadUrlResponse`. Consequently, the class-1 signed flow contacts `/storage/signed-upload-url`, fails response deserialization, and never performs the payload PUT. Both positive controls nevertheless pass: one checks request count; the share test checks `share/`, which occurs in the object-path header.
 
@@ -64,7 +64,7 @@ Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands 
    **Existing tests:** these tests accept that failure. They need a valid signed-URL response plus a recording PUT endpoint asserting the actual bundle bytes and successful completion.
 
 4. **MEDIUM — The recording fixtures require an unconfigured loopback alias on macOS.**  
-   [gate_testkit.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:49).
+   [gate_testkit.rs:49](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gate_testkit.rs:49).
 
    Class-3 tests repeatedly bind `127.0.0.2` and panic if binding fails. On macOS without that address configured, this is not equivalent to binding `127.0.0.1`: XNU checks for an assigned interface address and returns `EADDRNOTAVAIL` when absent. [Apple’s bind implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/netinet/in_pcb.c).
 
@@ -73,7 +73,7 @@ Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands 
    **Existing tests:** fail during fixture setup; there is no portable fallback. A class-3 URL such as `localhost`, backed by a verified listener on an available loopback address, avoids requiring an alias.
 
 5. **LOW — The inline-fallback negative test can pass without executing its upload.**  
-   [queue_tests.rs:4786](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4786).
+   [queue_tests.rs:4786](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4786).
 
    `enqueue_bytes_blocking` confirms scheduling of the detached fallback, not its completion. The test sleeps 500 ms and checks zero connections without awaiting the fallback or establishing that it reached the gate.
 
@@ -82,7 +82,7 @@ Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands 
    **Existing tests:** this test has no completion acknowledgement or paired class-1 run. Other dispatcher tests provide coverage, but do not make this path-specific assertion reliable.
 
 6. **LOW — Notice tests can inherit another test’s success.**  
-   [gcs.rs:1125](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1125), [destination_gate.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
+   [gcs.rs:1125](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1125), [destination_gate.rs:184](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
 
    The notice test ignores upload results and inspects process-global history. Other tests invoke the same `Once` and populate that history.
 
@@ -91,14 +91,14 @@ Audited `67a0a7fe..a4759f5df56c70ff6e7e33fb570d8e8527f8f304`. No Cargo commands 
    **Existing tests:** the separate sink test verifies `announce`, but does not establish that this upload caused the process notice. The synchronization itself appears sound; the defect is attribution of the assertion.
 
 7. **LOW — Pager retry detection depends on wall-clock scheduling.**  
-   [trace_cmd.rs:732](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-pager/src/trace_cmd.rs:732).
+   [trace_cmd.rs:732](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-pager/src/trace_cmd.rs:732).
 
    **Scenario:** the process is descheduled or suspended for two seconds between starting the measurement and checking elapsed time. The test reports “a withheld upload was retried” even though no retry occurred.
 
    **Existing tests:** this assertion produces the false failure. Count attempts directly rather than inferring them from elapsed wall time.
 
 8. **LOW — Notice frequency is once per kind, not once per process.**  
-   [destination_gate.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
+   [destination_gate.rs:184](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:184).
 
    **Scenario:** a process first withholds a trace and later a feedback archive. Two independent `Once` values print two notices, exceeding the stated once-per-process rule. The feedback notice itself correctly avoids promising a bucket.
 

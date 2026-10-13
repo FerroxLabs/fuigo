@@ -18,22 +18,22 @@
 849-        let entries_truncated = entries.len() > MAX_RESTORED_WORKFLOW_RUNS;
 
 codex
-- **(a) NOT FIXED — MEDIUM.** A concurrent creator can finish checking/syncing `.cwd`, then pause before creating its session directory. Cleanup removes `.cwd` and successfully removes the directory, so restoration is skipped. The creator then recursively recreates the directories without `.cwd`, breaking hashed-CWD recovery. See [copy.rs:900](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:900) and [mod.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/mod.rs:193).
+- **(a) NOT FIXED — MEDIUM.** A concurrent creator can finish checking/syncing `.cwd`, then pause before creating its session directory. Cleanup removes `.cwd` and successfully removes the directory, so restoration is skipped. The creator then recursively recreates the directories without `.cwd`, breaking hashed-CWD recovery. See [copy.rs:900](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:900) and [mod.rs:193](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/mod.rs:193).
 
-- **(b) FIXED.** Ownership now requires successful exclusive `create_dir`; `AlreadyExists` returns unclaimed. [copy.rs:914](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:914).
+- **(b) FIXED.** Ownership now requires successful exclusive `create_dir`; `AlreadyExists` returns unclaimed. [copy.rs:914](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:914).
 
-- **NEW — MEDIUM: explicit-mode forks change caller-owned ancestor permissions.** For explicit `/shared/cache/session`, `claim_cwd_dir("/shared/cache")` now invokes `create_dir_all_owner_only("/shared")`, chmodding `/shared` to `0700` on Unix—even when `/shared/cache` already exists. This can revoke other users’ access; the previous `create_dir_all` preserved permissions. [copy.rs:912](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:912).
+- **NEW — MEDIUM: explicit-mode forks change caller-owned ancestor permissions.** For explicit `/shared/cache/session`, `claim_cwd_dir("/shared/cache")` now invokes `create_dir_all_owner_only("/shared")`, chmodding `/shared` to `0700` on Unix—even when `/shared/cache` already exists. This can revoke other users’ access; the previous `create_dir_all` preserved permissions. [copy.rs:912](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:912).
 
 **Round 1 items 1, 2, 4, 5 are unchanged.** The delta from `8b380d34` affects only fork cleanup and its tests.
 
 Read-only source audit at `164c7694`; no cargo or runtime tests run.
 tokens used
 69,767
-- **(a) NOT FIXED — MEDIUM.** A concurrent creator can finish checking/syncing `.cwd`, then pause before creating its session directory. Cleanup removes `.cwd` and successfully removes the directory, so restoration is skipped. The creator then recursively recreates the directories without `.cwd`, breaking hashed-CWD recovery. See [copy.rs:900](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:900) and [mod.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/mod.rs:193).
+- **(a) NOT FIXED — MEDIUM.** A concurrent creator can finish checking/syncing `.cwd`, then pause before creating its session directory. Cleanup removes `.cwd` and successfully removes the directory, so restoration is skipped. The creator then recursively recreates the directories without `.cwd`, breaking hashed-CWD recovery. See [copy.rs:900](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:900) and [mod.rs:193](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/mod.rs:193).
 
-- **(b) FIXED.** Ownership now requires successful exclusive `create_dir`; `AlreadyExists` returns unclaimed. [copy.rs:914](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:914).
+- **(b) FIXED.** Ownership now requires successful exclusive `create_dir`; `AlreadyExists` returns unclaimed. [copy.rs:914](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:914).
 
-- **NEW — MEDIUM: explicit-mode forks change caller-owned ancestor permissions.** For explicit `/shared/cache/session`, `claim_cwd_dir("/shared/cache")` now invokes `create_dir_all_owner_only("/shared")`, chmodding `/shared` to `0700` on Unix—even when `/shared/cache` already exists. This can revoke other users’ access; the previous `create_dir_all` preserved permissions. [copy.rs:912](/Volumes/Mando/WaylandBots/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:912).
+- **NEW — MEDIUM: explicit-mode forks change caller-owned ancestor permissions.** For explicit `/shared/cache/session`, `claim_cwd_dir("/shared/cache")` now invokes `create_dir_all_owner_only("/shared")`, chmodding `/shared` to `0700` on Unix—even when `/shared/cache` already exists. This can revoke other users’ access; the previous `create_dir_all` preserved permissions. [copy.rs:912](<project>/Fuigo/wt-p132/crates/codegen/fuigo-shell/src/session/storage/jsonl/copy.rs:912).
 
 **Round 1 items 1, 2, 4, 5 are unchanged.** The delta from `8b380d34` affects only fork cleanup and its tests.
 

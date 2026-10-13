@@ -1,17 +1,17 @@
 import subprocess,sys,os,datetime
-SRC="/root/fuigo-builds/p75/src"; LOG=open("/root/fuigo-builds/p75/mutants.log","a")
-ENV=dict(os.environ,PATH=os.environ["HOME"]+"/.cargo/bin:"+os.environ["PATH"],CARGO_TARGET_DIR="/root/fuigo-builds/p75/target",RUST_MIN_STACK="16777216",CARGO_TERM_COLOR="never",RG_BIN_PATH="/usr/bin/rg",CARGO_BUILD_JOBS="16")
+SRC="<build>/p75/src"; LOG=open("<build>/p75/mutants.log","a")
+ENV=dict(os.environ,PATH=os.environ["HOME"]+"/.cargo/bin:"+os.environ["PATH"],CARGO_TARGET_DIR="<build>/p75/target",RUST_MIN_STACK="16777216",CARGO_TERM_COLOR="never",RG_BIN_PATH="/usr/bin/rg",CARGO_BUILD_JOBS="16")
 def sh(cmd):
     p=subprocess.run(cmd,shell=True,cwd=SRC,env=ENV,capture_output=True,text=True); return p.returncode,p.stdout+p.stderr
 def log(s): LOG.write(s+"\n"); LOG.flush()
-T_PAGER="/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-pager-bin --test dead_output_sweep"
-T_WS="/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workspace --test workspace_server_dead_output"
+T_PAGER="<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-pager-bin --test dead_output_sweep"
+T_WS="<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workspace --test workspace_server_dead_output"
 def CLIP(p): return "nice -n 10 cargo clippy --locked -p %s --message-format=short"%p
 M=[
  ("MU7","crates/codegen/fuigo-telemetry/src/debug_log.rs",'''        .parse_lossy(valid_directives(
             &std::env::var(EnvFilter::DEFAULT_ENV).unwrap_or_default(),
         ))''','        .from_env_lossy()',[T_PAGER]),
- ("MU8","crates/codegen/fuigo-workflow/src/lib.rs",'pub(crate) fn route_script_output(engine: &mut rhai::Engine) {','pub(crate) fn route_script_output(engine: &mut rhai::Engine) {\n    return;',["/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workflow --lib script_output"]),
+ ("MU8","crates/codegen/fuigo-workflow/src/lib.rs",'pub(crate) fn route_script_output(engine: &mut rhai::Engine) {','pub(crate) fn route_script_output(engine: &mut rhai::Engine) {\n    return;',["<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workflow --lib script_output"]),
 ]
 only=sys.argv[1:]
 log("### mutants at %s"%sh("git rev-parse HEAD")[1].strip())
