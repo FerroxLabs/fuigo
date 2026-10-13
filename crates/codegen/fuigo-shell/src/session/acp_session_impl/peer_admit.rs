@@ -558,6 +558,26 @@ impl SessionActor {
         }
     }
 
+    /// 26-4/26-5: a turn started by a peer message just ended. Applies only with the feature on and only to a turn that completed
+    /// (`EndTurn` or a provider `Refusal` stop): a cancelled, failed or length-cut turn is left alone.
+    pub(super) fn finish_peer_started_turn(&self, origin: &PromptOrigin, result: &crate::session::commands::PromptTurnResult) {
+        let PromptOrigin::PeerMessage { message_id, .. } = origin else { return };
+        if !peer_messaging_enabled() {
+            return;
+        }
+        use crate::session::commands::PromptCompletionKind;
+        let Ok(ok) = result else { return };
+        if !matches!(ok.completion_kind, PromptCompletionKind::Completed) {
+            return;
+        }
+        let refusal = match ok.stop_reason {
+            acp::StopReason::EndTurn => false,
+            acp::StopReason::Refusal => true,
+            _ => return,
+        };
+        self.peer_admission.finish_peer_turn(message_id, refusal);
+    }
+
     /// The live facts admission reads: the flag and this session's current effective mode, read on every call.
     pub(super) fn peer_live(&self) -> Live {
         Live {

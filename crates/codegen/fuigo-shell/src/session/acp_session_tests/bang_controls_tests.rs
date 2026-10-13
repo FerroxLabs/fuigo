@@ -156,6 +156,7 @@ impl Harness {
             timeout: None,
             description: command.to_owned(),
             is_background: false,
+            block_until_ms: None,
             workdir: None,
         });
         self.actor

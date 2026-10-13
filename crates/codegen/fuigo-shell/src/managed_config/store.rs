@@ -292,7 +292,7 @@ pub(super) fn gate_snapshot_locked(home: &std::path::Path) -> GateSnapshot {
     GateSnapshot {
         managed_principal_present: managed_principal_present(),
         // Expiry-ignoring: a backdated auth.json must not resolve Team→None and relax binding.
-        policy_compromised: crate::config::managed_policy_compromised_for(
+        policy_compromised: crate::config::managed_policy_compromise_for(
             &current_serving_identity_any_expiry(),
         ),
     }

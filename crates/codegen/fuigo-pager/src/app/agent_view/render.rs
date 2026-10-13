@@ -1454,6 +1454,18 @@ impl AgentView {
             1
         };
         let voice_recording_height = if voice_listening { 1 } else { 0 };
+        // A passive row group (not an overlay) above the prompt. Short terminals drop it, like the other optional rows, so the prompt, the
+        // scrollback and the peer held row (which needs more than 6 scrollback rows) keep their space.
+        let model_notice = if area.height <= agent::SHORT_TERMINAL_ROWS {
+            None
+        } else {
+            self.session.models.current_notice()
+        };
+        let model_notice_height = model_notice.as_ref().map_or(0, |notice| {
+            let text_width =
+                inner_width.saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right);
+            crate::views::model_notice_banner::height(notice, text_width)
+        });
         let _tool_usage_height = 0u16;
         let btw_height =
             crate::views::btw_overlay::btw_panel_height(self.btw_state.as_ref(), inner_width);
@@ -1496,6 +1508,7 @@ impl AgentView {
             follow_ups_height,
             dock_height,
             prompt_gap,
+            model_notice_height,
             voice_recording_height,
             shortcuts_height: 1,
             status_line_height: status_line.height(),
@@ -2540,6 +2553,19 @@ impl AgentView {
             }
         }
         self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
+        // A passive row group, not an overlay: it takes no keys and covers nothing, so it is not in `other_overlay_active`.
+        // The peer hold dialog is still painted after every layer (see `draw`).
+        if let Some(notice) = &model_notice {
+            let row = layout.model_notice;
+            let inset = Rect {
+                x: row.x.saturating_add(layout_cfg.block_pad_left),
+                width: row
+                    .width
+                    .saturating_sub(layout_cfg.block_pad_left + layout_cfg.block_pad_right),
+                ..row
+            };
+            crate::views::model_notice_banner::render(inset, buf, notice);
+        }
         if voice_listening && layout.voice_recording.height > 0 && layout.voice_recording.width > 0
         {
             let rec_area = layout.voice_recording;
@@ -3604,6 +3630,8 @@ impl AgentView {
                 .is_some_and(|p| p.focus != PlanApprovalFocus::Preview);
             let overlay_bottom = if layout.turn_status.height > 0 {
                 layout.turn_status.y
+            } else if layout.model_notice.height > 0 {
+                layout.model_notice.y
             } else if layout.voice_recording.height > 0 {
                 layout.voice_recording.y
             } else {

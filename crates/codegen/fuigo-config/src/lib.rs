@@ -19,6 +19,7 @@ mod env_overlay;
 pub mod fs_atomic;
 pub mod global_hook_sources;
 pub mod key_naming;
+pub mod mcp_bearer_file;
 #[cfg(test)]
 mod credential_env_k13_tests;
 #[cfg(test)]
@@ -80,11 +81,11 @@ pub use loader::{
 pub use macos_managed::MDM_REQUIREMENTS_SOURCE;
 pub use managed_cache::{
     managed_marker_records_file,
-    MANAGED_CONFIG_CACHE_FILE, ServingIdentity, SyncMarker, bump_rollback_floor,
+    MANAGED_CONFIG_CACHE_FILE, ManagedPolicyCompromise, ServingIdentity, SyncMarker, bump_rollback_floor,
     bump_rollback_floor_with_now, confirmed_team_switch, confirmed_team_switch_at,
     fail_closed_policy_armed_at, is_managed_config_hard_stale_for, is_managed_config_stale_for,
     managed_config_identity_changed_at, managed_config_synced_at, managed_deployment_id,
-    managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
+    managed_policy_compromise_for, managed_policy_compromised_for, mark_managed_config_synced, mark_managed_config_synced_at,
     normalize_identity,
 };
 pub use paths::{

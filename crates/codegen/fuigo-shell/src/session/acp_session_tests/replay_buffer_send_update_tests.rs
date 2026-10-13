@@ -131,6 +131,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             threshold_percent: std::cell::Cell::new(85),
             force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             context_window_override: None,
+            context_window_selection: Default::default(),
             count: std::sync::atomic::AtomicU64::new(0),
             auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
             previous_model: std::cell::Cell::new(None),

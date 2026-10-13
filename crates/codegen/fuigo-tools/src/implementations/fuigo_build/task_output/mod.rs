@@ -1004,7 +1004,8 @@ impl crate::types::tool_metadata::ToolMetadata for TaskOutputTool {
             fuigo_tool_types::build_task_output_description(&fuigo_tool_types::TaskOutputToolNaming {
                 monitor_tool: Some("monitor"),
                 read_tool: Some("read_file"),
-                bash_background_param: Some("is_background"),
+                bash_background_param: None,
+                bash_block_param: Some("block_until_ms"),
                 subagent_background_param: Some("run_in_background"),
                 task_ids_param: "task_ids",
                 timeout_ms_param: "timeout_ms",
@@ -1065,6 +1066,7 @@ fn task_output_description(
         monitor_tool: renderer.tool_for_kind(ToolKind::Monitor),
         read_tool: renderer.tool_for_kind(ToolKind::Read),
         bash_background_param: renderer.param_for_kind(ToolKind::Execute, "is_background"),
+        bash_block_param: renderer.param_for_kind(ToolKind::Execute, "block_until_ms"),
         subagent_background_param: renderer.param_for_kind(ToolKind::Task, "run_in_background"),
         task_ids_param: renderer
             .param_for_kind(ToolKind::BackgroundTaskAction, "task_ids")

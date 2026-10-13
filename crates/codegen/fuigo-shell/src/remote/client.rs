@@ -969,6 +969,9 @@ pub(crate) fn parse_remote_model_value(
         env_key: get_env_keys(obj, "envKey").or_else(|| get_env_keys(obj, "env_key")),
         api_backend,
         context_window,
+        // Local sources only: a remote catalog does not supply the selectable windows
+        context_windows: Vec::new(),
+        notice: None,
         auto_compact_threshold_percent: get_u64(obj, "autoCompactThresholdPercent")
             .or_else(|| get_u64(obj, "auto_compact_threshold_percent"))
             .and_then(|v| u8::try_from(v).ok()),

@@ -2452,6 +2452,10 @@ async fn async_main(args: PagerArgs) -> Result<HeadlessOutcome> {
         return Ok(HeadlessOutcome::Finished);
     }
     if let Some(Command::Wrap(ref wrap_args)) = args.command {
+        // `wrap` returns before `apply_sandbox`; on Windows its command runs unsandboxed, so say so first.
+        if let Some(line) = fuigo_shell::config::wrap_sandbox_warning_line() {
+            fuigo_tty_utils::cli_eprintln!("{}", line);
+        }
         return fuigo_pager::wrap_cmd::run(wrap_args).map(HeadlessOutcome::from);
     }
     args.pin_local_resume_target()?;

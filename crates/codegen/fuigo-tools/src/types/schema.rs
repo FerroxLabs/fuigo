@@ -43,7 +43,8 @@ fn parse_lenient_whole_f64(f: f64) -> Result<i64, String> {
     }
     Ok(f as i64)
 }
-fn parse_lenient_u64_value(value: &serde_json::Value) -> Result<u64, String> {
+/// Parse a JSON number or numeric string into a `u64` with the leniency of [`deserialize_lenient_u64`].
+pub fn parse_lenient_u64_value(value: &serde_json::Value) -> Result<u64, String> {
     match value {
         serde_json::Value::Number(n) => {
             if let Some(u) = n.as_u64() {

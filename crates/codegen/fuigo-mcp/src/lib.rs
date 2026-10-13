@@ -41,6 +41,7 @@ pub fn isolate_fuigo_home_for_tests() {
 
 pub mod acp_transport;
 mod auth_status;
+pub mod bearer_token_file;
 pub mod credentials;
 pub mod elicitation;
 mod http_policy;

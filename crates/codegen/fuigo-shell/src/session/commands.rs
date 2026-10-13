@@ -406,6 +406,10 @@ pub enum SessionCommand {
         /// Per-model remote settings and per-model user TOML overrides then target the right model after a `/model` switch.
         /// The session actor stores this on `compaction.threshold_percent` (which is `Cell<u8>` so it can update without `&mut self`).
         auto_compact_threshold_percent: u8,
+        /// How the switch resolves the session's `/context-window` selection.
+        context_window_selection: SwitchContextWindow,
+        /// The new model's default window and menu, from the entry the handler resolved.
+        supported_context_windows: Vec<std::num::NonZeroU64>,
         responds_to: oneshot::Sender<Result<acp::ModelId, acp::Error>>,
     },
     /// Zero-turn harness rebuild: build a brand-new `Agent` from the session's `AgentRebuildSpec` and the new `AgentDefinition`.
@@ -1105,5 +1109,31 @@ mod cancel_trigger_tests {
         assert!(!CancelTrigger::runtime_limit().is_runtime_limit());
         assert!(!CancelTrigger::from_client(CancelTrigger::RUNTIME_LIMIT_NAME).is_runtime_limit());
         assert!(!CancelTrigger::Esc.is_runtime_limit());
+    }
+}
+
+/// How a model switch resolves the session's context window selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchContextWindow {
+    /// Keep the session's selection, applied while the new model supports it (a plain user switch).
+    Preserve,
+    /// Use this selection, forgotten when the new model does not support it (a request or restore).
+    Set(Option<std::num::NonZeroU64>),
+}
+
+/// The context window part of a model switch: how to resolve the selection and what the new model offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextWindowSwitch {
+    pub selection: SwitchContextWindow,
+    /// The new model's default window and menu.
+    pub supported: Vec<std::num::NonZeroU64>,
+}
+impl Default for ContextWindowSwitch {
+    /// Keep the session's selection; the new model offers nothing to choose from.
+    fn default() -> Self {
+        Self {
+            selection: SwitchContextWindow::Preserve,
+            supported: Vec::new(),
+        }
     }
 }

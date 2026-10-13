@@ -182,6 +182,8 @@ mod shell_completion;
 #[cfg(test)]
 mod dock_input_tests;
 #[cfg(test)]
+mod model_notice_tests;
+#[cfg(test)]
 mod extensions_row_hint_tests;
 #[cfg(test)]
 mod task_status_tests;

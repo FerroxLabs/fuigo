@@ -25,6 +25,9 @@ pub struct BashToolConfig {
     /// `None` blocks for the resolved `timeout` (default 120s, a model-supplied value up to 300s), matching the tool description.
     /// `Some(0)` disables the separate budget, so auto-backgrounding happens only at the model/default timeout.
     pub foreground_block_budget_ms: Option<u64>,
+    /// How long a command blocks, in milliseconds, when the model omits `block_until_ms`. `None` uses the foreground timeout (120000 by default). A value above the
+    /// block ceiling (the foreground budget, or 300000 when none is set) is lowered to it; `0` is treated as 1.
+    pub default_block_until_ms: Option<u64>,
     /// Whether to allow a background `&` operator in foreground commands (default: `true`).
     /// Resolution: config.toml (this) > remote settings > `true`.
     pub allow_background_operator: Option<bool>,
@@ -71,6 +74,9 @@ impl BashToolConfig {
         map.insert("auto_background_on_timeout".into(), auto_bg.into());
         if let Some(ms) = self.foreground_block_budget_ms {
             map.insert("foreground_block_budget_ms".into(), ms.into());
+        }
+        if let Some(ms) = self.default_block_until_ms {
+            map.insert("default_block_until_ms".into(), ms.into());
         }
         let allow_bg_op = self
             .allow_background_operator
@@ -751,6 +757,23 @@ mod tests {
         assert_eq!(
             fg_budget(&local.to_bash_params_json(None, None)),
             Some(30_000),
+        );
+    }
+
+    // -- default_block_until_ms: only emitted when set (the tool defaults to the foreground timeout) --
+
+    #[test]
+    fn default_block_until_ms_emitted_only_when_set() {
+        let map = BashToolConfig::default().to_bash_params_json(None, None);
+        assert!(map.get("default_block_until_ms").is_none());
+        let local = BashToolConfig {
+            default_block_until_ms: Some(15_000),
+            ..BashToolConfig::default()
+        };
+        let map = local.to_bash_params_json(None, None);
+        assert_eq!(
+            map.get("default_block_until_ms").and_then(|v| v.as_u64()),
+            Some(15_000)
         );
     }
 }

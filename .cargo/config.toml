@@ -65,10 +65,14 @@ rustflags = [
 ]
 
 [target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
+# /STACK: the main thread's stack reserve. The Windows default is 1 MiB, which a debug build of the pager overflows at
+# startup; 8 MiB matches the stack the session threads already get. Applies to every executable linked for this target.
+rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
 
 [target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static"]
+# /STACK: the main thread's stack reserve. The Windows default is 1 MiB, which a debug build of the pager overflows at
+# startup; 8 MiB matches the stack the session threads already get. Applies to every executable linked for this target.
+rustflags = ["-C", "force-unwind-tables=yes", "-C", "target-feature=+crt-static", "-C", "link-arg=/STACK:8388608"]
 
 
 # jemalloc page size for Apple Silicon (macOS aarch64 uses 16KB pages = 2^14).

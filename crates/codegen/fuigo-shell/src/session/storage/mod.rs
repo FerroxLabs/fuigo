@@ -2017,7 +2017,7 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Update the current model in summary (delegates to `update_current_model_and_agent` with `agent_name = None`).
     async fn update_current_model(&self, info: &Info, model_id: &acp::ModelId) -> io::Result<()> {
-        self.update_current_model_and_agent(info, model_id, None, None)
+        self.update_current_model_and_agent(info, model_id, None, None, None)
             .await
     }
 
@@ -2030,6 +2030,7 @@ pub trait StorageAdapter: Send + Sync {
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+        context_window: Option<Option<std::num::NonZeroU64>>,
     ) -> io::Result<()>;
 
     /// Update the collection ID for telemetry tracing

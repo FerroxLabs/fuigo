@@ -2589,13 +2589,18 @@ pub struct HttpConfig {
     /// inferred from headers — and it keys the transport hardening (no
     /// proxy, no redirects) and the OAuth skip.
     pub local_agent_endpoint: bool,
+    /// `bearer_token_file` from the user's own config: read again for every request. Config supplies the credential,
+    /// so no `Authorization` header may also be set (judged at spawn) and OAuth discovery is skipped.
+    pub bearer_token_file: Option<crate::bearer_token_file::BearerTokenFile>,
 }
 
 impl HttpConfig {
     fn has_authorization_header(&self) -> bool {
-        self.headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        self.bearer_token_file.is_some()
+            || self
+                .headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
     }
 }
 
@@ -5034,16 +5039,21 @@ impl McpClient {
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none());
         }
+        if config.bearer_token_file.is_some() && is_loopback_http_url(&config.url) {
+            // reqwest sends `http://127.0.0.1` through `HTTP_PROXY` like any other host unless `NO_PROXY` says
+            // otherwise, which would carry the bearer token off this machine in clear text. A loopback server with a
+            // token file bypasses every proxy. (A non-loopback server must be https, so a proxy sees only a tunnel.)
+            builder = builder.no_proxy();
+        }
         // rmcp requires reqwest 0.13; the approved xai helper is typed for 0.12.
         #[allow(clippy::disallowed_methods)]
         let client = builder
             .build()
             .map_err(|e| McpError::ClientError(format!("Failed to build HTTP client: {e}")))?;
-        Ok(crate::mcp_http_client::McpHttpClient::new(
-            client,
-            server_name,
-            warn_budget,
-        ))
+        Ok(
+            crate::mcp_http_client::McpHttpClient::new(client, server_name, warn_budget)
+                .with_bearer_token_file(config.bearer_token_file.clone()),
+        )
     }
 
     /// Cheap, non-blocking liveness predicate.
@@ -5649,6 +5659,28 @@ pub(crate) fn is_loopback_http_url(url: &str) -> bool {
     }
 }
 
+/// The `bearer_token_file` a server's `_meta` names, checked for the things that do not need the file: the path is
+/// absolute or `~/`-relative, the URL is `https` (or `http` to this machine), and no `Authorization` header is also
+/// set. Any failure refuses THIS server only, with a reason that names the server and never any file content.
+fn bearer_token_file_for_server(
+    name: &str,
+    url: &str,
+    headers: &[(String, String)],
+    meta: Option<&acp::Meta>,
+) -> Result<Option<crate::bearer_token_file::BearerTokenFile>, McpError> {
+    use crate::bearer_token_file::{BearerTokenFile, BearerTokenFileError, BearerTokenPath};
+    let refuse = |reason: BearerTokenFileError| McpError::ClientError(format!("MCP server '{name}': {reason}"));
+    let Some(configured) = crate::bearer_token_file::configured_from_meta(meta).map_err(refuse)? else {
+        return Ok(None);
+    };
+    let path = BearerTokenPath::parse(&configured, fuigo_config::mcp_bearer_file::home_dir().as_deref()).map_err(refuse)?;
+    crate::bearer_token_file::check_url_may_carry_token(url).map_err(refuse)?;
+    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
+        return Err(refuse(BearerTokenFileError::ConflictsWithAuthorization));
+    }
+    Ok(Some(BearerTokenFile::new(path)))
+}
+
 /// Decide the agent-id header for one HTTP server and return whether it gets
 /// the first-party local-agent posture (no OAuth probe, no proxy, no redirects).
 ///
@@ -5828,10 +5860,10 @@ pub async fn start_mcp_server(
             ))
         }
         acp::McpServer::Http(acp::McpServerHttp {
-            name, url, headers, ..
+            name, url, headers, meta, ..
         })
         | acp::McpServer::Sse(acp::McpServerSse {
-            name, url, headers, ..
+            name, url, headers, meta, ..
         }) => {
             if let Some(mc) = meta_config {
                 tracing::info!(server = %name, %url, ?mc, "MCP http: meta config override");
@@ -5846,10 +5878,12 @@ pub async fn start_mcp_server(
                 http_headers_for_server(headers, ctx.session_id, first_party_key_snapshot().as_deref());
             let local_agent_endpoint =
                 apply_agent_id_header(&mut headers, name.as_str(), url.as_str(), ctx)?;
+            let bearer_token_file = bearer_token_file_for_server(&name, &url, &headers, meta.as_ref())?;
             let http_config = HttpConfig {
                 url: url.clone(),
                 headers,
                 local_agent_endpoint,
+                bearer_token_file,
             };
 
             let auth_decision = if http_config.has_authorization_header() {
@@ -6131,6 +6165,7 @@ impl McpClient {
                 url: String::new(),
                 headers: Vec::new(),
                 local_agent_endpoint: false,
+                bearer_token_file: None,
             }),
             Some(&overrides),
             None,
@@ -6308,3 +6343,7 @@ mod p194_tests;
 #[cfg(test)]
 #[path = "servers_p181_tests.rs"]
 mod p181_tests;
+
+#[cfg(all(test, unix))]
+#[path = "servers_bearer_file_tests.rs"]
+mod bearer_file_tests;

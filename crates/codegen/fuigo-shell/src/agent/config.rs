@@ -9,9 +9,9 @@ use agent_client_protocol as acp;
 use fuigo_agent::prompt::skills::SkillsConfig;
 use fuigo_sampler::{AuthScheme, SamplerConfig};
 use fuigo_sampling_types::{
-    CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
-    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption, ReasoningSummary,
-    reasoning_effort_meta_value, reasoning_efforts_meta_value,
+    CONTEXT_WINDOWS_META_KEY, CompactionAtTokens, CompactionsRemaining, MODEL_NOTICE_META_KEY,
+    ModelNotice, REASONING_EFFORT_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption, ReasoningSummary,
+    context_windows_meta_value, reasoning_effort_meta_value, reasoning_efforts_meta_value,
 };
 use fuigo_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
@@ -4591,7 +4591,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 api_base_url: Some(endpoints.fuigo_api_base_url.clone()),
                 name: m.name,
                 description: m.description,
+                notice: None,
                 context_window,
+                context_windows: Vec::new(),
                 auto_compact_threshold_percent: m.auto_compact_threshold_percent,
                 system_prompt_label: m.system_prompt_label,
                 temperature: m.temperature,
@@ -4646,6 +4648,9 @@ pub struct ModelEntryConfig {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Message clients show while this model is selected (`notice`); see [`ModelNotice`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<ModelNotice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4686,6 +4691,9 @@ pub struct ModelEntryConfig {
     /// Used for auto-compact threshold calculations.
     /// Required: BYOK users must explicitly set this in config.toml.
     pub context_window: NonZeroU64,
+    /// Selectable context windows when the model offers several; empty means only `context_window`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_windows: Vec<NonZeroU64>,
     /// Per-model auto-compact threshold (0-100).
     /// When the session's token usage exceeds this percentage of `context_window`, the conversation is summarized.
     /// Resolver precedence: requirements > env > user (per-model > global) > managed (per-model > global).
@@ -4770,6 +4778,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             base_url,
             name,
             description,
+            notice,
             max_completion_tokens,
             temperature,
             top_p,
@@ -4783,6 +4792,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             variants,
             extra_headers,
             context_window,
+            context_windows,
             auto_compact_threshold_percent,
             system_prompt_label,
             api_base_url,
@@ -4810,6 +4820,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             .field("base_url", &fuigo_auth::redact_url(base_url))
             .field("name", name)
             .field("description", description)
+            .field("notice", notice)
             .field("max_completion_tokens", max_completion_tokens)
             .field("temperature", temperature)
             .field("top_p", top_p)
@@ -4823,6 +4834,7 @@ impl std::fmt::Debug for ModelEntryConfig {
             .field("variants", variants)
             .field("extra_headers", &extra_headers.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("context_window", context_window)
+            .field("context_windows", context_windows)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("api_base_url", &api_base_url.as_deref().map(fuigo_auth::redact_url))
@@ -4852,6 +4864,22 @@ impl std::fmt::Debug for ModelEntryConfig {
 fn is_default_laziness_detector(cfg: &LazinessDetectorPerModelConfig) -> bool {
     cfg == &LazinessDetectorPerModelConfig::default()
 }
+/// Config text is shown in a terminal and sent to ACP clients, so it is scrubbed here and again where it is painted.
+/// Control characters, escape sequences, bidi controls and line separators go (row breaks become spaces), runs of
+/// whitespace collapse to one space, the text is capped by [`ModelNotice::normalized`] (160 characters), and a
+/// notice left blank is dropped.
+pub(crate) fn sanitize_model_notice(notice: ModelNotice) -> Option<ModelNotice> {
+    fn scrub(text: &str) -> String {
+        let clean = fuigo_tty_utils::scrub_unsafe_display(text, Some(' '));
+        clean.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    ModelNotice {
+        severity: notice.severity,
+        text: scrub(&notice.text),
+        label: notice.label.as_deref().map(scrub),
+    }
+    .normalized()
+}
 /// A `[model.foo]` entry from config.toml, parsed directly from raw TOML (bypassing deep merge).
 /// Scalar fields are `Option` so absent means "inherit from defaults/prefetched".
 /// The collection fields (`extra_headers`, `reasoning_efforts`) merge only when non-empty and so cannot express "override to empty."
@@ -4866,6 +4894,8 @@ pub struct ConfigModelOverride {
     pub mtls_cert_dir: Option<PathBuf>,
     pub name: Option<String>,
     pub description: Option<String>,
+    /// `notice = "text"` or `{ text, severity, label }`; blank text clears the inherited notice.
+    pub notice: Option<ModelNotice>,
     pub api_key: Option<String>,
     /// Env var name(s) for the provider key: string or array in config.toml.
     pub env_key: Option<EnvKeys>,
@@ -4891,6 +4921,8 @@ pub struct ConfigModelOverride {
     #[serde(default)]
     pub env_http_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
+    /// Selectable context windows for this model (`context_windows = [100000, 400000]`); see `context_window_choices`.
+    pub context_windows: Option<Vec<NonZeroU64>>,
     /// Per-model auto-compact threshold override (0-100) from `[model.<id>]`.
     /// Read directly by `resolve_auto_compact_threshold_percent`.
     /// Intentionally NOT merged into `ModelInfo.auto_compact_threshold_percent` so the resolver can keep user-per-model distinct from GB-per-model.
@@ -4930,6 +4962,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             mtls_cert_dir,
             name,
             description,
+            notice,
             api_key,
             env_key,
             auth_provider,
@@ -4944,6 +4977,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             query_params,
             env_http_headers,
             context_window,
+            context_windows,
             auto_compact_threshold_percent,
             system_prompt_label,
             use_concise,
@@ -4972,6 +5006,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             .field("mtls_cert_dir", mtls_cert_dir)
             .field("name", name)
             .field("description", description)
+            .field("notice", notice)
             .field("api_key", &api_key.as_ref().map(|_| "<redacted>"))
             .field("env_key", env_key)
             .field("auth_provider", auth_provider)
@@ -4986,6 +5021,7 @@ impl std::fmt::Debug for ConfigModelOverride {
             .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
+            .field("context_windows", context_windows)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
@@ -5038,6 +5074,10 @@ impl ConfigModelOverride {
         if self.description.is_some() {
             entry.info.description.clone_from(&self.description);
         }
+        if let Some(ref notice) = self.notice {
+            // A blank notice clears the inherited one.
+            entry.info.notice = sanitize_model_notice(notice.clone());
+        }
         if self.max_completion_tokens.is_some() {
             entry.info.max_completion_tokens = self.max_completion_tokens;
         }
@@ -5062,8 +5102,20 @@ impl ConfigModelOverride {
         if !self.env_http_headers.is_empty() {
             entry.info.env_http_headers = self.env_http_headers.clone();
         }
-        if let Some(cw) = self.context_window.and_then(NonZeroU64::new) {
+        let scalar = self.context_window.and_then(NonZeroU64::new);
+        let windows = match self
+            .context_windows
+            .as_deref()
+            .filter(|listed| !listed.is_empty())
+        {
+            Some(listed) => context_window_choices(scalar, listed),
+            None => {
+                scalar.and_then(|cw| context_window_choices(Some(cw), &entry.info.context_windows))
+            }
+        };
+        if let Some((cw, choices)) = windows {
             entry.info.context_window = cw;
+            entry.info.context_windows = choices;
         }
         if let Some(v) = self.use_concise {
             entry.info.use_concise = v;
@@ -5161,6 +5213,9 @@ pub struct ModelInfo {
     /// Honored by both the picker (`/model`) and `/session-info`: when set, that's the label shown to users in either consumer.
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Message clients show while this model is selected; sent as ACP `_meta.notice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<ModelNotice>,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
@@ -5172,6 +5227,9 @@ pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub env_http_headers: IndexMap<String, String>,
     pub context_window: NonZeroU64,
+    /// Selectable context windows when the model offers several (default first when listed); empty means the single `context_window`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_windows: Vec<NonZeroU64>,
     /// Per-model auto-compact threshold (0-100).
     /// `None` defers to the global / default tiers in `resolve_auto_compact_threshold_percent`.
     pub auto_compact_threshold_percent: Option<u8>,
@@ -5243,6 +5301,7 @@ impl std::fmt::Debug for ModelInfo {
             base_url,
             name,
             description,
+            notice,
             max_completion_tokens,
             temperature,
             top_p,
@@ -5252,6 +5311,7 @@ impl std::fmt::Debug for ModelInfo {
             query_params,
             env_http_headers,
             context_window,
+            context_windows,
             auto_compact_threshold_percent,
             system_prompt_label,
             use_concise,
@@ -5284,6 +5344,7 @@ impl std::fmt::Debug for ModelInfo {
             .field("base_url", &fuigo_auth::redact_url(base_url))
             .field("name", name)
             .field("description", description)
+            .field("notice", notice)
             .field("max_completion_tokens", max_completion_tokens)
             .field("temperature", temperature)
             .field("top_p", top_p)
@@ -5293,6 +5354,7 @@ impl std::fmt::Debug for ModelInfo {
             .field("query_params", &query_params.iter().map(|(k, _)| (k, "<redacted>")).collect::<Vec<_>>())
             .field("env_http_headers", env_http_headers)
             .field("context_window", context_window)
+            .field("context_windows", context_windows)
             .field("auto_compact_threshold_percent", auto_compact_threshold_percent)
             .field("system_prompt_label", system_prompt_label)
             .field("use_concise", use_concise)
@@ -5365,6 +5427,8 @@ impl ModelInfo {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
+            context_windows: Vec::new(),
+            notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
@@ -5399,6 +5463,7 @@ impl ModelInfo {
             base_url: entry.base_url.clone(),
             name: entry.name.clone(),
             description: entry.description.clone(),
+            notice: entry.notice.clone(),
             max_completion_tokens: entry.max_completion_tokens,
             temperature: entry.temperature,
             top_p: entry.top_p,
@@ -5408,6 +5473,7 @@ impl ModelInfo {
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: entry.context_window,
+            context_windows: entry.context_windows.clone(),
             auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
             system_prompt_label: entry.system_prompt_label.clone(),
             use_concise: entry.use_concise,
@@ -5436,6 +5502,10 @@ impl ModelInfo {
     /// Whether `id` is one of the ids this model sends: its own, or the one it uses at some effort.
     pub(crate) fn has_model_id(&self, id: &str) -> bool {
         self.model == id || self.variants.iter().any(|variant| variant.model_id == id)
+    }
+    /// Whether `window` is this model's default window or an entry in its menu.
+    pub(crate) fn supports_context_window(&self, window: NonZeroU64) -> bool {
+        self.context_window == window || self.context_windows.contains(&window)
     }
     /// The id to send at this effort.
     ///
@@ -6362,6 +6432,8 @@ fn resolve_aux_model_sampling_config_inner(
                 query_params: IndexMap::new(),
                 env_http_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(200_000).unwrap(),
+                context_windows: Vec::new(),
+                notice: None,
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
                 use_concise: false,
@@ -6589,6 +6661,26 @@ pub(crate) fn response_include_extensions(
         Vec::new()
     }
 }
+/// The default is `context_window`, else the first listed window; the choices keep list order and include it.
+pub(crate) fn context_window_choices(
+    context_window: Option<NonZeroU64>,
+    listed: &[NonZeroU64],
+) -> Option<(NonZeroU64, Vec<NonZeroU64>)> {
+    let default = context_window.or_else(|| listed.first().copied())?;
+    if listed.is_empty() {
+        return Some((default, Vec::new()));
+    }
+    let mut choices = Vec::with_capacity(listed.len() + 1);
+    if !listed.contains(&default) {
+        choices.push(default);
+    }
+    for window in listed {
+        if !choices.contains(window) {
+            choices.push(*window);
+        }
+    }
+    Some((default, choices))
+}
 pub(crate) fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -6743,6 +6835,8 @@ fn resolve_hidden_default_web_search_sampling_config(
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
+            context_windows: Vec::new(),
+            notice: None,
             auto_compact_threshold_percent: None,
             system_prompt_label: None,
             use_concise: false,
@@ -6874,6 +6968,15 @@ pub(crate) fn to_acp_model_info(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
                     );
+                }
+                if info.context_windows.len() > 1 {
+                    map.insert(
+                        CONTEXT_WINDOWS_META_KEY.to_string(),
+                        context_windows_meta_value(&info.context_windows),
+                    );
+                }
+                if let Some(notice) = info.notice.clone().and_then(sanitize_model_notice) {
+                    map.insert(MODEL_NOTICE_META_KEY.to_owned(), notice.to_meta_value());
                 }
                 if map.is_empty() { None } else { Some(map) }
             };

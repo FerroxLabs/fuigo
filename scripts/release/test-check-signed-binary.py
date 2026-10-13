@@ -15,7 +15,7 @@ csb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(csb)
 
 
-def make_pe(cert=b"", pe32plus=True):
+def make_pe(cert=b"", pe32plus=True, stack=8 * 1024 * 1024):
     opt_size = 240 if pe32plus else 224
     dos = bytearray(0x40)
     dos[:2] = b"MZ"
@@ -23,6 +23,7 @@ def make_pe(cert=b"", pe32plus=True):
     coff = b"PE\0\0" + struct.pack("<HHIIIHH", 0x8664, 0, 0, 0, 0, opt_size, 0x22)
     opt = bytearray(opt_size)
     struct.pack_into("<H", opt, 0, 0x20B if pe32plus else 0x10B)
+    struct.pack_into("<Q" if pe32plus else "<I", opt, 72, stack)
     dd = 112 if pe32plus else 96
     struct.pack_into("<I", opt, dd - 4, 16)
     body = bytes(dos) + coff + bytes(opt) + b"\0" * 64
@@ -93,8 +94,17 @@ class T(unittest.TestCase):
             self.assertIn("Ferrox Labs Test", self.run_check(make_pe(cert=der)))
             with self.assertRaises(csb.Fail):
                 self.run_check(make_pe(cert=der), subject="Someone Else")
+            # A correctly signed executable with the default 1 MiB stack reserve is refused.
+            with self.assertRaisesRegex(csb.Fail, "stack reserve"):
+                self.run_check(make_pe(cert=der, stack=1024 * 1024))
+            self.assertIn("stack reserve 8388608", self.run_check(make_pe(cert=der)))
         finally:
             shutil.rmtree(d)
+
+    def test_pe_stack_reserve_is_read_for_both_header_kinds(self):
+        for plus in (True, False):
+            self.assertEqual(csb.pe_stack_reserve(make_pe(pe32plus=plus)), 8 * 1024 * 1024)
+            self.assertEqual(csb.pe_stack_reserve(make_pe(pe32plus=plus, stack=1024 * 1024)), 1024 * 1024)
 
     def test_macho_unsigned(self):
         with self.assertRaisesRegex(csb.Fail, "unsigned"):
