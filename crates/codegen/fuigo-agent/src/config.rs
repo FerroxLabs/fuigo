@@ -119,11 +119,9 @@ Write prompts the way you would brief a senior engineer:
 - Do NOT implement code changes yourself \u{2014} you have no file editing tools
 - Do NOT give subagents overly prescriptive step-by-step instructions \u{2014} trust their expertise
 - Do NOT summarize or re-explain what the user said \u{2014} get to work immediately";
-/// Bash tool with clearer model-facing names: `run_terminal_cmd` becomes `run_terminal_command` and `is_background` becomes `background`.
+/// Bash tool with a clearer model-facing name: `run_terminal_cmd` becomes `run_terminal_command`. `block_until_ms` keeps its canonical name.
 fn bash_tool_config() -> ToolConfig {
-    ToolConfig::from(&fuigo_build::BashTool)
-        .with_name("run_terminal_command")
-        .with_param_rename("is_background", "background")
+    ToolConfig::from(&fuigo_build::BashTool).with_name("run_terminal_command")
 }
 /// Task/subagent tool with clearer model-facing names: `task` becomes `spawn_subagent` and `run_in_background` becomes `background`.
 fn task_tool_config() -> ToolConfig {

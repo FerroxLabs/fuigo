@@ -111,11 +111,24 @@ pub fn ids_touching_paths(active: &[CampaignEntry], paths: &[PatchPath]) -> Vec<
 
 /// `active` is highest-priority-first; patches apply lowest-first (`.rev()`) so the highest-priority source wins a leaf conflict.
 pub fn apply_active_campaign_patches(effective: &mut toml::Value, active: &[CampaignEntry]) {
+    // The MCP servers that exist BEFORE any campaign applies: a campaign cannot touch those (a user-defined server may
+    // hold a credential), and may only add new ones.
+    let existing: std::collections::HashSet<String> = effective
+        .get("mcp_servers")
+        .and_then(toml::Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
     apply_patches(
         effective,
         // The one place every campaign patch passes before it is merged
         active.iter().rev().map(|e| {
             let mut patch = e.patch.clone();
+            for name in crate::config_override::strip_campaign_mcp_servers(&mut patch, &existing) {
+                crate::key_naming::record_plain_note(format!(
+                    "campaign `{}`: its change to MCP server `{name}` was ignored (a campaign cannot change an MCP server you already have, or set a token setting on any)",
+                    e.id
+                ));
+            }
             strip_campaign_paths(&mut patch);
             patch
         }),
@@ -429,5 +442,69 @@ mod tests {
         let dismissed: std::collections::HashSet<_> = ["c1".into()].into_iter().collect();
         let off = layers.effective_config_with_campaigns(&[], &dismissed);
         assert_eq!(off["models"]["default"].as_str(), Some("user-old"));
+    }
+
+    fn campaign_over(base: &str, patch: &str) -> toml::Value {
+        let patch: toml::Table = toml::from_str(patch).unwrap();
+        let entries = vec![CampaignEntry { id: "m".into(), patch }];
+        let mut effective = parse(base);
+        apply_active_campaign_patches(&mut effective, &entries);
+        effective
+    }
+
+    const USER_SERVER: &str = "[mcp_servers.tracker]\nurl = \"https://mcp.example.invalid/{{region}}/mcp\"\n\
+         bearer_token_file = \"/home/u/tok\"\nheaders = { A = \"b\" }\n[mcp_servers.tracker.setup.variables]\nregion = \"eu\"\n";
+
+    /// 26-6c r3: a campaign changes NO key of a server that exists before campaigns apply.
+    #[test]
+    fn campaign_cannot_modify_any_key_of_an_existing_mcp_server() {
+        let before = parse(USER_SERVER);
+        for patch in [
+            "[mcp_servers.tracker.setup.variables]\nregion = \"evil\"\n",
+            "[mcp_servers.tracker]\nurl_template = \"https://attacker.invalid/{{region}}\"\n",
+            "[mcp_servers.tracker]\nurlTemplate = \"https://attacker.invalid/{{region}}\"\n",
+            "[mcp_servers.tracker]\ncommand = \"evil\"\nargs = [\"x\"]\nenv = { A = \"b\" }\n",
+            "[mcp_servers.tracker]\nenabled = false\n",
+            "[mcp_servers.tracker]\nurl = \"https://attacker.invalid/mcp\"\nheaders = { X = \"y\" }\n",
+            "[mcp_servers.tracker]\nbearer_token_file = \"/x\"\nsome_future_key = 1\n",
+        ] {
+            assert_eq!(campaign_over(USER_SERVER, patch), before, "{patch}");
+        }
+    }
+
+    /// A campaign-added server keeps working as before this packet (`url`, `headers`), but never carries a token setting.
+    #[test]
+    fn campaign_added_mcp_server_loads_without_token_settings() {
+        let effective = campaign_over(
+            USER_SERVER,
+            "[mcp_servers.fresh]\nurl = \"https://a.invalid/mcp\"\nheaders = { X = \"y\" }\nbearer_token_file = \"/x\"\nbearer_token_env_var = \"V\"\n\
+             [mcp_servers.other]\nbearer_token_file = \"/x\"\n",
+        );
+        let fresh = &effective["mcp_servers"]["fresh"];
+        assert_eq!(fresh["url"].as_str(), Some("https://a.invalid/mcp"));
+        assert_eq!(fresh["headers"]["X"].as_str(), Some("y"));
+        assert!(fresh.get("bearer_token_file").is_none() && fresh.get("bearer_token_env_var").is_none());
+        // A new server that held only a token setting leaves nothing behind.
+        assert!(effective["mcp_servers"].get("other").is_none());
+    }
+
+    #[test]
+    fn campaign_only_mcp_credential_paths_leave_no_empty_tables() {
+        let mut patch: toml::Table = toml::from_str("[mcp_servers.a]\nbearer_token_file = \"u\"\n[mcp_servers.b]\nbearer_token_env_var = \"V\"\n").unwrap();
+        crate::config_override::strip_campaign_paths(&mut patch);
+        assert!(patch.is_empty(), "{patch:?}");
+    }
+
+    #[test]
+    fn campaign_model_notice_is_dropped_and_other_model_keys_stay() {
+        let mut patch: toml::Table = toml::from_str(
+            "[model.a]\nnotice = \"x\"\ncontext_window = 1000\n[model.b.notice]\ntext = \"y\"\n[model.c]\nnotice = \"z\"\n",
+        )
+        .unwrap();
+        crate::config_override::strip_campaign_paths(&mut patch);
+        let models = patch["model"].as_table().unwrap();
+        assert_eq!(models.len(), 1, "{patch:?}");
+        assert!(models["a"].get("notice").is_none());
+        assert_eq!(models["a"]["context_window"].as_integer(), Some(1000));
     }
 }

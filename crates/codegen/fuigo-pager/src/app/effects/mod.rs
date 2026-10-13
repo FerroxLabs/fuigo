@@ -1767,6 +1767,32 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::SetContextWindow {
+            agent_id,
+            session_id,
+            model_id,
+            window,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                use fuigo_shell::sampling::types::{CONTEXT_WINDOW_META_KEY, context_window_meta_value};
+                let mut meta = acp::Meta::new();
+                meta.insert(
+                    CONTEXT_WINDOW_META_KEY.to_owned(),
+                    context_window_meta_value(window),
+                );
+                let req = acp::SetSessionModelRequest::new(session_id, model_id).meta(meta);
+                let result = acp_send(req, &tx)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| sanitize_user_error(&acp_error_text(&e)));
+                TaskResult::ContextWindowSet {
+                    agent_id,
+                    window,
+                    result,
+                }
+            });
+        }
         Effect::ProbeClipboardAttachment { ctx, change_count } => {
             tasks
                 .spawn(async move {
@@ -4777,6 +4803,21 @@ fn session_info_fields(
     title: Option<&str>,
     show_resolved_model: bool,
 ) -> Vec<SessionInfoField> {
+    session_info_fields_with_sandbox_warning(
+        info,
+        title,
+        show_resolved_model,
+        fuigo_sandbox::unavailable_warning().as_deref(),
+    )
+}
+
+/// `sandbox_warning` is the "profile set but sandboxing unavailable here" text, shown as a `Sandbox warning` line.
+fn session_info_fields_with_sandbox_warning(
+    info: &SessionInfoResponse,
+    title: Option<&str>,
+    show_resolved_model: bool,
+    sandbox_warning: Option<&str>,
+) -> Vec<SessionInfoField> {
     let mut fields = Vec::new();
     let mut push = |label: &'static str, value: String, compact: bool| {
         fields
@@ -4817,6 +4858,9 @@ fn session_info_fields(
     }
     if let Some(profile) = fuigo_sandbox::profile_name() {
         push("Sandbox", profile.to_string(), true);
+    }
+    if let Some(warning) = sandbox_warning {
+        push("Sandbox warning", warning.to_string(), false);
     }
     push("Turn", info.data.turn_index.to_string(), true);
     let ctx = &info.data.context;

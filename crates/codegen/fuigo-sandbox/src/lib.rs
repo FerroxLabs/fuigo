@@ -129,6 +129,28 @@ fn profile_confines(name: &str) -> bool {
     name.parse::<ProfileName>()
         .is_ok_and(|profile| profile != ProfileName::Off)
 }
+/// Column cap of the profile name inside the "sandbox unavailable" warning.
+const UNAVAILABLE_PROFILE_MAX_CHARS: usize = 128;
+/// The warning shown at every start on Windows when a sandbox profile is set: no sandbox can exist there, so Fuigo keeps running.
+///
+/// `None` off Windows (Linux and macOS keep their existing fail-closed behaviour and messages, with or without `enforce`),
+/// and for profile `off` (or a name that is not a confining profile).
+/// The profile name is config text, so it is scrubbed of terminal-control and hidden characters and capped.
+pub fn unavailable_warning_for(profile: &str, on_windows: bool) -> Option<String> {
+    if !on_windows || !profile_confines(profile) {
+        return None;
+    }
+    let clean = fuigo_tty_utils::scrub_unsafe_display(profile, Some(' '));
+    let clean: String = clean.chars().take(UNAVAILABLE_PROFILE_MAX_CHARS).collect();
+    Some(format!(
+        "Sandbox profile {clean} is set but sandboxing is not available on Windows: \
+         commands and file tools run unsandboxed."
+    ))
+}
+/// [`unavailable_warning_for`] for the profile this process was configured with, on this platform.
+pub fn unavailable_warning() -> Option<String> {
+    unavailable_warning_for(configured_profile_name()?, cfg!(windows))
+}
 /// Whether the sandbox was successfully applied to this process.
 pub fn is_active() -> bool {
     SANDBOX.get().is_some_and(|s| s.applied)
@@ -692,6 +714,31 @@ pub fn bwrap_reexec_for_profile(
 mod tests {
     use super::*;
     use serial_test::serial;
+    #[test]
+    fn unavailable_warning_text_on_windows_is_exact() {
+        assert_eq!(
+            unavailable_warning_for("workspace", true).as_deref(),
+            Some(
+                "Sandbox profile workspace is set but sandboxing is not available on Windows: \
+                 commands and file tools run unsandboxed."
+            )
+        );
+    }
+    #[test]
+    fn unavailable_warning_is_absent_for_off_and_off_windows() {
+        assert_eq!(unavailable_warning_for("off", true), None);
+        // Linux and macOS, with or without `enforce`: no new text; existing behaviour stays.
+        assert_eq!(unavailable_warning_for("workspace", false), None);
+        assert_eq!(unavailable_warning_for("strict", false), None);
+        #[cfg(not(windows))]
+        assert_eq!(unavailable_warning(), None);
+    }
+    #[test]
+    fn unavailable_warning_scrubs_the_profile_name() {
+        let w = unavailable_warning_for("evil\x1b[31m\nname", true).unwrap();
+        assert!(!w.contains('\x1b'));
+        assert!(!w.contains('\n'));
+    }
     /// Save, set/remove, and auto-restore an env var on drop.
     struct EnvGuard {
         key: &'static str,

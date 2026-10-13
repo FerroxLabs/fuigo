@@ -2563,7 +2563,7 @@ impl SessionActor {
         input: &serde_json::Value,
     ) -> fuigo_hooks::event::HookEventEnvelope {
         let (tool_input, tool_input_truncated) =
-            fuigo_hooks::event::truncate_payload(input.clone());
+            fuigo_hooks::event::truncate_payload(with_retired_bash_background_field(input.clone(), self.bash_auto_background_enabled()));
         let note = self.pre_tool_use_peer_note();
         self.make_hook_envelope(
             fuigo_hooks::event::HookEventName::PreToolUse,
@@ -3469,6 +3469,7 @@ mod plan_mode_edit_gate_tests {
                     timeout: None,
                     description: "write via bash".into(),
                     is_background: false,
+                    block_until_ms: None,
                     workdir: None,
                 })
             ),

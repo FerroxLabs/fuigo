@@ -85,6 +85,7 @@ async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
             &model,
             None,
             Some(Some(ReasoningEffort::High)),
+            None,
         )
         .await
         .unwrap();
@@ -99,7 +100,7 @@ async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
             "model-only update must not wipe the persisted effort",
         );
     adapter
-        .update_current_model_and_agent(&info, &model, None, Some(None))
+        .update_current_model_and_agent(&info, &model, None, Some(None), None)
         .await
         .unwrap();
     assert_eq!(
@@ -1219,6 +1220,7 @@ fn write_test_summary(
         agent_name: None,
         sandbox_profile: None,
         reasoning_effort: None,
+        context_window: None,
         last_turn_summary: None,
         last_turn_summary_prompt_id: None,
         last_recap: None,

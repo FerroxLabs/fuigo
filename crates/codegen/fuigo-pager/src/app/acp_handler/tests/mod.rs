@@ -2194,6 +2194,7 @@ pub(super) fn model_changed_ext(
         update: FuigoSessionUpdate::ModelChanged {
             model_id: model_id.to_string(),
             reasoning_effort: reasoning_effort.map(String::from),
+            context_window_selection: None,
         },
         meta: None,
     };
@@ -2210,6 +2211,7 @@ pub(super) fn model_changed_ext_with_event(
         update: FuigoSessionUpdate::ModelChanged {
             model_id: model_id.to_string(),
             reasoning_effort: None,
+            context_window_selection: None,
         },
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };

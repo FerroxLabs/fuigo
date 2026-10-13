@@ -1507,6 +1507,45 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
     }
     vec![]
 }
+/// Completion of a `/context-window` request. The model is unchanged; only the selection and the displayed total move.
+pub(in crate::app::dispatch) fn handle_context_window_set(
+    app: &mut AppView,
+    agent_id: AgentId,
+    window: std::num::NonZeroU64,
+    result: Result<(), String>,
+) -> Vec<Effect> {
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
+    agent.session.model_switch_pending = false;
+    let model_changed_during_switch =
+        std::mem::take(&mut agent.session.models.model_changed_during_switch);
+    match result {
+        Ok(()) => {
+            if !model_changed_during_switch {
+                agent.session.models.context_window_selection = Some(window.get());
+            }
+            agent.refresh_context_total();
+            if agent.session.models.context_window_selection == Some(window.get()) {
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Context window set to {}",
+                    crate::slash::commands::context_window::format_window(window.get())
+                )));
+            }
+        }
+        Err(msg) => {
+            agent.scrollback.push_block(RenderBlock::system(format!(
+                "Couldn't set context window to {}: {msg}",
+                crate::slash::commands::context_window::format_window(window.get())
+            )));
+        }
+    }
+    let mut effects = Vec::new();
+    let drain = maybe_drain_queue(agent);
+    effects.extend(drain.effects);
+    note_peek_page_flip(app, agent_id, drain.page_flip_entry);
+    effects
+}
 pub(in crate::app::dispatch) fn handle_switch_model_complete(
     app: &mut AppView,
     agent_id: AgentId,

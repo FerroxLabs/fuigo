@@ -106,6 +106,22 @@ Fuigo resolves the API key in this order:
 
 The `context_window` value tells Fuigo when to trigger auto-compaction. When you override a known model, Fuigo inherits that model's context window. When you define a new model and omit `context_window`, Fuigo defaults to 200,000 tokens, so set it explicitly to match your provider.
 
+#### Several context windows
+
+A model that is offered at more than one context size can list them, and you choose between them with `/context-window`:
+
+```toml
+[model.my-model]
+model = "my-model"
+base_url = "https://api.example.com/v1"
+context_window = 100000                  # the default (optional; the first listed size is used if omitted)
+context_windows = [100000, 400000]       # sizes /context-window can select
+```
+
+`context_windows` may also be set under `[model_providers.<id>]`; a model that sets neither `context_window` nor `context_windows` inherits both from its provider. The list is read from your configuration only. Values must be positive whole numbers of tokens; sizes above 16,000,000, repeated sizes and entries beyond the first 16 are dropped with a configuration warning, and a zero or non-number skips the whole `context_windows` field with a warning. The selected size must be one of the listed ones. A managed model allowlist still decides whether the model can be used at all; `/context-window` only picks among the sizes you or your administrator configured.
+
+**Model notice.** `notice = "preview: may change"` under `[model.<id>]` shows a short message in a banner just above the prompt while that model is selected, and sends it to ACP clients as `_meta.notice` on the model. A table form, `notice = { severity = "warning", text = "...", label = "deprecated" }`, picks the colour (`info`, `warning` or `critical`) and a short badge. The text is plain, single-line and capped at 160 characters: control and escape characters, bidirectional controls and line separators are removed, runs of whitespace collapse, and it is never shown as markdown or as a link. Every banner starts with a fixed `notice:` tag, so it cannot pass for a Fuigo message or a permission prompt. A notice is read only from your own and your administrator's configuration (a project `.fuigo/config.toml` does not define models), and a blank `notice = ""` clears one set by a lower layer. Terminals 16 rows high or less do not show the banner. A campaign cannot set a notice.
+
 ### Global Default Headers
 
 To apply the same headers to *every* model in the catalog -- built-in, prefetched from `/v1/models`, or custom -- set them once under the global `[models]` section instead of repeating them per model:

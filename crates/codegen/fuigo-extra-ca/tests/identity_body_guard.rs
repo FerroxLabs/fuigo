@@ -90,7 +90,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-auth/src/auth_provider.rs", 9), // P70a (R087): +4 are the quoted field names `"user_id"`, `"team_id"`, `"deployment_id"`, `"organization_id"` in `CredentialSnapshot`'s hand-written redacting `Debug` (it prints what the derive it replaced printed); +1 is a unit-test fixture literal `user_id: Some("p70-user")`. No body site
     ("crates/codegen/fuigo-config/src/managed_cache.rs", 3),
     ("crates/codegen/fuigo-config/src/managed_cache/claim_tests.rs", 4),
-    ("crates/codegen/fuigo-config/src/managed_cache/tests.rs", 47),
+    ("crates/codegen/fuigo-config/src/managed_cache/tests.rs", 49), // 26-6a: +2 are test fixture literals `principal: Some("team-a")` / `Some("dep-1")` in the compromise-reason test; no body site
     ("crates/codegen/fuigo-config/src/signed_policy/claim_tests.rs", 1),
     ("crates/codegen/fuigo-config/src/signed_policy/tests.rs", 19),
     ("crates/codegen/fuigo-fast-worktree/src/bin/nfs_create_latency_bench.rs", 1),
@@ -116,7 +116,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/settings.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/tests/turn_completion.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/acp_handler/workflow_ingest.rs", 1),
-    ("crates/codegen/fuigo-pager/src/app/actions.rs", 135), // R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep.
+    ("crates/codegen/fuigo-pager/src/app/actions.rs", 137), // 26-6d: +2 `agent_id` fields of `Effect::SetContextWindow` / `TaskResult::ContextWindowSet` (in-process agent-view key; the request is `session/set_model` with `_meta.contextWindow`, no new identity). R-xs-p12: +2 `agent_id: AgentId` fields of `Effect::PeerRpc` / `Action::PeerRpcDone`: the pager's in-process agent-view key that routes the answer back; the request body is `PeerCall::params` (sessionId, heldId, token, action) and carries no identity. Keep.
     ("crates/codegen/fuigo-pager/src/app/agent_view/cta.rs", 3),
     ("crates/codegen/fuigo-pager/src/app/agent_view/dock_input_tests.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/agent_view/key_owner_tests.rs", 6), // R-guard54: +1 `"email"` in an MCP elicitation-form test (4784cfc4); fixture JSON, no request body. Keep.
@@ -134,9 +134,9 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/prompt.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/queue.rs", 5), // R-guard54: +1 `agent_id: AgentId` parameter of `send_held_side_question` (d52be8ca, P193): the pager-local tab id, passed in-process to `start_side_question`; not the machine id. Keep.
     ("crates/codegen/fuigo-pager/src/app/dispatch/rewind.rs", 9),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 18),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/router.rs", 19), // 26-6d: the `Effect::SetContextWindow` constructor repeats the in-process `agent_id`; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/fork.rs", 5),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 5),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/session/lifecycle.rs", 6), // 26-6d: `handle_context_window_set(agent_id)`, in-process routing key; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/load.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/session/modal.rs", 2),
     ("crates/codegen/fuigo-pager/src/app/dispatch/settings/setters.rs", 1),
@@ -159,7 +159,7 @@ const EXPECTED: &[(&str, usize)] = &[
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/session/modal.rs", 6),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/settings.rs", 4),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/status.rs", 27),
-    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 35),
+    ("crates/codegen/fuigo-pager/src/app/dispatch/tests/task_result.rs", 37), // 26-6d: pager-local fixtures for `ContextWindowSet`; no body site
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/transcript.rs", 1),
     ("crates/codegen/fuigo-pager/src/app/dispatch/tests/turn.rs", 7),
     ("crates/codegen/fuigo-pager/src/app/dispatch/transcript.rs", 9),

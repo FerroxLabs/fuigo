@@ -130,6 +130,8 @@ pub struct McpHttpClient<C> {
     inner: C,
     server_name: Arc<str>,
     state: Arc<parking_lot::Mutex<ThrottleState>>,
+    /// When set, every request's bearer token is read from this file (and replaces any token rmcp passes).
+    bearer_token_file: Option<crate::bearer_token_file::BearerTokenFile>,
 }
 // No `Debug` derive: rmcp's `AuthClient` (an inner type) is not `Debug`.
 
@@ -141,6 +143,31 @@ impl<C> McpHttpClient<C> {
             state: Arc::new(parking_lot::Mutex::new(ThrottleState::with_budget(
                 warn_budget,
             ))),
+            bearer_token_file: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_bearer_token_file(mut self, file: Option<crate::bearer_token_file::BearerTokenFile>) -> Self {
+        self.bearer_token_file = file;
+        self
+    }
+
+    /// The token file, when configured, supplies this request's token. A failed check fails the request with the
+    /// generic reason; nothing read earlier is reused.
+    async fn resolve_auth_token<E: std::error::Error + Send + Sync + 'static>(
+        &self,
+        auth_token: Option<String>,
+    ) -> Result<Option<String>, StreamableHttpError<E>> {
+        match &self.bearer_token_file {
+            Some(file) => {
+                let token = file.read().await.map_err(|reason| {
+                    tracing::warn!(server = %self.server_name, %reason, "MCP bearer_token_file refused for this request");
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason.to_string())
+                })?;
+                Ok(Some(token))
+            }
+            None => Ok(auth_token),
         }
     }
 }
@@ -198,6 +225,8 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
             tokio::time::sleep(plan.delay).await;
         }
 
+        // After any backoff, so a reconnect uses the token the file holds now.
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         let result = self
             .inner
             .get_stream(uri, session_id, last_event_id, auth_token, custom_headers)
@@ -218,6 +247,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
         crate::http_policy::check_url(&uri)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         self.inner
             .post_message(uri, message, session_id, auth_token, custom_headers)
             .await
@@ -232,6 +262,7 @@ impl<C: StreamableHttpClient + Sync> StreamableHttpClient for McpHttpClient<C> {
     ) -> Result<(), StreamableHttpError<Self::Error>> {
         crate::http_policy::check_url(&uri)
             .map_err(|reason| std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason))?;
+        let auth_token = self.resolve_auth_token(auth_token).await?;
         self.inner
             .delete_session(uri, session_id, auth_token, custom_headers)
             .await

@@ -832,6 +832,10 @@ pub enum SessionUpdate {
         /// `None` when the model does not support reasoning effort or no effort override was applied.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_effort: Option<String>,
+        /// The session's context window selection (tokens); `None` means the model default.
+        /// Additive: clients that do not know the field ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window_selection: Option<u64>,
     },
     /// Streaming chunk of a tool call's arguments.
     ///
@@ -1291,6 +1295,18 @@ impl RetryState {
 }
 
 impl SessionUpdate {
+    /// Builds the `ModelChanged` update a model switch broadcasts to the session's clients.
+    pub fn model_changed(
+        model_id: impl Into<String>,
+        reasoning_effort: Option<String>,
+        context_window_selection: Option<u64>,
+    ) -> Self {
+        SessionUpdate::ModelChanged {
+            model_id: model_id.into(),
+            reasoning_effort,
+            context_window_selection,
+        }
+    }
     /// P70b display sink: replace credentials this process sent upstream (exact match) in the variants that carry
     /// error text from a failed model or tool call. Applied where a Fuigo notification is sent, so the client, the
     /// persisted `updates.jsonl`, the standard-rail retry mirror and the notification hooks all get the scrubbed text.
@@ -2841,19 +2857,15 @@ mod tests {
     ///   The wire stays smaller, and absence stays distinguishable from an explicit user clear, if that ever becomes a real distinction.
     #[test]
     fn model_changed_serializes_snake_case_with_optional_effort() {
-        let with_effort = SessionUpdate::ModelChanged {
-            model_id: "grok-4".into(),
-            reasoning_effort: Some("high".into()),
-        };
+        let with_effort =
+            SessionUpdate::model_changed("grok-4", Some("high".into()), Some(500_000));
         let json = serde_json::to_value(&with_effort).unwrap();
         assert_eq!(json["sessionUpdate"], "model_changed");
         assert_eq!(json["model_id"], "grok-4");
         assert_eq!(json["reasoning_effort"], "high");
+        assert_eq!(json["context_window_selection"], 500_000);
 
-        let without_effort = SessionUpdate::ModelChanged {
-            model_id: "grok-3".into(),
-            reasoning_effort: None,
-        };
+        let without_effort = SessionUpdate::model_changed("grok-3", None, None);
         let json = serde_json::to_value(&without_effort).unwrap();
         assert_eq!(json["sessionUpdate"], "model_changed");
         assert_eq!(json["model_id"], "grok-3");
@@ -2862,6 +2874,18 @@ mod tests {
             "reasoning_effort: None must be skipped on the wire so old pagers \
              and third-party ACP clients see a smaller, no-extra-keys payload"
         );
+        assert!(json.get("context_window_selection").is_none());
+    }
+
+    /// A payload from an agent that predates the field still parses; the selection is `None`.
+    #[test]
+    fn model_changed_without_context_window_selection_still_parses() {
+        let parsed: SessionUpdate = serde_json::from_value(serde_json::json!({
+            "sessionUpdate": "model_changed",
+            "model_id": "m",
+        }))
+        .unwrap();
+        assert_eq!(parsed, SessionUpdate::model_changed("m", None, None));
     }
 
     /// `ModelChanged` round-trips through JSON: a follower client deserializes the exact same value the agent serialized.
@@ -2869,10 +2893,7 @@ mod tests {
     /// The `#[serde(other)]` catch-all would swallow that on the pager side and break multi-client model sync without any test failing.
     #[test]
     fn model_changed_roundtrips_through_json() {
-        let original = SessionUpdate::ModelChanged {
-            model_id: "grok-4".into(),
-            reasoning_effort: Some("medium".into()),
-        };
+        let original = SessionUpdate::model_changed("grok-4", Some("medium".into()), Some(400_000));
         let json_str = serde_json::to_string(&original).unwrap();
         let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
         assert_eq!(original, parsed);
@@ -2886,10 +2907,7 @@ mod tests {
     fn model_changed_envelope_carries_session_id_at_top_level() {
         let notif = SessionNotification {
             session_id: acp::SessionId::new("sess-abc"),
-            update: SessionUpdate::ModelChanged {
-                model_id: "grok-4".into(),
-                reasoning_effort: None,
-            },
+            update: SessionUpdate::model_changed("grok-4", None, None),
             meta: None,
         };
         let json = serde_json::to_value(&notif).unwrap();

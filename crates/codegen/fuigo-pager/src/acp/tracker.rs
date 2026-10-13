@@ -376,7 +376,7 @@ pub struct AcpUpdateTracker {
     /// Task tool `run_in_background` flags, keyed by `task_id` (subagent_id).
     /// Populated when a task tool call is detected (variant == "Task"), consumed by the acp_handler when `SubagentSpawned` arrives.
     pub(crate) task_tool_background: std::collections::HashMap<String, bool>,
-    /// Tool call IDs marked as background (`is_background=true`).
+    /// Tool call IDs marked as background (`block_until_ms: 0`).
     ///
     /// First-detection (no scrollback entry yet): defers entry creation until `fuigo/task_backgrounded` creates a `BgTask` block.
     /// Late-detection (Execute block already exists): suppresses further output streaming; `handle_task_backgrounded` demotes the existing block.
@@ -1532,7 +1532,7 @@ impl AcpUpdateTracker {
                 tracing::debug!(
                     tool_call_id = %deferred_id,
                     keep_in_pending,
-                    "Deferring is_background=true tool to bg_deferred_tools"
+                    "Deferring background (block_until_ms=0) tool to bg_deferred_tools"
                 );
                 if !keep_in_pending {
                     self.pending_tools.remove(&deferred_id);
@@ -2558,7 +2558,7 @@ fn task_ids_from_raw_input(raw: &serde_json::Value) -> Vec<String> {
     }
     out
 }
-/// Check if a tool call is a background execute (`is_background=true`).
+/// Check if a tool call is a background execute (`block_until_ms: 0`, or the retired `is_background: true`).
 ///
 /// These are deferred from scrollback; the `fuigo/task_backgrounded` notification creates a `BgTask` block instead of an `Execute` block.
 ///
@@ -2571,9 +2571,14 @@ fn is_bg_tool(tc: &acp::ToolCall) -> bool {
         && tc
             .raw_input
             .as_ref()
-            .and_then(|v| v.get("is_background").or_else(|| v.get("background")))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .is_some_and(raw_input_requests_background)
+}
+/// The runner's own rule for a raw bash input (shared, not copied): an explicit `block_until_ms` wins over the retired
+/// boolean (`is_background`, also spelled `background`), with the same lenient string forms. `timeout: 0` is not a
+/// background request. A positive `block_until_ms` is foreground even when the user's auto-background setting may move
+/// it later (that arrives as the `fuigo/task_backgrounded` notification).
+fn raw_input_requests_background(input: &serde_json::Value) -> bool {
+    fuigo_tools::implementations::fuigo_build::bash::raw_input_requests_background(input)
 }
 /// Check if an Edit-kind tool call is a whole-file write (write) rather than a targeted replacement (search_replace / edit).
 ///

@@ -1574,7 +1574,7 @@ impl SessionActor {
                     && let Some(new_cw) = std::num::NonZeroU64::new(cw)
                     && self.compaction.context_window_override.is_none()
                 {
-                    cfg.context_window = new_cw;
+                    cfg.context_window = self.context_window_after_overflow(&cfg, new_cw);
                     self.chat_state_handle.update_sampling_config(cfg);
                 }
 
@@ -2685,6 +2685,39 @@ pub(crate) struct ParkGate {
 impl fuigo_sampling_types::DispatchGate for ParkGate {
     fn wait_open(&self) -> fuigo_sampling_types::DispatchGateFuture<'_> {
         Box::pin(crate::session::quiesce::wait_model_allowed(&self.session_id))
+    }
+}
+
+impl SessionActor {
+    /// The window after a server overflow at `server_window`: a selection that fits stays, a larger one is cleared.
+    pub(in crate::session) fn context_window_after_overflow(
+        &self,
+        cfg: &fuigo_sampling_types::SamplingConfig,
+        server_window: std::num::NonZeroU64,
+    ) -> std::num::NonZeroU64 {
+        let selection = crate::session::handle::load_context_window_selection(
+            &self.compaction.context_window_selection,
+        );
+        let Some(selection) = selection.filter(|selection| *selection == cfg.context_window) else {
+            return server_window;
+        };
+        if selection <= server_window {
+            return selection;
+        }
+        self.compaction
+            .context_window_selection
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let agent_name = self.agent.borrow().definition().name.clone();
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::CurrentModel {
+                model_id: acp::ModelId::new(cfg.model.clone()),
+                agent_name: Some(agent_name),
+                reasoning_effort: None,
+                context_window: Some(None),
+            });
+        server_window
     }
 }
 

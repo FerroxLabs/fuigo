@@ -1699,6 +1699,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
             url: command_or_url.to_string(),
             transport_type: None,
             bearer_token_env_var: None,
+            bearer_token_file: None,
             headers: None,
             oauth_client_id: None,
             oauth_client_secret_env_var: None,

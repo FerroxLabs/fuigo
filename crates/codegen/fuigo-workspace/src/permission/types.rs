@@ -1065,6 +1065,7 @@ pub(crate) mod tests {
             timeout: None,
             description: "run tests".into(),
             is_background: false,
+            block_until_ms: None,
             workdir: None,
         });
         let access = AccessKind::from(&input);

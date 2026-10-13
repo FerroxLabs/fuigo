@@ -32,7 +32,7 @@ use super::session::fork::{
 };
 use super::session::lifecycle::{
     dispatch_exit_session, handle_session_created, handle_session_failed,
-    handle_switch_model_complete, handle_worktree_session_created, handle_worktree_session_failed,
+    handle_context_window_set, handle_switch_model_complete, handle_worktree_session_created, handle_worktree_session_failed,
 };
 use super::session::load::{
     handle_card_detail_loaded, handle_deep_search_results, handle_session_load_failed,
@@ -831,6 +831,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             prev_model_id,
         } => handle_switch_model_complete(app, agent_id, model_id, effort, result, prev_model_id),
+        TaskResult::ContextWindowSet {
+            agent_id,
+            window,
+            result,
+        } => handle_context_window_set(app, agent_id, window, result),
         TaskResult::BgTaskKilled {
             session_id,
             task_id,

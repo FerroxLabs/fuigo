@@ -825,9 +825,9 @@ impl ModelsManager {
     }
 
     /// Wait, bounded by one auth refresh plus one fetch, for the first fetch outcome; never triggers a fetch.
-    pub(crate) async fn wait_for_first_catalog(&self) {
+    pub(crate) async fn wait_for_first_catalog(&self) -> bool {
         self.wait_for_first_catalog_inner(crate::util::config::resolve_remote_fetch_enabled())
-            .await;
+            .await
     }
 
     async fn wait_for_first_catalog_inner(&self, remote_fetch_enabled: bool) -> bool {

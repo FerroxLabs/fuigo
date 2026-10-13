@@ -141,6 +141,8 @@ pub struct SessionHandle {
     /// Clients then describe the fires this session will actually get rather than re-resolving a setting that may have flipped since spawn.
     pub scheduler_background_loops: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The selected context window in tokens, 0 for none, shared with the session actor.
+    pub context_window_selection: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// YOLO (auto-approve) mode for this session.
     /// Per-session tracking prevents cross-client contamination in leader mode where one client enabling YOLO could affect another client's sessions.
     pub yolo_mode: bool,
@@ -779,4 +781,9 @@ impl SessionHandle {
             );
         }
     }
+}
+pub(crate) fn load_context_window_selection(
+    selection: &std::sync::atomic::AtomicU64,
+) -> Option<std::num::NonZeroU64> {
+    std::num::NonZeroU64::new(selection.load(std::sync::atomic::Ordering::Relaxed))
 }

@@ -275,6 +275,28 @@ enabled = true
 Authorization = "Bearer <token>"
 ```
 
+### Reading the token from a file
+
+A token that another program rotates (a credential helper, a secrets agent) can live in a file instead of the config. Name the file with `bearer_token_file`:
+
+```toml
+[mcp_servers.internal-tools]
+url = "https://mcp.internal.example.com/mcp"
+bearer_token_file = "~/.config/internal-tools/token"
+```
+
+Fuigo reads the file again for every request, so a rotated token applies at once and no restart is needed. The rules, in plain words:
+
+- **Only your own `config.toml`.** `bearer_token_file` is honoured only for a server defined in your own `config.toml`. In a project `.fuigo/config.toml`, a project `.mcp.json`, a plugin, a managed, remote or campaign config, or a server definition an editor hands over, it is ignored and Fuigo shows a warning. A repository you merely open can never make Fuigo read a file it chose and send it to a server it chose.
+- **The whole server entry must come from your own config.** If a managed, requirements or campaign layer changes anything about that server's entry (any key at all, including `setup`, `url_template`, `command`, `headers` or a field added in a later version), Fuigo drops `bearer_token_file` for that server and shows a warning: the server then runs without your token, so the token can never be sent to an address you did not choose. Campaigns, including ones delivered remotely, cannot change any key of an MCP server you already have, and cannot set `bearer_token_file` or `bearer_token_env_var` on any server; they can still add a new server (without a token setting), and you get a warning when a campaign's change to an MCP server is ignored. A server added by an editor (`mcp/upsert`) never keeps a `bearer_token_file`, and the field is not written to your `config.toml`.
+- **The file must be yours alone.** It must be a regular file owned by you, with no group or other permissions (mode `0600` or `0400`), at most 16 KiB, and not a symbolic link. Fuigo checks this on every read. The token is the file's text without one trailing newline; it must have no spaces, control characters or non-ASCII characters inside, and at least 16 characters (a shorter file is refused with "token too short", so every accepted token can be redacted from logs).
+- **The path is absolute or starts with `~/`.** Relative paths are refused, and `$VAR`, `${VAR}` or `%VAR%` in the path is never expanded (not even in your own `config.toml`, where other values are): the path is used exactly as written.
+- **Where the token goes.** Only as `Authorization: Bearer <token>`, only to this server's URL, only over `https` (or plain `http` to a loopback IP address such as `127.0.0.1` or `[::1]`; the name `localhost` is not accepted for a token). A redirect to another origin is not followed with the token. For a plain-`http` server on this machine Fuigo bypasses any `HTTP_PROXY` setting, so the token never leaves the machine.
+- **One credential per server.** Setting `bearer_token_file` together with `bearer_token_env_var` or an `Authorization` header is a configuration error for that server.
+- **When a check fails,** that server is skipped with a one-line warning that names the server and the reason; your other servers start normally. If the file changes so that it fails a check later, requests to that server fail with the same short reason until it is fixed; nothing read earlier is reused.
+- **Never shown.** The token is not written to logs, `/mcp`, `fuigo doctor`, error messages or telemetry; at most the path is shown. Limit: an MCP server you give a token to can return that token in its own tool results, and tool results are not scrubbed before they reach the model. Give a token only to servers you trust.
+- **Windows.** `bearer_token_file` is not supported on Windows in this release; a server that sets it is skipped with a warning. Use `bearer_token_env_var` there.
+
 To avoid putting secrets in the config file, reference an environment variable with `${VAR}` (or `${VAR:-default}`). Fuigo expands string fields in `[mcp_servers.*]` — `url`, `command`, `args`, and the values in `env` and `headers` — at load time:
 
 ```toml

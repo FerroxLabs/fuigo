@@ -1606,6 +1606,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<fuigo_sampling_types::ReasoningEffort>>,
+        context_window: Option<Option<std::num::NonZeroU64>>,
     ) -> io::Result<()> {
         self.apply_summary_patch(
             info,
@@ -1614,6 +1615,7 @@ impl StorageAdapter for JsonlStorageAdapter {
                     model_id: model_id.clone(),
                     agent_name: agent_name.map(String::from),
                     reasoning_effort,
+                    context_window,
                 }),
                 ..Default::default()
             },

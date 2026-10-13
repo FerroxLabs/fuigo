@@ -361,6 +361,8 @@ pub enum PersistenceMsg {
         /// Persisted in `summary.agent_name` so session resume doesn't depend on the mutable model catalog.
         agent_name: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+        /// `Some(None)` clears the saved context window selection; `None` leaves it as is.
+        context_window: Option<Option<std::num::NonZeroU64>>,
     },
     PlanState(TodoState),
     PlanModeState(crate::session::plan_mode::PlanModeSnapshot),
@@ -1236,6 +1238,9 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// The context window (tokens) the user selected with `/context-window`; absent when the model default is in use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<std::num::NonZeroU64>,
     /// Ultra-short summary of the most recent successful turn, shown as the dashboard row's secondary line (via the roster for non-attached clients).
     /// Displayed until replaced by the next successful turn (or cleared by a conversation rewind).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1309,6 +1314,7 @@ impl Summary {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            context_window: None,
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
@@ -2399,6 +2405,7 @@ impl SessionPersistence {
                     model_id,
                     agent_name,
                     reasoning_effort,
+                    context_window,
                 } => {
                     if let Err(e) = self
                         .storage
@@ -2407,6 +2414,7 @@ impl SessionPersistence {
                             &model_id,
                             agent_name.as_deref(),
                             reasoning_effort,
+                            context_window,
                         )
                         .await
                     {

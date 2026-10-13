@@ -906,6 +906,7 @@ mod tests {
                 url: "https://mcp.p70.invalid/mcp".into(),
                 transport_type: None,
                 bearer_token_env_var: Some(FUIGO_API_KEY_ENV_VAR.into()),
+                bearer_token_file: None,
                 headers: None,
                 oauth_client_id: None,
                 oauth_client_secret_env_var: None,
