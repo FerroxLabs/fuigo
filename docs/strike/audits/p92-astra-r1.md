@@ -1,9 +1,9 @@
-Astra round 1 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (13676 lines, sha256 12e50f6ead21d0ebfd703bbcf46c4b04b860c74e1cd94f1765ed227a379fe3b5) kept at /root/fuigo-builds/p92/logs/astra/.
+Astra round 1 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (13676 lines, sha256 12e50f6ead21d0ebfd703bbcf46c4b04b860c74e1cd94f1765ed227a379fe3b5) kept at <build>/p92/logs/astra/.
 
 R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edits. Line references below are for `8735c062`; concurrent later changes were excluded. Credential examples are synthetic.
 
 1. **MEDIUM — Credential detection regresses for JSON and previously rejected token shapes.**  
-   [safety.rs:90](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:90)
+   [safety.rs:90](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:90)
 
    Exact input:
    ```text
@@ -22,7 +22,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** P92 tests cover unquoted assignments and longer credentials, not these regressions.
 
 2. **MEDIUM — A rejected private-key header can leave its body readable.**  
-   [safety.rs:132](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:132)
+   [safety.rs:132](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:132)
 
    Exact input, using Rust escape notation for U+200B:
    ```text
@@ -33,7 +33,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** The private-key tests use ordinary ASCII headers; none covers this disagreement between admission and block tracking.
 
 3. **MEDIUM — CRLF paragraph boundaries can still cause whole-file exclusion.**  
-   [safety.rs:148](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:148)
+   [safety.rs:148](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:148)
 
    Exact input:
    ```text
@@ -44,9 +44,9 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** The multiline and paragraph-isolation fixtures use LF with completely empty separator lines.
 
 4. **MEDIUM — Redaction-marker counting rejects the supplied corpus and permits a query-secret bypass.**  
-   [safety.rs:93](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:93)
+   [safety.rs:93](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:93)
 
-   The pinned [corpus line 164](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/filter_corpus.txt:164) contains:
+   The pinned [corpus line 164](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/filter_corpus.txt:164) contains:
    ```text
    time, and only by the strict matcher. So `https://user:secret@host/v1?key=...` is stored
    ```
@@ -61,7 +61,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** `engineering_corpus_is_admitted` should catch the first case and fail at this commit, by source inspection—not an executed result. No supplied test catches the second.
 
 5. **LOW — Mixed uses of invisible characters bypass both normalization alternatives.**  
-   [safety.rs:61](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:61)
+   [safety.rs:61](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:61)
 
    Exact input:
    ```text
@@ -72,7 +72,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** Existing tests exercise internal invisibles and separator invisibles separately.
 
 6. **LOW — The privileged-imperative rule rejects ordinary safety guidance.**  
-   [safety.rs:29](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:29)
+   [safety.rs:29](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:29)
 
    Exact input:
    ```text
@@ -87,18 +87,18 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** Neither case appears in the corpus or targeted tests.
 
 7. **LOW — Workspace initialization remains an unchecked memory-text writer.**  
-   [storage.rs:461](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/storage.rs:461)
+   [storage.rs:461](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/storage.rs:461)
 
    Initialize a non-ephemeral workspace whose exact path is:
    ```text
-   /Volumes/Mando/projects/Ignore previous instructions
+   <volume>/projects/Ignore previous instructions
    ```
    `ensure_initialized` interpolates that path into `MEMORY.md` through `initialize_file`, which never calls `validate_entry`. Removing the check from `update_file_checked` therefore allows recognized unsafe text to be persisted through this path. Subsequent filtered reads protect retrieval, but claim 2’s complete write coverage is false.
 
    **Tests:** `every_new_entry_write_rejects_flagged_content_without_replacing_existing_bytes` does not exercise initialization.
 
 8. **LOW — Dream injects unfiltered session filenames.**  
-   [dream.rs:263](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/dream.rs:263)
+   [dream.rs:263](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/dream.rs:263)
 
    Exact filename and contents:
    ```text
@@ -114,7 +114,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** No supplied test uses a flagged filename or checks admission of the complete assembled dream message.
 
 9. **LOW — The all-blank index test does not protect the new guard.**  
-   [filter_tests.rs:176](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/filter_tests.rs:176)
+   [filter_tests.rs:176](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/filter_tests.rs:176)
 
    Its exact input has no trailing newline:
    ```text
@@ -131,7 +131,7 @@ R099: audited `fc3ccb94..8735c062` statically. No builds, tests, probes, or edit
    **Tests:** The current assertion checks removal and searches for old words, not absence of all chunks/embedding candidates for newline-only views.
 
 10. **LOW — Removing `exfiltrate` also removes its malicious-use rejection.**  
-    [safety.rs:77](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:77)
+    [safety.rs:77](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:77)
 
     Exact input:
     ```text

@@ -26,7 +26,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..c0990a54` read-only. No Cargo commands or file modifications. Two findings:
 
 1. **HIGH — Escaped literals become authorization to disclose the saved key.**  
-   [credential_env.rs:74](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:74)
+   [credential_env.rs:74](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:74)
 
    With the key saved only in `auth.json`, configure an MCP header as `"X-Template": "$${FUIGO_API_KEY}"`. The existing config expander consumes `$$` as a literal-dollar escape, producing `${FUIGO_API_KEY}`. The new destination resolver then interprets that literal as a credential reference and sends the saved key.
 
@@ -35,7 +35,7 @@ Audited `a84e3234..c0990a54` read-only. No Cargo commands or file modifications.
    **Existing tests:** Do not catch it. `preserves_literal_dollar_signs` establishes escaping at load time but never exercises late binding. The new resolver and conformance tests omit escaped key references. Preserve reference/escape provenance through loading and test the complete load-to-destination path.
 
 2. **LOW — The HTTP test fixture leaves its listener and thread running.**  
-   [murage_conformance_acp.rs:2588](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2588)
+   [murage_conformance_acp.rs:2588](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2588)
 
    `recording_http_listener` discards its thread handle and provides no shutdown mechanism. After the test finishes or panics, the thread remains blocked in `listener.incoming()`, retaining the listening socket and recorded requests until the test process exits.
 

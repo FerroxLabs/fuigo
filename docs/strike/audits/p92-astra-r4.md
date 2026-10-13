@@ -1,8 +1,8 @@
-Astra round 4 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (19801 lines, sha256 a845b5cbc83296711b9035cd71ca8dea2f176a1943d9b144424a6e468b7ffa3a) kept at /root/fuigo-builds/p92/logs/astra/.
+Astra round 4 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (19801 lines, sha256 a845b5cbc83296711b9035cd71ca8dea2f176a1943d9b144424a6e468b7ffa3a) kept at <build>/p92/logs/astra/.
 
 Static review of `6cdc2bec`; no builds, tests, or application code executed. Three MEDIUM findings remain.
 
-1. **MEDIUM — PEM body suppression stops on an invisible character.** [safety.rs:314](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:314)
+1. **MEDIUM — PEM body suppression stops on an invisible character.** [safety.rs:314](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:314)
 
    Exact input, expressed as a Rust string:
    ```rust
@@ -13,7 +13,7 @@ Static review of `6cdc2bec`; no builds, tests, or application code executed. Thr
 
    **Test coverage:** Not caught. Existing tests put invisibles in the header, while their body lines contain only ASCII base64 characters. Normalize body classification consistently with header detection.
 
-2. **MEDIUM — Single-quoted literal passwords receive the shell-substitution exemption.** [safety.rs:259](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:259)
+2. **MEDIUM — Single-quoted literal passwords receive the shell-substitution exemption.** [safety.rs:259](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:259)
 
    Exact input:
    ```text
@@ -24,7 +24,7 @@ Static review of `6cdc2bec`; no builds, tests, or application code executed. Thr
 
    **Test coverage:** Not caught. The round-3 test covers a quoted JSON name; the benign probe covers an actual unquoted command substitution. The exemption needs to distinguish literal value quoting.
 
-3. **MEDIUM — Credential value predicates still regress against the original filter.** [safety.rs:268](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:268)
+3. **MEDIUM — Credential value predicates still regress against the original filter.** [safety.rs:268](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:268)
 
    Exact inputs, independently:
    ```text

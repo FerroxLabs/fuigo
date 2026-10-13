@@ -1,6 +1,6 @@
 # P113 Astra r3 brief (independent audit, read-only)
 
-You are auditing branch `strike/p113` in the worktree `/Volumes/Mando/WaylandBots/Fuigo/wt-p113` (Rust workspace,
+You are auditing branch `strike/p113` in the worktree `<project>/Fuigo/wt-p113` (Rust workspace,
 crates under `crates/codegen/`). Source inspection only: do not build, run tests, or modify any file.
 
 Packet P113 fixes credential egress: credentials Fuigo sends or holds must not reach (a) child processes it spawns,

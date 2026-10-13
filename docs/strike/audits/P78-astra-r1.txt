@@ -3,13 +3,13 @@
 
 Audited `37a5b9d4..65d7401a` using git and file reads only. No builds, tests, or file changes.
 
-1. **MEDIUM — Reader guard checks token presence, not lock lifetime.** [theme_pin_guard_tests.rs:528](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:528)  
+1. **MEDIUM — Reader guard checks token presence, not lock lifetime.** [theme_pin_guard_tests.rs:528](<project>/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:528)  
    An uncalled nested function or closure containing `pin_theme()`, a pin acquired after assertions, or `drop(pin_theme())` all satisfy the scanner while leaving assertions unprotected. Bare `test_lock()` also passes without acquiring anything. Existing scanner tests catch none of these. Same-name functions are checked individually, so a pinned sibling cannot conceal a parsed unpinned test; however, module identity and conditional compilation are not distinguished. The four currently listed readers genuinely hold their guards.
 
-2. **MEDIUM — The Python probe can hang indefinitely or leak its child on failure.** [tests.rs:2331](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2331)  
+2. **MEDIUM — The Python probe can hang indefinitely or leak its child on failure.** [tests.rs:2331](<project>/Fuigo/wt-p78/crates/codegen/fuigo-tools/src/implementations/lsp/tests.rs:2331)  
    The 120-second deadline covers only arrival at `writing`; `child.wait()` has no deadline. A writer stuck after release never finishes the test. If creating `go` fails, Rust panics while Python remains in its polling loop; dropping `Child` does not terminate or reap it. Existing tests exercise successful completion only. Use bounded exit observation and an unconditional kill/reap guard.
 
-3. **LOW — Matcher freshness is not guaranteed by every new predicate.** [prompt.rs:3146](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs:3146), [history_search.rs:664](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/views/history_search.rs:664)  
+3. **LOW — Matcher freshness is not guaranteed by every new predicate.** [prompt.rs:3146](<project>/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/dispatch/tests/prompt.rs:3146), [history_search.rs:664](<project>/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/views/history_search.rs:664)  
    With the daemon unscheduled, the dispatch test’s initial `result_count() == 0` succeeds on the default snapshot without processing `"third"`. This weakness already existed; the final `"third prompt"` assertion still requires real output. Likewise, reactivation with identical history can satisfy the opening-list predicate using the previous activation’s snapshot; a subsequent generation-only query wait could then consume the pending reset rather than its query answer. Current helper callers use fresh states, so that second scenario is presently unexercised. Existing regression tests do not establish request-specific freshness.
 
 Claims that hold:

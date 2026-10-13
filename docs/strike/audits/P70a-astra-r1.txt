@@ -23,14 +23,14 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Audited `8b1a0192..cd32a15a` read-only. No Cargo, builds, or tests were run. During the audit, HEAD advanced to `b7a7edca`; that commit fixes finding 1 only.
 
 1. **HIGH — Constructor logs the credential-bearing base URL.**  
-   [`client.rs:1107`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/client.rs:1107)
+   [`client.rs:1107`](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/client.rs:1107)
 
    At `cd32a15a`, `client_new` records `base_url = %config.base_url`. Constructing a sampler with `https://gateway.example/v1?key=SECRET` therefore writes the complete key to an INFO event, before any request. This refutes C4(b).
 
    **Existing test:** Yes. `request_logs_hold_no_url_or_header_credentials_and_serde_errors_hold_no_body` captures construction and checks fragments of its base-URL secret; it should catch this. The concurrent `b7a7edca` change applies `redact_url` here.
 
 2. **HIGH — Transport-error redaction leaks query credentials after punctuation in the path.**  
-   [`bearer_fragment.rs:124`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/src/bearer_fragment.rs:124)
+   [`bearer_fragment.rs:124`](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/src/bearer_fragment.rs:124)
 
    `redact_urls_in_text` treats `)` as the end of a URL. A supported endpoint such as:
 
@@ -45,16 +45,16 @@ Audited `8b1a0192..cd32a15a` read-only. No Cargo, builds, or tests were run. Dur
    **Existing test:** No. The helper tests and sampler logging fixture use paths without these delimiters.
 
 3. **MEDIUM — Credential-bearing URLs remain exposed through derived Debug.**  
-   [`app/cli.rs:275`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-pager/src/app/cli.rs:275), [`storage_types.rs:23`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/prod/mc/cli-chat-proxy-types/src/storage_types.rs:23)
+   [`app/cli.rs:275`](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-pager/src/app/cli.rs:275), [`storage_types.rs:23`](<project>/Fuigo/wt-p70a/prod/mc/cli-chat-proxy-types/src/storage_types.rs:23)
 
    `AgentArgs` still derives `Debug`, including its `cli_chat_proxy_base_url` and `fuigo_api_base_url`. Formatting arguments containing a query key exposes it. `SignedUploadUrlResponse` also derives `Debug`, exposing the complete presigned upload URL and its authorization query.
 
    These are **pre-existing omissions left unresolved by the packet**, rather than newly introduced disclosures, but they directly refute C2’s repository-wide coverage claim.
 
-   **Existing test:** No. The guard’s rules omit URL carriers and explicitly classify `_url` names as benign ([`secret_debug_guard.rs:107`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:107)). The CLI Debug test exercises `ServeArgs`, not `AgentArgs`.
+   **Existing test:** No. The guard’s rules omit URL carriers and explicitly classify `_url` names as benign ([`secret_debug_guard.rs:107`](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:107)). The CLI Debug test exercises `ServeArgs`, not `AgentArgs`.
 
 4. **LOW — Two environment tests pass with the environment-write fix reverted.**  
-   [`murage_conformance_acp.rs:2237`](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2237), same file at line 2334.
+   [`murage_conformance_acp.rs:2237`](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/tests/murage_conformance_acp.rs:2237), same file at line 2334.
 
    `auth_json_key_authenticates_without_entering_the_agent_environment` and `set_api_key_key_never_enters_the_agent_environment` inspect a **model-tool child**. That path unconditionally strips `FUIGO_API_KEY`, independently of the configured exclusion list.
 

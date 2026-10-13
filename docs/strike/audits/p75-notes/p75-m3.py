@@ -1,5 +1,5 @@
-exec(open('/root/fuigo-builds/p75/mutants.py').read().split('M=[')[0])
-T_TEL="/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-telemetry --test external_console_dead_stderr"
+exec(open('<build>/p75/mutants.py').read().split('M=[')[0])
+T_TEL="<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-telemetry --test external_console_dead_stderr"
 M=[
  ("MU9","crates/codegen/fuigo-telemetry/src/external/providers.rs",'                fuigo_tty_utils::cli_eprintln!(\n                    "[external-otel] metric=','                eprintln!(\n                    "[external-otel] metric=',[T_TEL]),
  ("MU6b","crates/codegen/fuigo-telemetry/src/external/providers.rs",'            fuigo_tty_utils::cli_eprintln!(\n                "[external-otel] event=','            eprintln!(\n                "[external-otel] event=',[T_TEL]),

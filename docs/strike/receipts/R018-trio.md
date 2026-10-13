@@ -1,8 +1,8 @@
 # R018: the P35/P36/P37 trio in one branch. Acceptance NOT met.
 
 **Date:** 2026-09-30 (box UTC) · **Parent:** `f89618ef` (strike/integration) · **Tip:** `5524445a` (`strike/trio`) · **Box:** hetzner-dsm
-**Lane:** `/root/fuigo-builds/trio/`. It had its own worktree (the bundle was fetched into `integration/src-p15r`) and its own
-`CARGO_TARGET_DIR=/root/fuigo-builds/trio/target`. Env: `RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg CARGO_TERM_COLOR=never`, toolchain 1.94.0 from `rust-toolchain.toml`.
+**Lane:** `<build>/trio/`. It had its own worktree (the bundle was fetched into `integration/src-p15r`) and its own
+`CARGO_TARGET_DIR=<build>/trio/target`. Env: `RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg CARGO_TERM_COLOR=never`, toolchain 1.94.0 from `rust-toolchain.toml`.
 Scripts and outputs stay in the lane dir: `accept.sh/.out`, `post.sh` + `post-partial.out`, `rest.sh/.out`, `stress/`, and `*.log`, `*.failset`.
 
 ## Verdict
@@ -54,7 +54,7 @@ P35's `startup_prefetch.rs` edit is inside `accept_within`, but it is entirely `
 
 ## 2. Parent `f89618ef`: every complete (or killed) run
 
-Full runs use `flock /root/fuigo-builds/.shell-test.lock`, taken per run, and `cargo test --locked --no-fail-fast -p fuigo-shell` with host network.
+Full runs use `flock <build>/.shell-test.lock`, taken per run, and `cargo test --locked --no-fail-fast -p fuigo-shell` with host network.
 Host network matches the P12b-R precedent that produced the brief's "3 failures at 8b4b8f40".
 
 | run | exit | derived / headers / unfinished | failures | failset sha256 | log sha256 | admissible |
@@ -106,7 +106,7 @@ What happened to each of the parent's three named failures:
   `#[test]` in no group, so a writer can land between the two calls. The result is an identity mismatch, `load_fresh` returns `None`, and
   `has_fetched_real_catalog()` is false. This is the same family as P37's registry/`FUIGO_TEST_VERSION` fix.
   None of `models*`, `cache.rs` or the writers is touched by the trio.
-  It is already in `/root/fuigo-builds/p15r2-shell-8b4b8f407.failset`, `p17r-v3/baseline-fuigo-shell.failset` and `p35f-lib-2.failset`.
+  It is already in `<build>/p15r2-shell-8b4b8f407.failset`, `p17r-v3/baseline-fuigo-shell.failset` and `p35f-lib-2.failset`.
   **The R012 §9c mechanism is wrong.** The test's cache lives in its own tempdir, not under `$FUIGO_HOME`, so a `FuigoHome` would not fix it.
 * **`cancelled_and_timed_out_login_release_listener`.** The test binds port 0, drops the listener, and asserts it can rebind the same port.
   Any concurrent bind of that ephemeral port fails the test. So does a concurrent `Command::spawn`'s fork-to-exec window holding a copy of

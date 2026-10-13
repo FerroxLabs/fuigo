@@ -257,11 +257,11 @@ The header was corrected before the gate on the final tip.
 - **Commit:** `922f5d3e3608f6018cf32de34bfea722bbf25cf4` (strike/p17r). Parent control:
   `f89618efccc265c7978c465ec7e75b6c0c143723`. Baseline control:
   `2eb306e08ae24d05c15c74b6b1c1d3235e0f1d96`.
-- **Where:** hetzner-dsm, private lane `/root/fuigo-builds/p17r-v3/`, using its own clone and its
+- **Where:** hetzner-dsm, private lane `<build>/p17r-v3/`, using its own clone and its
   own `CARGO_TARGET_DIR`, `nice -n 19`, `CARGO_BUILD_JOBS=8`, and no lane lock. Every full
-  `-p fuigo-shell` run was taken under `flock /root/fuigo-builds/.shell-test.lock`. The target
-  (57 GB) was deleted at the end. Script: `/root/fuigo-builds/p17r-v3/gate.sh`; log of record:
-  `/root/fuigo-builds/p17r-v3/gate.out`.
+  `-p fuigo-shell` run was taken under `flock <build>/.shell-test.lock`. The target
+  (57 GB) was deleted at the end. Script: `<build>/p17r-v3/gate.sh`; log of record:
+  `<build>/p17r-v3/gate.out`.
 - **Toolchain (from inside the tree):** rustc 1.94.0 (`4a4ef493e`, 2026-03-02), cargo 1.94.0.
   `rust-toolchain.toml` sha256
   `32a47ba7c3bcc9063bd056b833d12d51b628a38862b499fb4388d22c58cd64ca`. `rustc -vV` sha256
@@ -311,7 +311,7 @@ The candidate set is **not** ⊆ the parent set. Two names are candidate-only:
 - `inherited_parent_pool_keeps_the_mcp_meta_tools_reachable_from_the_child`
   (`tests/inherited_mcp_pool_child_acp.rs`): **not isolated**. The gate script only isolates
   `--lib` names, so it skipped this integration-test function. It is in the recorded v1 base
-  failset at `8e11724` (`/root/fuigo-builds/p17r-base-fuigo-shell.failset`), so it failed
+  failset at `8e11724` (`<build>/p17r-base-fuigo-shell.failset`), so it failed
   before any P17-R code existed. That is attribution by prior record, not by a same-session
   isolation pair. **Unverified in this session.**
 
@@ -383,7 +383,7 @@ Seven names were candidate-only here: `embedded_otel_gate_keeps_a_session_user_f
 `provider_resolves_relative_program_against_cwd`, two `session::workflow::registry::tests::*`,
 and three `session::worktree::tests::*`. Every one was isolated 3/3 at `8b4b8f40` and 3/3 at
 `c1c1684b`, and **every run passed**. None of them fails at the tip run in §3. Mutant results
-were identical to §3. Logs are under `/root/fuigo-builds/p17r-v3/run-8b4b8f40/`.
+were identical to §3. Logs are under `<build>/p17r-v3/run-8b4b8f40/`.
 
 A first v3 gate at `591b4e90` was stopped by me on purpose, before any suite ran, to correct
 the test-sensitivity header. Its process group and `timeout`'s separate group were both killed,
@@ -404,7 +404,7 @@ Isolation ×3 at both revs:
   `init_session_load_backfills_worktree_identity_on_untagged_summary` pass 3/3 at both.
 
 `fuigo-shell-base` was 4/4, exit 0. Clippy warning sets were identical at `8e11724` and
-`adbf192e`. Logs: `/root/fuigo-builds/p17rv2-*`.
+`adbf192e`. Logs: `<build>/p17rv2-*`.
 
 ## 5. What I could not verify
 

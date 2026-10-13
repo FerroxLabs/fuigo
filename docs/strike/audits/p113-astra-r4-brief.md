@@ -1,6 +1,6 @@
 # P113 Astra r4 brief (independent audit, read-only)
 
-Worktree `/Volumes/Mando/WaylandBots/Fuigo/wt-p113`, branch `strike/p113`. Source inspection only: do not build, run
+Worktree `<project>/Fuigo/wt-p113`, branch `strike/p113`. Source inspection only: do not build, run
 tests, or modify any file. Packet P113: credentials Fuigo sends or holds must not reach child processes it spawns, the
 session event log, the `/feedback` trace archive, or proxy logs/errors.
 

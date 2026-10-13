@@ -25,7 +25,7 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Two **LOW** findings. No BLOCKER, HIGH or MEDIUM defect found in the scoped packet. Audited `8b1a0192..139d5f3e` read-only; no Cargo or Rust tests run, and no files modified.
 
 1. **LOW — Guard misses named credential fields after parenthesized generic bounds.**  
-   [secret_debug_guard.rs:333](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:333)
+   [secret_debug_guard.rs:333](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:333)
 
    Concrete counterexample:
 
@@ -42,7 +42,7 @@ Two **LOW** findings. No BLOCKER, HIGH or MEDIUM defect found in the scoped pack
    **Existing tests:** do not catch it. The final commit’s `Callbacks` fixture places function types inside the body, rather than in the generic bounds. Skip generic bounds before selecting the body delimiter and add this counterexample.
 
 2. **LOW — One newly added Debug implementation still lacks exhaustive destructuring.**  
-   [credentials.rs:297](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/credentials.rs:297)
+   [credentials.rs:297](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/credentials.rs:297)
 
    `ObservedAccessToken::fmt` accesses `self.0` directly. Adding a second tuple field would still compile without requiring a Debug-output decision, contrary to C2’s explicit guarantee. Its current token output is safely redacted; this is a maintenance safeguard gap.
 

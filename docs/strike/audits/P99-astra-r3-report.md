@@ -1,22 +1,22 @@
 # P99 Astra round 3, final (gpt-6-astra, read-only) on fe16738c..4505bfb5
 
-Final report, verbatim. Full transcript: Hetzner /root/fuigo-builds/p99/astra/astra-r3.txt, sha256 b4d5c3a87d6bf05b70987b98b20e5a3c674990971f3583380ac08683a481c7d5.
+Final report, verbatim. Full transcript: Hetzner <build>/p99/astra/astra-r3.txt, sha256 b4d5c3a87d6bf05b70987b98b20e5a3c674990971f3583380ac08683a481c7d5.
 
 Audited `fe16738c..4505bfb5` at `4505bfb54275d867260df5d39f70198c17f09bab`, including the round 2 delta and relevant callers. Read-only: no builds, tests, or file changes.
 
 **No BLOCKER/HIGH defect found in P99’s credential-destination binding. Three follow-ups remain.**
 
 1. **MEDIUM — HTTP error bodies can still expose credentials in diagnostics.**  
-   Locations: [protocol.rs:494](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:494), [protocol.rs:629](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:629), [refresh.rs:239](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:239).
+   Locations: [protocol.rs:494](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:494), [protocol.rs:629](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:629), [refresh.rs:239](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:239).
 
-   An admitted endpoint or its gateway can return a non-2xx response containing a reflected request—for example, `{"error":"invalid_request","error_description":"Rejected refresh_token=SECRET"}`. The entire body becomes the displayed `TokenRefreshHttp` error and is written into unified logs. Code exchange similarly returns the raw body, potentially exposing the code and verifier. Recognized terminal errors also log unsanitized `error_description` at [refresh.rs:214](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:214).
+   An admitted endpoint or its gateway can return a non-2xx response containing a reflected request—for example, `{"error":"invalid_request","error_description":"Rejected refresh_token=SECRET"}`. The entire body becomes the displayed `TokenRefreshHttp` error and is written into unified logs. Code exchange similarly returns the raw body, potentially exposing the code and verifier. Recognized terminal errors also log unsanitized `error_description` at [refresh.rs:214](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:214).
 
    `without_url()` does not affect these custom errors. Preserve status and recognized OAuth error codes for classification, while excluding raw response text from diagnostics.
 
    **Coverage:** Existing tests do not assert redaction of reflected secrets in HTTP response bodies. The new connection-refusal test never exercises this path. **Pre-existing; remains outside the round 3 sanitization fix.**
 
 2. **LOW — `redacted_for_log` retains embedded credentials in non-HTTP URLs.**  
-   Locations: [protocol.rs:333](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:333), invoked before endpoint validation at [protocol.rs:323](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:323).
+   Locations: [protocol.rs:333](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:333), invoked before endpoint validation at [protocol.rs:323](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/protocol.rs:323).
 
    Discovery can supply `blob:https://user:secret@idp.example/token`. In the locked URL implementation, a blob URL’s path contains the embedded URL; its origin is derived from that embedded URL. Consequently, this formatter produces `https://idp.examplehttps://user:secret@idp.example/token`, retaining the secret and hiding the original scheme. This follows directly from the [url 2.5.8 implementation](https://docs.rs/url/2.5.8/src/url/origin.rs.html).
 
@@ -25,7 +25,7 @@ Audited `fe16738c..4505bfb5` at `4505bfb54275d867260df5d39f70198c17f09bab`, incl
    **Coverage:** The new helper test covers HTTPS and an unparsable string, not valid non-HTTP URLs. **Residual exposure in the new round 3 helper; the previous raw logging also exposed it.**
 
 3. **LOW — One refusal comment still incorrectly says the token was not forwarded.**  
-   Location: [refresh.rs:21](/Volumes/Mando/WaylandBots/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:21).
+   Location: [refresh.rs:21](<project>/Fuigo/wt-p99/crates/codegen/fuigo-shell/src/auth/oidc/refresh.rs:21).
 
    A same-origin 307 loop forwards the token repeatedly before hitting the limit. A same-origin hop followed by a refused cross-origin hop also forwards it within the admitted origin. Both produce `Refused`, contradicting “the token was not forwarded.”
 

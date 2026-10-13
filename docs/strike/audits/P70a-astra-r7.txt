@@ -22,7 +22,7 @@ ROUND 7. Rounds 1-6: r1 (cd32a15a) 2 HIGH 1 MEDIUM 1 LOW; r2 (d6416ba0) 1 MEDIUM
 Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a concrete scenario, and whether an existing test catches it. End with exactly one of: LAND / LAND-WITH-FOLLOWUPS / DO-NOT-LAND.
 
 ===== FINAL REPORT =====
-**MEDIUM — The final commit’s new unit test deterministically fails and does not exercise the positionless branch.** [retry.rs:980](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/retry.rs:980)
+**MEDIUM — The final commit’s new unit test deterministically fails and does not exercise the positionless branch.** [retry.rs:980](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/retry.rs:980)
 
 The fixture constructs `Error::custom("Data error at line 1 column 347")`. In the locked `serde_json 1.0.149`, `custom` calls `make_error`, which parses that suffix and restores `line = 1`, `column = 347`. See [dependency implementation:483](~/.cargo/registry/src/index.crates.io-…/serde_json-1.0.149/src/error.rs:483).
 
@@ -32,7 +32,7 @@ Consequently, the fixture bypasses the new `e.line() == 0` branch and produces:
 Failed to parse API response at line 1 column 347: Data error at line 1 column 347. …
 ```
 
-The assertion at [retry.rs:984](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/retry.rs:984) expects `Failed to parse API response: …`, so it fails.
+The assertion at [retry.rs:984](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-sampler/src/retry.rs:984) expects `Failed to parse API response: …`, so it fails.
 
 **Test coverage:** The newly added test itself catches the mismatch by failing, but never tests the intended positionless behavior. Use `Error::custom("Data error")`, explicitly assert `line() == 0`, and retain the separate positioned-error check. The comments describing every custom summary as positionless also need correction.
 

@@ -11,7 +11,7 @@ Reviewed all four files in `bc739009..57047bd8`. No BLOCKER/HIGH findings.
 
 Remaining finding:
 
-- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:196](/Volumes/Mando/WaylandBots/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:196):** Switching compiler selection through `PATH` or `PROTOC` can retain previously generated output until another tracked input changes. This deliberate limitation is now correctly documented; use `cargo clean -p <generating-crate>` when switching.
+- **LOW — [crates/build/fuigo-proto-build/src/lib.rs:196](<project>/Fuigo/wt-p74/crates/build/fuigo-proto-build/src/lib.rs:196):** Switching compiler selection through `PATH` or `PROTOC` can retain previously generated output until another tracked input changes. This deliberate limitation is now correctly documented; use `cargo clean -p <generating-crate>` when switching.
 
 `git diff --check`, `bash -n`, and `actionlint` passed. Rust tests and CI were not rerun under the read-only constraint. No files modified.
 

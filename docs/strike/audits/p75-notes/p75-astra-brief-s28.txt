@@ -1,4 +1,4 @@
-You are auditing the RESTACK of packet P75 of the Fuigo strike in the git worktree /Volumes/Mando/WaylandBots/Fuigo/wt-p75r (branch strike/p75-s28). Read-only: do not modify anything, do not run cargo, do not build.
+You are auditing the RESTACK of packet P75 of the Fuigo strike in the git worktree <project>/Fuigo/wt-p75r (branch strike/p75-s28). Read-only: do not modify anything, do not run cargo, do not build.
 
 Context. Release builds are panic = "abort". println!/print!/eprintln!/eprint!/dbg! panic when the write fails (EPIPE, ENOSPC), so one print on a dead fd is a SIGABRT. P75 (receipt docs/strike/receipts/R077-p75.md) swept the shipped crates to fuigo_tty_utils::cli_println!/cli_eprintln!, denies clippy::print_stdout / print_stderr / dbg_macro in every workspace member ([workspace.lints.clippy] in the root Cargo.toml, clippy.toml allow-print-in-tests / allow-dbg-in-tests), and vendors print-free tiff 0.11.3 and usvg 0.47.0 through [patch.crates-io]. P75 itself was audited in seven earlier rounds and is NOT in scope again.
 

@@ -1,11 +1,11 @@
 # P82 Astra round 3 (gpt-6-astra, read-only, codex 0.160)
 
-First attempt at HEAD fda8b717 stopped by the 30-minute background limit before reporting (inadmissible; raw `hetzner-dsm:/root/fuigo-builds/p82/p82-astra-r3-killed.raw.txt`, sha256 `60b2655e6152e989d3e181b65dda67f6a5e4d442965ac6bd5b60c70f40aa95f3`). Rerun at 148f0523 (one test fixture added): raw `hetzner-dsm:/root/fuigo-builds/p82/p82-astra-r3.raw.txt`, sha256 `9567bab593e4cae556e689be85fed4b1dc8479eaab140e9effc84f71236b7067`.
+First attempt at HEAD fda8b717 stopped by the 30-minute background limit before reporting (inadmissible; raw `hetzner-dsm:<build>/p82/p82-astra-r3-killed.raw.txt`, sha256 `60b2655e6152e989d3e181b65dda67f6a5e4d442965ac6bd5b60c70f40aa95f3`). Rerun at 148f0523 (one test fixture added): raw `hetzner-dsm:<build>/p82/p82-astra-r3.raw.txt`, sha256 `9567bab593e4cae556e689be85fed4b1dc8479eaab140e9effc84f71236b7067`.
 
 ## Brief
 
 ```
-Independent audit, round 3, of Fuigo packet P82. Repo: /Volumes/Mando/WaylandBots/Fuigo/wt-p82 (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p82, HEAD 148f0523. Audit the whole packet `git diff a31a24c2..148f0523`, with attention to the delta since round 2 `git diff cdf6b4fd..148f0523` (148f0523 adds one test fixture only). Parent a31a24c2 is packet P81 (identity filter in agent/relay.rs relay_outbound_frame, on P77, on integration 8b1a0192): context, not under audit, except where P82 interacts with it.
+Independent audit, round 3, of Fuigo packet P82. Repo: <project>/Fuigo/wt-p82 (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p82, HEAD 148f0523. Audit the whole packet `git diff a31a24c2..148f0523`, with attention to the delta since round 2 `git diff cdf6b4fd..148f0523` (148f0523 adds one test fixture only). Parent a31a24c2 is packet P81 (identity filter in agent/relay.rs relay_outbound_frame, on P77, on integration 8b1a0192): context, not under audit, except where P82 interacts with it.
 
 Rule: a credential (session bearer, API key, environment secrets, anything docs/destination-trust-policy.md classes as a credential, and configuration values that carry one) is handed over the relay bridge only to a FluxRouter-operated relay, decided on the URL the relay socket is opened to (IdentityDisclosure::for_websocket_destination: wss to the FluxRouter API host). A FluxRouter relay must receive byte for byte what it received before, and its messages must reach the agent byte for byte as before. Local stdio / IPC clients must be byte-for-byte unchanged. Declared NOT covered (content or tool access, listed as proposals): prompt history, tool input/output (incl. MCP sdk_call and hooks run/event reverse requests), initialize _meta.metadata, git remote URLs, marketplace source URLs, fs/read_file, terminal commands the relay runs; a relay that may drive the agent can use its tools.
 
@@ -30,7 +30,7 @@ Reviewed `strike/p82` at `148f0523512fae8de1bf8397e5de037fd76812ae`, including t
 
 1. **HIGH — skills configuration provides an environment-credential getter.**
 
-   The backstop at [relay_credentials.rs:286](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:286) leaves skills configuration responses untouched.
+   The backstop at [relay_credentials.rs:286](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:286) leaves skills configuration responses untouched.
 
    A non-FluxRouter relay can send these extension requests:
 
@@ -41,10 +41,10 @@ Reviewed `strike/p82` at `148f0523512fae8de1bf8397e5de037fd76812ae`, including t
 
    The source chain is complete:
 
-   - [skills.rs:148](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:148) resolves the path without expanding `${…}`. Failed canonicalization preserves the path; an existing directory is unnecessary.
-   - [skills.rs:290](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:290) saves it into `skills.paths`.
-   - [load.rs:51](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/util/config/load.rs:51) reloads effective configuration. [loader.rs:289](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-config/src/loader.rs:289) expands environment references throughout its string values.
-   - [skills.rs:432](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:432) returns the expanded paths and repeats them in `message`.
+   - [skills.rs:148](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:148) resolves the path without expanding `${…}`. Failed canonicalization preserves the path; an existing directory is unnecessary.
+   - [skills.rs:290](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:290) saves it into `skills.paths`.
+   - [load.rs:51](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/util/config/load.rs:51) reloads effective configuration. [loader.rs:289](<project>/Fuigo/wt-p82/crates/codegen/fuigo-config/src/loader.rs:289) expands environment references throughout its string values.
+   - [skills.rs:432](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/skills.rs:432) returns the expanded paths and repeats them in `message`.
 
    **Leaking fields:** `result.result.paths[]` and `result.result.message`. `${OTHER_SECRET}` works for other available process environment variables.
 
@@ -54,9 +54,9 @@ Reviewed `strike/p82` at `148f0523512fae8de1bf8397e5de037fd76812ae`, including t
 
 2. **HIGH — cloud-environment configuration retains credential-bearing scripts.**
 
-   [withhold_environment_secrets at relay_credentials.rs:256](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:256) removes only `secrets[].value`.
+   [withhold_environment_secrets at relay_credentials.rs:256](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:256) removes only `secrets[].value`.
 
-   The actual environment type also serializes `setupScript` and `maintenanceScript`, defined at [sandbox_types.rs:473](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/prod/mc/cli-chat-proxy-types/src/sandbox_types.rs:473). Cloud list returns the backend environments directly at [acp_agent.rs:2407](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:2407); create and update likewise return the environment at lines 2463 and 2522.
+   The actual environment type also serializes `setupScript` and `maintenanceScript`, defined at [sandbox_types.rs:473](<project>/Fuigo/wt-p82/prod/mc/cli-chat-proxy-types/src/sandbox_types.rs:473). Cloud list returns the backend environments directly at [acp_agent.rs:2407](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:2407); create and update likewise return the environment at lines 2463 and 2522.
 
    Concrete scenario: an accessible environment has a setup script containing `curl -H 'Authorization: Bearer literal-key' …`. Listing that configuration transmits the literal credential through:
 
@@ -69,7 +69,7 @@ Reviewed `strike/p82` at `148f0523512fae8de1bf8397e5de037fd76812ae`, including t
 
    This finding is conditional on the backend returning the configured script. Fuigo’s response types and bridge apply no redaction to it. The sibling `environmentVariables[].value` also remains raw if someone stores an API key there; its “Non-secret” comment does not enforce that property.
 
-   **Tests:** not caught. [environment_responses at relay_credentials_tests.rs:190](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials_tests.rs:190) leaves both scripts at their default and uses only `NODE_ENV=production` in ordinary environment variables.
+   **Tests:** not caught. [environment_responses at relay_credentials_tests.rs:190](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials_tests.rs:190) leaves both scripts at their default and uses only `NODE_ENV=production` in ordinary environment variables.
 
 **A — Round-2 closure**
 
@@ -83,17 +83,17 @@ Reviewed `strike/p82` at `148f0523512fae8de1bf8397e5de037fd76812ae`, including t
 
 - **Reverse requests:** `fs/write_text_file` forwards file content supplied to the filesystem adapters; `session/request_permission` forwards tool-call content and permission metadata. I found no additional automatic credential-field injection in those producers. Their arbitrary content remains within the stated exclusions. MCP SDK calls and hook reverse requests retain the same excluded-content boundary.
 - **Other configuration getters:** plugin lists project summaries/counts, model lists project display/capability data rather than API keys or endpoint configuration, and workspace lists project identifiers/names. I found no additional concrete credential getter there. Skills configuration is the exception above.
-- **Terminal matching:** [relay_credentials.rs:301](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:301) decodes the method as a JSON string and compares exactly with `terminal/create`. Slash and Unicode escapes work. Duplicate method/params/env keys in inspected objects fail closed. Removal does not depend on the environment value’s type.
+- **Terminal matching:** [relay_credentials.rs:301](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:301) decodes the method as a JSON string and compares exactly with `terminal/create`. Slash and Unicode escapes work. Duplicate method/params/env keys in inspected objects fail closed. Removal does not depend on the environment value’s type.
 - **Non-object terminal params:** left unchanged. These cannot be emitted by the inspected typed terminal producers; I found no current producer-based leak through that case.
 - **New pre-check keys:** `setup` and `env` trigger inspection, not indiscriminate recursive removal. Unchanged valid frames return their original bytes. I found no current unrelated producer whose normal fields are wrongly removed by the added paths.
-- **Byte preservation:** FluxRouter takes the original-frame path; its inbound handling retains the pre-P82 trimming/capability behavior. Local IPC receives the separate original copy at [app.rs:996](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/app.rs:996). Edited non-FluxRouter containers can normalize whitespace/key spelling, while retained raw values and unchanged rows preserve their bytes.
+- **Byte preservation:** FluxRouter takes the original-frame path; its inbound handling retains the pre-P82 trimming/capability behavior. Local IPC receives the separate original copy at [app.rs:996](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/app.rs:996). Edited non-FluxRouter containers can normalize whitespace/key spelling, while retained raw values and unchanged rows preserve their bytes.
 - **P81:** P82 executes first; P81 cannot restore removed credentials. The destination decision remains tied to `config.ws_url`, used for the socket connection.
 - **Request parsing:** the gate forwards the value it inspected, eliminating duplicate-method and newline reinterpretation. ACP 0.10.4’s actual line reader and method-first dispatch are consistent with this defense. Both text and binary delivery paths are gated. Existing text-frame error interception happens before the gate; it drops those frames rather than providing a credential bypass.
 - **Agent-serve comparison:** no additional source defect identified. The whole-function pins cover both validation and hashing/comparison. This establishes neither compiled constant-time behavior nor timing-test evidence.
 
 **E — Concrete predicted surviving mutations**
 
-These are source-based predictions against the inspected tests, not results from the running 73-mutant job. Locations below refer to [relay_credentials.rs](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs).
+These are source-based predictions against the inspected tests, not results from the running 73-mutant job. Locations below refer to [relay_credentials.rs](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs).
 
 | Severity of regression | Location | Mutation and why it survives |
 |---|---|---|

@@ -1,8 +1,8 @@
-Astra round 3 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (7641 lines, sha256 5a21a0b53aa6ae92bd5150b390b9699f8e4e8f083032de48b691c8ccc2653274) kept at /root/fuigo-builds/p92/logs/astra/.
+Astra round 3 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (7641 lines, sha256 5a21a0b53aa6ae92bd5150b390b9699f8e4e8f083032de48b691c8ccc2653274) kept at <build>/p92/logs/astra/.
 
 Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM findings and two LOW findings.** Source inspection only; no builds, tests, probes, or project code executed. No files changed.
 
-1. **MEDIUM — Code-syntax exemptions admit literal passwords.** [safety.rs:227](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:227), [safety.rs:236](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:236)
+1. **MEDIUM — Code-syntax exemptions admit literal passwords.** [safety.rs:227](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:227), [safety.rs:236](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:236)
 
    Each of these standalone inputs is admitted:
 
@@ -15,7 +15,7 @@ Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM fi
 
    **Test coverage:** Not caught. `astra_r2_masking_and_placeholders_do_not_hide_real_values` covers an *internal* `::` and `${...}`, not these inputs.
 
-2. **MEDIUM — Slug masking still masks a prefix of a credential.** [safety.rs:173](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:173)
+2. **MEDIUM — Slug masking still masks a prefix of a credential.** [safety.rs:173](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:173)
 
    ```text
    Fact: credential = fuigo-abcdefgh-ijklmnop-qrst1234
@@ -27,7 +27,7 @@ Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM fi
 
    **Test coverage:** Not caught. The added case starts with a mixed segment, so it never exercises partial-prefix masking.
 
-3. **MEDIUM — A four-line private-key header leaves its body readable.** [safety.rs:278](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:278), [safety.rs:323](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:323)
+3. **MEDIUM — A four-line private-key header leaves its body readable.** [safety.rs:278](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:278), [safety.rs:323](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:323)
 
    ```text
    -----BEGIN
@@ -46,7 +46,7 @@ Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM fi
 
    **Test coverage:** Not caught. The round-2 regression test splits the header across only two lines.
 
-4. **MEDIUM — Lookback reopens an already closed key block and blanks the remaining file.** [safety.rs:278](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:278), [safety.rs:286](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:286)
+4. **MEDIUM — Lookback reopens an already closed key block and blanks the remaining file.** [safety.rs:278](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:278), [safety.rs:286](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:286)
 
    ```text
    PEM framing: -----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----
@@ -60,7 +60,7 @@ Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM fi
 
    **Test coverage:** Not caught. Existing cases do not place clean content immediately after a same-line BEGIN/END example or an empty two-line block.
 
-5. **LOW — Local compact windows miss a close variant previously caught.** [safety.rs:104](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:104)
+5. **LOW — Local compact windows miss a close variant previously caught.** [safety.rs:104](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:104)
 
    Exact input, using Rust notation for U+200B:
 
@@ -74,7 +74,7 @@ Audited `fc3ccb94..900d7434`, focusing on `a71654f0..900d7434`. **Four MEDIUM fi
 
    **Test coverage:** Not caught. Mixed-invisible tests use shorter phrases; the longer override-family tests contain no invisibles.
 
-6. **LOW — The new sudo search introduces quadratic work.** [safety.rs:152](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:152)
+6. **LOW — The new sudo search introduces quadratic work.** [safety.rs:152](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:152)
 
    Concrete input: the exact line `always run tests\n` repeated 50,000 times.
 

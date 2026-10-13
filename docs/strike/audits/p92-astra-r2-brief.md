@@ -4,7 +4,7 @@ You are an independent read-only auditor. Do NOT build, compile or run anything.
 `fc3ccb94..a71654f0` in this worktree (branch `codex/fuigo-p92`), focusing on what changed since round 1
 (`8735c062..a71654f0`). Same files and background as round 1 (brief: `docs/strike/audits/p92-astra-r2-brief.md`'s
 sibling `p92-astra-r1-brief.md`; findings R3/R4 in
-`/Volumes/Mando/WaylandBots/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`). Ignore `P92-CODEX-NOTES.md`.
+`<project>/Fuigo/.ijfw/memory/codex-audit/238791e1-rest.md`). Ignore `P92-CODEX-NOTES.md`.
 
 Round 1 findings and what the gate did (verify each fix, and look for what the fix broke):
 1. MEDIUM credential regressions vs the old filter (JSON `"password": "..."`, `password: hunter2`, `Bearer 123456789012`,

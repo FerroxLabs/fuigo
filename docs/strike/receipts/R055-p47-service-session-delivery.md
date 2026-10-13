@@ -113,7 +113,7 @@ explicit `BearerDestination::Unrestricted` static key.
 Runner `p47dev/mut.sh` applies `Fuigo/p47-mutants.py <M>` to a worktree of `58cc9c3b` (the gated tip `c1dc667d`
 differs only by the lint commits `6d363a47` and `c1dc667d`: the `BearerRule` type alias, a duplicate `allow`, fmt), builds,
 then runs `cargo test --locked -p <pkg> [--features middleware] -- p47` for the mutated package(s). Every mutant
-compiled. Results: `Fuigo/p47-mutants-results.txt`; logs `hetzner-dsm:/root/fuigo-builds/p47dev/mutlogs/`.
+compiled. Results: `Fuigo/p47-mutants-results.txt`; logs `hetzner-dsm:<build>/p47dev/mutlogs/`.
 **38 of 38 killed.** (`fuigo-extra-ca`'s own unit tests are not `p47`-named, so M1–M4 show extra-ca exit 0; the
 shell wire tests kill them.)
 
@@ -177,10 +177,10 @@ regression. … **LAND**". Round 5: "**No BLOCKER, HIGH, MEDIUM or LOW findings 
 
 ## 6. The gate (contract A.2.1)
 
-`/root/fuigo-builds/rp.sh p47rp2 90c5a4af22cfc87ff98cd57c9ee56c5b5bab466f strike/p47 /root/fuigo-builds/p47.bundle
+`<build>/rp.sh p47rp2 90c5a4af22cfc87ff98cd57c9ee56c5b5bab466f strike/p47 <build>/p47.bundle
 fuigo-extra-ca fuigo-auth fuigo-file-utils fuigo-memory fuigo-telemetry fuigo-computer-hub-sdk fuigo-workspace
 fuigo-shell fuigo-pager` (per package `slot-run.sh … nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p
-<pkg>`, then `cargo clippy --locked --all-targets` for all nine). Summary `hetzner-dsm:/root/fuigo-builds/p47rp2.out`
+<pkg>`, then `cargo clippy --locked --all-targets` for all nine). Summary `hetzner-dsm:<build>/p47rp2.out`
 (sha256 `4890d7e16d925d97e49206f344bcbb83add3a8c648857df89931ac338b15c5a9`); window 2026-10-01T23:44:58Z–2026-10-02T02:00:08Z.
 
 | rev | pkg | exit | derived | headers / unfinished | failing | log sha256 |
@@ -290,7 +290,7 @@ was lost. … **LAND**".
 
 **What the coordinator's re-proof found.** In `fuigo-workspace`, `handle::tests::drain_wedged_producer_does_not_starve_queue_flush`
 and `handle::tests::two_phase_drain_waits_for_producer_then_drains_queue` failed 3/3 at `abe960e2` and passed 3/3 at
-`ae592509` (`hetzner:/root/fuigo-builds/iso-s12c.out`).
+`ae592509` (`hetzner:<build>/iso-s12c.out`).
 
 **Cause (a product mistake in P47, not a test problem).** The tests' upload source (`handle_tests.rs`
 `UnreachableSource`) is a proxy config with no credential: `user_token: ""`.

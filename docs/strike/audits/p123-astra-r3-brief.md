@@ -1,6 +1,6 @@
 # P123 Astra round 3 brief (last round)
 
-Read-only checkout `/Volumes/Mando/WaylandBots/Fuigo/wt-p123`, branch `strike/p123`. Do NOT run cargo, do not modify anything,
+Read-only checkout `<project>/Fuigo/wt-p123`, branch `strike/p123`. Do NOT run cargo, do not modify anything,
 and do NOT open the earlier audit reports in `docs/strike/audits/` (they are huge). Parent `bfb0ffa4`; compare with `v1.0.20`.
 Audit `git log bfb0ffa4..HEAD`; the newest commit is the round-2 redesign. Items: see `p123-astra-r1-brief.md`.
 

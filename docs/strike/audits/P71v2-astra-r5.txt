@@ -38,7 +38,7 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `2eb33c17..23c8c82c2629aac42257eae0c411145c4734c061`. Read-only; no Cargo, builds, or wire tests executed.
 
 1. **HIGH — `upload_via_signed_url` gates a different destination from the one receiving the bytes.**  
-   [storage_client.rs:2025](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:2025)
+   [storage_client.rs:2025](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:2025)
 
    This public API permits:
    ```rust
@@ -57,7 +57,7 @@ Audited `2eb33c17..23c8c82c2629aac42257eae0c411145c4734c061`. Read-only; no Carg
    **Existing tests:** do not catch it. The new nine-method test constructs the client itself on the third-party base; it never combines a permitted base with a third-party PUT destination.
 
 2. **MEDIUM — the public sink-surface pins can accept a new ungated upload method.**  
-   [upload_gate_guard.rs:345](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:345), [upload_gate_guard.rs:419](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:419)
+   [upload_gate_guard.rs:345](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:345), [upload_gate_guard.rs:419](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:419)
 
    Both inventories require visibility and function keywords on the same line. A valid method inside `impl StorageClient` beginning:
    ```rust
@@ -71,7 +71,7 @@ Audited `2eb33c17..23c8c82c2629aac42257eae0c411145c4734c061`. Read-only; no Carg
    **Existing tests:** do not catch the added method; the wire test invokes only its fixed nine-method list.
 
 3. **LOW — the detached inline-fallback negative test can finish before an erroneous send.**  
-   [queue_tests.rs:4829](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4829)
+   [queue_tests.rs:4829](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/queue_tests.rs:4829)
 
    The test waits for destination resolution, then sleeps 500 ms and asserts zero connections. Resolution is not task completion. With the gate removed and connection establishment delayed beyond that window, this individual test can pass before the detached task sends; runtime teardown then cancels it. The separate positive control does not synchronize completion of the negative task.
 

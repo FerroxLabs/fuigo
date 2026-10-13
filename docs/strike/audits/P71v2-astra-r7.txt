@@ -41,7 +41,7 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `01115e18..c40c5886`, the single commit on `strike/p71v2-s19`. **Two MEDIUM guard defects remain.** I found no current production upload bypass. No files were modified; no Cargo, builds, or Rust tests were run.
 
 1. **MEDIUM — test-item stripping can hide a production upload method.**  
-   [upload_gate_guard.rs:317](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:317)
+   [upload_gate_guard.rs:317](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:317)
 
    `test_item_lines` removes whole lines, rather than stopping at the test item’s closing token. In `storage_client.rs`, append a production method immediately after the closing brace of the existing `#[cfg(test)] with_breaker_open_duration`:
 
@@ -63,7 +63,7 @@ Audited `01115e18..c40c5886`, the single commit on `strike/p71v2-s19`. **Two MED
    **Existing tests:** do not catch an added, otherwise unexercised method. The scanner self-tests omit this spelling. An in-memory reproduction confirmed that the method disappears from the scanned production text. This is neither macro-generated code nor a test-named file.
 
 2. **MEDIUM — the first-statement pin accepts a conditional gate.**  
-   [upload_gate_guard.rs:529](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:529)
+   [upload_gate_guard.rs:529](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:529)
 
    The signature walker ignores executable code on the line it identifies as the signature’s end. This modification to `StorageClient::upload` passes its gate pin:
 

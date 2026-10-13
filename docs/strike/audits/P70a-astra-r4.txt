@@ -25,17 +25,17 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Audited `8b1a0192..24c7337e`, all nine commits. **Three findings: one HIGH, two MEDIUM.** Read-only; no Cargo or tests run; worktree remains clean.
 
 1. **HIGH — Relay still logs proxy credentials verbatim.**  
-   [relay.rs:265](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:265)  
+   [relay.rs:265](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/relay.rs:265)  
    With `HTTPS_PROXY=http://alice:secret@proxy.example:3128` and a relay destination outside `NO_PROXY`, the info event “Using HTTP CONNECT proxy for relay connections” records the entire URL, including the password, before connecting. The packet redacts `ws_url` but misses this `proxy` field. **Pre-existing exposure left unresolved; refutes C4(b).**  
    **Existing test catches it:** No. The added sampler capture test does not execute the relay. Pass this field through `redact_url` and cover authenticated proxy configuration.
 
 2. **MEDIUM — MCP OAuth client-secret lookup loses the saved key.**  
-   [mcp.rs:36](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:36)  
+   [mcp.rs:36](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:36)  
    Configure `oauth_client_secret_env_var = "FUIGO_API_KEY"` with an OAuth client ID, then load the key from `auth.json` without an exported environment key. `oauth_config()` still calls `resolve_oauth_client_secret()`, which reads `std::env` directly and returns `None`. The nested OAuth block’s `client_secret_env_var` has the same problem. Previously these lookups received the copied key; now an endpoint requiring that client secret cannot authenticate. This is a credential lookup, outside the explicitly accepted string-expansion change. **Change-induced regression; refutes C3.**  
    **Existing test catches it:** No. Both new MCP resolver tests exercise bearer headers with OAuth fields unset. Route these lookups through the resolver that excludes runtime credentials.
 
 3. **MEDIUM — Internal workspace session Debug still exposes environment values.**  
-   [config.rs:949](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-workspace/src/config.rs:949)  
+   [config.rs:949](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-workspace/src/config.rs:949)  
    Construct `fuigo_workspace::AgentSessionConfig::new("child")`, insert `("API_KEY", "secret")` into `extra_env`, and format it with `{:?}`: the complete value is printed. P70a fixes the similarly named wire type in `fuigo-workspace-types`, but misses this internal type. **Pre-existing gap; refutes C2’s workspace-wide claim.**  
    **Existing test catches it:** No. The guard only examines derived Debug implementations, so this existing manual implementation bypasses it. Redact the map values and add a direct formatting regression test.
 

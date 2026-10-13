@@ -5,13 +5,18 @@
 //! `McpServerConfig::to_acp_mcp_server`). This module enforces what the FILE must be, each time it is read:
 //!
 //! * the path is absolute or `~/`-relative (no environment expansion, no relative paths);
-//! * the final component is opened without following a symlink (`O_NOFOLLOW`);
+//! * the final component is opened without following a symlink (`O_NOFOLLOW`; on Windows `FILE_FLAG_OPEN_REPARSE_POINT`);
 //! * the opened file is a regular file, owned by the current user, with no group or other permission bits, and at
 //!   most [`MAX_TOKEN_FILE_BYTES`] long (all judged on the open descriptor, so there is no check-then-open race);
 //! * the content is read with a bound, one trailing newline is dropped, and what is left must be visible ASCII
 //!   (no control characters, no whitespace, no non-ASCII).
 //!
-//! Windows: not supported in this release. A configured `bearer_token_file` refuses the server (fail closed).
+//! Windows: the same contract, judged by the one Windows file-ACL checker (`fuigo-win-acl`) on the open handle. "No group
+//! or other permission bits" there means: owned by the current user (or BUILTIN\Administrators when the token is
+//! elevated), not a reparse point, one hard link, and a DACL whose every entry is a plain allow for the current user,
+//! SYSTEM or BUILTIN\Administrators. Inherited entries count. The path must be a plain file on a local drive (no device,
+//! pipe, network or stream path; see `bearer_token_file_windows`). A refused file refuses that server only.
+//! Other platforms: not supported; a configured `bearer_token_file` refuses the server (fail closed).
 //!
 //! Nothing here ever puts the token, or any part of the file's content, in an error, a log line or a `Debug` output.
 
@@ -22,6 +27,9 @@ use std::time::Duration;
 
 use agent_client_protocol as acp;
 use tokio::task::JoinHandle;
+
+#[path = "bearer_token_file_windows.rs"]
+mod windows_rules;
 
 /// Tokens are short; anything larger is the wrong file.
 pub const MAX_TOKEN_FILE_BYTES: u64 = 16 * 1024;
@@ -36,7 +44,7 @@ pub const META_KEY: &str = "fuigo/mcp/bearerTokenFile";
 /// Why the setting or its file was refused. The text never holds file content.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BearerTokenFileError {
-    #[error("bearer_token_file is not supported on Windows in this release")]
+    #[error("bearer_token_file is not supported on this platform")]
     UnsupportedPlatform,
     #[error("bearer_token_file must be an absolute path or start with ~/")]
     NotAbsolute,
@@ -50,8 +58,12 @@ pub enum BearerTokenFileError {
     NotRegular,
     #[error("bearer_token_file is not owned by the current user")]
     WrongOwner,
-    #[error("bearer_token_file is readable by others (use mode 0600 or 0400)")]
+    #[error("{}", too_permissive_text())]
     TooPermissive,
+    #[error("bearer_token_file has more than one hard link")]
+    MultipleLinks,
+    #[error("bearer_token_file must be a plain file path on a local drive (not a device, pipe, network or stream path)")]
+    UnsupportedPath,
     #[error("bearer_token_file is larger than 16 KiB")]
     TooLarge,
     #[error("bearer_token_file is empty")]
@@ -68,6 +80,71 @@ pub enum BearerTokenFileError {
     InsecureUrl,
     #[error("bearer_token_file cannot be combined with another Authorization setting")]
     ConflictsWithAuthorization,
+}
+
+/// The text of [`BearerTokenFileError::TooPermissive`]: unix names the mode; Windows names who may have access.
+const fn too_permissive_text() -> &'static str {
+    if cfg!(windows) {
+        "bearer_token_file is accessible to users other than you, SYSTEM and Administrators"
+    } else {
+        "bearer_token_file is readable by others (use mode 0600 or 0400)"
+    }
+}
+
+/// The warning for a refused file. On unix the error text alone (unchanged). On Windows the path the user configured is
+/// added, with the fix for the "others have access" case: `remove access for other users from <path>`. The path is a
+/// configuration value, never file content.
+pub fn refusal_text(error: &BearerTokenFileError, path: &Path) -> String {
+    use BearerTokenFileError as E;
+    if !cfg!(windows) {
+        return error.to_string();
+    }
+    match error {
+        E::TooPermissive => format!("{error}: remove access for other users from {}", path.display()),
+        // Setting-level reasons that are not about the file itself.
+        E::NotAbsolute | E::NoHomeDir | E::NotAString | E::InsecureUrl | E::ConflictsWithAuthorization | E::TimedOut => error.to_string(),
+        _ => format!("{error}: {}", path.display()),
+    }
+}
+
+/// Is a file that is already configured acceptable right now? Windows only (elsewhere always `Ok`): opens and judges the
+/// file exactly as a request would, without reading it, so a file with other users' access refuses its server at load
+/// time with a warning. A file that is missing or cannot be opened is NOT a refusal here (a rotating agent may create it
+/// later); every request checks again.
+#[cfg(windows)]
+pub fn preflight(path: &BearerTokenPath) -> Result<(), BearerTokenFileError> {
+    let path = path.as_ref().to_path_buf();
+    preflight_within(TOKEN_READ_TIMEOUT, move || windows_rules::open_checked(&path).map(drop))
+}
+
+/// Run `judge` on its own thread and wait at most `bound` for it. Config loading is synchronous and may run on an async
+/// worker, so the caller is never held longer than `bound`.
+///
+/// `Unreadable` (missing file, cannot open) and a judge that does not finish in time are both "not judged now": `Ok`,
+/// the server is NOT skipped, because every request checks the file again with its own bound ([`TOKEN_READ_TIMEOUT`]).
+/// Any other error is a refusal. The abandoned thread ends when its open returns.
+#[cfg(any(windows, test))]
+fn preflight_within<F>(bound: Duration, judge: F) -> Result<(), BearerTokenFileError>
+where
+    F: FnOnce() -> Result<(), BearerTokenFileError> + Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new().name("bearer-file-preflight".into()).spawn(move || {
+        let _ = tx.send(judge());
+    });
+    if spawned.is_err() {
+        return Ok(());
+    }
+    match rx.recv_timeout(bound) {
+        Ok(Err(BearerTokenFileError::Unreadable)) | Ok(Ok(())) | Err(_) => Ok(()),
+        Ok(Err(refusal)) => Err(refusal),
+    }
+}
+
+/// See the Windows version: on other platforms nothing is checked before a request.
+#[cfg(not(windows))]
+pub fn preflight(_path: &BearerTokenPath) -> Result<(), BearerTokenFileError> {
+    Ok(())
 }
 
 /// The configured string as `_meta` for the ACP server entry.
@@ -112,7 +189,7 @@ pub struct BearerTokenPath(PathBuf);
 impl BearerTokenPath {
     /// Parse the configured string. Only a leading `~/` is expanded; nothing else is interpreted.
     pub fn parse(configured: &str, home: Option<&Path>) -> Result<Self, BearerTokenFileError> {
-        if !cfg!(unix) {
+        if !cfg!(any(unix, windows)) {
             return Err(BearerTokenFileError::UnsupportedPlatform);
         }
         let path = match configured.strip_prefix("~/") {
@@ -123,6 +200,11 @@ impl BearerTokenPath {
         };
         if !path.is_absolute() {
             return Err(BearerTokenFileError::NotAbsolute);
+        }
+        if cfg!(windows)
+            && let Some(problem) = windows_rules::path_problem(&path.to_string_lossy())
+        {
+            return Err(problem);
         }
         Ok(Self(path))
     }
@@ -164,7 +246,12 @@ impl BearerTokenFile {
         Self { path: Arc::new(path), read_timeout: TOKEN_READ_TIMEOUT, stalled_read: Arc::default() }
     }
 
-    #[cfg(all(test, unix))]
+    /// [`refusal_text`] for this file's path.
+    pub fn refusal_text(&self, error: &BearerTokenFileError) -> String {
+        refusal_text(error, self.path.as_ref().as_ref())
+    }
+
+    #[cfg(all(test, any(unix, windows)))]
     fn with_timeout(mut self, timeout: Duration) -> Self {
         self.read_timeout = timeout;
         self
@@ -255,6 +342,19 @@ fn read_checked_bytes(path: &Path) -> Result<Vec<u8>, BearerTokenFileError> {
     if meta.len() > MAX_TOKEN_FILE_BYTES {
         return Err(BearerTokenFileError::TooLarge);
     }
+    read_bounded(file)
+}
+
+/// Windows: open without following a reparse point, judge the open handle with the shared checker, then read that same
+/// handle with the bound.
+#[cfg(windows)]
+fn read_checked_bytes(path: &Path) -> Result<Vec<u8>, BearerTokenFileError> {
+    read_bounded(windows_rules::open_checked(path)?)
+}
+
+/// At most [`MAX_TOKEN_FILE_BYTES`] from an already judged file; one byte more means the file grew since it was judged.
+#[cfg(any(unix, windows))]
+fn read_bounded(file: std::fs::File) -> Result<Vec<u8>, BearerTokenFileError> {
     let mut contents = Vec::new();
     file.take(MAX_TOKEN_FILE_BYTES + 1)
         .read_to_end(&mut contents)
@@ -265,7 +365,7 @@ fn read_checked_bytes(path: &Path) -> Result<Vec<u8>, BearerTokenFileError> {
     Ok(contents)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn read_checked_bytes(_path: &Path) -> Result<Vec<u8>, BearerTokenFileError> {
     Err(BearerTokenFileError::UnsupportedPlatform)
 }
@@ -293,3 +393,31 @@ pub fn check_url_may_carry_token(url: &str) -> Result<(), BearerTokenFileError> 
 #[cfg(all(test, unix))]
 #[path = "bearer_token_file_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "bearer_token_file_win_tests.rs"]
+mod win_tests;
+
+#[cfg(test)]
+mod preflight_bound_tests {
+    use super::*;
+
+    #[test]
+    fn a_judge_that_does_not_finish_in_time_is_not_a_refusal_and_returns_at_the_bound() {
+        let started = std::time::Instant::now();
+        let result = preflight_within(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_secs(3));
+            Err(BearerTokenFileError::TooPermissive)
+        });
+        assert_eq!(result, Ok(()));
+        assert!(started.elapsed() < Duration::from_secs(2), "the caller was held past the bound");
+    }
+
+    #[test]
+    fn a_refusal_in_time_is_returned_and_unreadable_or_ok_pass() {
+        let bound = Duration::from_secs(5);
+        assert_eq!(preflight_within(bound, || Err(BearerTokenFileError::TooPermissive)), Err(BearerTokenFileError::TooPermissive));
+        assert_eq!(preflight_within(bound, || Err(BearerTokenFileError::Unreadable)), Ok(()));
+        assert_eq!(preflight_within(bound, || Ok(())), Ok(()));
+    }
+}

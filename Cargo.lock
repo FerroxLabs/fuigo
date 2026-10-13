@@ -4328,6 +4328,7 @@ dependencies = [
  "fuigo-tools",
  "fuigo-tty-utils",
  "fuigo-version",
+ "fuigo-win-acl",
  "fuigo-workspace-types",
  "futures",
  "http 1.4.0",
@@ -5015,6 +5016,7 @@ dependencies = [
  "fuigo-tracing-macros",
  "fuigo-tty-utils",
  "fuigo-version",
+ "fuigo-win-acl",
  "fuigo-workflow",
  "fuigo-workspace",
  "futures",
@@ -5535,7 +5537,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.26"
+version = "1.0.27"
 dependencies = [
  "semver",
 ]
@@ -5560,6 +5562,13 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+]
+
+[[package]]
+name = "fuigo-win-acl"
+version = "0.1.0"
+dependencies = [
+ "windows 0.61.3",
 ]
 
 [[package]]

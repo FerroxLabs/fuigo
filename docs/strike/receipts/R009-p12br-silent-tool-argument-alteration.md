@@ -1,7 +1,7 @@
 # Receipt R009 — P12b could execute a tool with silently altered arguments. Reproduced, then fixed.
 
-**Date:** 2026-09-30 · **Box:** hetzner-dsm · **Lane:** `/root/fuigo-builds/integration` (shared, held
-under `flock /root/fuigo-builds/.lane-integration.lock` for the whole run) · **Packet:** P12b-R,
+**Date:** 2026-09-30 · **Box:** hetzner-dsm · **Lane:** `<build>/integration` (shared, held
+under `flock <build>/.lane-integration.lock` for the whole run) · **Packet:** P12b-R,
 reopening landed P12b (`74b0941`).
 
 > Receipt-number collision warning: three packets were in flight when this was written. If a sibling
@@ -194,7 +194,7 @@ are one line through the same recognizer, but the provenance matters for the aud
 ## 7. Wider run — and criterion 3 cannot be met as written
 
 Run in the same lane, BASE (`8e11724`) then B, same command each side. `fuigo-shell` additionally takes
-`flock /root/fuigo-builds/.shell-test.lock`, so it serializes against the sibling packets' shell runs.
+`flock <build>/.shell-test.lock`, so it serializes against the sibling packets' shell runs.
 `env_digest` for every row: `rustc 1.94.0 (4a4ef493e 2026-03-02) / cargo 1.94.0 (85eff7c80 2026-01-15) /
 RUST_MIN_STACK=16777216`. Failing sets from each log's `failures:` block, as in §2.
 
@@ -231,7 +231,7 @@ move R007 §5 named as this strike's recurring failure: stop at the first explan
 is the discriminating measurement instead.
 
 **Two independent full runs of the SAME commit `8e11724`** — the `p09` recording
-(`/root/fuigo-builds/p09-base-fuigo-shell.failset`, 16 failures) and this receipt's BASE run (17) —
+(`<build>/p09-base-fuigo-shell.failset`, 16 failures) and this receipt's BASE run (17) —
 share 14 entries and differ by **5**:
 
 ```
@@ -261,7 +261,7 @@ Three further checks, none of which rests on the churn argument:
    test that fails and passes at one commit cannot be attributed to a diff.
 2. **Three of the five pass at BASE in serial isolation.** Re-run one per `cargo test` invocation with
    `--exact --test-threads=1` under the shell lock, at `8e11724`
-   (`/root/fuigo-builds/p12br-discriminate.out`):
+   (`<build>/p12br-discriminate.out`):
    ```
    BASE exit=0 ran=1 test result: ok  agent::config::tests::configured_endpoints_become_the_trusted_origins
    BASE exit=0 ran=1 test result: ok  auth::manager::lock::tests::dropping_the_guard_silences_the_heartbeat_before_anyone_else_can_hold_the_lock
@@ -292,7 +292,7 @@ trusting a stored number — the mistake R005 made and R007 retracted.
 * **A sibling gate is running inside the shared lane `src` without the lane lock.**
   **[REFUTED by the integrator, 2026-09-30 — see the annotation at the end of this section.]** At 02:45
   `p15r-gate.sh` was executing `cargo test --locked --no-run -p fuigo-shell -p fuigo-extra-ca -p
-  fuigo-sampler` in `/root/fuigo-builds/integration/src` while this packet held
+  fuigo-sampler` in `<build>/integration/src` while this packet held
   `.lane-integration.lock` and had that checkout at `985cdee1`. It was therefore **compiling this
   packet's commit**, not its own. `p02ar-gate.sh` does it correctly: its own `src-p02ar` checkout *and*
   the lane lock. Nothing was done to the sibling's processes; it is flagged because its results may not
@@ -304,7 +304,7 @@ trusting a stored number — the mistake R005 made and R007 retracted.
   > **02:35:55Z**, and `p15r-gate.sh` was written at **02:41:01Z** — six minutes *later* — with an
   > mtime unchanged since, so the version running at 02:45 is the version that exists now and it
   > already pointed at the private checkout. P15-R's own run provenance confirms it independently:
-  > `p15r-fix.out:1` stamps `src=/root/fuigo-builds/integration/src-p15r`.
+  > `p15r-fix.out:1` stamps `src=<build>/integration/src-p15r`.
   >
   > **Second annotation, correcting the first.** P15-R's own report (04:5xZ) supplies the piece I
   > was missing, and my "likely origin: `ps` hides the cwd" guess was wrong. What actually happened
@@ -337,4 +337,4 @@ trusting a stored number — the mistake R005 made and R007 retracted.
   from the log the killed run had already finished writing. Cause unknown — most likely a broad `pkill`
   from another session.
 * **The lane target dir is 164 GB and the box is at 84%.** Not deleted: two sibling packets were still
-  building in it. Whoever finishes last should remove `/root/fuigo-builds/integration/target`.
+  building in it. Whoever finishes last should remove `<build>/integration/target`.

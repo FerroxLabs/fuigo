@@ -1,11 +1,11 @@
 import subprocess,sys,os,datetime
-SRC="/root/fuigo-builds/p75/src"; LOG=open("/root/fuigo-builds/p75/mutants.log","a")
-ENV=dict(os.environ,PATH=os.environ["HOME"]+"/.cargo/bin:"+os.environ["PATH"],CARGO_TARGET_DIR="/root/fuigo-builds/p75/target",RUST_MIN_STACK="16777216",CARGO_TERM_COLOR="never",RG_BIN_PATH="/usr/bin/rg",CARGO_BUILD_JOBS="16")
+SRC="<build>/p75/src"; LOG=open("<build>/p75/mutants.log","a")
+ENV=dict(os.environ,PATH=os.environ["HOME"]+"/.cargo/bin:"+os.environ["PATH"],CARGO_TARGET_DIR="<build>/p75/target",RUST_MIN_STACK="16777216",CARGO_TERM_COLOR="never",RG_BIN_PATH="/usr/bin/rg",CARGO_BUILD_JOBS="16")
 def sh(cmd):
     p=subprocess.run(cmd,shell=True,cwd=SRC,env=ENV,capture_output=True,text=True); return p.returncode,p.stdout+p.stderr
 def log(s): LOG.write(s+"\n"); LOG.flush()
-T_PAGER="/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-pager-bin --test dead_output_sweep"
-T_WS="/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workspace --test workspace_server_dead_output"
+T_PAGER="<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-pager-bin --test dead_output_sweep"
+T_WS="<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-workspace --test workspace_server_dead_output"
 def CLIP(p): return "nice -n 10 cargo clippy --locked -p %s --message-format=short"%p
 M=[
  ("MU1","crates/codegen/fuigo-update/src/auto_update.rs",'fuigo_tty_utils::cli_eprintln!("Switched to {} channel.", ch);','eprintln!("Switched to {} channel.", ch);',[T_PAGER,CLIP("fuigo-update")]),

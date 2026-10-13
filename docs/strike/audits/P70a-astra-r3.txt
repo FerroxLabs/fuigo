@@ -25,7 +25,7 @@ Find defects. For each: severity BLOCKER / HIGH / MEDIUM / LOW, file:line, a con
 Audited `8b1a0192..bc079f73` read-only. **Two findings: one MEDIUM, one LOW.** No Cargo, builds, or tests run; no files modified.
 
 1. **MEDIUM — MCP authentication misses the stored-key resolver.**  
-   [auth_method.rs:94](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/auth_method.rs:94), [mcp.rs:484](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:484)
+   [auth_method.rs:94](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/agent/auth_method.rs:94), [mcp.rs:484](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config-types/src/mcp.rs:484)
 
    Configure an HTTP/SSE MCP server with `bearer_token_env_var = "FUIGO_API_KEY"` and supply the key through `auth.json` or `fuigo/setApiKey`. MCP materialization still calls `std::env::var` directly, so it now omits Authorization. If the launcher supplied an older key, MCP continues sending that key after `setApiKey` replaces it in memory.
 
@@ -34,7 +34,7 @@ Audited `8b1a0192..bc079f73` read-only. **Two findings: one MEDIUM, one LOW.** N
    **Existing tests:** None covers this mapping. The added MCP logging test supplies literal headers; the stored-key tests exercise other resolvers. Route explicitly configured MCP credential lookup through an appropriate saved/env resolver without restoring environment writes.
 
 2. **LOW — The Debug guard misses the standard HTTP header-map type.**  
-   [secret_debug_guard.rs:135](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:135), [secret_debug_guard.rs:284](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:284)
+   [secret_debug_guard.rs:135](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:135), [secret_debug_guard.rs:284](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-auth/tests/secret_debug_guard.rs:284)
 
    This concrete counterexample produces no guard hit:
 

@@ -3,9 +3,9 @@
 
 Audited `37a5b9d4..b7813a9c` using git and file reads only. No new findings. Two previously recorded LOW limitations remain:
 
-1. **LOW — Indirect dashboard readers remain outside scanner coverage.** [session.rs:1280](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/agent_view/session.rs:1280). Session creation/loading can observe `FUIGO_AGENT_DASHBOARD=0` from a concurrent setter through `apply_app_scoped_gates`. Existing tests do not catch this because their assertions do not depend on dashboard visibility. Already recorded as a proposal; no additional pre-landing change identified.
+1. **LOW — Indirect dashboard readers remain outside scanner coverage.** [session.rs:1280](<project>/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/app/agent_view/session.rs:1280). Session creation/loading can observe `FUIGO_AGENT_DASHBOARD=0` from a concurrent setter through `apply_app_scoped_gates`. Existing tests do not catch this because their assertions do not depend on dashboard visibility. Already recorded as a proposal; no additional pre-landing change identified.
 
-2. **LOW — Conservative pin scanner rejects unrelated same-name bindings.** [theme_pin_guard_tests.rs:577](/Volumes/Mando/WaylandBots/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:577). After acquiring `_theme`, a nested `fn helper(_theme: ()) {}` triggers rejection despite retaining the outer guard. Existing self-tests do not cover this scenario. Deliberately documented; none of the four listed readers encounters it.
+2. **LOW — Conservative pin scanner rejects unrelated same-name bindings.** [theme_pin_guard_tests.rs:577](<project>/Fuigo/wt-p78/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:577). After acquiring `_theme`, a nested `fn helper(_theme: ()) {}` triggers rejection despite retaining the outer guard. Existing self-tests do not cover this scenario. Deliberately documented; none of the four listed readers encounters it.
 
 The round-6 MEDIUM is resolved: body scanning catches keyword-prefixed dashboard calls and excludes multiline test signatures.
 
