@@ -1,0 +1,16 @@
+[package]
+license = "Apache-2.0"
+edition.workspace = true
+name = "fuigo-win-acl"
+version = "0.1.0"
+description = "Windows ACL rule for a file we are about to trust: judged on the open handle (owner, DACL, link count, reparse point)"
+
+[features]
+# Windows-only helpers that create files and folders with a chosen DACL, for tests of code that uses the checker.
+test-support = []
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
+[lints]
+workspace = true

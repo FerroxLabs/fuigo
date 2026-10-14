@@ -41,16 +41,16 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `67a0a7fe..50c37d7b94e6e35ef0fb12de751832f0704c4578` read-only. No Cargo commands or file modifications. I found **no current production storage-upload bypass**. Remaining findings concern notice delivery, guard coverage, and tests. These are source conclusions, not executed-test results.
 
 1. **MEDIUM — The withholding notice is invisible in the Unix interactive TUI.**  
-   [destination_gate.rs:198](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:198)
+   [destination_gate.rs:198](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/destination_gate.rs:198)
 
-   With a third-party proxy configured, an upload withheld after TUI startup calls `best_effort_stderr::eprint_line`. That writes to ordinary fd 2, which [app/mod.rs:682](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-pager/src/app/mod.rs:682) has redirected to `/dev/null`. The `Once` is consumed, so restoring stderr later does not display the notice.
+   With a third-party proxy configured, an upload withheld after TUI startup calls `best_effort_stderr::eprint_line`. That writes to ordinary fd 2, which [app/mod.rs:682](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-pager/src/app/mod.rs:682) has redirected to `/dev/null`. The `Once` is consumed, so restoring stderr later does not display the notice.
 
    Nothing uploads, but the user misses the promised explanation and bucket remedy. The trace warning remains; the feedback handler also returns its explicit error.
 
    **Existing tests:** neither the injected-sink test nor process-global notice history detects this. They do not exercise notice delivery after the TUI redirect.
 
 2. **MEDIUM — R1-2 is only partially resolved: ordinary Rust forms still escape the guard.**  
-   [upload_gate_guard.rs:252](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:252), [upload_gate_guard.rs:276](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:276)
+   [upload_gate_guard.rs:252](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:252), [upload_gate_guard.rs:276](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:276)
 
    The added checks catch the specific Round 1 examples, but C4 remains too broad. An in-memory reproduction of the matching rules produced zero dispatcher/client matches for the first three examples below.
 
@@ -66,7 +66,7 @@ Audited `67a0a7fe..50c37d7b94e6e35ef0fb12de751832f0704c4578` read-only. No Cargo
    **Existing tests:** the scanner self-tests do not cover these examples. No current production instance was found. This is a regression-guard defect, not evidence of present leakage.
 
 3. **LOW — The new recovery test introduces a shared-counter race.**  
-   [recovery.rs:689](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-workspace/src/recovery.rs:689)
+   [recovery.rs:689](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-workspace/src/recovery.rs:689)
 
    The new test recovers two artifacts labelled `tool_state.json`. The existing `recovers_valid_orphan_pair_in_place` test snapshots the process-global `ORPHAN_RECOVERED["tool_state.json"]` counter and requires exactly `before + 1`.
 
@@ -75,7 +75,7 @@ Audited `67a0a7fe..50c37d7b94e6e35ef0fb12de751832f0704c4578` read-only. No Cargo
    **Existing tests:** the older assertion exposes the race intermittently; neither test synchronizes or isolates the shared label.
 
 4. **LOW — Two positive controls still accept missing or incorrect payloads.**  
-   [p71_gate_tests.rs:80](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:80), [p71_gate_tests.rs:215](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:215)
+   [p71_gate_tests.rs:80](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:80), [p71_gate_tests.rs:215](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-shell/src/upload/p71_gate_tests.rs:215)
 
    The tool-definition test supplies an empty list and checks only `tool_definitions.json`, which appears in the object-path header. Sending an empty or incorrect body can still pass.
 

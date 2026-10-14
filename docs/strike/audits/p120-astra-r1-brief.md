@@ -3,7 +3,7 @@
 Repository: this worktree (strike/p120, parent 9381f19c6a67477ce7ff9623943912ed74017d59). Review `git diff 9381f19c..HEAD`.
 
 Backlog items (release-notes-1.0.21 post-release backlog, known limit K16; source: R113 Round 3 and R3.5, in
-/Volumes/Mando/WaylandBots/Fuigo/strike-integration/docs/strike/receipts/R113-p113.md):
+<project>/Fuigo/strike-integration/docs/strike/receipts/R113-p113.md):
 1. Archive scrub on joined records. A `/feedback` archive (crates/codegen/fuigo-shell/src/upload/feedback_archive.rs, with
    fuigo-secrets `sanitizer.rs`: `PrivateKeyJoin`, `opens_private_key_block`, the PEM regexes) must catch a private key split
    across several strings of a record or several session records (envelope strings between chunks, chunks shorter than a

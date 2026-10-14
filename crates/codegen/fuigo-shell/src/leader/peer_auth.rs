@@ -100,84 +100,15 @@ pub(crate) mod win {
     use std::os::windows::io::RawHandle;
     use windows::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, HLOCAL, LocalFree};
     use windows::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-        SDDL_REVISION_1, SE_KERNEL_OBJECT,
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
     };
-    use windows::Win32::Security::{
-        GetTokenInformation, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-        TOKEN_USER, TokenUser,
-    };
+    use windows::Win32::Security::{OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES};
     use windows::Win32::System::Pipes::GetNamedPipeServerProcessId;
-    use windows::Win32::System::Threading::{
-        GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::core::PCWSTR;
 
-    pub(crate) fn code(e: &windows::core::Error) -> u32 {
-        (e.code().0 as u32) & 0xFFFF
-    }
-
-    pub(crate) struct Owned(pub(crate) HANDLE);
-    impl Drop for Owned {
-        fn drop(&mut self) {
-            // SAFETY: the handle was opened by this module and is closed once.
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
-
-    /// `S-1-...` text of a SID.
-    pub(crate) fn sid_to_string(sid: PSID) -> Result<String, u32> {
-        let mut text = PWSTR::null();
-        // SAFETY: `sid` points at a valid SID owned by the caller; `text` receives a LocalAlloc'd string.
-        unsafe { ConvertSidToStringSidW(sid, &mut text) }.map_err(|e| code(&e))?;
-        // SAFETY: on success `text` is a NUL-terminated wide string.
-        let s = unsafe { text.to_string() }.map_err(|_| 0u32);
-        // SAFETY: the string was allocated by the call above with LocalAlloc.
-        let _ = unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
-        s
-    }
-
-    /// The raw bytes of one `GetTokenInformation` class (8-byte aligned), or the Win32 error.
-    pub(crate) fn token_info_buf(
-        token: HANDLE,
-        class: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
-    ) -> Result<Vec<u64>, u32> {
-        let mut needed = 0u32;
-        // SAFETY: size probe; the expected failure is "insufficient buffer" and sets `needed`.
-        let _ = unsafe { GetTokenInformation(token, class, None, 0, &mut needed) };
-        if needed == 0 {
-            return Err(0);
-        }
-        // u64 elements: the buffer is at least 8-byte aligned for TOKEN_USER and the other token structs.
-        let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
-        // SAFETY: `buf` holds at least `needed` bytes.
-        unsafe { GetTokenInformation(token, class, Some(buf.as_mut_ptr().cast()), needed, &mut needed) }
-            .map_err(|e| code(&e))?;
-        Ok(buf)
-    }
-
-    /// The user SID text of an open token (needs `TOKEN_QUERY`).
-    pub(crate) fn token_user_sid(token: HANDLE) -> Result<String, u32> {
-        let buf = token_info_buf(token, TokenUser)?;
-        // SAFETY: on success the buffer starts with a TOKEN_USER whose SID points into the same buffer.
-        let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
-        sid_to_string(sid)
-    }
-
-    /// The token user SID text of the process behind `process` (needs `PROCESS_QUERY_LIMITED_INFORMATION`).
-    fn process_token_user_sid(process: HANDLE) -> Result<String, u32> {
-        let mut token = HANDLE::default();
-        // SAFETY: `process` is a live process handle; `token` is writable.
-        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.map_err(|e| code(&e))?;
-        let token = Owned(token);
-        token_user_sid(token.0)
-    }
-
-    /// The user account of this process.
-    pub(crate) fn own_sid() -> Result<String, u32> {
-        // SAFETY: the pseudo handle of the current process needs no closing.
-        process_token_user_sid(unsafe { GetCurrentProcess() })
-    }
+    // The SID and token helpers moved to `fuigo-win-acl` (the one file-ACL checker); same names here.
+    pub(crate) use fuigo_win_acl::sys::{Owned, code, own_sid, process_token_user_sid, sid_to_string, token_info_buf, token_user_sid};
 
     /// The user account of process `pid`, from its token. Opening uses the least access (`PROCESS_QUERY_LIMITED_INFORMATION`).
     pub(crate) fn peer_token_sid(pid: u32) -> Result<String, u32> {

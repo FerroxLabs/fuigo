@@ -5,7 +5,11 @@
 use super::*;
 use fuigo_mcp::bearer_token_file::configured_from_meta;
 
+/// A path that is absolute on the platform and names no real file (nothing is read through it).
+#[cfg(unix)]
 const FILE: &str = "/run/fake-bearer-file-token";
+#[cfg(windows)]
+const FILE: &str = "C:/fuigo-fake/bearer-file-token";
 
 fn meta_of(server: &acp::McpServer) -> Option<String> {
     let meta = match server {
@@ -34,8 +38,6 @@ fn convert(root: &TomlValue, name: &str) -> acp::McpServer {
     servers[name].clone().to_acp_mcp_server(name).expect("the server still starts")
 }
 
-// The setting is honoured on unix only; on Windows the server is skipped (see the Windows test below).
-#[cfg(unix)]
 #[test]
 fn the_users_own_config_toml_may_set_it() {
     if fuigo_test_support::env::rerun_in_own_process() {
@@ -157,8 +159,6 @@ fn a_client_supplied_or_unmarked_foreign_definition_loses_it() {
     assert!(note_for("fromclient"));
 }
 
-// The setting is honoured on unix only; on Windows the server is skipped (see the Windows test below).
-#[cfg(unix)]
 #[test]
 fn both_forms_or_a_bad_path_skip_that_server_only() {
     if fuigo_test_support::env::rerun_in_own_process() {
@@ -200,8 +200,6 @@ fn debug_and_serialized_forms_hold_the_path_only() {
 
 /// 26-6c r2: a higher layer (requirements, MDM, a campaign) that changes ANY decisive field of a server the user gave a
 /// token file drops the token file for that server: the token goes nowhere, whatever origin the merged entry names.
-// The setting is honoured on unix only; on Windows the server is skipped (see the Windows test below).
-#[cfg(unix)]
 #[test]
 fn a_higher_layer_that_changes_the_entry_drops_the_users_token_file() {
     if fuigo_test_support::env::rerun_in_own_process() {
@@ -276,9 +274,9 @@ fn a_dollar_in_the_path_is_not_expanded_in_the_user_layer() {
     assert_ne!(layer["mcp_servers"]["t"]["headers"]["H"].as_str(), Some("$HOME"));
 }
 
-const USER_TEMPLATED: &str = r#"[mcp_servers.tracker]
+const USER_TEMPLATED_TEXT: &str = r#"[mcp_servers.tracker]
 url = "https://{{host}}/mcp"
-bearer_token_file = "/run/fake-bearer-file-token"
+bearer_token_file = "@FILE@"
 
 [mcp_servers.tracker.setup]
 fields = [{ id = "region", label = "Region", type = "select", options = [{ label = "EU", value = "eu" }] }]
@@ -287,6 +285,10 @@ fields = [{ id = "region", label = "Region", type = "select", options = [{ label
 from = "region"
 map = { eu = "eu.example.invalid" }
 "#;
+
+fn user_templated() -> String {
+    USER_TEMPLATED_TEXT.replace("@FILE@", FILE)
+}
 
 /// Convert the way `materialize_merged_mcp_configs` does: parse (provenance check), resolve the setup with the user's saved
 /// preference `region = eu`, then convert.
@@ -310,20 +312,18 @@ fn url_of(server: &acp::McpServer) -> String {
 
 /// 26-6c r3: the rule is the WHOLE entry. A higher layer that changes only `setup.variables` (which rewrites the URL
 /// after any URL comparison) drops the token file, with the note.
-// The setting is honoured on unix only; on Windows the server is skipped (see the Windows test below).
-#[cfg(unix)]
 #[test]
 fn a_higher_layer_changing_only_setup_variables_drops_the_token_file() {
     if fuigo_test_support::env::rerun_in_own_process() {
         return;
     }
     let home = fuigo_test_support::FuigoHome::new();
-    std::fs::write(home.path().join("config.toml"), USER_TEMPLATED).unwrap();
-    let same: TomlValue = toml::from_str(USER_TEMPLATED).unwrap();
+    std::fs::write(home.path().join("config.toml"), user_templated()).unwrap();
+    let same: TomlValue = toml::from_str(&user_templated()).unwrap();
     let server = convert_resolved(&same, "tracker");
     assert_eq!(url_of(&server), "https://eu.example.invalid/mcp");
     assert_eq!(meta_of(&server).as_deref(), Some(FILE));
-    let changed: TomlValue = toml::from_str(&USER_TEMPLATED.replace("eu.example.invalid", "attacker.example.invalid")).unwrap();
+    let changed: TomlValue = toml::from_str(&user_templated().replace("eu.example.invalid", "attacker.example.invalid")).unwrap();
     let server = convert_resolved(&changed, "tracker");
     assert_eq!(url_of(&server), "https://attacker.example.invalid/mcp", "the rewrite does happen");
     assert_eq!(meta_of(&server), None);
@@ -337,10 +337,11 @@ fn an_unknown_extra_key_in_a_higher_layer_drops_the_token_file() {
         return;
     }
     let home = fuigo_test_support::FuigoHome::new();
-    std::fs::write(home.path().join("config.toml"), USER_TEMPLATED).unwrap();
-    let extra: TomlValue = toml::from_str(&format!("{USER_TEMPLATED}\n[mcp_servers.tracker.future]\nknob = 1\n")).unwrap();
+    std::fs::write(home.path().join("config.toml"), user_templated()).unwrap();
+    let templated = user_templated();
+    let extra: TomlValue = toml::from_str(&format!("{templated}\n[mcp_servers.tracker.future]\nknob = 1\n")).unwrap();
     let extra_flat: TomlValue =
-        toml::from_str(&USER_TEMPLATED.replace("[mcp_servers.tracker]\n", "[mcp_servers.tracker]\nfuture_field = true\n")).unwrap();
+        toml::from_str(&user_templated().replace("[mcp_servers.tracker]\n", "[mcp_servers.tracker]\nfuture_field = true\n")).unwrap();
     for merged in [extra, extra_flat] {
         assert_eq!(meta_of(&convert_resolved(&merged, "tracker")), None);
     }
@@ -354,10 +355,10 @@ fn template_command_and_enabled_changes_drop_the_token_file() {
         return;
     }
     let home = fuigo_test_support::FuigoHome::new();
-    std::fs::write(home.path().join("config.toml"), USER_TEMPLATED).unwrap();
+    std::fs::write(home.path().join("config.toml"), user_templated()).unwrap();
     for extra in ["url_template = \"https://x.invalid/{{region}}\"\n", "enabled = false\n", "args = [\"x\"]\n", "command = \"evil\"\n"] {
         let merged: TomlValue =
-            toml::from_str(&USER_TEMPLATED.replace("[mcp_servers.tracker]\n", &format!("[mcp_servers.tracker]\n{extra}"))).unwrap();
+            toml::from_str(&user_templated().replace("[mcp_servers.tracker]\n", &format!("[mcp_servers.tracker]\n{extra}"))).unwrap();
         let parsed = parse_mcp_servers_from_toml(&merged);
         if let Some(server) = parsed.get("tracker") {
             assert!(server.bearer_token_file().is_none(), "{extra}");
@@ -365,20 +366,84 @@ fn template_command_and_enabled_changes_drop_the_token_file() {
     }
 }
 
-/// On Windows the setting is not supported in this release: a server that sets it, even in the user's own
-/// `config.toml`, is skipped (fail closed) and never started without its token.
+/// Windows: the setting is honoured with the same rule as the file checker (`fuigo-win-acl`). The config-level outcome:
+/// an owner-only file keeps its server; a file other users can reach skips THAT server only, with a warning that names
+/// the path and the fix and never the content. Files are made with their DACL at creation; fake tokens; no pipe, no network.
 #[cfg(windows)]
-#[test]
-fn on_windows_a_server_that_sets_it_is_skipped() {
-    if fuigo_test_support::env::rerun_in_own_process() {
-        return;
+mod windows_files {
+    use super::*;
+    use fuigo_win_acl::test_support::{create_dir_inheriting_read_for, write_file_also_readable_by, write_owner_only_file};
+
+    const FAKE_TOKEN: &str = "fake-token-AbC123-not-real";
+
+    /// A path for a TOML basic string: forward slashes (a backslash would be an escape).
+    fn toml_path(path: &std::path::Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
     }
-    let home = fuigo_test_support::FuigoHome::new();
-    std::fs::write(
-        home.path().join("config.toml"),
-        format!("[mcp_servers.tracker]\nurl = \"https://mcp.example.invalid/mcp\"\nbearer_token_file = \"{FILE}\"\n"),
-    )
-    .unwrap();
-    let parsed = parse_mcp_servers_from_toml(&toml_with_file());
-    assert!(parsed["tracker"].clone().to_acp_mcp_server("tracker").is_none());
+
+    fn server_text(name: &str, file: &str) -> String {
+        format!("[mcp_servers.{name}]\nurl = \"https://{name}.example.invalid/mcp\"\nbearer_token_file = \"{file}\"\n")
+    }
+
+    fn warned_about(server: &str) -> Vec<String> {
+        fuigo_config::key_naming::refusal_notes().into_iter().filter(|n| n.contains(&format!("`{server}`"))).collect()
+    }
+
+    #[test]
+    fn an_owner_only_file_keeps_its_server_and_the_path_is_carried_unchanged() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = fuigo_test_support::FuigoHome::new();
+        let files = tempfile::tempdir().unwrap();
+        let token = files.path().join("win-ok-token");
+        write_owner_only_file(&token, FAKE_TOKEN.as_bytes()).unwrap();
+        let configured = toml_path(&token);
+        let text = server_text("winok", &configured);
+        std::fs::write(home.path().join("config.toml"), &text).unwrap();
+        let root: TomlValue = toml::from_str(&text).unwrap();
+        assert_eq!(meta_of(&convert(&root, "winok")).as_deref(), Some(configured.as_str()));
+        assert!(warned_about("winok").is_empty(), "{:?}", warned_about("winok"));
+    }
+
+    #[test]
+    fn a_file_other_users_can_reach_skips_that_server_only_with_the_path_and_the_fix() {
+        if fuigo_test_support::env::rerun_in_own_process() {
+            return;
+        }
+        let home = fuigo_test_support::FuigoHome::new();
+        let files = tempfile::tempdir().unwrap();
+        let good = files.path().join("win-good-token");
+        write_owner_only_file(&good, FAKE_TOKEN.as_bytes()).unwrap();
+        let shared = files.path().join("win-shared-token");
+        write_file_also_readable_by(&shared, FAKE_TOKEN.as_bytes(), "BU").unwrap();
+        let folder = files.path().join("win-shared-folder");
+        create_dir_inheriting_read_for(&folder, "BU").unwrap();
+        let inherited = folder.join("win-inherited-token");
+        std::fs::write(&inherited, FAKE_TOKEN).unwrap();
+        let text = [
+            server_text("goodone", &toml_path(&good)),
+            server_text("sharedone", &toml_path(&shared)),
+            server_text("inheritedone", &toml_path(&inherited)),
+            server_text("devicepath", r"//./pipe/fake-not-a-server"),
+            server_text("notyet", &toml_path(&files.path().join("will-exist-later"))),
+        ]
+        .concat();
+        std::fs::write(home.path().join("config.toml"), &text).unwrap();
+        let root: TomlValue = toml::from_str(&text).unwrap();
+        let parsed = parse_mcp_servers_from_toml(&root);
+        for skipped in ["sharedone", "inheritedone", "devicepath"] {
+            assert!(parsed[skipped].clone().to_acp_mcp_server(skipped).is_none(), "{skipped} must be skipped");
+        }
+        for kept in ["goodone", "notyet"] {
+            assert!(parsed[kept].clone().to_acp_mcp_server(kept).is_some(), "{kept} must start (a file not there yet is no refusal)");
+        }
+        for (server, path) in [("sharedone", &shared), ("inheritedone", &inherited)] {
+            let notes = warned_about(server);
+            assert_eq!(notes.len(), 1, "{notes:?}");
+            assert!(notes[0].contains(&format!("remove access for other users from {}", toml_path(path))), "{}", notes[0]);
+            assert!(!notes[0].contains(FAKE_TOKEN), "{}", notes[0]);
+        }
+        assert_eq!(warned_about("devicepath").len(), 1);
+    }
 }

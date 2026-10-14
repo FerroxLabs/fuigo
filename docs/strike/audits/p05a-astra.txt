@@ -4,31 +4,31 @@ Six rounds. Each round's brief listed the previous findings and their fixes. Fin
 =================== ROUND 1 (346763990564ef82 raw-log sha256 prefix) ===================
 Read-only audit of `e93beb94..b7273321570a42135ded610c910114c6a3caa0da`. No files modified; builds and tests were not run.
 
-1. **HIGH — Live slots can be deleted based on age.** [lib.rs:250](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:250)  
+1. **HIGH — Live slots can be deleted based on age.** [lib.rs:250](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:250)  
    An alive PID with an unavailable start token becomes eligible after 30 days. The reader then renames and deletes its slot, so that session’s eventual crash writes into an unlinked file. The legacy branch similarly deletes an empty slot after seven days without proving its owner dead. **Fix:** always preserve `AliveUnverified`; age must never substitute for proof of death. Add aged-live-slot regression cases.
 
-2. **HIGH — Reinstalling after `fork()` deletes the parent’s slot.** [handler.rs:598](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:598)  
+2. **HIGH — Reinstalling after `fork()` deletes the parent’s slot.** [handler.rs:598](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:598)  
    A child inherits `SLOT_PATH`. Calling `install()` creates its own slot, overwrites `OWNER_PID`, then unconditionally removes the inherited previous path. The parent remains alive with an unlinked crash FD. The fork test exercises crash/exit only, missing this case. **Fix:** retain the previous owner identity and unlink previous slots only when owned by the current PID; test parent install → fork → child install → parent crash.
 
-3. **MEDIUM — Crash evidence is discarded before a report is successfully saved.** [lib.rs:281](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:281), [lib.rs:320](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:320)  
+3. **MEDIUM — Crash evidence is discarded before a report is successfully saved.** [lib.rs:281](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:281), [lib.rs:320](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:320)  
    Read errors become empty data, and the claim is deleted before symbolication or report writing. An interrupted reader, unreadable blob, or failed report write permanently loses the evidence. Ignored write errors also let the notice advertise a nonexistent report. **Fix:** propagate errors, retain recoverable claims, atomically publish the report, and delete the blob only after successful persistence.
 
-4. **MEDIUM — Windows clean exits leak slots; nonterminal operation has no retention sweep.** [handler.rs:1033](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:1033), [main.rs:2060](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-pager-bin/src/main.rs:2060)  
+4. **MEDIUM — Windows clean exits leak slots; nonterminal operation has no retention sweep.** [handler.rs:1033](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:1033), [main.rs:2060](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-pager-bin/src/main.rs:2060)  
    Windows `release_slot()` has no production caller or exit registration. Every ordinary Windows run leaves an empty file. With redirected stderr, startup skips the only sweep, so these files—and crash blobs on every platform—accumulate without a bound. **Fix:** wire Windows normal-exit cleanup, including explicit exit paths, and separate bounded maintenance from interactive notification.
 
-5. **MEDIUM — Symbolication applies the wrong instruction adjustment.** [symbolicate.rs:115](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:115)  
+5. **MEDIUM — Symbolication applies the wrong instruction adjustment.** [symbolicate.rs:115](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:115)  
    Locked dependency `backtrace 0.3.76` already subtracts one inside `ResolveWhat::address_or_ip`. Return addresses therefore resolve at `RA − 2`; the faulting PC resolves at `PC − 1`. At a function or source-line boundary, the report can identify the preceding location. Existing marker tests check function names away from such boundaries. **Fix:** account for the dependency’s adjustment exactly once, compensate for the actual fault PC, and test boundary addresses and line numbers.
 
-6. **MEDIUM — Unknown build identities can pass the same-build gate.** [symbolicate.rs:67](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:67)  
+6. **MEDIUM — Unknown build identities can pass the same-build gate.** [symbolicate.rs:67](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:67)  
    Two binaries without build IDs both carry zeros. Equal version, image span, and executable length then authorize symbolication even when their code differs; unknown executable lengths weaken this further. **Fix:** require a verified identity, compute a reliable fallback fingerprint outside the handler, or retain raw offsets when identity is unavailable. Add an equal-sized, unknown-identity negative case.
 
-7. **MEDIUM — The scan limit can indefinitely starve dead slots.** [lib.rs:226](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:226)  
+7. **MEDIUM — The scan limit can indefinitely starve dead slots.** [lib.rs:226](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:226)  
    Sorting and truncating happen before owner checks. If the first 256 names belong to live sessions or protected claims, every startup revisits them and never reaches later dead slots. Collecting the entire directory also leaves memory consumption unbounded despite the scan limit. **Fix:** use a bounded, fair traversal with continuation, or budget eligible work without permanently excluding later entries.
 
-8. **MEDIUM — Claim recovery loses the PID-reuse guard.** [lib.rs:268](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:268)  
+8. **MEDIUM — Claim recovery loses the PID-reuse guard.** [lib.rs:268](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:268)  
    Claims encode only the reader PID and check `owner_state(claimer, 0)`. If a reader dies and its PID is reused, the abandoned claim is treated as live for the replacement process’s lifetime. The existing recovery test only covers an unreused PID. **Fix:** include and verify the claimer’s start token, just as for writer slots.
 
-9. **MEDIUM — Concurrent benign panics can produce a false crash notice.** [panic_info.rs:83](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/panic_info.rs:83)  
+9. **MEDIUM — Concurrent benign panics can produce a false crash notice.** [panic_info.rs:83](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/panic_info.rs:83)  
    Thread A can record a broken-pipe panic and pause in the chained hook. Thread B then encounters another benign panic, cannot record because the global slot is occupied, and aborts first. Its thread ID does not match A’s snapshot, so the handler records a raw signal and startup announces a crash. **Fix:** retain independently published per-thread panic classifications using signal-safe storage, and add a synchronized two-thread abort test.
 
 VERDICT: FAIL — Live-session slot protection is violated by age-based cleanup and fork-child reinstallation, with additional retention, symbolication, and classification defects remaining.
@@ -36,23 +36,23 @@ VERDICT: FAIL — Live-session slot protection is violated by age-based cleanup 
 =================== ROUND 2 (29f73e7584eb8ac6 raw-log sha256 prefix) ===================
 Reviewed `e93beb94..c55be6250159`. No files changed. Findings are source-backed; Rust tests and native Windows checks were not rerun.
 
-1. **MEDIUM — Windows address correction remains incomplete.** [symbolicate.rs:134](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:134)  
+1. **MEDIUM — Windows address correction remains incomplete.** [symbolicate.rs:134](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/symbolicate.rs:134)  
    The pinned `backtrace 0.3.76` MSVC backend subtracts once in `address_or_ip()` and again in `resolve_with_inline()`. Consequently, frame 0 resolves at `PC−1`, and return addresses at `RA−2`. A fault at a function entry can still identify the preceding function. I verified the dependency source against the cached crate and Cargo.lock checksum.  
    **Fix:** Correct or compensate for that backend’s adjustment and enable the boundary regression tests on Windows MSVC.
 
-2. **MEDIUM — Sampled fingerprints can falsely establish build identity.** [image.rs:56](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:56)  
+2. **MEDIUM — Sampled fingerprints can falsely establish build identity.** [image.rs:56](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:56)  
    Two executables without build IDs can differ entirely within unsampled regions while retaining identical length, image span and version. Their fingerprints then match deterministically, allowing incorrect symbolication. For example, offset 8192 is unsampled in a 1 MiB executable. The zero-identity rejection is correct, but the fallback reintroduces false confidence.  
    **Fix:** Hash the complete executable, or retain `UnverifiedBuild` when a trustworthy identity is unavailable.
 
-3. **MEDIUM — The entry cap still permits scan starvation.** [lib.rs:300](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:300), also line 259  
+3. **MEDIUM — The entry cap still permits scan starvation.** [lib.rs:300](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:300), also line 259  
    Streaming removes the allocation/sorting problem but does not guarantee progress. If the first 4096 directory entries remain untouched—live slots or unrelated entries—subsequent startups can repeatedly inspect that same prefix and never reach later dead slots. Headless sweeps similarly cannot advance past a prefix of written blobs.  
    **Fix:** Add bounded continuation or partitioning that guarantees eventual coverage; test repeated scans with a non-removable prefix.
 
-4. **MEDIUM — History pruning can invalidate the notice before it is displayed.** [lib.rs:358](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:358)  
+4. **MEDIUM — History pruning can invalidate the notice before it is displayed.** [lib.rs:358](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:358)  
    With one older real crash and ten newer benign crashes, all eleven reports are created and their blobs removed. Pruning then deletes the real crash’s report, but `startup_notice()` still selects it and prints its nonexistent path. `last-crash-report.txt` contains the newer benign report.  
    **Fix:** Coordinate retention with notice selection so every announced report remains available; cover this mixed benign/non-benign backlog.
 
-5. **LOW — Thread-name sanitization preserves private path content.** [panic_info.rs:70](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/panic_info.rs:70)  
+5. **LOW — Thread-name sanitization preserves private path content.** [panic_info.rs:70](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/panic_info.rs:70)  
    Replacing separators is not redaction: the existing test converts `/home/alice/secret\proj` into `_home_alice_secret_proj`, which is subsequently stored. Panic messages and panic locations are not copied, but a strict “no paths stored” guarantee is unsupported; symbolicated reports also retain source filenames.  
    **Fix:** Replace path-like thread names with a fixed label and define/enforce the permitted source-location format.
 
@@ -66,17 +66,17 @@ VERDICT: PASS WITH NOTES — No BLOCKER or HIGH remains, but four MEDIUM defects
 Reviewed `e93beb94..6c14e03a75b9f349175ca3fda49d8077899bff1b` read-only. **Three MEDIUM findings remain; no BLOCKER/HIGH found.** Tests were inspected, not executed.
 
 1. **MEDIUM — Missing Windows identity still permits symbolication.**  
-   [image.rs:299](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:299)  
+   [image.rs:299](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:299)  
    Even when the PE timestamp is zero, `SizeOfImage` populates the identity’s next four bytes. Consequently, `has_identity()` always succeeds for a valid Windows image. Two stamp-less builds with matching version, image size and executable size can pass `same_build()` and produce incorrect symbols. Microsoft documents zero as a nonmeaningful timestamp. [PE specification](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format)  
    **Fix:** Leave the entire identity zero when the stamp is unavailable, unless another verified build identifier exists. Add a regression covering zero timestamp with nonzero image size. **R2-2 remains incomplete.**
 
 2. **MEDIUM — Concurrent startup can delete another startup’s announced report.**  
-   [lib.rs:504](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:504)  
+   [lib.rs:504](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/lib.rs:504)  
    The pruning exemption protects only the current caller’s `keep` vector. With ten newer reports already archived, reader A can write an older backlog report and pause before announcing it. Reader B—even one finding no new crashes—prunes with an empty exemption list and deletes A’s report. A subsequently announces a nonexistent path.  
    **Fix:** Protect newly produced reports across processes, such as through a reader PID/start-token lease checked by pruning. Add a coordinated two-reader regression. The existing test covers only one scan. **R2-4 remains incomplete.**
 
 3. **MEDIUM — Default-on recording bypasses the remote kill switch in actual startup.**  
-   [crash_handler.rs:27](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:27), [main.rs:2055](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-pager-bin/src/main.rs:2055)  
+   [crash_handler.rs:27](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:27), [main.rs:2055](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-pager-bin/src/main.rs:2055)  
    The startup decision reads a process-local remote cache initialized to `None`. Its production setter runs later during agent initialization; subsequent remote updates only change that cache. With no higher-priority override, remote `crash_handler_enabled=false` therefore cannot prevent or stop recording. Changing the default to true exposes this ineffective disable path.  
    **Fix:** Make the remote tier available to the initial decision and apply subsequent effective gate changes to recording, preserving precedence and terminal restoration. Test the actual startup/update path rather than only the pure resolver.
 
@@ -95,12 +95,12 @@ VERDICT: PASS WITH NOTES — No BLOCKER/HIGH remains, but Windows identity valid
 Reviewed `e93beb94..bffd7dad87d78759a1972dcbefe17408169a56be` read-only. **No BLOCKER/HIGH findings; two MEDIUM issues remain.** Tests were inspected, not executed; native Windows results were not independently reproduced.
 
 1. **MEDIUM — Persisting the remote gate can erase an existing kill switch.**  
-   [crash_handler.rs:85](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:85)  
+   [crash_handler.rs:85](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-shell/src/util/config/resolve/crash_handler.rs:85)  
    **Scenario:** An existing `remote-gate` contains `0`. Another session persists `false` again using `std::fs::write`, which truncates before writing. A concurrent startup can read the empty file, resolve the remote tier to `None`, and enable recording through the default. An interrupted or failed write can leave that state permanent until another successful delivery. Rust documents this operation as `File::create` followed by `write_all`. [Rust documentation](https://doc.rust-lang.org/std/fs/fn.write.html)  
    **Fix:** Write a unique temporary sibling completely, then atomically replace the gate. Preserve the previous file on failure. Add coverage for concurrent startup and failed replacement. R3-3 reaches startup correctly, but persistence is not reliably sticky.
 
 2. **MEDIUM — Windows identity still accepts the other invalid PE timestamp.**  
-   [image.rs:304](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:304)  
+   [image.rs:304](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/image.rs:304)  
    **Scenario:** `TimeDateStamp == 0xFFFFFFFF` produces a nonzero identity. Two different binaries carrying this sentinel, with equal version, image size and executable length, can pass `same_build` and receive incorrect symbols. Microsoft identifies both zero and `0xFFFFFFFF` as nonmeaningful timestamps. [PE specification](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#general-concepts)  
    **Fix:** Leave identity zero for both sentinel values; test both through the identity and `UnverifiedBuild` paths. R3-1 correctly handles zero but misses this equivalent case.
 
@@ -127,7 +127,7 @@ VERDICT: PASS WITH NOTES — No BLOCKER/HIGH remains, but remote-gate persistenc
 Reviewed `e93beb94..83dfe5d294d5f7baed2deb366f4dbffcbdc9659d`, read-only.
 
 **HIGH — Fork reinstall briefly authorizes writes into the parent’s slot**  
-[handler.rs:587](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:587)
+[handler.rs:587](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/src/handler.rs:587)
 
 `OWNER_PID.swap(pid, ...)` publishes the child’s PID before `CRASH_FD.swap(fd, ...)` at line 594 replaces the inherited descriptor. Between those operations, the installed handler sees child ownership paired with the parent’s descriptor.
 
@@ -146,7 +146,7 @@ VERDICT: FAIL — A HIGH fork-reinstall ownership race still allows a child cras
 =================== ROUND 6 (b6c07f9ac7ad01f6 raw-log sha256 prefix) ===================
 Reviewed `e93beb94..4244940d093baa6f22a9b583b2c7402648c12165`. No BLOCKER/HIGH remains.
 
-- **LOW — [tests/integration.rs:311](/Volumes/Mando/WaylandBots/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/tests/integration.rs:311): Fork-reinstall coverage can pass without a successful reinstall.** The branch ignores `install()`’s result, exits without crashing, and does not assert the child’s wait status. A regression that disables child installation could therefore pass the parent-slot assertions. **Fix:** assert installation succeeds, crash the reinstalled child, and verify its own blob alongside the untouched parent slot. This is a coverage gap; the R5 handover ordering itself is correct by inspection.
+- **LOW — [tests/integration.rs:311](<project>/Fuigo/wt-p05a/crates/codegen/fuigo-crash-handler/tests/integration.rs:311): Fork-reinstall coverage can pass without a successful reinstall.** The branch ignores `install()`’s result, exits without crashing, and does not assert the child’s wait status. A regression that disables child installation could therefore pass the parent-slot assertions. **Fix:** assert installation succeeds, crash the reinstalled child, and verify its own blob alongside the untouched parent slot. This is a coverage gap; the R5 handover ordering itself is correct by inspection.
 
 Fix verification:
 

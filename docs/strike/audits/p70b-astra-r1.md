@@ -1,13 +1,13 @@
 # P70b Astra round 1 (gpt-6-astra, read-only, codex 0.160)
 
-Raw transcript (1114 KB, not committed): `hetzner-dsm:/root/fuigo-builds/p70b/p70b-astra-r1.raw.txt`, sha256 `cd411e920603515bd0a06ec0f6eab3f6fc865c7b467cecc7ff586cc9247a6b88`.
+Raw transcript (1114 KB, not committed): `hetzner-dsm:<build>/p70b/p70b-astra-r1.raw.txt`, sha256 `cd411e920603515bd0a06ec0f6eab3f6fc865c7b467cecc7ff586cc9247a6b88`.
 
 Audited: `e0145e0f..7bc6912a`. Verdict: **DO-NOT-LAND** (10 HIGH, 4 MEDIUM). What was done per finding: receipt R088 §5.
 
 ## Brief
 
 ```
-Independent audit, round 1, of Fuigo packet P70b. Repo: /Volumes/Mando/WaylandBots/Fuigo/wt-p70b (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p70b, HEAD 7bc6912a. Audit `git diff e0145e0f..7bc6912a` (parent e0145e0f = strike/integration).
+Independent audit, round 1, of Fuigo packet P70b. Repo: <project>/Fuigo/wt-p70b (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p70b, HEAD 7bc6912a. Audit `git diff e0145e0f..7bc6912a` (parent e0145e0f = strike/integration).
 
 Threat: an upstream (model provider or proxy) echoes a credential the client sent back inside its error text, and that text is shown to the user, written to a log, or exported as telemetry. Sean accepted this design ("option A"); audit the code against it, not against a different design:
  (1) CLASSIFY FIRST: nothing is scrubbed before the error is classified. The sampler and the shell decide retry/compact/strip-images/re-auth/friendly-message on the error text exactly as it arrived; SamplingError and the in-process SamplingErrorInfo keep raw text.

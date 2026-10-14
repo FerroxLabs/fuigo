@@ -28,7 +28,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Two defects remain in `a84e3234..faad5ce7`. This was a read-only source audit; no Cargo commands or tests were run, and the worktree remains clean.
 
 1. **HIGH — Escaped hook modifier forms still receive the saved key.**  
-   [credential_env.rs:119](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:119), [env_expand.rs:69](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:69).
+   [credential_env.rs:119](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:119), [env_expand.rs:69](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:69).
 
    The mask recognizes only plain references, whereas hook detection also recognizes modifier, length and indirection forms. For example:
    ```toml
@@ -39,7 +39,7 @@ Two defects remain in `a84e3234..faad5ce7`. This was a read-only source audit; n
    **Existing tests do not catch this.** Parser/runner tests cover escaped plain references. The detector test checks `$${#FUIGO_API_KEY}` directly, bypassing the parser that changes it. This leaves F0c/F0d incomplete.
 
 2. **MEDIUM — A fixed-marker collision disables escape protection.**  
-   [credential_env.rs:109](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:109).
+   [credential_env.rs:109](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:109).
 
    If an input contains `ESCAPED_DOLLAR_MASK`, masking returns `None` and normal expansion proceeds. A concrete MCP configuration is:
    ```toml

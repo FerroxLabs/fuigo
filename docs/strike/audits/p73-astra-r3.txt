@@ -9,7 +9,7 @@ Audited `48886772..56eb821643539757cb1cf3f02c91ffa224f3b1ab` read-only. No Cargo
 
 **BLOCKER/HIGH: none found**, including in the remaining diff.
 
-**LOW — Documented limitation remains:** [theme_pin_guard_tests.rs:32](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:32) still misses this unpinned mutation:
+**LOW — Documented limitation remains:** [theme_pin_guard_tests.rs:32](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:32) still misses this unpinned mutation:
 
 ```rust
 use crate::theme::cache::set;
@@ -25,10 +25,10 @@ Line 12 accurately documents this limitation. R2’s finding is acknowledged, no
 
 The other four R2 findings are closed by inspection:
 
-- **MEDIUM, attribute/module discovery:** [theme_pin_guard_tests.rs:246](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:246) records complete attribute spans. Backward traversal crosses multiline attributes, and module discovery skips intervening comments.
-- **LOW, raw byte strings:** [theme_pin_guard_tests.rs:99](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:99) recognizes `br#…#`, including R2’s embedded-quote examples. Their contents no longer grant locks or fabricate mutations.
-- **LOW, string opt-outs:** [theme_pin_guard_tests.rs:443](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:443) searches the comment-only view; `"theme-pin:"` cannot exempt a mutation.
-- **LOW, dashboard serialization:** [theme_pin_guard_tests.rs:377](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:377) matches exact comma-separated keys in direct serial attributes. Multiple keys work; other keys and `cfg_attr` wrappers do not qualify.
+- **MEDIUM, attribute/module discovery:** [theme_pin_guard_tests.rs:246](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:246) records complete attribute spans. Backward traversal crosses multiline attributes, and module discovery skips intervening comments.
+- **LOW, raw byte strings:** [theme_pin_guard_tests.rs:99](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:99) recognizes `br#…#`, including R2’s embedded-quote examples. Their contents no longer grant locks or fabricate mutations.
+- **LOW, string opt-outs:** [theme_pin_guard_tests.rs:443](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:443) searches the comment-only view; `"theme-pin:"` cannot exempt a mutation.
+- **LOW, dashboard serialization:** [theme_pin_guard_tests.rs:377](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:377) matches exact comma-separated keys in direct serial attributes. Multiple keys work; other keys and `cfg_attr` wrappers do not qualify.
 
 No new panic or nontermination path found: both views preserve line counts, function endpoints stay within those counts, empty input never reaches `len() - 1`, and every parser loop makes strict progress. No new HIGH span-end defect found. The remaining source changes are unchanged since R2; reviewing the cache publication, worker split and test changes supplied no reason to elevate them to HIGH.
 

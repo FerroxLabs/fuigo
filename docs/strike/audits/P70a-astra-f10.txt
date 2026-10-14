@@ -32,20 +32,20 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..5a1cccee01fa19a62c073e5bc45ba2560714ad4a` read-only. No Cargo, test execution, or file modifications.
 
 1. **HIGH — HTTP-hook hostname expansion leaks the saved key through dependency logging.**  
-   [runner/http.rs:210](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:210)
+   [runner/http.rs:210](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:210)
 
    Configure `https://${FUIGO_API_KEY}.hooks.example/check`, with a DNS-compatible saved key and wildcard DNS resolving to an allowed address. Enable `FUIGO_LOG_FILE` with DEBUG logging. After validation, the resolved URL reaches Reqwest’s connector, whose pinned version logs `starting new connection: {dst:?}` at [connect.rs:882](~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/reqwest-0.12.24/src/connect.rs:882). The connection destination contains the key-bearing hostname. Successful TLS is unnecessary.
 
-   `hide_first_party_key` protects Fuigo’s own records, but cannot affect this dependency event. The [file logging filter](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-telemetry/src/debug_log.rs:94) permits DEBUG; the global exclusion covers ACP raw-wire logging only.
+   `hide_first_party_key` protects Fuigo’s own records, but cannot affect this dependency event. The [file logging filter](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-telemetry/src/debug_log.rs:94) permits DEBUG; the global exclusion covers ACP raw-wire logging only.
 
    **Existing tests do not catch it:** the HTTP-hook record tests use blocked private addresses or `.invalid` hosts, stopping before the connector. They inspect returned records rather than captured dependency logs. This needs a regression that reaches the connector and captures the production logging path.
 
 2. **LOW — The documented literal escape is incorrect inside hook commands.**  
-   [02-authentication.md:169](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:169)
+   [02-authentication.md:169](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:169)
 
    The unconditional instruction to write `$${FUIGO_API_KEY}` to send literal `${FUIGO_API_KEY}` does not hold for a shell hook command. For example, `printf '%s' "$${FUIGO_API_KEY}"` produces `<shell-PID>{FUIGO_API_KEY}` because the preserved `$$` reaches `sh`. The key remains protected, but the documented output is wrong. Qualify this instruction by destination.
 
-   **Existing tests do not flag the documentation mismatch:** the [parsed-hook test](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:2098) explicitly accepts the PID-prefixed result.
+   **Existing tests do not flag the documentation mismatch:** the [parsed-hook test](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:2098) explicitly accepts the PID-prefixed result.
 
 The inspected resolver and spawn paths support the agent-environment isolation claim. The remaining HIGH concerns logging after destination resolution, outside the stated composition limits.
 

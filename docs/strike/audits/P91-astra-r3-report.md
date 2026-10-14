@@ -1,16 +1,16 @@
 Reviewed `fc3ccb94..c84b4c08` read-only. **Two HIGH and two MEDIUM findings remain.** No Cargo or native tests were run. Findings follow from production-path tracing; an in-memory string model also confirmed finding 2.
 
 1. **HIGH — Pre-P91 compaction memory survives invalidation and `--no-memory`.**  
-   [memory_context.rs:283](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:283)
+   [memory_context.rs:283](<project>/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:283)
 
-   Legacy recognition runs only for `System` items. Synthetic user items pass through the nonce-only stripper. However, the pre-P91 compaction path inserted bare-tagged memory inside a synthetic system reminder: [compaction_context.rs:296](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/compaction_context.rs:296) → [compaction_utils.rs:1069](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-chat-state/src/compaction_utils.rs:1069).
+   Legacy recognition runs only for `System` items. Synthetic user items pass through the nonce-only stripper. However, the pre-P91 compaction path inserted bare-tagged memory inside a synthetic system reminder: [compaction_context.rs:296](<project>/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/compaction_context.rs:296) → [compaction_utils.rs:1069](<project>/Fuigo/wt-p91/crates/codegen/fuigo-chat-state/src/compaction_utils.rs:1069).
 
    **Scenario:** Compact before upgrading, then resume under P91 after deleting the recalled source—or with `--no-memory`. The persisted compaction reminder retains the recalled facts without validation. Removing the leading system message’s memory block does not remove this second copy.
 
    **Existing tests:** Do not catch it. `legacy_shapes_elsewhere_are_kept` explicitly asserts preservation of legacy memory in a synthetic reminder. The compaction-item removal test uses the new nonced formatter.
 
 2. **HIGH — An old header inside a recalled snippet causes partial removal, leaving stale facts permanently unrecognizable.**  
-   [memory_context.rs:208](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:208)
+   [memory_context.rs:208](<project>/Fuigo/wt-p91/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:208)
 
    The rightmost-opening search also accepts an opening/header sequence occurring **inside** the old block’s snippet:
 
@@ -27,7 +27,7 @@ Reviewed `fc3ccb94..c84b4c08` read-only. **Two HIGH and two MEDIUM findings rema
    **Existing tests:** Do not catch it. Despite its comment claiming coverage of a copied header, `legacy_tail_with_tag_literals_inside_is_still_recognised` uses `"not a header"` inside the snippet. The in-memory model confirmed both retained facts and failure of subsequent recognition.
 
 3. **MEDIUM — An equivalent-URL starter can bypass the migration lock and strand legacy memory.**  
-   [storage.rs:1063](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-memory/src/storage.rs:1063)
+   [storage.rs:1063](<project>/Fuigo/wt-p91/crates/codegen/fuigo-memory/src/storage.rs:1063)
 
    Lock acquisition happens only when the caller’s particular legacy directory exists. Origins ending in `widgets.git/` and `widgets.git` resolve to the same new directory but different legacy directories.
 
@@ -36,7 +36,7 @@ Reviewed `fc3ccb94..c84b4c08` read-only. **Two HIGH and two MEDIUM findings rema
    **Existing tests:** Do not catch it. The concurrent test uses one origin and temporary workspaces. Those workspaces are classified as ephemeral, so `ensure_initialized()` skips the destination creation central to the original race. Consequently, that fixture does not reliably protect against reverting the lock either.
 
 4. **MEDIUM — Migration does not coordinate with still-running pre-P91 sessions.**  
-   [storage.rs:1138](/Volumes/Mando/WaylandBots/Fuigo/wt-p91/crates/codegen/fuigo-memory/src/storage.rs:1138)
+   [storage.rs:1138](<project>/Fuigo/wt-p91/crates/codegen/fuigo-memory/src/storage.rs:1138)
 
    The new migration lock coordinates new migrators only. Existing pre-P91 actors retain the old storage paths and do not acquire it.
 

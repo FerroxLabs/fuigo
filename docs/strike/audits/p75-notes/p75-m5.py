@@ -1,5 +1,5 @@
-exec(open('/root/fuigo-builds/p75/mutants.py').read().split('M=[')[0])
-M=[("MU11","crates/codegen/fuigo-shared/Cargo.toml",'wayland-backend = { workspace = true, features = ["log"] }','wayland-backend = { workspace = true }',["/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test -p fuigo-pager-bin --test dead_output_sweep"])]
+exec(open('<build>/p75/mutants.py').read().split('M=[')[0])
+M=[("MU11","crates/codegen/fuigo-shared/Cargo.toml",'wayland-backend = { workspace = true, features = ["log"] }','wayland-backend = { workspace = true }',["<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test -p fuigo-pager-bin --test dead_output_sweep"])]
 only=sys.argv[1:]
 log("### mutants at %s"%sh("git rev-parse HEAD")[1].strip())
 for mid,f,old,new,cmds in M:

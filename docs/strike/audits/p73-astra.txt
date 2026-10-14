@@ -7,8 +7,8 @@ Round 5 audit (confirmation). Worktree at your cwd (read-only), HEAD vs base `st
 ## FINAL ANSWER
 Audited `strike/p73-base..c226b6cc3765c0f940d05124e740820af485ae6b` read-only. No Cargo or Rust tests run; the Hetzner results are user-supplied evidence.
 
-- **BLOCKER/HIGH:** None found. R4’s HIGH is closed: [theme_pin_guard_tests.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) excludes instance `.set(...)` calls while retaining bare setters; the regression at line 611 covers this distinction. Searching all three crates found no sibling false-positive call among the remaining mutator tokens. The unrelated appearance-cache setter retains its exemption.
-- **LOW — Existing coverage limitation:** [theme_pin_guard_tests.rs:193](/Volumes/Mando/WaylandBots/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) still misses a directly imported `set(kind)` with a variable argument. This is documented and unchanged in practical scope.
+- **BLOCKER/HIGH:** None found. R4’s HIGH is closed: [theme_pin_guard_tests.rs:193](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) excludes instance `.set(...)` calls while retaining bare setters; the regression at line 611 covers this distinction. Searching all three crates found no sibling false-positive call among the remaining mutator tokens. The unrelated appearance-cache setter retains its exemption.
+- **LOW — Existing coverage limitation:** [theme_pin_guard_tests.rs:193](<project>/Fuigo/wt-p73/crates/codegen/fuigo-pager/src/theme_pin_guard_tests.rs:193) still misses a directly imported `set(kind)` with a variable argument. This is documented and unchanged in practical scope.
 
 `KindCell` retains serialized publication, unlocked loading, and the second loaded check that prevents stale seeds overwriting setters. Reset never makes the published cell unloaded. Current production callbacks do not re-enter the publication mutex; arbitrary callback re-entry remains unsupported.
 

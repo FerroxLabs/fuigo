@@ -1,13 +1,13 @@
-# Astra round 3 — final report (verbatim; full transcript: Hetzner /root/fuigo-builds/p87/astra/P87-astra-r3-report.txt, sha256 b1b41a241e0e1dbea0e0eddb511af458c118c6e8fe3b2a950e151ac9efc48eb2)
+# Astra round 3 — final report (verbatim; full transcript: Hetzner <build>/p87/astra/P87-astra-r3-report.txt, sha256 b1b41a241e0e1dbea0e0eddb511af458c118c6e8fe3b2a950e151ac9efc48eb2)
 
 Reviewed `84569ea8..34a404c3` on `strike/p87`. **No BLOCKER/HIGH defect or new production bypass found.** Read-only inspection only; no builds, tests, mutations, or edits performed.
 
 1. **MEDIUM — Retained compatibility restriction: split-host IdPs cannot refresh.**  
-   [oidc_provider.rs:85](/Volumes/Mando/WaylandBots/Fuigo/wt-p87/crates/common/fuigo-computer-hub-sdk/src/oidc_provider.rs:85).  
-   Google publishes issuer `accounts.google.com` and token endpoint `oauth2.googleapis.com`; this check therefore rejects its refresh endpoint. [Google discovery metadata](https://accounts.google.com/.well-known/openid-configuration). Hub authentication eventually loses validity when the stored access token expires. **Tests enforce this restriction:** the helper and both refresh-path tests reject foreign origins. This remains intentional under the supplied brief, and the [user guide now documents it](/Volumes/Mando/WaylandBots/Fuigo/wt-p87/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:190). Retain the product-owner follow-up.
+   [oidc_provider.rs:85](<project>/Fuigo/wt-p87/crates/common/fuigo-computer-hub-sdk/src/oidc_provider.rs:85).  
+   Google publishes issuer `accounts.google.com` and token endpoint `oauth2.googleapis.com`; this check therefore rejects its refresh endpoint. [Google discovery metadata](https://accounts.google.com/.well-known/openid-configuration). Hub authentication eventually loses validity when the stored access token expires. **Tests enforce this restriction:** the helper and both refresh-path tests reject foreign origins. This remains intentional under the supplied brief, and the [user guide now documents it](<project>/Fuigo/wt-p87/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:190). Retain the product-owner follow-up.
 
 2. **LOW — New module documentation incorrectly prohibits every query string.**  
-   [subscription.rs:5](/Volumes/Mando/WaylandBots/Fuigo/wt-p87/crates/codegen/fuigo-extra-ca/src/subscription.rs:5).  
+   [subscription.rs:5](<project>/Fuigo/wt-p87/crates/codegen/fuigo-extra-ca/src/subscription.rs:5).  
    The new description says “no … query,” but `https://chatgpt.com/backend-api/codex/models?client_version=1.0.5` is intentionally accepted; that endpoint requires the narrowly validated `client_version` parameter. Following the blanket description would produce a rejected catalogue request. **The existing `subscription_catalog_allows_only_required_client_version` test pins the correct behavior, but does not catch the inaccurate prose.** Document this exception.
 
 All prior-round corrective responses are present and supported by source inspection:

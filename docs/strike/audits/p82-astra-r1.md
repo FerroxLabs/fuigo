@@ -1,11 +1,11 @@
 # P82 Astra round 1 (gpt-6-astra, read-only, codex 0.160)
 
-Raw transcript (790 KB, not committed): `hetzner-dsm:/root/fuigo-builds/p82/p82-astra-r1.raw.txt`, sha256 `3756345e9cd316a549f078a8b8d65983c185eec16ad068641c9615a02d0e907d`.
+Raw transcript (790 KB, not committed): `hetzner-dsm:<build>/p82/p82-astra-r1.raw.txt`, sha256 `3756345e9cd316a549f078a8b8d65983c185eec16ad068641c9615a02d0e907d`.
 
 ## Brief
 
 ```
-Independent audit, round 1, of Fuigo packet P82. Repo: /Volumes/Mando/WaylandBots/Fuigo/wt-p82 (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p82, HEAD f2eb90c6. Audit `git diff a31a24c2..f2eb90c6` (two commits: 07d26ab5 relay credentials, f2eb90c6 agent serve secret compare). Parent a31a24c2 is packet P81 (on P77, on integration 8b1a0192); P77/P81 are the identity filter in agent/relay.rs (relay_outbound_frame) and are context, not under audit, except where P82 interacts with them.
+Independent audit, round 1, of Fuigo packet P82. Repo: <project>/Fuigo/wt-p82 (read-only; do NOT run cargo or any build; do NOT read docs/strike/audits/). Branch strike/p82, HEAD f2eb90c6. Audit `git diff a31a24c2..f2eb90c6` (two commits: 07d26ab5 relay credentials, f2eb90c6 agent serve secret compare). Parent a31a24c2 is packet P81 (on P77, on integration 8b1a0192); P77/P81 are the identity filter in agent/relay.rs (relay_outbound_frame) and are context, not under audit, except where P82 interacts with them.
 
 Rule: a credential (session bearer, API key, environment secrets, anything docs/destination-trust-policy.md classes as a credential) is handed over the relay bridge only to a FluxRouter-operated relay, decided on the URL the relay socket is opened to (fuigo_extra_ca::fluxrouter::IdentityDisclosure::for_websocket_destination: wss to the FluxRouter API host). A FluxRouter relay must receive byte for byte what it received before, and its messages must reach the agent byte for byte as before. Local stdio / IPC clients must be byte-for-byte unchanged.
 
@@ -42,7 +42,7 @@ Verified checkout: `strike/p82`, `f2eb90c656c01afe192a3be84fb650bd27cb8a35`. Rev
 
 **A. Enumeration**
 
-**HIGH — Hook credentials remain exposed.** [extensions/hooks.rs:85](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/hooks.rs:85) chooses `command_raw`/`url_raw`, falling back to resolved values, and copies them into `HookInfo` without credential redaction.
+**HIGH — Hook credentials remain exposed.** [extensions/hooks.rs:85](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/hooks.rs:85) chooses `command_raw`/`url_raw`, falling back to resolved values, and copies them into `HookInfo` without credential redaction.
 
 Concrete scenario: an existing HTTP hook uses:
 
@@ -56,7 +56,7 @@ A non-FluxRouter relay requests `_fuigo/hooks/list` for that session. The respon
 result.result.hooks[].url
 ```
 
-The handler is [extensions/hooks.rs:245](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/hooks.rs:245). The same DTO is emitted on hook reload through [hooks_plugins.rs:979](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session_impl/hooks_plugins.rs:979), with the actual notification method established at [updates.rs:1116](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session_impl/updates.rs:1116):
+The handler is [extensions/hooks.rs:245](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/hooks.rs:245). The same DTO is emitted on hook reload through [hooks_plugins.rs:979](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session_impl/hooks_plugins.rs:979), with the actual notification method established at [updates.rs:1116](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session_impl/updates.rs:1116):
 
 ```text
 _fuigo/session_notification
@@ -75,15 +75,15 @@ The resulting inventory is:
 
 | Producer | Wire path | Value delivered before relay filtering / P82 treatment |
 |---|---|---|
-| [auth.rs:47](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/auth.rs:47), `getBearerToken` | `result.result.token` | Real session/static credential, or null; runtime-authentication key excluded by producer. P82 covers it. |
-| [auth.rs:67](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/auth.rs:67), `getApiKey` | `result.result.key` | Real environment key, including legacy fallback, or null. P82 covers it. |
-| [acp_agent.rs:2389](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:2389), cloud list/create/update | `result.environments[].secrets[].value`; `result.environment.secrets[].value` | Backend-provided values; type explicitly permits real or redacted values. P82 removes either. |
-| [mcp.rs:480](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/mcp.rs:480), MCP list/catalog notification | `result.result.servers[].env[].value`; `params.mcpServers[].env[].value` | Real resolved stdio environment values. P82 covers them. |
+| [auth.rs:47](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/auth.rs:47), `getBearerToken` | `result.result.token` | Real session/static credential, or null; runtime-authentication key excluded by producer. P82 covers it. |
+| [auth.rs:67](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/auth.rs:67), `getApiKey` | `result.result.key` | Real environment key, including legacy fallback, or null. P82 covers it. |
+| [acp_agent.rs:2389](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:2389), cloud list/create/update | `result.environments[].secrets[].value`; `result.environment.secrets[].value` | Backend-provided values; type explicitly permits real or redacted values. P82 removes either. |
+| [mcp.rs:480](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/mcp.rs:480), MCP list/catalog notification | `result.result.servers[].env[].value`; `params.mcpServers[].env[].value` | Real resolved stdio environment values. P82 covers them. |
 | Hook list/change notification, above | `result.result.hooks[].{url,command}`; `params.update.hooks[].{url,command}` | Literal credentials remain real; unfiltered. |
-| [prompt_history.rs:91](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/prompt_history.rs:91) | `result.prompts[]` | Stored prompt text, unredacted here. A previously pasted credential can be returned without running a tool. |
-| [session/acp_mcp.rs:83](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_mcp.rs:83), reverse SDK request | `_fuigo/mcp/sdk_call`, `params.message` | Actual MCP message, including tool arguments; no general credential scrub. |
-| [session/acp_session/hooks.rs:526](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session/hooks.rs:526), reverse hook request/event | `_fuigo/hooks/run` / `_fuigo/hooks/event`, flattened `params.toolInput` / `params.toolResult`, where applicable | Actual tool content, potentially credential-bearing; no P82 protection at these paths. |
-| [acp_agent.rs:498](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:498), initialize | `result._meta.metadata` | Parsed `FUIGO_AGENT_METADATA` object, unredacted. Conditional content surface, not an automatic auth-store export. |
+| [prompt_history.rs:91](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/extensions/prompt_history.rs:91) | `result.prompts[]` | Stored prompt text, unredacted here. A previously pasted credential can be returned without running a tool. |
+| [session/acp_mcp.rs:83](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_mcp.rs:83), reverse SDK request | `_fuigo/mcp/sdk_call`, `params.message` | Actual MCP message, including tool arguments; no general credential scrub. |
+| [session/acp_session/hooks.rs:526](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/session/acp_session/hooks.rs:526), reverse hook request/event | `_fuigo/hooks/run` / `_fuigo/hooks/event`, flattened `params.toolInput` / `params.toolResult`, where applicable | Actual tool content, potentially credential-bearing; no P82 protection at these paths. |
+| [acp_agent.rs:498](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/mvp_agent/acp_agent.rs:498), initialize | `result._meta.metadata` | Parsed `FUIGO_AGENT_METADATA` object, unredacted. Conditional content surface, not an automatic auth-store export. |
 
 Prompt/history/tool payloads are **conditional content carriers**, not additional dedicated credential getters. They establish that the blanket statement “a non-FluxRouter relay is never handed a credential” is stronger than this implementation.
 
@@ -117,12 +117,12 @@ Other seams:
 
 - `declare_relay_client_capabilities` only adjusts `initialize` capabilities; it cannot turn a permitted method into a credential getter.
 - Text-frame errors are handled before the gate: authentication errors end the session for recovery; other errors are skipped. Binary behavior remains different, but a binary message with a blocked method is still refused.
-- Relay sync’s [sync.rs:541](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/relay/sync.rs:541) answers its own initialize handshake and does not dispatch arbitrary requests to `MvpAgent`.
+- Relay sync’s [sync.rs:541](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/relay/sync.rs:541) answers its own initialize handshake and does not dispatch arbitrary requests to `MvpAgent`.
 - The destination decision and connection use the same `config.ws_url`. The proxy path wraps the tunnel in TLS for the target hostname.
 
 **FluxRouter compatibility:** P82 preserves the previous text branch, including its pre-existing newline trimming and initialize-capability rewrite. Binary handling remains the previous branch. Outbound filtering returns the original string immediately.
 
-**Local compatibility:** [app.rs:984](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/app.rs:984) sends separate copies to relay and IPC; relay filtering cannot mutate the IPC copy. The real-agent test exercises a reconstructed bridge, not the actual leader server/IPC implementation. Source inspection supports preservation; I did not independently execute it.
+**Local compatibility:** [app.rs:984](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/app.rs:984) sends separate copies to relay and IPC; relay filtering cannot mutate the IPC copy. The real-agent test exercises a reconstructed bridge, not the actual leader server/IPC implementation. Source inspection supports preservation; I did not independently execute it.
 
 **C. Response backstop**
 
@@ -143,7 +143,7 @@ Two qualifications matter:
 1. **“Output always valid JSON” is not a filter guarantee.** The fast path intentionally passes `"not json"` unchanged, and a test requires that behavior. Valid producer frames remain valid after rewriting; undecidable inspected frames become the empty sentinel and are not written.
 2. Unrelated raw **values** survive rewriting, but visited object formatting/key escapes can be normalized. Entire untouched frames remain byte-for-byte unchanged.
 
-P82 runs before P81 at [relay.rs:566](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay.rs:566). An empty fail-closed result remains empty and the writer skips it. P81 cannot restore removed credentials.
+P82 runs before P81 at [relay.rs:566](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay.rs:566). An empty fail-closed result remains empty and the writer skips it. P81 cannot restore removed credentials.
 
 **D. `agent serve`**
 
@@ -152,18 +152,18 @@ The changed comparison is functionally correct on inspection:
 - Both header and query authentication call `secret_matches`.
 - An empty configured secret rejects everyone.
 - A recognized Bearer header retains precedence over a query key.
-- The handler authenticates before WebSocket upgrade at [server.rs:142](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:142).
+- The handler authenticates before WebSocket upgrade at [server.rs:142](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:142).
 - I found no unauthenticated route to credential methods. Once authenticated, this server intentionally grants local-client capabilities, including the getters.
 
-The implementation hashes both strings and folds across all 32 digest bytes. **LOW documentation overclaim:** [server.rs:120](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:120) says timing does not depend on secret length; hashing work does depend on input length. Source inspection also does not establish compiler-level constant-time behavior.
+The implementation hashes both strings and folds across all 32 digest bytes. **LOW documentation overclaim:** [server.rs:120](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:120) says timing does not depend on secret length; hashing work does depend on input length. Source inspection also does not establish compiler-level constant-time behavior.
 
 Remaining transport issues are pre-existing:
 
 | Severity | Evidence and concrete scenario | P82 tests |
 |---|---|---|
-| HIGH when exposed across an untrusted network | [server.rs:630](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:630): plain HTTP/WebSocket listener. An observer who captures authentication can obtain full agent access. Default binding is loopback. | Not tested |
-| MEDIUM | [main.rs:172](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-pager-bin/src/main.rs:172): startup prints the secret and credential-bearing URL. Query authentication can propagate the reusable secret into copied URLs or request logs. | Not tested |
-| MEDIUM | [cli.rs:387](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-pager/src/app/cli.rs:387): first 12 UUID hex characters give 48 random bits. No authentication rate limiter is installed in this router. This is limited brute-force margin, not a demonstrated practical online bypass. | Not tested |
+| HIGH when exposed across an untrusted network | [server.rs:630](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:630): plain HTTP/WebSocket listener. An observer who captures authentication can obtain full agent access. Default binding is loopback. | Not tested |
+| MEDIUM | [main.rs:172](<project>/Fuigo/wt-p82/crates/codegen/fuigo-pager-bin/src/main.rs:172): startup prints the secret and credential-bearing URL. Query authentication can propagate the reusable secret into copied URLs or request logs. | Not tested |
+| MEDIUM | [cli.rs:387](<project>/Fuigo/wt-p82/crates/codegen/fuigo-pager/src/app/cli.rs:387): first 12 UUID hex characters give 48 random bits. No authentication rate limiter is installed in this router. This is limited brute-force margin, not a demonstrated practical online bypass. | Not tested |
 
 **E. Surviving behavioral mutations**
 
@@ -171,13 +171,13 @@ An exhaustive list of *every possible* mutation is not supportable without a def
 
 | Severity if introduced | Mutation and location | Why the tests would miss it |
 |---|---|---|
-| MEDIUM | Add `if presented != expected_secret { return false; }` before hashing at [server.rs:124](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:124). | Functional outcomes remain identical. The source pin rejects `==` spellings, not `!=`; the pinned digest/fold remains present. This reintroduces an ordinary early comparison. |
-| HIGH | Exempt duplicate `params`, `servers`, or `environments` keys from rejection at [relay_credentials.rs:156](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:156). | Those duplicate spellings are absent from the fixtures. A credential-bearing first occurrence followed by an empty last occurrence can produce “unchanged,” returning the original leaking frame. |
-| HIGH | Limit MCP server lists or individual `env` lists to two inspected entries at [relay_credentials.rs:209](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:209). | MCP fixtures reach two servers/two environment entries, not a credential in a third entry. Cloud-list coverage does not close a list-specific mutation. |
-| LOW | Strip at most two leading underscores at [relay_credentials.rs:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:55). | Tests cover zero, one and two prefixes. Three would be forwarded, violating the gate contract, although ACP would not route that spelling to the getter. |
+| MEDIUM | Add `if presented != expected_secret { return false; }` before hashing at [server.rs:124](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:124). | Functional outcomes remain identical. The source pin rejects `==` spellings, not `!=`; the pinned digest/fold remains present. This reintroduces an ordinary early comparison. |
+| HIGH | Exempt duplicate `params`, `servers`, or `environments` keys from rejection at [relay_credentials.rs:156](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:156). | Those duplicate spellings are absent from the fixtures. A credential-bearing first occurrence followed by an empty last occurrence can produce “unchanged,” returning the original leaking frame. |
+| HIGH | Limit MCP server lists or individual `env` lists to two inspected entries at [relay_credentials.rs:209](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:209). | MCP fixtures reach two servers/two environment entries, not a credential in a third entry. Cloud-list coverage does not close a list-specific mutation. |
+| LOW | Strip at most two leading underscores at [relay_credentials.rs:55](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay_credentials.rs:55). | Tests cover zero, one and two prefixes. Three would be forwarded, violating the gate contract, although ACP would not route that spelling to the getter. |
 | MEDIUM | Drop ordinary objects containing `error` in `gate_relay_message` at line 90. | Gate tests’ “responses and errors” section actually supplies result responses. Socket fixtures contain no binary reverse-RPC error. Text errors already take another path. |
-| MEDIUM | Fail to terminate the binary reader when `to_agent_tx.send` fails at [relay.rs:865](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay.rs:865). | Tests keep the agent receiver alive; they do not exercise this new shutdown branch. |
-| LOW | Reject query authentication whenever any Authorization header exists at [server.rs:104](/Volumes/Mando/WaylandBots/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:104). | No case combines a malformed/non-Bearer header with a correct query. Current behavior permits that fallback. |
+| MEDIUM | Fail to terminate the binary reader when `to_agent_tx.send` fails at [relay.rs:865](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/relay.rs:865). | Tests keep the agent receiver alive; they do not exercise this new shutdown branch. |
+| LOW | Reject query authentication whenever any Authorization header exists at [server.rs:104](<project>/Fuigo/wt-p82/crates/codegen/fuigo-shell/src/agent/server.rs:104). | No case combines a malformed/non-Bearer header with a correct query. Current behavior permits that fallback. |
 | LOW | Accept trailing whitespace by normalizing inputs before the pinned digest statements at `server.rs:124`. | Wrong-input tests include leading whitespace, not trailing whitespace. The hashing source pin would remain satisfied. |
 
 Conversely, the tests do catch removing either gate, removing any listed withholding path, broad first-party withholding, forwarding positional arrays, common escape/duplicate bypasses, and replacing the multi-location traversal with short-circuiting logic.

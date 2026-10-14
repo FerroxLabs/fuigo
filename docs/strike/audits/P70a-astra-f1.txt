@@ -24,30 +24,30 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Audited `a84e3234..5c03f2cb`. No Cargo or tests run; no files modified. Findings are based on source tracing.
 
 1. **HIGH — Expanded MCP credentials reach persistent diagnostics.**  
-   The new expansion at [loader.rs:722](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/loader.rs:722) feeds saved keys into MCP arguments and URLs. [mcp_target_str:5537](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5537) returns arguments joined verbatim, or the complete HTTP URL. [mcp.rs:1638](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/session/acp_session_impl/mcp.rs:1638) persists that target in `events.jsonl`.
+   The new expansion at [loader.rs:722](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/loader.rs:722) feeds saved keys into MCP arguments and URLs. [mcp_target_str:5537](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:5537) returns arguments joined verbatim, or the complete HTTP URL. [mcp.rs:1638](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/session/acp_session_impl/mcp.rs:1638) persists that target in `events.jsonl`.
 
-   **Scenario:** `args = ["--api-key", "${FUIGO_API_KEY}"]` or `url = "https://example.com/mcp?key=${FUIGO_API_KEY}"`. Starting the server records the saved key outside its authorized destination. OAuth discovery timeout also logs and persists the complete URL at [servers.rs:2271](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:2271).
+   **Scenario:** `args = ["--api-key", "${FUIGO_API_KEY}"]` or `url = "https://example.com/mcp?key=${FUIGO_API_KEY}"`. Starting the server records the saved key outside its authorized destination. OAuth discovery timeout also logs and persists the complete URL at [servers.rs:2271](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-mcp/src/servers.rs:2271).
 
    **Existing tests:** Do not catch this. The new conformance test uses MCP env/header credentials and does not check this test’s persistent diagnostics. The existing timeout test checks event types, not credential redaction.
 
 2. **HIGH — HTTP-hook URL credentials remain exposed through Debug and errors.**  
-   [result.rs:109](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/result.rs:109) uses `redact_url`, which preserves paths, hosts and query parameter names.
+   [result.rs:109](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/result.rs:109) uses `redact_url`, which preserves paths, hosts and query parameter names.
 
    **Scenario:** `https://10.0.0.1/hook/${FUIGO_API_KEY}` expands successfully before SSRF rejection; formatting the returned `HttpInfo` prints the saved key in the path.
 
-   There is also an actual log/wire path: `https://${FUIGO_API_KEY}.invalid/hook`, with a DNS-compatible key, reaches [http.rs:108](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:108). DNS failure includes the expanded hostname in `reason`, which is logged and returned at [http.rs:191](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:191), then copied into ACP hook notifications at [hook_dispatch.rs:162](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/session/acp_session_impl/hook_dispatch.rs:162).
+   There is also an actual log/wire path: `https://${FUIGO_API_KEY}.invalid/hook`, with a DNS-compatible key, reaches [http.rs:108](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:108). DNS failure includes the expanded hostname in `reason`, which is logged and returned at [http.rs:191](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/http.rs:191), then copied into ACP hook notifications at [hook_dispatch.rs:162](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-shell/src/session/acp_session_impl/hook_dispatch.rs:162).
 
    **Existing tests:** Do not catch either case. The added HTTP-hook test checks only a query **value**, using an IP address and the SSRF-block path.
 
 3. **MEDIUM — Hook reference detection misses valid explicit references.**  
-   [env_expand.rs:247](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:247) reuses an iterator that consumes an entire braced expression without inspecting nested references.
+   [env_expand.rs:247](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/env_expand.rs:247) reuses an iterator that consumes an entire braced expression without inspecting nested references.
 
    **Scenario:** With `OVERRIDE` unset, `command = 'my-hook --key "${OVERRIDE:-$FUIGO_API_KEY}"'` explicitly references the key, but detection sees only `OVERRIDE`. No key is injected, preflight skips the modifier expression, and the hook receives an empty argument. `${#FUIGO_API_KEY}` is also missed because the iterator reports an empty variable name. F3’s “any form” claim is false.
 
    **Existing tests:** Do not catch this; the added command cases use plain references. Existing iterator tests document nesting behavior without testing its new use for credential injection.
 
 4. **LOW — Documentation gives an ineffective workaround for hook scripts.**  
-   [02-authentication.md:167](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:167) suggests exporting the key before launch as an alternative for a script whose config does not reference it.
+   [02-authentication.md:167](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md:167) suggests exporting the key before launch as an alternative for a script whose config does not reference it.
 
    **Scenario:** A hook configured as `/bin/sh my-hook.sh` still receives no exported `FUIGO_API_KEY`: the hook applies the environment policy, which strips it, and `hook_child_env` adds nothing without a reference.
 

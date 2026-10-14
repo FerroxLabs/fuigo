@@ -62,12 +62,12 @@ All judged by rp.sh / slot-run on the build box; `.out` sha256 first 16 hex.
     fuigo-config code and fuigo-config/fuigo-shell tests, re-gated above). `5c65f19e552d9a04`.
   - Earlier: `hf1022-rpa` shell at `bf8e16489` `c45644b67c9cfb58`; `hf1022-rpb` 8 pkgs at `bf8e16489`
     `8ba0b21581c5db8c`; `hf1022-rpc` shell at `e40a8ce47` `2c0ade7656e141ed`. All pass.
-- **P192 ACP repro** (`/root/fuigo-builds/hf1022-repro/p192/`) against `fuigo-pager` built at `c80e6a211`
+- **P192 ACP repro** (`<build>/hf1022-repro/p192/`) against `fuigo-pager` built at `c80e6a211`
   (sha256 `47a35b5da53ff4cf`), `--network none`, VARIANTS=ABCDM: xAI and ChatGPT, no "refuses to contact upstream
   vendor host", every turn on the subscription transport (summaries `3f38212032197a6f`, `d861f429de3a9c94`).
   Capture: 10 of 10 vendor inference POSTs carry the subscription bearer; FLUX_KEY_TO_VENDOR_HOST 0 (`verdict.txt`
   `48480435430176a5`).
-- **P188 ACP repro** (`/root/fuigo-builds/hf1022-repro/p188/`, for MurageMobile): 1.0.21 FAIL (reply three times),
+- **P188 ACP repro** (`<build>/hf1022-repro/p188/`, for MurageMobile): 1.0.21 FAIL (reply three times),
   hotfix `bf8e16489` PASS (two discards, client view = accepted reply only).
 - Not run here: the final gate and version bump (coordinator step), live ChatGPT/xAI accounts.
 

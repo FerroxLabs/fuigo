@@ -3,7 +3,7 @@
 **Packet:** P53 (`strike/p53`). **Parent:** `45bd14ee6a0b2fecc57b844aa758a831c69051d2` (integration HEAD).
 **Gated tip:** `d7c4a14bf0e396abf97f76d26ed21783542f7b2f`. The receipt commit follows it and touches only this file
 and `docs/strike/audits/P53-astra.txt`. **Not landed.** The coordinator lands.
-**Host:** `hetzner-dsm`, lane `/root/fuigo-builds/p53/`, `slot-run.sh p53`, `CARGO_BUILD_JOBS=16`,
+**Host:** `hetzner-dsm`, lane `<build>/p53/`, `slot-run.sh p53`, `CARGO_BUILD_JOBS=16`,
 `RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg CARGO_TERM_COLOR=never`, builds under `nice -n 10`.
 Toolchain read inside the tree: `rustc 1.94.0 (4a4ef493e 2026-03-02)`, digest
 `b75985398e5509a90a7d5d68f8ec6690675f703c5cfa11893b04fc9c3fceca69` (`rustc -vV | sha256sum`).
@@ -147,8 +147,8 @@ sleeps are scaled by `FUIGO_TEST_TIMEOUT_SCALE`; they are still sleeps. That is 
 
 ## 4. Gate (Contract A.2.1)
 
-Command (`/root/fuigo-builds/p53-gate.sh`, which runs `rp.sh`):
-`FUIGO_BINARY=/root/fuigo-builds/p53/fuigo-pager-tip /root/fuigo-builds/rp.sh p53 45bd14ee6a0b2fecc57b844aa758a831c69051d2 strike/p53 /root/fuigo-builds/p53.bundle fuigo-pager-bin fuigo-shell`
+Command (`<build>/p53-gate.sh`, which runs `rp.sh`):
+`FUIGO_BINARY=<build>/p53/fuigo-pager-tip <build>/rp.sh p53 45bd14ee6a0b2fecc57b844aa758a831c69051d2 strike/p53 <build>/p53.bundle fuigo-pager-bin fuigo-shell`
 inside `slot-run.sh p53`, per package `cargo test --locked --no-fail-fast -p <pkg>`, then
 `cargo clippy --locked --all-targets -p fuigo-pager-bin -p fuigo-shell`. Started `2026-10-01T14:38:41Z`,
 ended `2026-10-01T15:34:20Z`, `rp_exit=0`, `DONE` marker present in `p53.out`.
@@ -186,7 +186,7 @@ four rows (`run1-*` files on the host).
 
 Each was applied by hand to a clean worktree at `12815476` (source identical to `d7c4a14b`), rebuilt in the lane
 target dir, run against the covering test, and reverted (`git checkout -- .`). The diff is saved as
-`/root/fuigo-builds/p53/mutant-<id>.diff`. Every one fails the test it is meant to fail:
+`<build>/p53/mutant-<id>.diff`. Every one fails the test it is meant to fail:
 
 | Id | Mutation | Covering test | Result | Log sha256 |
 |---|---|---|---|---|
@@ -240,7 +240,7 @@ Round 4 reviewed `12815476`; `d7c4a14b` differs by one line (`std::fs::canonical
 Disk checked before the lane (`df -h /root`: 473 GB free, 72% used; peaked at 83% while other sessions' lanes
 were building). I used the lane's own `target/`, not a shared one, and `touch`ed changed files before each
 build. `rp.sh` removed `p53/target` and the `p53/src` worktree at the end of the gate. Remaining on the host in
-`/root/fuigo-builds/p53*`: logs, `.failset` files, mutant diffs and `fuigo-pager-tip` (561 MB), deleted after
+`<build>/p53*`: logs, `.failset` files, mutant diffs and `fuigo-pager-tip` (561 MB), deleted after
 this receipt. Runs were aborted by session (`pkill -s <sid>`), never `pkill -f`; I confirmed `pgrep -s` was empty
 each time (two driver runs were killed deliberately after I changed the code under test).
 
@@ -291,7 +291,7 @@ Same toolchain digest `b75985398e5509a90a7d5d68f8ec6690675f703c5cfa11893b04fc9c3
 fuigo-shell grows by one target (the P53 test binary), derived from the candidate. **TIP failing set ⊆ PARENT failing
 set: yes** (all empty; `only-tip:` and `only-parent:` empty for all three packages). Clippy `--all-targets`: parent
 `warnset=28`, tip `warnset=28`, `clippy new:` empty (parent `b5d7952c…a8e6`, tip `b03921c7…8f3e`, full digests in
-`/root/fuigo-builds/p53-{parent,tip}-clippy.log`). All three P53 e2e tests, the reloader, startup-delay, cli and
+`<build>/p53-{parent,tip}-clippy.log`). All three P53 e2e tests, the reloader, startup-delay, cli and
 pager note tests ran and passed in these logs. One-run-per-side; no suite-stability claim.
 
 Not re-run after the rebase: mutants M1 to M6 (taken at `12815476`, unchanged code) and a mutant for each of the new
@@ -340,7 +340,7 @@ suites green (e2e 5 passed, shell unit, pager unit, bin unit).
 | M4 | upload skip reason ignores memory | `memory_archive_is_skipped_when_the_session_has_memory_off` |
 | M5 | `memory_enabled: true` on the trace context | `trace_context_memory_enabled_follows_the_session_memory_config` |
 | M6 | agent-memory scope not gated | `no_memory_withholds_agent_memory_from_subagents` |
-| M7 | **shell-side refusal removed** (`save_memory_note` writes to a fallback store when memory is off) | `a_memory_note_is_decided_by_the_shell_at_write_time`; run at the final base, log `/root/fuigo-builds/p53/m7.log` sha256 `42d5a568ca805adbb8a9ebebbfd2caac56ff5016305c28743c46069c77d41967` |
+| M7 | **shell-side refusal removed** (`save_memory_note` writes to a fallback store when memory is off) | `a_memory_note_is_decided_by_the_shell_at_write_time`; run at the final base, log `<build>/p53/m7.log` sha256 `42d5a568ca805adbb8a9ebebbfd2caac56ff5016305c28743c46069c77d41967` |
 | M8 | pager refuses locally when the hint says off | `a_remember_note_always_reaches_the_shell_whatever_the_cache_says` |
 | M9 | pager refuses the modal save when the hint says off | `a_stale_cache_in_either_direction_...` and `a_remember_note_always_reaches_the_shell_...` |
 | M10 | shell always says `memoryEnabled: true` | `build_tools_meta_serialises_tool_names` |
@@ -350,7 +350,7 @@ suites green (e2e 5 passed, shell unit, pager unit, bin unit).
 
 M7 was first mis-specified (the replacement text did not match), reported `APPLYFAIL`, and was rerun with a corrected
 patch; M13 (a variant) was dropped. The race itself has no mutant: see "Race" above. Log shas for M1 to M12 are in
-`/root/fuigo-builds/p53/big-mut-*.log` (deleted with the lane; sha256 values are in the run output `big.out`).
+`<build>/p53/big-mut-*.log` (deleted with the lane; sha256 values are in the run output `big.out`).
 
 **Astra rounds 5 to 9**, text in `docs/strike/audits/P53-astra.txt`: 5 `DO-NOT-LAND`, 6 `DO-NOT-LAND`, 7 `DO-NOT-LAND`
 (HIGH race, MEDIUM stale off), 8 `LAND-WITH-FOLLOWUPS` (one LOW, fixed), 9 **`VERDICT: LAND`**. Nothing above LOW
@@ -359,7 +359,7 @@ remained at round 9.
 **Gate against `f82e6e331de6a4076a900602fdce9a470de452b2`, tip `0630b3b0`.** The first attempt had 18 `fuigo-shell`
 failures on the parent: my gate script had deleted the `FUIGO_BINARY` it pointed at (`FUIGO_BINARY does not exist`).
 That run is void, not a flake, and I do not use it. The gate was re-run with the binary present
-(`/root/fuigo-builds/p53-gate-final.out`, 02:14Z to 03:24Z, `DONE`, `rp_exit=0`):
+(`<build>/p53-gate-final.out`, 02:14Z to 03:24Z, `DONE`, `rp_exit=0`):
 
 | Run | Package | exit | derived | headers | unfinished | failing set | log sha256 |
 |---|---|---|---|---|---|---|---|
@@ -371,7 +371,7 @@ That run is void, not a flake, and I do not use it. The gate was re-run with the
 | TIP | fuigo-shell | 0 | 41 | 41 | 0 | empty | `a527690856dcca14ba8c5e7c38476b668c3e78178a9cc6475f2a7ee16195e61c` |
 
 Clippy `--all-targets`: parent and tip both `warnset=28`, `clippy new:` empty (parent `79267fa2…a6da938`, tip
-`1d9a6f60…75206`, `/root/fuigo-builds/p53-{parent,tip}-clippy.log`). **Tip failing set is not a subset of the parent's:**
+`1d9a6f60…75206`, `<build>/p53-{parent,tip}-clippy.log`). **Tip failing set is not a subset of the parent's:**
 one tip-only name, the mermaid render-timing test. Isolation per A.2.1 is below.
 
 **Isolation of the tip-only name (A.2.1), `iso.sh`, `--exact`, `-p fuigo-pager --lib`:**

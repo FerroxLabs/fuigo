@@ -79,6 +79,7 @@ members = [
     "crates/codegen/fuigo-update",
     "crates/codegen/fuigo-version",
     "crates/codegen/fuigo-voice",
+    "crates/codegen/fuigo-win-acl",
     "crates/codegen/fuigo-workspace",
     "crates/codegen/fuigo-workspace-client",
     "crates/codegen/fuigo-workspace-daemon",
@@ -367,6 +368,7 @@ fuigo-test-support = { path = "crates/codegen/fuigo-test-support" }
 fuigo-tools = { path = "crates/codegen/fuigo-tools" }
 fuigo-tools-api = { path = "crates/codegen/fuigo-tools-api" }
 fuigo-version = { path = "crates/codegen/fuigo-version" }
+fuigo-win-acl = { path = "crates/codegen/fuigo-win-acl" }
 fuigo-workspace = { path = "crates/codegen/fuigo-workspace", default-features = false }
 fuigo-workspace-types = { path = "crates/codegen/fuigo-workspace-types" }
 fuigo-hooks-plugins-types = { path = "crates/codegen/fuigo-hooks-plugins-types" }

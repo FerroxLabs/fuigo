@@ -1,10 +1,10 @@
 Astra round 2 (codex 0.160.0, model gpt-6-astra, read-only) on dbf192cf..ccb7e389 -- final report only.
-Raw transcript (4996 lines) not committed; sha256 b9c96c68039e9ff0a235e13293424850cef1ccdc4def46e79ae725d58f1b1cd6; copy at hetzner-dsm:/root/fuigo-builds/p83/audits/p83-astra-r2.raw.txt
+Raw transcript (4996 lines) not committed; sha256 b9c96c68039e9ff0a235e13293424850cef1ccdc4def46e79ae725d58f1b1cd6; copy at hetzner-dsm:<build>/p83/audits/p83-astra-r2.raw.txt
 
 Audited `dbf192cf..ccb7e389` on clean branch `strike/p83`, HEAD `ccb7e389`. Read-only; no builds or tests run. **Three HIGH findings and one MEDIUM finding remain.**
 
 1. **HIGH — R1 HIGH 1 stands: the move check detects some violations after dereferencing may already have occurred.**  
-   [local_ref.rs:49](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:49), [local_ref.rs:80](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:80)
+   [local_ref.rs:49](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:49), [local_ref.rs:80](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:80)
 
    Concrete scenario: initialize an agent in a `Box`, move its contents into another allocation, release the original allocation, then yield to the LocalSet. The announcement task can dereference the old address before another `spawn_bound` or agent destruction checks `home`. Aborting later cannot repair that use-after-free.
 
@@ -15,7 +15,7 @@ Audited `dbf192cf..ccb7e389` on clean branch `strike/p83`, HEAD `ccb7e389`. Read
    **Minimal complete fix:** make the pointer target permanently stable before bound work is possible. A movable public handle containing private, stable heap storage can preserve by-value constructor signatures. Alternatively, expose an enforced pinned ownership API with a `!Unpin` agent and prevent unpinned construction/use. **Returning plain `Rc<MvpAgent>` alone is insufficient:** safe `Rc::try_unwrap` can extract the agent when only one strong reference remains, even with weak references present. [Rust `Rc` documentation](https://doc.rust-lang.org/std/rc/struct.Rc.html#method.try_unwrap)
 
 2. **HIGH — R1 HIGH 2 is only partially fixed: discarding a second panic payload can abandon the drain.**  
-   [local_ref.rs:159](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:159)
+   [local_ref.rs:159](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:159)
 
    `first_panic.get_or_insert(panic)` drops the supplied payload when `first_panic` is already populated. That drop occurs **outside** `catch_unwind`.
 
@@ -26,7 +26,7 @@ Audited `dbf192cf..ccb7e389` on clean branch `strike/p83`, HEAD `ccb7e389`. Read
    **Correction:** ensure secondary payload disposal cannot unwind before draining completes—for example, retain the first payload and deliberately forget secondary payloads, or abort safely on the unsupported secondary-panic path.
 
 3. **HIGH — A panicking wake also abandons remaining bound futures.**  
-   [local_ref.rs:163](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:163)
+   [local_ref.rs:163](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:163)
 
    `waker.wake()` runs outside the catch boundary, between draining successive slots.
 
@@ -39,7 +39,7 @@ Audited `dbf192cf..ccb7e389` on clean branch `strike/p83`, HEAD `ccb7e389`. Read
    **Correction:** finish dropping **all** bound futures before invoking wake callbacks, or catch each wake with the same panic-safe payload handling as destruction. The drain must not be interruptible by a wake.
 
 4. **MEDIUM — Three teardown tests themselves permit relocation and can abort before testing their intended assertion.**  
-   [p83_teardown_tests.rs:177](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:177), [line 221](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:221), [line 248](/Volumes/Mando/WaylandBots/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:248)
+   [p83_teardown_tests.rs:177](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:177), [line 221](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:221), [line 248](<project>/Fuigo/wt-p83/crates/codegen/fuigo-shell/src/agent/mvp_agent/tests/p83_teardown_tests.rs:248)
 
    These tests spawn against a by-value local and then pass that agent by value to `drop`. The panic test additionally moves it into the `catch_unwind` closure. Those ownership transfers permit physical relocation; keeping an agent “in a local” does not guarantee its address.
 

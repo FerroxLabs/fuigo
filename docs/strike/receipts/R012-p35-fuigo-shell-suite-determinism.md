@@ -7,7 +7,7 @@
 
 
 **Date:** 2026-09-30 · **Base:** `8e1172417` · **Fix:** `f9d75f6f` (`strike/p35`) · **Box:** hetzner-dsm
-**Lane:** `/root/fuigo-builds/lane-p13` · `CARGO_TARGET_DIR=/root/fuigo-builds/lane-p13/target`
+**Lane:** `<build>/lane-p13` · `CARGO_TARGET_DIR=<build>/lane-p13/target`
 
 R008 §5 recorded that two identical full `-p fuigo-shell` runs at `8e11724` disagreed — 16 failures
 then 18, churn +3/−1 — and concluded that until the churning clusters are hermetic, no packet in this
@@ -80,7 +80,7 @@ both-3  exit=101  48 passed; 1 failed   create_worktree_for_resume_honors_git_re
 Three runs, three different answers, in **0.15 s each** instead of six minutes. That is the whole
 churn, reproduced by two modules out of a 7190-test suite, and it names a **fifth** member of the
 family that neither baseline run had caught yet (`create_worktree_for_resume_honors_git_ref`).
-Raw output: `/root/fuigo-builds/p35-repro.out`, `p35-repro-both-{1,2,3}.{log,failset,meta}`.
+Raw output: `<build>/p35-repro.out`, `p35-repro-both-{1,2,3}.{log,failset,meta}`.
 Receipts, all three at the same commit, same command, same toolchain:
 
 ```
@@ -92,7 +92,7 @@ inner:      cargo test --offline --locked --no-fail-fast -p fuigo-shell --lib -j
               -- --test-threads=96 session::worktree::tests session::storage::jsonl::worktree_heal_tests
 env_digest: rustc 1.94.0 (4a4ef493e 2026-03-02) | cargo 1.94.0 (85eff7c80 2026-01-15) | ripgrep 14.1.0
             RUST_MIN_STACK=16777216  RG_BIN_PATH=/usr/bin/rg
-            lock=/root/fuigo-builds/.shell-test.lock
+            lock=<build>/.shell-test.lock
 ```
 
 | run | exit_code | failset_count | timestamp (UTC) | log sha256 | failset sha256 |
@@ -209,9 +209,9 @@ commit.** I got two, twice, and the same 13-name set recurs across four runs and
 disagreement is one extra name, and every one of those names is a pre-existing flake this packet did
 not target. The numbers are below verbatim; nothing is averaged, rerun-until-green or selected.
 
-Common to every run: lane `/root/fuigo-builds/lane-p13`,
-`CARGO_TARGET_DIR=/root/fuigo-builds/lane-p13/target`, `RUST_MIN_STACK=16777216`,
-`RG_BIN_PATH=/usr/bin/rg`, `flock /root/fuigo-builds/.shell-test.lock`,
+Common to every run: lane `<build>/lane-p13`,
+`CARGO_TARGET_DIR=<build>/lane-p13/target`, `RUST_MIN_STACK=16777216`,
+`RG_BIN_PATH=/usr/bin/rg`, `flock <build>/.shell-test.lock`,
 `env_digest: rustc 1.94.0 (4a4ef493e 2026-03-02) | cargo 1.94.0 (85eff7c80 2026-01-15) | ripgrep 14.1.0`.
 
 ### 5a. Three full-package runs at `f9d75f6f`
@@ -367,7 +367,7 @@ to adopt permanently.
 
 `CLAUDE.md` has documented both for the whole strike and **neither was on the box**; seven agents
 improvised around them, and Contract A's sandboxed-suite requirement had never been met by any run.
-They are now at `/root/fuigo-builds/lane.sh` and `/root/fuigo-builds/testlane.sh`, and every run in
+They are now at `<build>/lane.sh` and `<build>/testlane.sh`, and every run in
 this receipt went through them.
 
 - `lane.sh <lane> <cpus> <cmd…>` — network allowed. Sets the lane's own `CARGO_TARGET_DIR`,
