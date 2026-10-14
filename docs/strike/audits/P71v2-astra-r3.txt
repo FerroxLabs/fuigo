@@ -37,7 +37,7 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `2eb33c17..37e125ec` on `strike/p71v2-s19`, read-only. No Cargo commands or file modifications. **No current production storage-upload bypass found.** Two follow-ups remain; these are source-review conclusions, not executed-test results.
 
 1. **MEDIUM — The tripwire still misses direct storage-client calls with intervening whitespace or comments.**  
-   [upload_gate_guard.rs:308](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:308)
+   [upload_gate_guard.rs:308](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:308)
 
    These valid call forms produce no dispatcher or client-upload match:
    ```rust
@@ -55,7 +55,7 @@ Audited `2eb33c17..37e125ec` on `strike/p71v2-s19`, read-only. No Cargo commands
    **Existing tests:** `the_scanners_see_what_they_must` tests adjacent parentheses and a bare method name ending a line; neither case catches these forms. R2-2 is therefore partially resolved.
 
 2. **LOW — The S3 positive control lets one upload satisfy the other upload’s payload assertion.**  
-   [gcs.rs:1190](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1190)
+   [gcs.rs:1190](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/gcs.rs:1190)
 
    `operator_s3_bucket_receives_bytes_unchanged` sends `upload_bytes` and `upload_file` to one recording endpoint, then checks only two requests and one occurrence of `CONTENT` across everything received.
 

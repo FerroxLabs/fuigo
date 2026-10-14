@@ -702,8 +702,9 @@ impl McpServerConfig {
     /// * from a source that is not the user's own config (`untrusted_source`: a project config, a plugin, a project
     ///   `.mcp.json`, a managed or client-supplied definition): IGNORED with a visible warning; the server still starts,
     ///   without this credential.
-    /// * on Windows, a relative path, or together with `bearer_token_env_var` or an `Authorization` header: this server is
-    ///   refused (`Err`) with a one-line warning naming the server and the reason.
+    /// * a relative path, or together with `bearer_token_env_var` or an `Authorization` header: this server is refused
+    ///   (`Err`) with a one-line warning naming the server and the reason. On Windows also a path that is not a plain
+    ///   local file path, and a file other users can reach (the warning then names the path and the fix).
     fn checked_bearer_token_file(
         &self,
         name: &str,
@@ -711,7 +712,7 @@ impl McpServerConfig {
         env_var: Option<&str>,
         headers: Option<&HashMap<String, String>>,
     ) -> Result<Option<acp::Meta>, ()> {
-        use fuigo_mcp::bearer_token_file::{BearerTokenFileError, BearerTokenPath, bearer_token_file_meta};
+        use fuigo_mcp::bearer_token_file::{BearerTokenFileError, BearerTokenPath, bearer_token_file_meta, preflight, refusal_text};
         let Some(file) = file else { return Ok(None) };
         let note = |text: String| fuigo_config::mcp_bearer_file::record_note(text);
         if self.untrusted_source {
@@ -727,8 +728,17 @@ impl McpServerConfig {
             refuse(BearerTokenFileError::ConflictsWithAuthorization);
             return Err(());
         }
-        if let Err(reason) = BearerTokenPath::parse(file, fuigo_config::mcp_bearer_file::home_dir().as_deref()) {
-            refuse(reason);
+        let path = match BearerTokenPath::parse(file, fuigo_config::mcp_bearer_file::home_dir().as_deref()) {
+            Ok(path) => path,
+            Err(reason) => {
+                refuse(reason);
+                return Err(());
+            }
+        };
+        // Windows: a file that other users can reach refuses this server now, with the path and the fix. (Elsewhere the
+        // check happens on each request; a file that is not there yet is not a refusal.)
+        if let Err(reason) = preflight(&path) {
+            note(format!("MCP server `{name}` skipped: {}", refusal_text(&reason, path.as_ref())));
             return Err(());
         }
         Ok(Some(bearer_token_file_meta(file)))

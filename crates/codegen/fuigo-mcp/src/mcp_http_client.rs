@@ -162,8 +162,10 @@ impl<C> McpHttpClient<C> {
         match &self.bearer_token_file {
             Some(file) => {
                 let token = file.read().await.map_err(|reason| {
+                    // On Windows the text also names the configured path and the fix; never file content.
+                    let reason = file.refusal_text(&reason);
                     tracing::warn!(server = %self.server_name, %reason, "MCP bearer_token_file refused for this request");
-                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason.to_string())
+                    std::io::Error::new(std::io::ErrorKind::PermissionDenied, reason)
                 })?;
                 Ok(Some(token))
             }

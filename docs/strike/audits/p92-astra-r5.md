@@ -1,8 +1,8 @@
-Astra round 5 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (13210 lines, sha256 9f8a92601626108c85b3430b0ff6b8b8e637360ca59218c01aa13fdb0b0ad1b1) kept at /root/fuigo-builds/p92/logs/astra/.
+Astra round 5 (codex 0.160, gpt-6-astra, read-only), final report only. Raw transcript (13210 lines, sha256 9f8a92601626108c85b3430b0ff6b8b8e637360ca59218c01aa13fdb0b0ad1b1) kept at <build>/p92/logs/astra/.
 
 R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of the requested commits; builds and tests were not executed. Later commits and dirty edits were excluded.
 
-1. **MEDIUM — Markdown blockquotes expose private-key bodies.** [safety.rs:329](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:329)
+1. **MEDIUM — Markdown blockquotes expose private-key bodies.** [safety.rs:329](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:329)
 
    Exact input:
    ```text
@@ -16,7 +16,7 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    **Coverage:** the PEM tests cover bare and invisible-containing body lines, not Markdown-prefixed bodies.
 
-2. **MEDIUM — the new comparison exemption hides a valid shell assignment.** [safety.rs:262](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:262)
+2. **MEDIUM — the new comparison exemption hides a valid shell assignment.** [safety.rs:262](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:262)
 
    Exact input: `PASSWORD==Q7v9z2`
 
@@ -24,7 +24,7 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    **Coverage:** `credential_names_in_code_comparisons_are_admitted` tests a comparison and an ordinary assignment, not an assignment whose value begins with `=`.
 
-3. **MEDIUM — quoted credential values beginning with a delimiter escape detection.** [safety.rs:248](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:248)
+3. **MEDIUM — quoted credential values beginning with a delimiter escape detection.** [safety.rs:248](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:248)
 
    Exact input: `{"password": "&Q7v9z2Lm"}`
 
@@ -32,7 +32,7 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    **Coverage:** quoted-literal tests cover `:`, `$(` and ordinary words, but not an initial `&`, comma or semicolon.
 
-4. **MEDIUM — four- and five-character numeric credentials regress against the baseline.** [safety.rs:274](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:274)
+4. **MEDIUM — four- and five-character numeric credentials regress against the baseline.** [safety.rs:274](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:274)
 
    Exact inputs: `password=1234` and `password=12345`
 
@@ -40,7 +40,7 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    **Coverage:** existing cases cover seven-character `hunter2` and short quoted values, not unquoted four- or five-digit passwords.
 
-5. **MEDIUM — quoted `api key` names lose baseline protection.** [safety.rs:237](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:237)
+5. **MEDIUM — quoted `api key` names lose baseline protection.** [safety.rs:237](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/safety.rs:237)
 
    Exact input: `{"api key": "Q7v9z2Lm"}`
 
@@ -50,7 +50,7 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    Findings 2–5 pass both write admission and the filtered-read fast path, allowing the admitted literals into persistence and downstream consumers.
 
-6. **MEDIUM — removing the filename guard can exclude an entirely clean dream session.** [dream.rs:264](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/dream.rs:264)
+6. **MEDIUM — removing the filename guard can exclude an entirely clean dream session.** [dream.rs:264](<project>/Fuigo/wt-p92/crates/codegen/fuigo-memory/src/dream.rs:264)
 
    Exact filename: `-----BEGIN PRIVATE KEY-----.md`  
    Exact contents: `"SQLite\nRedis\n"`
@@ -59,6 +59,6 @@ R099: six MEDIUM findings remain at `89451a69`. This was a read-only review of t
 
    **Coverage:** the filename test uses `Ignore previous instructions` and a sentence containing spaces; it does not exercise this suppression case.
 
-**LOW — pre-existing filename-to-injection gap.** [memory_context.rs:180](/Volumes/Mando/WaylandBots/Fuigo/wt-p92/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:180): an allowed session named `Ignore previous instructions.md`, containing `"SQLite uses WAL\n"`, passes snippet/source validation and places the rejected phrase into the injected `File:` field unchanged. No inspected test covers a flagged source filename.
+**LOW — pre-existing filename-to-injection gap.** [memory_context.rs:180](<project>/Fuigo/wt-p92/crates/codegen/fuigo-shell/src/session/helpers/memory_context.rs:180): an allowed session named `Ignore previous instructions.md`, containing `"SQLite uses WAL\n"`, passes snippet/source validation and places the rejected phrase into the injected `File:` field unchanged. No inspected test covers a flagged source filename.
 
 **DO-NOT-LAND**

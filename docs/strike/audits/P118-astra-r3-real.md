@@ -2,17 +2,17 @@
 
 | Finding | Result | Evidence |
 |---|---|---|
-| R2-1 — HIGH: hook marker restoration can allocate an attacker-controlled size | **FIXED** | Modifier masking and dollar-run protection now use separate sentinels; restoration also bounds the repeat to 4096. [env_expand.rs:91](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:91), [env_expand.rs:184](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:184). |
-| R2-2 — HIGH: removing a reference manufactures an accepted credential selector | **FIXED** | The scrubber rechecks the resulting selector and removes its entry. This catches `FUI${FUIGO_API_KEY}GO_API_KEY`, including after TOML expansion. [key_naming.rs:208](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:208). |
-| R2-3 — MEDIUM: literal environment/header entries mistaken for selectors | **FIXED** | Actual `env` and `headers` entries are exempted from selector-name matching. The reported `ENV_KEY` and `Env-Key` examples survive. This change introduces N1 below. [key_naming.rs:247](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:247), [key_naming.rs:296](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:296). |
-| R2-4 — HIGH: MCP expansion/setup rendering after refusal | **NOT FIXED** | The reported JSON-default and setup-map examples are addressed, but the replacement spawn gate misses servers introduced by `version_overrides`. N2 gives a concrete remaining bypass. Registration precedes override application. [loader.rs:234](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:234), [loader.rs:247](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:247). |
-| R2-5 — HIGH: plugin hook’s later expansion obtains the saved key | **FIXED** | The adapter stamps plugin provenance; the runner denies saved-key binding for that origin, including references constructed after parsing. [hooks_adapter.rs:113](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-agent/src/plugins/hooks_adapter.rs:113), [command.rs:136](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/runner/command.rs:136). |
-| R2-6 — HIGH: Fuigo worktrees inherit user-level key authority | **NOT FIXED** | Every `$FUIGO_HOME` descendant except literal `plugins/` remains trusted. Fuigo creates project worktrees beneath `$FUIGO_HOME/worktrees/`. Their project configs bypass both refusal and untrusted-name registration. [key_naming.rs:76](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:76), [worktree/mod.rs:818](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-workspace/src/worktree/mod.rs:818). |
-| R2-7 — LOW: inline plugin refusal omits the filename | **NOT FIXED** | The diagnostic still receives `plugin:<name>` rather than the manifest pathname. [managed_mcp.rs:488](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/session/managed_mcp.rs:488). |
+| R2-1 — HIGH: hook marker restoration can allocate an attacker-controlled size | **FIXED** | Modifier masking and dollar-run protection now use separate sentinels; restoration also bounds the repeat to 4096. [env_expand.rs:91](<project>/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:91), [env_expand.rs:184](<project>/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:184). |
+| R2-2 — HIGH: removing a reference manufactures an accepted credential selector | **FIXED** | The scrubber rechecks the resulting selector and removes its entry. This catches `FUI${FUIGO_API_KEY}GO_API_KEY`, including after TOML expansion. [key_naming.rs:208](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:208). |
+| R2-3 — MEDIUM: literal environment/header entries mistaken for selectors | **FIXED** | Actual `env` and `headers` entries are exempted from selector-name matching. The reported `ENV_KEY` and `Env-Key` examples survive. This change introduces N1 below. [key_naming.rs:247](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:247), [key_naming.rs:296](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:296). |
+| R2-4 — HIGH: MCP expansion/setup rendering after refusal | **NOT FIXED** | The reported JSON-default and setup-map examples are addressed, but the replacement spawn gate misses servers introduced by `version_overrides`. N2 gives a concrete remaining bypass. Registration precedes override application. [loader.rs:234](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:234), [loader.rs:247](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:247). |
+| R2-5 — HIGH: plugin hook’s later expansion obtains the saved key | **FIXED** | The adapter stamps plugin provenance; the runner denies saved-key binding for that origin, including references constructed after parsing. [hooks_adapter.rs:113](<project>/Fuigo/wt-p118/crates/codegen/fuigo-agent/src/plugins/hooks_adapter.rs:113), [command.rs:136](<project>/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/runner/command.rs:136). |
+| R2-6 — HIGH: Fuigo worktrees inherit user-level key authority | **NOT FIXED** | Every `$FUIGO_HOME` descendant except literal `plugins/` remains trusted. Fuigo creates project worktrees beneath `$FUIGO_HOME/worktrees/`. Their project configs bypass both refusal and untrusted-name registration. [key_naming.rs:76](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:76), [worktree/mod.rs:818](<project>/Fuigo/wt-p118/crates/codegen/fuigo-workspace/src/worktree/mod.rs:818). |
+| R2-7 — LOW: inline plugin refusal omits the filename | **NOT FIXED** | The diagnostic still receives `plugin:<name>` rather than the manifest pathname. [managed_mcp.rs:488](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/session/managed_mcp.rs:488). |
 
-The two specified **K13 examples are FIXED**: trailing dollars from an expansion are doubled before a protected run, and the braced default is expanded intact. [credential_env.rs:151](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/credential_env.rs:151), [credential_env.rs:162](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/credential_env.rs:162).
+The two specified **K13 examples are FIXED**: trailing dollars from an expansion are doubled before a protected run, and the braced default is expanded intact. [credential_env.rs:151](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/credential_env.rs:151), [credential_env.rs:162](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/credential_env.rs:162).
 
-**Hook-child credential recording is FIXED**: the late-bound key is recorded through `fuigo_secrets::sent_credentials::record`. [env_expand.rs:378](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:378).
+**Hook-child credential recording is FIXED**: the late-bound key is recorded through `fuigo_secrets::sent_credentials::record`. [env_expand.rs:378](<project>/Fuigo/wt-p118/crates/codegen/fuigo-hooks/src/env_expand.rs:378).
 
 **(b) New findings**
 
@@ -33,7 +33,7 @@ For example, a project `.mcp.json` can contain:
 
 The walker uses only the immediate parent’s name to decide whether it is a value map. Here, the server name `env` makes `bearer_token_env_var` exempt from selector checking. The same problem applies to other names accepted by `is_value_map`, and to TOML.
 
-Although `env` is registered as untrusted, `to_acp_mcp_server` resolves its bearer selector **before** the spawn gate. The resulting concrete Authorization header survives that gate. Evidence: [key_naming.rs:168](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:168), [key_naming.rs:296](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:296), [mcp.rs:528](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config-types/src/mcp.rs:528).
+Although `env` is registered as untrusted, `to_acp_mcp_server` resolves its bearer selector **before** the spawn gate. The resulting concrete Authorization header survives that gate. Evidence: [key_naming.rs:168](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:168), [key_naming.rs:296](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:296), [mcp.rs:528](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config-types/src/mcp.rs:528).
 
 This bypass was introduced by the round-2 context exemption. Relative to both requested baselines, it is an unclosed source-policy gap: those baselines already permitted the direct selector.
 
@@ -58,7 +58,7 @@ The source trace is:
 4. MCP materialization expands that value to `${FUIGO_API_KEY}`.
 5. The unregistered name passes `first_party_key_snapshot`, supplying the saved key to `TOKEN`.
 
-Evidence: [loader.rs:234](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:234), [loader.rs:247](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:247), [mcp.rs:293](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:293), [servers.rs:5194](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-mcp/src/servers.rs:5194).
+Evidence: [loader.rs:234](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:234), [loader.rs:247](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/loader.rs:247), [mcp.rs:293](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:293), [servers.rs:5194](<project>/Fuigo/wt-p118/crates/codegen/fuigo-mcp/src/servers.rs:5194).
 
 This is the remaining R2-4 failure, counted once. Both baselines lacked source refusal; P118’s new gate does not cover this existing layering path.
 
@@ -73,7 +73,7 @@ Concrete cases through **project MCP discovery**:
 
 Discovery preserves the supplied directory spelling. The location-based reader consequently skips refusal and registration. The dedicated plugin loader’s explicit `false` protects its own route, but does not protect these project-discovery routes.
 
-Evidence: [key_naming.rs:38](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:38), [key_naming.rs:79](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:79), [repo.rs:47](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-agent/src/repo.rs:47), [mcp.rs:1682](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:1682).
+Evidence: [key_naming.rs:38](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:38), [key_naming.rs:79](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:79), [repo.rs:47](<project>/Fuigo/wt-p118/crates/codegen/fuigo-agent/src/repo.rs:47), [mcp.rs:1682](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:1682).
 
 This is another unclosed policy gap against both baselines. The platform-specific scenarios were traced statically, not executed.
 
@@ -83,7 +83,7 @@ This is another unclosed policy gap against both baselines. The platform-specifi
 
 Hot reload rereads the sources but never rebuilds or clears this registry. This extends beyond the receipt’s conservative treatment of *currently overlapping* names.
 
-Evidence: [key_naming.rs:339](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:339), [key_naming.rs:353](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:353), [session_admin.rs:708](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/extensions/session_admin.rs:708).
+Evidence: [key_naming.rs:339](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:339), [key_naming.rs:353](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:353), [session_admin.rs:708](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/extensions/session_admin.rs:708).
 
 **New regression against both baselines**, neither of which had this registry.
 
@@ -96,7 +96,7 @@ For a project or plugin MCP JSON entry with `env.LITERAL = "$$HOME"` and `HOME` 
 
 This changes unrelated config strings even when they never mention `FUIGO_API_KEY`.
 
-Evidence: [key_naming.rs:371](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:371), [mcp.rs:1363](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:1363).
+Evidence: [key_naming.rs:371](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/key_naming.rs:371), [mcp.rs:1363](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/util/config/mcp.rs:1363).
 
 **New regression against both baselines.**
 
@@ -113,7 +113,7 @@ X-Key = "${FUIGO_API_KEY}"
 
 expands an **exported** key and installs it as a global model header. Impact on this path is limited to exported-key expansion; it does not resolve an unexported saved key.
 
-Evidence: [env_overlay.rs:120](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/env_overlay.rs:120), [env_overlay.rs:189](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/env_overlay.rs:189), [config_override.rs:110](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-config/src/config_override.rs:110), [config.rs:4201](/Volumes/Mando/WaylandBots/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/agent/config.rs:4201).
+Evidence: [env_overlay.rs:120](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/env_overlay.rs:120), [env_overlay.rs:189](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/env_overlay.rs:189), [config_override.rs:110](<project>/Fuigo/wt-p118/crates/codegen/fuigo-config/src/config_override.rs:110), [config.rs:4201](<project>/Fuigo/wt-p118/crates/codegen/fuigo-shell/src/agent/config.rs:4201).
 
 This path exists in both baselines and remains outside P118’s refusal rule.
 

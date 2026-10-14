@@ -3,8 +3,8 @@
 **Packet:** P42 (`strike/p42`). **Parent (rebased, 2026-10-01):** `45bd14ee6a0b2fecc57b844aa758a831c69051d2`
 (integration HEAD after P22/P23/P25, P45 and P17-F1). **Gated tip:** `cc3c32a7591b0893deab07a937486a7a8e42556a`.
 The receipt commit follows it and touches only this file.
-**Host:** `hetzner-dsm` (96 cores), lanes `/root/fuigo-builds/p42dev/` (focused runs, mutants) and
-`/root/fuigo-builds/p42rp/` (gate, `rp.sh`). `CARGO_BUILD_JOBS=16 RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg
+**Host:** `hetzner-dsm` (96 cores), lanes `<build>/p42dev/` (focused runs, mutants) and
+`<build>/p42rp/` (gate, `rp.sh`). `CARGO_BUILD_JOBS=16 RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/rg
 CARGO_TERM_COLOR=never`, builds under `nice -n 10`, tests through `slot-run.sh`. Toolchain digest
 (`rustc -vV | sha256sum`): `b75985398e5509a90a7d5d68f8ec6690675f703c5cfa11893b04fc9c3fceca69` (1.94.0, pinned in-tree).
 **Not landed.** The coordinator lands.
@@ -214,7 +214,7 @@ definitions file, copied to `Fuigo/p42-mutants.py`), then three runs, each built
 mutants M1–M5b and M21–M26, `cargo test --locked -p fuigo-pager --lib -- auth_destination_refused refused_destination
 is_reauthable_failure prompt_response_formatted_401`. Target and worktree deleted after each. M1–M26 ran at
 `aeb90071`; M23b (the data site rewritten by `cc3c32a7`) at `cc3c32a7`. Every mutant compiled (build exit 0).
-Results: `Fuigo/p42-mutants-results.txt`; per-mutant logs `hetzner-dsm:/root/fuigo-builds/p42dev/mutlogs/`.
+Results: `Fuigo/p42-mutants-results.txt`; per-mutant logs `hetzner-dsm:<build>/p42dev/mutlogs/`.
 
 **29 of 29 killed.** M14/M15 are now exercised (the filter includes `the_registry_knows`), and M16 is now killed
 by the spawn-level memory test.
@@ -271,10 +271,10 @@ Round 7: "No remaining BLOCKER/HIGH/MEDIUM/LOW findings identified. … LAND".
 
 ## 8. The gate (contract A.2.1)
 
-`/root/fuigo-builds/rp.sh p42rp2 45bd14ee6a0b2fecc57b844aa758a831c69051d2 strike/p42 /root/fuigo-builds/p42b.bundle
+`<build>/rp.sh p42rp2 45bd14ee6a0b2fecc57b844aa758a831c69051d2 strike/p42 <build>/p42b.bundle
 fuigo-shell-base fuigo-sampler fuigo-shell fuigo-pager` (per package `slot-run.sh … nice -n 10 timeout 3600 cargo test
 --locked --no-fail-fast -p <pkg>`; then `cargo clippy --locked --all-targets` for the four). Summary
-`hetzner-dsm:/root/fuigo-builds/p42rp2.out`; logs `p42rp2-{parent,tip}-<pkg>.log`.
+`hetzner-dsm:<build>/p42rp2.out`; logs `p42rp2-{parent,tip}-<pkg>.log`.
 
 | rev | pkg | exit | derived | headers / unfinished | failing | log sha256 |
 |---|---|---|---|---|---|---|
@@ -306,7 +306,7 @@ Summaries (sha256): `p42rp2.out` `1c3a6a2c5aeddaec8eec363adde7416ef841d45dd3a2ad
 `8693fea8f1ac1b9ce2e66d37071d32c0cca720775081bacefb3796bf41fb6a25`. Gate window 2026-10-01T11:35:54Z–12:58:03Z; isolation
 13:01:36Z–14:12:40Z.
 
-Log: `hetzner-dsm:/root/fuigo-builds/p42iso.out` (per-run logs `p42iso-<sha>-<name>-<n>.log`), all 24 runs exit 0.
+Log: `hetzner-dsm:<build>/p42iso.out` (per-run logs `p42iso-<sha>-<name>-<n>.log`), all 24 runs exit 0.
 
 **Result: tip ⊆ parent holds** for all four packages once the four load-timing names are isolated (they pass
 3/3 `--exact` at both revisions; none is P42 code). fuigo-pager tip set = parent set (18 pre-existing paste tests).

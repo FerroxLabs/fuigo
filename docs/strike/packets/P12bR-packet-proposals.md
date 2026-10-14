@@ -5,7 +5,7 @@
 
 > **HARD RULE — builds run on Hetzner, never on the Mac.** `ssh hetzner-dsm`, own lane, own
 > `CARGO_TARGET_DIR`. `df -h` first, delete the target dir after. Peers' dirs are DO-NOT-TOUCH.
-> Never build under `/Volumes/Mando`.
+> Never build under `<volume>`.
 
 Four things were found while fixing the BLOCKER that are outside P12b-R's declared file ownership, or
 outside the finding it was reopened for. Per the strike rule, none were fixed as drive-bys. Numbering is
@@ -99,7 +99,7 @@ mechanism hunts in this strike went wrong (R007 §5).
 **Severity:** LOW, process. **Est:** a decision, then either 5 min or one large merge slot.
 
 `cargo fmt --all -- --check` at `8e11724` exits 1 with **381 dirty files**
-(`/root/fuigo-builds/p12br-B-fmt.log`). The tree has never been rustfmt-clean during this strike, so any
+(`<build>/p12br-B-fmt.log`). The tree has never been rustfmt-clean during this strike, so any
 packet asserting "fmt clean" is asserting something it cannot have checked, and any agent who runs the
 check wastes time deciding whether the noise is theirs. P12b-R inspected every hunk inside its five
 files, found all but two pre-existing, and fixed only its own two.

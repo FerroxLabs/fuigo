@@ -37,7 +37,7 @@ Report defects only (not style). For each: severity BLOCKER / HIGH / MEDIUM / LO
 Audited `2eb33c17..93633790112cad8978d5b704a05fa7a3e63ca483`. Read-only; no Cargo, builds, or wire tests executed.
 
 1. **HIGH — caller-supplied HTTP clients can forward signed-upload content to an undesignated destination.**  
-   [storage_client.rs:534](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:534), [storage_client.rs:2030](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:2030)
+   [storage_client.rs:534](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:534), [storage_client.rs:2030](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-file-utils/src/storage_client.rs:2030)
 
    Construct `StorageClient::with_provider` with a permitted FluxRouter base and `reqwest::Client::new()`. Call `upload_bytes_signed`; FluxRouter returns signed URL **A**. If A responds with HTTP 307/308 pointing to **B**, the supplied client can replay the complete upload body to B, although FluxRouter designated only A.
 
@@ -48,7 +48,7 @@ Audited `2eb33c17..93633790112cad8978d5b704a05fa7a3e63ca483`. Read-only; no Carg
    **Existing tests:** do not catch it. The redirect test exercises the hardened fallback client; the new sink test uses a third-party base, which is refused before redirect handling.
 
 2. **MEDIUM — R5-2 remains incomplete: valid visibility syntax still hides an ungated method from both inventories.**  
-   [upload_gate_guard.rs:349](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:349)
+   [upload_gate_guard.rs:349](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-extra-ca/tests/upload_gate_guard.rs:349)
 
    `public_functions` splits whitespace rather than Rust tokens. It misses:
 
@@ -65,7 +65,7 @@ Audited `2eb33c17..93633790112cad8978d5b704a05fa7a3e63ca483`. Read-only; no Carg
    **Existing tests:** do not catch these spellings. The added self-test catches the original `pub\nasync fn` case only.
 
 3. **LOW — the workspace environment negative test accepts cancellation before the upload attempt completes.**  
-   [handle_tests.rs:2500](/Volumes/Mando/WaylandBots/Fuigo/wt-p71v2/crates/codegen/fuigo-workspace/src/handle_tests.rs:2500)
+   [handle_tests.rs:2500](<project>/Fuigo/wt-p71v2/crates/codegen/fuigo-workspace/src/handle_tests.rs:2500)
 
    The class-3 case discards `drain`’s result. A timeout aborts the worker and returns its remaining count. If an erroneous upload stalls before connecting—for example during destination resolution beyond the 20-second deadline—the worker is cancelled, zero connections is asserted, and this negative case passes.
 

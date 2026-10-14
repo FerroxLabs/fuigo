@@ -1,6 +1,6 @@
 # R023: TRIO-FINAL. The fuigo-shell suite is deterministic at the tip: three identical, empty failing sets
 
-**Date:** 2026-10-01 (box UTC) · **Lane:** `trio2` on hetzner-dsm (`/root/fuigo-builds/trio2/`)
+**Date:** 2026-10-01 (box UTC) · **Lane:** `trio2` on hetzner-dsm (`<build>/trio2/`)
 **Parent:** `cca0969f505de7ef04480e676b71782c94600a7d` (integration HEAD: P09 v3 + P17-R v3 landed)
 **Tip:** `fe4df7799e47d8ac2d378cee535efcf3e1dc6302` (`strike/trio`, this receipt adds one docs commit on top)
 **Not landed.** The coordinator lands.
@@ -10,7 +10,7 @@ specified. Rebasing onto `8d250586` makes a new tip, and that needs a new series
 
 Runs were made **under shared host load**: other strike lanes ran on the same box throughout (load average 80 to 116 on
 96 threads; the slot runner went from 3 to 5 slots mid-session). Every test invocation went through
-`/root/fuigo-builds/slot-run.sh trio2 …`, so this lane had a private `HOME` and never shared `~/.fuigo` with another lane.
+`<build>/slot-run.sh trio2 …`, so this lane had a private `HOME` and never shared `~/.fuigo` with another lane.
 
 ## Verdict
 
@@ -238,7 +238,7 @@ P38 lands. It did not happen in the three tip runs. Logs: `trio2/stress2/run-*.l
 
 Derived counts (`derive.py`): fuigo-shell **38** (`exe=37 doc=1`) at parent and tip; fuigo-dirs **2** (`exe=1 doc=1`).
 Awk header check = `<derived> 0` on every admissible run. Exit is never a signal (`grep -c signal:` = 0), and the DONE
-marker is present. Failsets are in `/root/fuigo-builds/trio2-{parent,tip}-*-fuigo-shell.failset`.
+marker is present. Failsets are in `<build>/trio2-{parent,tip}-*-fuigo-shell.failset`.
 
 | run | rev | exit | hdr / unfinished | failing set | failset sha256 | log sha256 | admissible |
 |---|---|---|---|---|---|---|---|
@@ -277,12 +277,12 @@ Commands, verbatim (env for all: `RUST_MIN_STACK=16777216 RG_BIN_PATH=/usr/bin/r
 `CARGO_TARGET_DIR=<lane>/target` (tip) or `<lane>/target-parent`, builds `nice -n 10`; toolchain read in-tree:
 `rustc 1.94.0 (4a4ef493e 2026-03-02)`, LLVM 21.1.8, host x86_64-unknown-linux-gnu):
 ```
-/root/fuigo-builds/slot-run.sh trio2 nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p fuigo-shell > LOG 2>&1; echo "DONE rc=$?" >> LOG
-/root/fuigo-builds/slot-run.sh trio2 nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p fuigo-shell -- --skip session::workflow::manager::tests   # parent runs 3-4
-/root/fuigo-builds/slot-run.sh trio2 nice -n 10 timeout 1800 cargo test --locked --no-fail-fast -p fuigo-dirs
-cargo test --locked -p <pkg> --no-run --message-format=json | P=<pkg> python3 /root/fuigo-builds/derive.py
+<build>/slot-run.sh trio2 nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p fuigo-shell > LOG 2>&1; echo "DONE rc=$?" >> LOG
+<build>/slot-run.sh trio2 nice -n 10 timeout 3600 cargo test --locked --no-fail-fast -p fuigo-shell -- --skip session::workflow::manager::tests   # parent runs 3-4
+<build>/slot-run.sh trio2 nice -n 10 timeout 1800 cargo test --locked --no-fail-fast -p fuigo-dirs
+cargo test --locked -p <pkg> --no-run --message-format=json | P=<pkg> python3 <build>/derive.py
 nice -n 10 cargo clippy --locked --all-targets -p fuigo-shell -p fuigo-dirs
-/root/fuigo-builds/slot-run.sh trio2 nice -n 10 timeout 600 <tip lib binary> --test-threads=96 <filter>   # stress, ×40
+<build>/slot-run.sh trio2 nice -n 10 timeout 600 <tip lib binary> --test-threads=96 <filter>   # stress, ×40
 ```
 Scripts: `trio2/{parent.sh,parent2.sh,probe.sh,probe_patch.py,focus.sh,mutants.sh,mutants2.sh,adv_patch.py,gate.sh}`.
 

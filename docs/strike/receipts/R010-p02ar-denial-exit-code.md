@@ -95,7 +95,7 @@ receipt_id:   R010
 packet:       P02a-R (reopen of P02a, c43d96e)
 base:         8e1172417a10a76b879cd9affeff20edf7fc0dbd   (strike/integration HEAD)
 fix:          78e457fbc6d1...                            (strike/p02ar)
-lane:         /root/fuigo-builds/integration   (SHARED; its `src` held a sibling's uncommitted WIP,
+lane:         <build>/integration   (SHARED; its `src` held a sibling's uncommitted WIP,
               so this ran in the worktree `src-p02ar` sharing the lane CARGO_TARGET_DIR -- no new
               target dir. Every checkout+build+test block under flock .lane-integration.lock)
 env_digest:   rustc 1.94.0 (4a4ef493e 2026-03-02)   [the repo's PINNED toolchain, per
@@ -247,7 +247,7 @@ the last commit that can change a build, and it is the one the gate ran. Nothing
 
 The lane's own `src` was never touched (a sibling's uncommitted WIP lives there, and later a sibling
 held `.lane-integration.lock` for ~40 minutes with a `-p fuigo-shell` run; this gate queued behind it as
-intended). My worktree `/root/fuigo-builds/integration/src-p02ar` is **85 MB of source** and can be
+intended). My worktree `<build>/integration/src-p02ar` is **85 MB of source** and can be
 removed with `git worktree remove`; the lane's shared `target/` was **not** deleted because siblings are
 using it. Disk went 276 GB → 263 GB free (85%).
 

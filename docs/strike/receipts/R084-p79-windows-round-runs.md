@@ -107,10 +107,10 @@ Rows before `f4-*` ran on working copies or earlier commits of the round.
 | 05:23:02 | `wmut-f4-W6` | `test -p fuigo-config --lib -- fs_atomic::p79_tests` | C: | 101 | same | `cf275e6275f4bbff222168f033bb3e1261d5ca4c1ed933f675b614a46231eb36` |
 | 05:23:06 | `f4-clippy` | `clippy --all-targets -p fuigo-config` | F: | 0 | same | `1990bc7a0a3994890259e1949cd3e064437691d9c342ce27cffbc487b7a3a545` |
 
-## B. Hetzner, lane `p79w` (`/root/fuigo-builds/p79w/logs/`; `SHA256SUMS` there lists every log)
+## B. Hetzner, lane `p79w` (`<build>/p79w/logs/`; `SHA256SUMS` there lists every log)
 
 `run.sh <tag> <cargo args>` = `slot-run.sh p79w nice -n 10 timeout 3000 cargo <args>` with the protocol's
-environment and `CARGO_TARGET_DIR=/root/fuigo-builds/p79w/target`. `tree` is the lane checkout's HEAD and how many
+environment and `CARGO_TARGET_DIR=<build>/p79w/target`. `tree` is the lane checkout's HEAD and how many
 files differed from it (0 = a clean checkout of a commit). `*-vfat` runs had `FUIGO_P79_CI_DIR` on a vfat loop mount.
 Mutant runs are in `mut-<label>/` (one log per mutant, `summary.txt`), not in this table.
 

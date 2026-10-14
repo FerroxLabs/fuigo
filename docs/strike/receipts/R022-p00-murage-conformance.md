@@ -233,7 +233,7 @@ rustc 1.94.0 (`rustc -vV` sha256 `b7598539…`).
   `8d250586`).
 - Derived counts come from `cargo test --locked -p <pkg> --no-run --message-format=json | P=<pkg> python3
   derive.py`.
-- Failing sets come from the `failures:` block and are saved as `/root/fuigo-builds/p00-gate2-*.failset`.
+- Failing sets come from the `failures:` block and are saved as `<build>/p00-gate2-*.failset`.
 
 ### 4.1 Gate of record: parent `8d250586` vs tip `3e711b9c`
 
@@ -267,7 +267,7 @@ inside the full suite. Out files: `gate2-parent4.out` `b67255b0`, `gate2-tip6.ou
 | `session::worktree::tests::create_worktree_for_resume_honors_git_ref` (shell) | 17 | pass ×3 | pass ×3 |
 
 All 66 runs used `slot-run.sh p00 cargo test --locked -p <pkg> --lib -- --exact <name>`, and every one exited 0
-with `1 passed` (`iso6.out` `de9764b9`). Sightings come from `/root/fuigo-builds/*.failset` and
+with `1 passed` (`iso6.out` `de9764b9`). Sightings come from `<build>/*.failset` and
 `*/*.failset`, excluding P00's own.
 
 Parent-only (they pass at the tip): `attempted_settings_fetch_failure_is_a_degraded_start`,

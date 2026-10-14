@@ -1,5 +1,5 @@
 Independent security/correctness audit, read-only (do not build, do not run cargo, do not modify files).
-Repo: this worktree (/Volumes/Mando/WaylandBots/Fuigo/wt-p90), branch codex/fuigo-p90. Diff to audit: fc3ccb94..HEAD
+Repo: this worktree (<project>/Fuigo/wt-p90), branch codex/fuigo-p90. Diff to audit: fc3ccb94..HEAD
 (7ba7a187 = original Codex build-lane output, 75ea29ef = reviewer fixes on top). Rust, crates/codegen/.
 Packet P90 hardens subscription (ChatGPT / xAI OAuth) sign-in. Claims to verify:
 F2 (crates/codegen/fuigo-shell/src/auth/subscription/flow.rs `callback`, `read_callback`): a callback request with

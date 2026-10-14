@@ -1,5 +1,5 @@
-exec(open('/root/fuigo-builds/p75/mutants.py').read().split('M=[')[0])
-M=[("MU12","third_party/tiff-0.11.3/src/decoder/ifd.rs",'return Err(TiffError::LimitsExceeded);','return Err(dbg!(TiffError::LimitsExceeded));',["/root/fuigo-builds/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-tools --test tiff_dead_stderr"]),
+exec(open('<build>/p75/mutants.py').read().split('M=[')[0])
+M=[("MU12","third_party/tiff-0.11.3/src/decoder/ifd.rs",'return Err(TiffError::LimitsExceeded);','return Err(dbg!(TiffError::LimitsExceeded));',["<build>/slot-run.sh p75 nice -n 10 timeout 1800 cargo test --locked -p fuigo-tools --test tiff_dead_stderr"]),
  ("ML6","third_party/usvg-0.47.0/src/text/colr.rs",'log::warn!("sweep gradients are not supported.");','println!("Warning: sweep gradients are not supported.");',["nice -n 10 cargo clippy --locked -p usvg --message-format=short"])]
 only=sys.argv[1:]
 log("### mutants at %s"%sh("git rev-parse HEAD")[1].strip())

@@ -29,7 +29,7 @@ Find defects in the delta: correctness, security (the key reaching a place the u
 Two HIGH findings remain in `a84e3234..0c46c832`. Review was read-only; no Cargo or Rust tests ran, and the worktree remains clean.
 
 1. **HIGH — Expansion values can collide with the “private” mask and manufacture consent.**  
-   [credential_env.rs:139](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:139), particularly the whole-result replacement at line 155.
+   [credential_env.rs:139](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:139), particularly the whole-result replacement at line 155.
 
    The marker is absent from `input`, but can occur in a value returned by the expander. For example, this hook handler contains only an escaped first-party reference:
 
@@ -46,7 +46,7 @@ Two HIGH findings remain in `a84e3234..0c46c832`. Review was read-only; no Cargo
    **Existing tests do not catch it:** the PUA regression case puts marker characters in the original input, not in an expansion value. This refutes F0e’s collision protection. Restoration must distinguish actual masking tokens from bytes introduced by expansion.
 
 2. **HIGH — Odd dollar runs still expand in the command hook’s shell.**  
-   [credential_env.rs:126](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:126) and [runner/command.rs:136](/Volumes/Mando/WaylandBots/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:136).
+   [credential_env.rs:126](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-config/src/credential_env.rs:126) and [runner/command.rs:136](<project>/Fuigo/wt-p70a/crates/codegen/fuigo-hooks/src/runner/command.rs:136).
 
    All runs of two or more dollars are classified as escaped and preserved. However, the runner passes them unchanged to `sh -c`. Consider:
 

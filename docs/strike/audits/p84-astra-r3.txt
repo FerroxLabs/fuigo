@@ -1,10 +1,10 @@
-# P84 Astra round 3 — final report (range e0145e0f..95c361fb; raw transcript sha256 19d102dd17da78c1a6390de9b14ce5c7f9f9f2c0045c2ce0f664428de5e2f242, copy at hetzner-dsm:/root/fuigo-builds/p84/audits/p84-astra-r3.raw)
+# P84 Astra round 3 — final report (range e0145e0f..95c361fb; raw transcript sha256 19d102dd17da78c1a6390de9b14ce5c7f9f9f2c0045c2ce0f664428de5e2f242, copy at hetzner-dsm:<build>/p84/audits/p84-astra-r3.raw)
 
 **Two HIGH soundness holes remain in claim 7.** The relocation fix and production call paths look correct, but the context check does not fully close r2’s escape issue.
 
 1. **HIGH — A returned `&MvpAgent` can escape the checked context.**
 
-   Locations: [local_ref.rs:54](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:54), [local_ref.rs:269](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:269), [handle.rs:45](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:45).
+   Locations: [local_ref.rs:54](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:54), [local_ref.rs:269](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:269), [handle.rs:45](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/handle.rs:45).
 
    `get()` checks the context when creating the reference, but its returned lifetime follows the `LocalRef` borrow. Safe crate code can leak just the `LocalRef`, obtain a reference during the permitted builder context, and retain that reference after the task completes:
 
@@ -28,7 +28,7 @@
 
 2. **HIGH — Address reuse lets a stale `LocalRef` pass another agent’s context check.**
 
-   Locations: [local_ref.rs:55](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:55), [local_ref.rs:81](/Volumes/Mando/WaylandBots/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:81).
+   Locations: [local_ref.rs:55](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:55), [local_ref.rs:81](<project>/Fuigo/wt-p84/crates/codegen/fuigo-shell/src/agent/mvp_agent/local_ref.rs:81).
 
    Concrete scenario: retain an escaped `LocalRef` from agent A, destroy A, then construct agent B whose allocation reuses A’s address. Move the stale reference into B’s bound future. The address comparison succeeds, and `get()` dereferences A’s invalid pointer. Reallocation at the same address does not restore the original pointer’s validity. [Rust’s provenance documentation](https://doc.rust-lang.org/std/ptr/index.html#provenance)
 

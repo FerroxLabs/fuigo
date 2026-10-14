@@ -1,6 +1,6 @@
 # P123 Astra round 1 brief
 
-You are auditing a read-only checkout: `/Volumes/Mando/WaylandBots/Fuigo/wt-p123`, branch `strike/p123`. Do NOT run cargo
+You are auditing a read-only checkout: `<project>/Fuigo/wt-p123`, branch `strike/p123`. Do NOT run cargo
 and do not modify anything. Parent (`strike/integration`) is `bfb0ffa4d329155ce83e5552a468b375505826c7`; compare also with
 tag `v1.0.20` (`git show v1.0.20:<path>` works in this worktree). Commits to audit: `git log bfb0ffa4..HEAD` (a red-tests
 commit, then the fix commit). Hetzner results are not yours to run; read the code and tests.
