@@ -12,6 +12,7 @@ mod mcp_reenable;
 mod permissions;
 mod persist;
 mod resolve;
+mod self_writes;
 mod settings_writes;
 mod tips;
 mod worktree;
@@ -37,6 +38,8 @@ pub use fuigo_config_types::{
     WorktreeKindMaxAge, deserialize_tolerant,
 };
 pub use resolve::*;
+pub use self_writes::sha256_hex;
+pub(crate) use self_writes::{current_seq, newest_matching_since, record_own_write};
 pub use settings_writes::*;
 pub use tips::*;
 pub use worktree::*;

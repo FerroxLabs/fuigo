@@ -207,6 +207,12 @@ pub(crate) struct Watch {
     entries: Vec<Entry>,
     dirs: Vec<DirEntry>,
     skipped: Vec<PathBuf>,
+    /// `fuigo_home/config.toml`: the one file whose `ui.permission_mode` the user's own Shift+Tab rewrites (see
+    /// [`only_permission_mode_differs`]).
+    config_toml: Option<PathBuf>,
+    /// Only the newest self-write ledger entry, and only if newer than this, can re-baseline (see `util::config::self_writes`).
+    /// A match raises it to that entry, so every older entry is dead for this watch.
+    ledger_floor: u64,
     /// Changes found by a recheck and not yet taken by the caller: a recheck cancelled between the file work and the
     /// application of its result leaves its findings here, so the next call still reports them.
     pending: Vec<Change>,
@@ -456,11 +462,31 @@ fn candidates(roots: &Roots) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     (fixed, listed, dirs)
 }
 
+/// Do `old` and `new` both parse as TOML and differ in nothing but `ui.permission_mode`? Unparseable either way, or any other
+/// difference, is `false` (the change trips the hold).
+fn only_permission_mode_differs(old: &[u8], new: &[u8]) -> bool {
+    fn parse(b: &[u8]) -> Option<toml::Table> {
+        let mut t: toml::Table = std::str::from_utf8(b).ok()?.parse().ok()?;
+        if let Some(toml::Value::Table(ui)) = t.get_mut("ui") {
+            ui.remove("permission_mode");
+            if ui.is_empty() {
+                t.remove("ui");
+            }
+        }
+        Some(t)
+    }
+    matches!((parse(old), parse(new)), (Some(a), Some(b)) if a == b)
+}
+
 impl Watch {
     /// Record the current state of every candidate. Reads at most [`MAX_PRESENT`] files of at most [`MAX_FILE_BYTES`].
     pub(crate) fn snapshot(roots: &Roots) -> Self {
         let (fixed, listed, dirs) = candidates(roots);
-        let mut w = Self::default();
+        let mut w = Self {
+            config_toml: roots.fuigo_home.as_ref().map(|f| f.join("config.toml")),
+            ledger_floor: crate::util::config::current_seq(),
+            ..Self::default()
+        };
         for d in dirs {
             if let Some(names) = capped_names(&d) {
                 let hash = names_hash(&names);
@@ -572,7 +598,8 @@ impl Watch {
                     out.push(Change { path: e.path.clone(), old_hash: Some(hash.clone()), new_hash: None });
                     e.state = State::Absent;
                 }
-                (State::Present { stat, hash, .. }, Some(new)) => {
+                (State::Present { stat, hash, copy }, Some(new)) => {
+                    let floor = &mut self.ledger_floor;
                     // A symlink's target string is cheap to read, so it is compared even when the stat fields are equal.
                     if *stat == new && new.kind != Kind::Symlink {
                         continue;
@@ -583,7 +610,24 @@ impl Watch {
                         continue;
                     }
                     // An unreadable path (a swap to a FIFO or a link since the stat) is a change, never skipped.
-                    let nh = read_state(&e.path, new.kind).map(|(h, _)| h).unwrap_or_else(|| "unreadable".to_owned());
+                    let read = read_state(&e.path, new.kind);
+                    // The user's own mode switch (Shift+Tab) rewrites `[ui] permission_mode` in `config.toml` through Fuigo's own
+                    // writer, which records the hash of what it wrote. Only a file with such a hash, still differing from the
+                    // baseline copy in nothing but that key, moves the baseline silently; a mode-only edit from anywhere else
+                    // (a tool, a shell command) has no ledger entry and trips like any other change.
+                    if let Some((h, bytes)) = &read
+                        && new.kind == Kind::File
+                        && self.config_toml.as_deref() == Some(e.path.as_path())
+                        && only_permission_mode_differs(copy, bytes)
+                        && let Some(seq) = crate::util::config::newest_matching_since(*floor, h)
+                    {
+                        *floor = seq;
+                        *stat = new;
+                        *hash = h.clone();
+                        *copy = bytes.clone();
+                        continue;
+                    }
+                    let nh = read.map(|(h, _)| h).unwrap_or_else(|| "unreadable".to_owned());
                     *stat = new;
                     if nh != *hash {
                         out.push(Change { path: e.path.clone(), old_hash: Some(hash.clone()), new_hash: Some(nh.clone()) });

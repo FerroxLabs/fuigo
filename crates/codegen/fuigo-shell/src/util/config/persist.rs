@@ -312,7 +312,23 @@ fn merge_section<T: serde::Serialize>(
 /// from defaults. A lock wait that makes no progress for
 /// `fuigo_config::fs_atomic::CONFIG_LOCK_MAX_WAIT` surfaces as a `TimedOut`
 /// I/O error rather than a hang.
-pub async fn update_config<F>(mut f: F) -> Result<()>
+pub async fn update_config<F>(f: F) -> Result<()>
+where
+    F: FnMut(&mut Config),
+{
+    update_config_inner(f, false).await
+}
+
+/// [`update_config`] for a change the USER made through Fuigo's own UI (the Shift+Tab mode switch): on success the hash of the
+/// exact bytes written goes into the self-write ledger, which is what lets the peer integrity watch tell this write from a model's.
+pub async fn update_config_as_user<F>(f: F) -> Result<()>
+where
+    F: FnMut(&mut Config),
+{
+    update_config_inner(f, true).await
+}
+
+async fn update_config_inner<F>(mut f: F, record: bool) -> Result<()>
 where
     F: FnMut(&mut Config),
 {
@@ -354,6 +370,7 @@ where
         let (root, mut cfg) = settings_view(&path, snapshot.current())?;
         f(&mut cfg);
         let contents = toml::to_string_pretty(&render_settings(root, &cfg))?.into_bytes();
+        let own = record.then(|| super::self_writes::sha256_hex(&contents));
         let committed = {
             let (path, lock_path) = (path.clone(), lock_path.clone());
             tokio::task::spawn_blocking(move || {
@@ -371,7 +388,12 @@ where
             .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))?
         };
         match committed {
-            Ok(true) => return Ok(()),
+            Ok(true) => {
+                if let Some(h) = own {
+                    super::self_writes::record_own_write(&h);
+                }
+                return Ok(());
+            }
             // Overtaken by another writer: decide again from its version.
             Ok(false) => {}
             Err(e) => return Err(write_err(e, &path)),
@@ -398,6 +420,7 @@ where
     let (root, mut cfg) = settings_view(&path, current)?;
     f(&mut cfg);
     let contents = toml::to_string_pretty(&render_settings(root, &cfg))?.into_bytes();
+    let own = record.then(|| super::self_writes::sha256_hex(&contents));
     tokio::task::spawn_blocking(move || {
         let _locks = (lock, guard);
         fuigo_config::fs_atomic::stage_atomically_from_existing(&path, &contents, 0o600)
@@ -405,7 +428,11 @@ where
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
     })
     .await
-    .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))?
+    .map_err(|e| anyhow::anyhow!("config write task failed: {e}"))??;
+    if let Some(h) = own {
+        super::self_writes::record_own_write(&h);
+    }
+    Ok(())
 }
 
 /// Optimistic passes [`update_config`] makes before its locked cycle (as

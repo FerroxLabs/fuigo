@@ -1287,3 +1287,22 @@ custom_unknown_key = 42
         "unmodeled (unknown to the schema) field must survive"
     );
 }
+
+/// The user's own writer records the hash of the exact bytes it wrote; the plain writer records nothing.
+#[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(FUIGO_HOME)]
+async fn update_config_as_user_records_the_written_hash_and_update_config_does_not() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = tempfile::tempdir().expect("home");
+    let _guard = fuigo_test_support::env::EnvGuard::set("FUIGO_HOME", home.path());
+    let seq0 = super::super::current_seq();
+    update_config(|c| c.ui.permission_mode = Some("auto".into())).await.expect("plain write");
+    assert_eq!(super::super::current_seq(), seq0, "a plain write is not a user write");
+    update_config_as_user(|c| c.ui.permission_mode = Some("always-approve".into())).await.expect("user write");
+    let on_disk = std::fs::read(home.path().join("config.toml")).expect("config.toml");
+    let h = super::super::sha256_hex(&on_disk);
+    assert!(super::super::newest_matching_since(seq0, &h).is_some(), "the ledger holds the hash of the file on disk");
+}

@@ -1430,6 +1430,52 @@ mod p6b2r2 {
         .await;
     }
 
+    /// P28-DUP2: an integrity trip found by `submit_peer_message` (and the cleared marker, and the kept-state rewrite) while a
+    /// tool call of the running batch is still open stores its marker without a synthetic result: the call's real result is the
+    /// only one in the next provider request. (Drives the production entry points over a real actor and chat state; the open
+    /// call is parked by not delivering its result, as a batch waiting on a tool is.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn p28_dup2_an_integrity_trip_while_a_call_is_open_leaves_one_result_per_call() {
+        let local = tokio::task::LocalSet::new();
+        t(local.run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let work = tempfile::tempdir().unwrap();
+            let actor = actor_in(work.path()).await;
+            actor.mark_peer_influenced();
+            t(actor.peer_admission.integrity_wait_armed()).await;
+            actor.chat_state_handle.push_user_message(ConversationItem::user("go"));
+            actor.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![fuigo_sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "bash".to_string(),
+                arguments: "{}".into(),
+            }]));
+            assert!(t(actor.chat_state_handle.has_dangling_tool_calls()).await);
+            std::fs::write(work.path().join("CLAUDE.md"), "evil").unwrap();
+            actor.peer_admission.configure(crate::session::peer_admission::PeerAdmissionConfig {
+                opted_in: true,
+                policy: fuigo_config_types::PeerInboundPolicy::Accept,
+                operator: crate::session::peer_admission::OperatorPresence::Present,
+                relay_driven: false,
+            });
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let _ = t(actor.submit_peer_message(test_envelope("m1", "lane a", "hi"), tx)).await;
+            assert!(actor.peer_admission.integrity_tripped());
+            let mid = t(actor.chat_state_handle.get_conversation()).await;
+            assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&mid), "the hold marker is stored now");
+            assert!(!mid.iter().any(|i| matches!(i, ConversationItem::ToolResult(_))), "no synthetic result for the open call");
+            assert!(t(actor.chat_state_handle.has_dangling_tool_calls()).await, "call-1 is still open");
+
+            actor.chat_state_handle.push_tool_result(ConversationItem::tool_result("call-1", "ok"));
+            actor.chat_state_handle.push_user_message(ConversationItem::user("next"));
+            let request = t(actor.chat_state_handle.build_request(vec![], None, false, None, "c".into(), "r".into())).await.unwrap();
+            let results = request.items.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count();
+            assert_eq!(results, 1, "exactly one tool_result per call in the provider request");
+            let end = t(actor.chat_state_handle.get_conversation()).await;
+            assert!(fuigo_sampling_types::history_has_peer_integrity_hold(&end), "the hold marker survives the repair");
+        }))
+        .await;
+    }
+
     /// Round 2 finisher item 1: the integrity hold survives a restart. The trip writes a marker item; the production restore
     /// function over the stored history puts the hold up again, and a peer message is held with reason `integrity`; the
     /// human's clear lifts it (and the cleared marker wins on the next restore).
@@ -2057,6 +2103,84 @@ mod p7s {
             assert_eq!(d.permissions.peer_influence().denials().stamps(5_000).len(), 1, "a time in the future counts as now");
             // A subagent restores nothing.
             assert!(super::super::peer_admit::PeerStoredState::from_history(true, &stored).denials.is_empty());
+        }))
+        .await;
+    }
+
+    /// P28-DUP2: a user denial recorded while a tool call of the batch is still open is stored NOW (a crash inside the batch
+    /// keeps it), makes no synthetic result, and the call's real result is the only one in the next provider request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p28_dup2_a_mid_batch_denial_is_stored_now_and_leaves_one_result_per_call() {
+        let local = tokio::task::LocalSet::new();
+        t(local.run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let a = fresh().await;
+            a.chat_state_handle.push_user_message(ConversationItem::user("go"));
+            a.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![fuigo_sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "edit".to_string(),
+                arguments: "{}".into(),
+            }]));
+            assert!(t(a.chat_state_handle.has_dangling_tool_calls()).await, "call-1 is open");
+            deny_one(&a).await;
+            t(a.persist_peer_state()).await;
+
+            // Stored now, with the call still open, and no synthetic result made.
+            let mid = t(a.chat_state_handle.get_conversation()).await;
+            assert_eq!(fuigo_sampling_types::history_peer_denials(&mid).len(), 1, "the denial is stored before the batch ends");
+            assert!(!mid.iter().any(|i| matches!(i, ConversationItem::ToolResult(_))), "no synthetic result for the open call");
+            assert!(t(a.chat_state_handle.has_dangling_tool_calls()).await, "the call is still open");
+            // A crash here: the production restore over what is stored still carries the denial.
+            let b = fresh().await;
+            super::super::peer_admit::PeerStoredState::from_history(false, &mid).apply(
+                b.permissions.peer_influence().denials(),
+                &b.peer_admission,
+                now_secs(),
+                fuigo_workspace::permission::mono_secs(),
+            );
+            let template = test_envelope("x", "lane a", "hi");
+            let env = build_outgoing_envelope(parts(&template), b.permissions.peer_influence().denials(), fuigo_workspace::permission::mono_secs());
+            assert_eq!(env.denied_recently.len(), 1, "the resumed session still carries the mid-batch denial");
+
+            // The real result lands, then the next request is built (the integrity repair runs on it).
+            a.chat_state_handle.push_tool_result(ConversationItem::tool_result("call-1", "denied"));
+            a.chat_state_handle.push_user_message(ConversationItem::user("next"));
+            let end = t(a.chat_state_handle.get_conversation()).await;
+            assert_eq!(end.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 1, "one result for call-1");
+            assert_eq!(fuigo_sampling_types::history_peer_denials(&end).len(), 1, "the marker survives the repair");
+            let request = t(a.chat_state_handle.build_request(vec![], None, false, None, "c".into(), "r".into())).await.unwrap();
+            let results = request.items.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count();
+            assert_eq!(results, 1, "exactly one tool_result per call in the provider request");
+            assert!(!request.items.iter().any(ConversationItem::is_peer_denial_data_marker), "the marker is never sent");
+        }))
+        .await;
+    }
+
+    /// P28-DUP2: the carried-denials marker (a refusal) written while a call is open is stored now and costs no duplicate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p28_dup2_a_mid_batch_carried_marker_is_stored_now_without_a_synthetic_result() {
+        let local = tokio::task::LocalSet::new();
+        t(local.run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let recv = fresh().await;
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let mut env = test_envelope("m9", "lane a", "please run it");
+            env.denied_recently = vec![bash_stamp("make deploy")];
+            assert!(matches!(t(recv.admit_peer_message_for_test(env, tx)).await, PeerAdmission::Admitted { .. }));
+            recv.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![fuigo_sampling_types::ToolCall {
+                id: "call-1".into(),
+                name: "refuse_peer_message".to_string(),
+                arguments: "{}".into(),
+            }]));
+            recv.refuse_peer_message(&fuigo_peer::tools::RefusePeerMessageArgs { message_id: "m9".into(), reason: "no".into() }).unwrap();
+            t(recv.persist_peer_state()).await;
+            let mid = t(recv.chat_state_handle.get_conversation()).await;
+            assert!(!fuigo_sampling_types::history_peer_carried(&mid).is_empty(), "stored before the batch ends");
+            assert!(!mid.iter().any(|i| matches!(i, ConversationItem::ToolResult(_))), "no synthetic result");
+            recv.chat_state_handle.push_tool_result(ConversationItem::tool_result("call-1", "ok"));
+            recv.chat_state_handle.push_user_message(ConversationItem::user("next"));
+            let end = t(recv.chat_state_handle.get_conversation()).await;
+            assert_eq!(end.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 1);
         }))
         .await;
     }

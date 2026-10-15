@@ -408,11 +408,17 @@ impl InboxHost for ConnHost {
         let book = &handle.peer_gate().watches;
         let (id, from) = (envelope.message_id.clone(), envelope.from.clone());
         if !watch {
+            // A plain record is registered before the send: a held message tells its sender when it is released, expires or is
+            // refused (S9.3), and a delivered one lets an explicit refusal (the model's tool) reach the sender while its turn
+            // runs. It is dropped silently when that turn ends.
+            let Some(out) = out else { return self.send(to, envelope).await };
+            book.register_plain(&id, &from, &out);
+            let guard = UnsettledWatch { gate: handle.peer_gate().clone(), id: id.clone(), armed: true };
             let outcome = self.send(to, envelope).await;
-            // A held message tells its sender when it is released, expires or is refused (S9.3).
-            if let (DeliveryOutcome::Held { .. }, Some(out)) = (&outcome, &out) {
-                book.settled(&id, &from, true, false, out);
-            }
+            let held = matches!(outcome, DeliveryOutcome::Held { .. });
+            let rejected_now = !matches!(outcome, DeliveryOutcome::Delivered {} | DeliveryOutcome::Held { .. });
+            book.settled(&id, &from, held, rejected_now, &out);
+            guard.disarm();
             return outcome;
         }
         // A watch needs a way to send its notice, a free slot (per session: the sender's own oldest ends `unavailable`, else
