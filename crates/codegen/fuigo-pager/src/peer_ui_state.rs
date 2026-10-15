@@ -62,7 +62,8 @@ impl std::fmt::Debug for Token {
 pub enum PeerEvent {
     Held(PeerHold),
     Released(Option<String>),
-    Refused(Option<String>),
+    /// The held id, and whether the sender was really told (the shell's `senderTold`).
+    Refused(Option<String>, bool),
     Expired(Option<String>),
     Reheld(Option<String>),
     Warning { text: String, subject: String },
@@ -111,7 +112,7 @@ pub fn parse_event(update: &Value) -> Option<PeerEvent> {
     Some(match str_of(update, "sessionUpdate")? {
         "peer_held" => PeerEvent::Held(hold_from(update)?),
         "peer_released" => PeerEvent::Released(id()),
-        "peer_refused" => PeerEvent::Refused(id()),
+        "peer_refused" => PeerEvent::Refused(id(), update.get("senderTold").and_then(Value::as_bool).unwrap_or(false)),
         "peer_expired" => PeerEvent::Expired(id()),
         "peer_reheld" => PeerEvent::Reheld(id()),
         "peer_warning" => PeerEvent::Warning {
@@ -387,7 +388,7 @@ impl PeerUiState {
         if !peer_ui_enabled() {
             return None;
         }
-        let gone = |s: &mut Self, id: Option<String>, make: fn(String) -> PeerNotice| {
+        let gone = |s: &mut Self, id: Option<String>, make: &dyn Fn(String) -> PeerNotice| {
             let name = s.name_of(&id);
             if let Some(id) = &id {
                 s.remove(id);
@@ -403,9 +404,9 @@ impl PeerUiState {
                 }
                 None
             }
-            PeerEvent::Released(id) => gone(self, id, |name| PeerNotice::Released { name }),
-            PeerEvent::Refused(id) => gone(self, id, |name| PeerNotice::Refused { name }),
-            PeerEvent::Expired(id) => gone(self, id, |name| PeerNotice::Expired { name }),
+            PeerEvent::Released(id) => gone(self, id, &|name| PeerNotice::Released { name }),
+            PeerEvent::Refused(id, told) => gone(self, id, &|name| PeerNotice::Refused { name, told }),
+            PeerEvent::Expired(id) => gone(self, id, &|name| PeerNotice::Expired { name }),
             PeerEvent::Reheld(id) => {
                 let name = self.name_of(&id);
                 if let Some(id) = id {

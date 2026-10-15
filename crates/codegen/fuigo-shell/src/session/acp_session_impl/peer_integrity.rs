@@ -90,7 +90,7 @@ impl SessionActor {
         // S6.6: persist the hold (item kind, hashes nowhere) so a resume brings it back before any message is admitted.
         let _ = self
             .chat_state_handle
-            .push_user_message_and_ack(crate::sampling::ConversationItem::peer_integrity_tripped_marker())
+            .push_state_marker_and_ack(crate::sampling::ConversationItem::peer_integrity_tripped_marker())
             .await;
         let warning = integrity_warning(changes);
         #[cfg(test)]

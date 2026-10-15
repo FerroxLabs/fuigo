@@ -246,13 +246,13 @@ async fn the_event_pump_announces_holds_once_and_the_notices_with_escaped_text()
     pump_once(&f, "s", &mut known, &mut pend, &emit).await;
     assert_eq!(release_impl(&f, rel(&id, &tok), None).await.unwrap()["result"], "delivered");
     // Notice events: fixed text, escaped subject.
-    let n = PeerNotice { message_id: "/etc/<x>\n".into(), from: String::new(), kind: NoticeKind::ProtectedFileChanged, detail: None };
+    let n = PeerNotice { message_id: "/etc/<x>\n".into(), from: String::new(), kind: NoticeKind::ProtectedFileChanged, detail: None, told: false };
     let ev = notice_event("s", &n);
     assert_eq!(ev["update"]["sessionUpdate"], "peer_warning");
     assert!(!ev["update"]["subject"].as_str().unwrap().contains('<'));
     assert!(ev["update"]["text"].as_str().unwrap().starts_with("a protected file changed"));
     for kind in [NoticeKind::Released, NoticeKind::Expired, NoticeKind::Reheld, NoticeKind::LaunderingRefused] {
-        let ev = notice_event("s", &PeerNotice { message_id: "m".into(), from: String::new(), kind, detail: None });
+        let ev = notice_event("s", &PeerNotice { message_id: "m".into(), from: String::new(), kind, detail: None, told: false });
         assert!(ev["update"]["sessionUpdate"].as_str().unwrap().starts_with("peer_"));
     }
 }
@@ -276,7 +276,7 @@ async fn p13r2_a_hostile_peer_message_id_is_never_echoed_and_release_works_throu
     let all = format!("{rows}{:?}", out.lock().unwrap());
     assert!(!all.contains('\u{202e}') && !all.contains("<b>") && !all.contains("\\u{1b}") && !all.contains("\\u001b"), "{all}");
     assert_eq!(out.lock().unwrap()[0]["update"]["heldId"], id);
-    let n = notice_event("s", &PeerNotice { message_id: HOSTILE.into(), from: String::new(), kind: NoticeKind::Released, detail: None });
+    let n = notice_event("s", &PeerNotice { message_id: HOSTILE.into(), from: String::new(), kind: NoticeKind::Released, detail: None, told: false });
     assert_eq!(n["update"]["heldId"], held_ref("", HOSTILE));
     assert!(!n.to_string().contains("<b>"));
     let r = release_impl(&f, rel(&id, &tok), None).await.unwrap();

@@ -72,6 +72,13 @@ impl ChatStateHandle {
         .await
     }
 
+    /// Store a peer state marker (a user item that is never sent to a model) WITHOUT running the integrity repair, and await the
+    /// actor's acknowledgement. If the last tool-calling assistant item still has an open call, the marker is stored before it
+    /// (memory and disk), so no synthetic "cancelled" result is made for the call and the call/result run stays contiguous.
+    pub async fn push_state_marker_and_ack(&self, item: ConversationItem) -> Option<()> {
+        self.query("PushStateMarkerAndAck", |reply| ChatStateCommand::PushStateMarkerAndAck { item, reply }).await
+    }
+
     /// Strictly append one working-directory switch and await persistence.
     /// A matching generation returns `AlreadyPresent`; indeterminate errors must be retried.
     pub async fn append_working_directory_switch_and_ack(

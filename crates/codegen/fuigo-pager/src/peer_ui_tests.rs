@@ -122,7 +122,7 @@ fn notices_are_fixed_text_plus_escaped_names() {
     for n in [
         PeerNotice::Delivered { name: NASTY.into() },
         PeerNotice::Released { name: NASTY.into() },
-        PeerNotice::Refused { name: NASTY.into() },
+        PeerNotice::Refused { name: NASTY.into(), told: true },
         PeerNotice::Expired { name: NASTY.into() },
         PeerNotice::IntegrityWarning { path: NASTY.into() },
         PeerNotice::LaunderingRefused { name: NASTY.into() },
@@ -442,4 +442,16 @@ fn delivered_preview_is_a_single_line_block() {
         RenderBlock::System(b) => assert!(b.single_line, "the preview must not wrap"),
         other => panic!("expected a system row, got {other:?}"),
     }
+}
+
+#[test]
+fn p28_refused_row_says_the_sender_is_told_only_when_it_is() {
+    let _g = force_peer_ui_for_test(true);
+    let told = notice_row_text(&PeerNotice::Refused { name: "a".into(), told: true }).unwrap();
+    let not = notice_row_text(&PeerNotice::Refused { name: "a".into(), told: false }).unwrap();
+    assert_eq!(told, "Peer message from \"a\" was refused; the sender is told.");
+    assert_eq!(not, "Peer message from \"a\" was refused.");
+    let ev = |t: serde_json::Value| crate::peer_ui_state::parse_event(&serde_json::json!({"sessionUpdate": "peer_refused", "senderTold": t}));
+    assert!(matches!(ev(true.into()), Some(crate::peer_ui_state::PeerEvent::Refused(_, true))));
+    assert!(matches!(ev(serde_json::Value::Null), Some(crate::peer_ui_state::PeerEvent::Refused(_, false))));
 }

@@ -348,6 +348,32 @@ impl ChatStateActor {
         self.prune_retained_conversation();
     }
 
+    /// Store a peer state marker without the integrity repair (see `PushStateMarkerAndAck`). The repair would answer a call of
+    /// the running batch with a synthetic "cancelled" result, and the real result would then make two for one id. Appended after
+    /// the call and before its result the marker would instead break the contiguous result run the repair and the request
+    /// builder rely on, so with a call still open it is inserted before that assistant item (memory and disk). Markers are
+    /// never model input and carry no tokens, so no token estimate, prune or reminder handling applies.
+    pub(super) fn push_state_marker(&mut self, item: ConversationItem) {
+        let open_at = self
+            .state
+            .conversation
+            .iter()
+            .rposition(|i| matches!(i, ConversationItem::Assistant(a) if !a.tool_calls.is_empty()))
+            .filter(|&at| fuigo_sampling_types::has_dangling_tool_calls(&self.state.conversation[at..]));
+        match open_at {
+            Some(at) => {
+                self.rewrite_history(HistoryRewrite::IntegrityRepair, |conversation| {
+                    conversation.insert(at, item);
+                    1
+                });
+            }
+            None => {
+                self.persistence.persist_message(&item);
+                self.state.conversation.push(item);
+            }
+        }
+    }
+
     /// Eagerly hard-clear tool results from very old turns in the retained
     /// in-memory conversation, freeing the actual string bytes.
     ///

@@ -282,7 +282,7 @@ fn s5_5_expiry_at_the_boundary() {
     assert_eq!(s.release("m1", &token, exp, &live(recv)), Err(ReleaseError::Expired));
     assert_eq!(s.held_count(), 0);
     let notices = s.take_notices(exp);
-    assert_eq!(notices, vec![PeerNotice { message_id: "m1".into(), from: notices[0].from.clone(), kind: NoticeKind::Expired, detail: None }]);
+    assert_eq!(notices, vec![PeerNotice { message_id: "m1".into(), from: notices[0].from.clone(), kind: NoticeKind::Expired, detail: None, told: false }]);
     // And a sweep alone (no release attempt) expires it too.
     let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
     let (exp, _) = hold_one(&s, "m1", T0);
@@ -770,18 +770,56 @@ fn p13r2_a_released_sender_denied_row_is_delivered_but_every_other_reason_is_rec
 fn r2_automatic_refusal_is_per_message_and_does_not_hold_the_sender() {
     let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
     let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    // A WATCHED message (the sender asked for the idle notice): its text-only reply is still recorded refused (1.0.26).
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let total: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+    let from = env_from("m1", ae()).from;
+    s.gate().watches.register_watch("m1", &from, &tx, &total).unwrap();
     assert_eq!(outcome_of(s.submit(env_from("m1", ae()), T0, &live(ae()))), DeliveryOutcome::Delivered {});
+    s.gate().watches.settled("m1", &from, false, false, &tx);
     s.note_delivered(&env_from("m1", ae()));
     let _g = s.begin_turn(false, Some("m1"));
     s.note_model_response(0, true, false);
     assert!(s.finish_peer_turn("m1", false), "the message is recorded refused");
+    assert_eq!(rx.try_recv().map(|o| o.kind), Ok(fuigo_peer::NoticeKind::Denied));
     let n = s.take_notices(now_mono());
     assert_eq!(n.last().map(|n| n.kind), Some(NoticeKind::ModelRefused));
     assert_eq!(n.last().and_then(|n| n.detail.as_deref()), Some("no action taken"));
+    assert!(n.last().is_some_and(|n| n.told), "a watched message: the sender really is told");
     assert_eq!(s.refused_sender_count(), 0, "no per-sender state");
     // A second message claiming the same `from`, in the same mode, is delivered normally.
     assert_eq!(outcome_of(s.submit(env_from("m2", ae()), T0 + 1, &live(ae()))), DeliveryOutcome::Delivered {});
     assert_eq!(s.held_count(), 0);
+}
+
+/// P28 oddity 1: a message the human RELEASED was explicitly accepted. A text-only reply to it is not recorded as refused (no
+/// ModelRefused notice, so no "refused" row for the human and nothing refused for the sender); the empty-reply notice still shows.
+#[test]
+fn p28_released_message_text_only_reply_is_not_auto_refused() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let recv = PeerMode::new(false, PeerBase::Default, false);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (_, token) = hold_one(&s, "m1", T0);
+    assert_eq!(s.release("m1", &token, T0 + 1, &live(recv)), Ok(()));
+    let (enter, _) = s.drain(T0 + 2, &live(recv));
+    assert_eq!(enter.len(), 1);
+    s.take_notices(now_mono());
+    s.note_delivered(&enter[0]);
+    let _g = s.begin_turn(false, Some("m1"));
+    s.note_model_response(0, true, false);
+    assert!(!s.finish_peer_turn("m1", false), "a released message is never auto-refused");
+    let n = s.take_notices(now_mono());
+    assert!(n.iter().all(|n| n.kind != NoticeKind::ModelRefused), "{n:?}");
+    // An empty reply to a released message still shows the one transcript notice, still without a refusal.
+    let (_, token) = hold_one(&s, "m2", T0 + 10);
+    assert_eq!(s.release("m2", &token, T0 + 11, &live(recv)), Ok(()));
+    let (enter, _) = s.drain(T0 + 12, &live(recv));
+    s.take_notices(now_mono());
+    s.note_delivered(&enter[0]);
+    let _g2 = s.begin_turn(false, Some("m2"));
+    assert!(!s.finish_peer_turn("m2", false));
+    let n = s.take_notices(now_mono());
+    assert_eq!(n.iter().map(|n| n.kind).collect::<Vec<_>>(), vec![NoticeKind::PeerTurnNoReply], "{n:?}");
 }
 
 /// The tool path keeps its full consequences (pinned): the sender is held for the rest of the session.
@@ -795,4 +833,116 @@ fn r2_tool_refusal_still_holds_the_sender() {
     assert_eq!(s.refused_sender_count(), 1);
     let out = s.submit(env_from("m2", ae()), T0 + 1, &live(ae()));
     assert!(matches!(out, Submitted::Done(DeliveryOutcome::Held { reason: HoldReason::SenderDenied, .. })), "{out:?}");
+}
+
+// ---- P28-2: the sender of a delivered, UNWATCHED message ----
+
+type Told = tokio::sync::mpsc::UnboundedReceiver<crate::session::peer_watch::Outbound>;
+
+fn told_kinds(rx: &mut Told) -> Vec<fuigo_peer::NoticeKind> {
+    let mut v = Vec::new();
+    while let Ok(o) = rx.try_recv() {
+        v.push(o.kind);
+    }
+    v
+}
+
+/// Deliver `id` the way `send_watched` does for an unwatched send: plain record before the submit, settled after.
+fn send_plain(s: &PeerAdmissionState, id: &str, now: u64, receiver: PeerMode) -> (Told, bool) {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let env = env_from(id, ae());
+    let gate = s.gate();
+    gate.watches.register_plain(id, &env.from, &tx);
+    let out = outcome_of(s.submit(env.clone(), now, &live(receiver)));
+    let held = matches!(out, DeliveryOutcome::Held { .. });
+    gate.watches.settled(id, &env.from, held, false, &tx);
+    if !held {
+        s.note_delivered(&env);
+    }
+    (rx, held)
+}
+
+/// A chatty text-only reply to an unwatched message is not a refusal: no sender notice, no ModelRefused row.
+#[test]
+fn p28_unwatched_text_only_reply_tells_nobody_and_shows_no_refused_row() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (mut rx, held) = send_plain(&s, "m1", T0, ae());
+    assert!(!held);
+    let _g = s.begin_turn(false, Some("m1"));
+    s.note_model_response(0, true, false);
+    assert!(!s.finish_peer_turn("m1", false));
+    assert!(s.take_notices(now_mono()).iter().all(|n| n.kind != NoticeKind::ModelRefused));
+    s.gate().watches.turn_ended();
+    assert!(told_kinds(&mut rx).is_empty(), "the sender hears nothing");
+}
+
+/// An explicit refusal by the model's tool reaches the sender as Denied, and the human's row says the sender is told.
+#[test]
+fn p28_unwatched_tool_refusal_tells_the_sender_denied() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (mut rx, _) = send_plain(&s, "m1", T0, ae());
+    let _g = s.begin_turn(false, Some("m1"));
+    s.gate().watches.turn_started();
+    s.gate().watches.bind_turn("m1");
+    s.refuse_by_model("m1", "not mine").expect("refused");
+    assert_eq!(told_kinds(&mut rx), vec![fuigo_peer::NoticeKind::Denied]);
+    let n = s.take_notices(now_mono());
+    assert!(n.iter().any(|n| n.kind == NoticeKind::ModelRefused && n.told), "{n:?}");
+    s.gate().watches.turn_ended();
+    assert!(told_kinds(&mut rx).is_empty(), "no idle notice for an unwatched message");
+}
+
+/// The human refusing a held, unwatched message reaches the sender as Refused.
+#[test]
+fn p28_unwatched_held_message_refused_by_the_human_tells_the_sender() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (mut rx, held) = send_plain(&s, "m1", T0, PeerMode::new(false, PeerBase::Default, false));
+    assert!(held);
+    let token = s.list_held(T0).iter().find(|h| h.message_id == "m1").unwrap().token.clone();
+    s.reject("m1", &token, T0 + 1).unwrap();
+    assert_eq!(told_kinds(&mut rx), vec![fuigo_peer::NoticeKind::Refused]);
+    assert!(s.take_notices(now_mono()).iter().any(|n| matches!(n.kind, NoticeKind::Refused(_)) && n.told));
+}
+
+/// No record leaks: the plain record ends with its turn, silently; a later refusal finds nothing.
+#[test]
+fn p28_unwatched_delivered_record_is_dropped_silently_when_the_turn_ends() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (mut rx, _) = send_plain(&s, "m1", T0, ae());
+    assert_eq!(s.gate().watches.len(), 1);
+    s.gate().watches.turn_started();
+    s.gate().watches.bind_turn("m1");
+    s.gate().watches.turn_ended();
+    assert_eq!(s.gate().watches.len(), 0, "no record left");
+    assert!(told_kinds(&mut rx).is_empty());
+    let _ = s.refuse_by_model("m1", "late");
+    assert!(told_kinds(&mut rx).is_empty(), "nothing to tell after the turn");
+}
+
+/// Production order (turn_task.rs): the end-of-turn hook runs while the turn guard is still alive and only then does the guard
+/// drop (which ends the turn for the watch book). A WATCHED message with a text-only reply is therefore still auto-refused, as in
+/// 1.0.27: the sender gets Denied and no idle notice follows.
+#[test]
+fn p28_watched_text_only_reply_is_refused_before_the_turn_guard_drops() {
+    let _on = crate::session::peer_message::force_peer_messaging_for_test(true);
+    let s = store(PeerInboundPolicy::Accept, OperatorPresence::Present);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let total: std::sync::Arc<std::sync::atomic::AtomicUsize> = Default::default();
+    let from = env_from("m1", ae()).from;
+    s.gate().watches.register_watch("m1", &from, &tx, &total).unwrap();
+    assert_eq!(outcome_of(s.submit(env_from("m1", ae()), T0, &live(ae()))), DeliveryOutcome::Delivered {});
+    s.gate().watches.settled("m1", &from, false, false, &tx);
+    s.note_delivered(&env_from("m1", ae()));
+    let g = s.begin_turn(false, Some("m1"));
+    s.gate().watches.turn_started();
+    s.note_turn_peer_message("m1");
+    s.note_model_response(0, true, false);
+    assert!(s.finish_peer_turn("m1", false), "refused while the guard is alive");
+    drop(g);
+    s.gate().watches.turn_ended();
+    assert_eq!(told_kinds(&mut rx), vec![fuigo_peer::NoticeKind::Denied], "Denied, and no idle after it");
 }

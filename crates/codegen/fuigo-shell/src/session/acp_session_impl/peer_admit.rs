@@ -320,11 +320,11 @@ impl SessionActor {
             if self.peer_work_outstanding_locked(&state) {
                 return PeerClear::Outstanding;
             }
-            // `push_user_message_and_ack` sends its command before its first await, so polling it once enqueues the marker
+            // `push_state_marker_and_ack` sends its command before its first await, so polling it once enqueues the marker
             // while the lock is held (ordering); the same future is awaited for the ack after the lock is released.
             let mut append = Box::pin(
                 self.chat_state_handle
-                    .push_user_message_and_ack(crate::sampling::ConversationItem::peer_influence_marker(false)),
+                    .push_state_marker_and_ack(crate::sampling::ConversationItem::peer_influence_marker(false)),
             );
             let first = std::future::poll_fn(|cx| std::task::Poll::Ready(append.as_mut().poll(cx))).await;
             if matches!(first, std::task::Poll::Ready(None)) {
@@ -379,7 +379,7 @@ impl SessionActor {
         }
         let Some(state) = self.peer_admission.snapshot_peer_state() else { return };
         let item = crate::sampling::ConversationItem::peer_carried_denials_marker(&state);
-        if self.chat_state_handle.push_user_message_and_ack(item).await.is_none() {
+        if self.chat_state_handle.push_state_marker_and_ack(item).await.is_none() {
             self.peer_admission.mark_state_dirty();
         }
     }
@@ -413,6 +413,9 @@ impl SessionActor {
         if !peer_messaging_enabled() || self.startup_hints.is_subagent {
             return;
         }
+        // P28-DUP: the markers go through `push_state_marker_and_ack`, not the user-message push: that push runs the integrity
+        // repair, which answers a tool call of the running batch that has no result yet with a synthetic "cancelled" result (its
+        // real result then makes two for one id, a 400 on every later request). A mid-batch persist therefore still writes now.
         let wall = crate::session::peer_admission::now_secs();
         let fresh = self.peer_admission.new_denials(self.permissions.peer_influence().denials().entries());
         let total = fresh.len();
@@ -428,7 +431,7 @@ impl SessionActor {
         }
         if let Some(state) = self.peer_admission.take_state_to_store() {
             let item = crate::sampling::ConversationItem::peer_carried_denials_marker(&state);
-            if self.chat_state_handle.push_user_message_and_ack(item).await.is_none() {
+            if self.chat_state_handle.push_state_marker_and_ack(item).await.is_none() {
                 self.peer_admission.mark_state_dirty();
             }
         }
@@ -439,7 +442,7 @@ impl SessionActor {
         if take_denial_append_failure() {
             return None;
         }
-        self.chat_state_handle.push_user_message_and_ack(item).await.map(|_| ())
+        self.chat_state_handle.push_state_marker_and_ack(item).await
     }
 
     /// The `PeerHost` this session's peer tools and `/peers` talk to. A subagent gets an unavailable one: it reaches its

@@ -256,3 +256,52 @@ async fn flag_off_nothing_runs() {
         })
         .await;
 }
+
+/// P28-DUP: `refuse_peer_message` makes the receiver-side peer state dirty (refused sender) while its own tool call is open.
+/// The result handler (`handle_bridge_tool_success` / `handle_tool_error`) runs `persist_peer_state` BEFORE it pushes the
+/// call's result, so the `peer_carried_denials` marker is appended first; that `push_user_message` runs the integrity repair,
+/// which answers the still-open call with a synthetic "cancelled" result, and the real result then lands after the marker
+/// (outside the contiguous run `dedup_duplicate_tool_results` scans). Here the dirty state is set just before the turn (no
+/// persist runs between it and the result handler) and the call is a real tool (`todo_write`, success path).
+#[tokio::test(flavor = "current_thread")]
+async fn p28_dup_refusal_pending_when_a_tool_result_lands_leaves_one_result_per_call() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let r = rig().await;
+            *r.actor.agent.borrow_mut() = test_fuigo_build_agent_with_todo().await;
+            r.server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(fuigo_test_support::sse::responses_api_reasoning_then_tool_call_events(
+                    "thinking",
+                    "call-1",
+                    "todo_write",
+                    r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
+                    "test",
+                )),
+            );
+            r.server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("done", "test")));
+            let env = envelope("m1");
+            r.actor.peer_admission.note_delivered(&env);
+            let guard = r.actor.peer_admission.begin_turn(false, Some("m1"));
+            // What the `refuse_peer_message` tool does through the pump (sets the refused sender, `state_dirty`).
+            let args = fuigo_peer::tools::RefusePeerMessageArgs { message_id: "m1".into(), reason: "not mine".into() };
+            r.actor.refuse_peer_message(&args).expect("refused by the model");
+            let request = peer_turn_request(&env);
+            let result = run_parent_turn(&r.actor, request).await;
+            drop(guard);
+            assert!(result.is_ok(), "{result:?}");
+            let bodies = r.server.request_bodies();
+            assert!(bodies.len() >= 2, "a follow-up request was sent: {}", bodies.len());
+            let input = bodies[1]["input"].as_array().cloned().unwrap_or_default();
+            let outputs: Vec<&serde_json::Value> =
+                input.iter().filter(|i| i["type"] == "function_call_output" && i["call_id"] == "call-1").collect();
+            assert_eq!(
+                outputs.len(),
+                1,
+                "exactly one tool result for call-1; follow-up input: {}",
+                serde_json::to_string_pretty(&input).unwrap()
+            );
+        })
+        .await;
+}

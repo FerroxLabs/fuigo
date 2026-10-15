@@ -108,6 +108,18 @@ fn p11_a_plain_held_message_still_reports_release_and_expiry_but_never_idle() {
     b.bind_turn("p");
     b.turn_ended();
     assert!(drain(&mut rx).is_empty());
+    assert_eq!(b.len(), 0, "the plain record ended silently with its turn");
+}
+
+#[test]
+fn p28_a_released_unwatched_message_can_still_be_refused_by_the_model() {
+    let (b, tx, mut rx, _t) = rig();
+    b.settled("p", &from(1), true, false, &tx);
+    b.on_session_notice("p", &SessionNotice::Released);
+    b.turn_started();
+    b.bind_turn("p");
+    assert!(b.on_session_notice("p", &SessionNotice::ModelRefused));
+    assert_eq!(drain(&mut rx), vec![("p".to_owned(), NoticeKind::Released), ("p".to_owned(), NoticeKind::Denied)]);
 }
 
 #[test]
@@ -286,4 +298,54 @@ fn p11_forget_removes_an_unsettled_registration() {
     b.turn_started();
     b.turn_ended();
     assert!(drain(&mut rx).is_empty());
+}
+
+#[test]
+fn p28_plain_delivered_records_are_capped_oldest_evicted_and_held_ones_are_kept() {
+    let (b, tx, mut rx, _t) = rig();
+    b.register_plain("held", &from(1), &tx);
+    b.settled("held", &from(1), true, false, &tx);
+    for i in 0..(MAX_HELD_RECORDS + 10) {
+        let id = format!("d{i}");
+        b.register_plain(&id, &from(1), &tx);
+        b.settled(&id, &from(1), false, false, &tx);
+    }
+    assert_eq!(b.len(), MAX_HELD_RECORDS, "bounded");
+    // The held one survived and still reports its release; the oldest delivered ones are gone, the newest remain.
+    assert!(b.on_session_notice("held", &SessionNotice::Released));
+    assert!(!b.on_session_notice("d0", &SessionNotice::ModelRefused));
+    assert!(b.on_session_notice(&format!("d{}", MAX_HELD_RECORDS + 9), &SessionNotice::ModelRefused));
+    assert_eq!(drain(&mut rx).len(), 2);
+}
+
+#[test]
+fn p28_all_held_at_the_cap_adds_no_plain_delivered_record() {
+    let (b, tx, _rx, _t) = rig();
+    for i in 0..MAX_HELD_RECORDS {
+        b.settled(&format!("h{i}"), &from(1), true, false, &tx);
+    }
+    b.register_plain("d", &from(1), &tx);
+    assert_eq!(b.len(), MAX_HELD_RECORDS);
+    assert!(!b.is_watched("d"));
+}
+
+/// Session close: what each kind of record gets, compared with 1.0.27 (which had records only for watches and HELD messages).
+#[test]
+fn p28_ending_a_session_tells_watches_and_held_senders_but_not_senders_of_delivered_messages() {
+    let (b, tx, mut rx, total) = rig();
+    b.register_watch("w", &from(1), &tx, &total).unwrap();
+    b.register_plain("held", &from(2), &tx);
+    b.settled("held", &from(2), true, false, &tx);
+    // Delivered and running, delivered and queued, and still unsettled: none of these asked to be told.
+    b.register_plain("running", &from(3), &tx);
+    b.settled("running", &from(3), false, false, &tx);
+    b.bind_turn("running");
+    b.register_plain("queued", &from(4), &tx);
+    b.settled("queued", &from(4), false, false, &tx);
+    b.register_plain("unsettled", &from(5), &tx);
+    b.end_all(NoticeKind::Exited);
+    let mut got = drain(&mut rx);
+    got.sort_by(|x, y| x.0.cmp(&y.0));
+    assert_eq!(got, vec![("held".to_owned(), NoticeKind::Exited), ("w".to_owned(), NoticeKind::Exited)]);
+    assert_eq!(b.len(), 0);
 }

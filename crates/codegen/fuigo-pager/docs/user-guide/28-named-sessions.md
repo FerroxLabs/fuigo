@@ -107,7 +107,8 @@ You can also be told other outcomes. The sender gets one short notice for each o
 - the message was held and you released it,
 - it was held and expired,
 - it was held and refused,
-- the model in the other session refused it,
+- the model in the other session refused it with its `refuse_peer_message` tool (this works for any message that was delivered or that you released,
+  with or without `notify_when_idle`, while the other session is still working on it),
 - the other session finished its turn and is idle,
 - the other session exited,
 - the other session is unavailable (this is not a confirmed exit),
@@ -298,9 +299,12 @@ runs do nothing new.
   refusing the message. Nothing was run. Now, when such a turn ends with an empty reply or a refusal from the model
   provider, you see one notice in the transcript. A turn that was started by a message from another session and makes
   no tool call at all (an empty reply, a provider refusal or a reply with only text) is recorded as refused
-  automatically with the reason "no action taken": the sender is told. This applies to that message only; later
-  messages from that sender are not held because of it (unlike a refusal the model makes with `refuse_peer_message`,
-  which holds the sender for the rest of the session). A turn in which the model used a tool is not refused this way. The model can still reply with text and take
+  automatically with the reason "no action taken". Only a message sent with `notify_when_idle` is treated this way, and
+  only then is the sender told. For a message sent without it, a reply with only text is not a refusal: the sender hears
+  nothing and you see no "refused" row (the empty-reply and provider-refusal notices still show). A message you released
+  is never refused automatically. A refusal here applies to that message only; later messages from that sender are not held
+  because of it (unlike a refusal the model makes with `refuse_peer_message`, which holds the sender for the rest of the
+  session and always tells the sender). A turn in which the model used a tool is not refused this way. The model can still reply with text and take
   no action; the rule judges the turn by whether any tool was called, not by whether the model's text was a refusal.
 - Session park in this release is hold only.
 

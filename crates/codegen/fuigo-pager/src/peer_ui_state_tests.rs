@@ -40,7 +40,7 @@ fn parses_the_six_events_and_ignores_the_rest() {
         let ev = parse_event(&json!({"sessionUpdate": name, "heldId": hid(1), "detail": "d"})).unwrap();
         let got = match ev {
             PeerEvent::Released(Some(_)) => 0,
-            PeerEvent::Refused(Some(_)) => 1,
+            PeerEvent::Refused(Some(_), _) => 1,
             PeerEvent::Expired(Some(_)) => 2,
             PeerEvent::Reheld(Some(_)) => 3,
             other => panic!("{other:?}"),
@@ -107,7 +107,7 @@ fn held_row_appears_and_goes_with_a_notice() {
     let note = s.apply_event(PeerEvent::Released(Some(hid(1)))).unwrap();
     assert!(note.contains("lane a") && note.contains("No tool call was approved"), "{note}");
     assert_eq!(s.held_count(), 1);
-    assert!(s.apply_event(PeerEvent::Refused(Some(hid(2)))).unwrap().contains("refused"));
+    assert!(s.apply_event(PeerEvent::Refused(Some(hid(2)), false)).unwrap().contains("refused"));
     assert!(s.row_text(10).is_none());
     s.apply_event(PeerEvent::Held(parse_hold(&held_update(3, "lane c"))));
     assert!(s.apply_event(PeerEvent::Expired(Some(hid(3)))).unwrap().contains("expired"));
