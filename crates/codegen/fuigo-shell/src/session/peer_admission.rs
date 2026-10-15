@@ -259,6 +259,8 @@ pub struct PeerNotice {
     /// Text for the human only (never audited, never sent to the sender): for `Released` the denial counts per kind ("the sender
     /// was recently denied: bash x2, edit x1"), for `ModelRefused` the model's reason (escaped, at most 200 characters).
     pub detail: Option<String>,
+    /// A refusal notice only: the sender really was sent a typed notice (it had a record for the message).
+    pub told: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,6 +347,9 @@ struct Inner {
     conv_of: HashMap<String, (String, u32)>,
     /// Message id -> the sender's claimed (name, ref) for the ids in `received` (same bound): RAW, escaped when shown.
     label_of: HashMap<String, (String, String)>,
+    /// Ids of messages a human released from a hold (pruned with `received`, capped): a release is an explicit accept, so a text-only
+    /// reply to one is never auto-refused (P28 oddity 1).
+    released: HashSet<String>,
     /// What the running turn did (26-4, 26-5): read once when a peer-started turn ends.
     turn_obs: TurnObs,
     /// The (conversation id, hop) of the peer message that started or joined the running turn (the highest hop if several);
@@ -623,8 +628,8 @@ impl Inner {
         if self.notices.len() >= NOTICE_RING {
             self.notices.pop_front();
         }
-        self.gate.watches.on_session_notice(message_id, &kind);
-        self.notices.push_back(PeerNotice { message_id: message_id.to_owned(), from: from.to_owned(), kind, detail: None });
+        let told = self.gate.watches.on_session_notice(message_id, &kind);
+        self.notices.push_back(PeerNotice { message_id: message_id.to_owned(), from: from.to_owned(), kind, detail: None, told });
     }
 
     fn notice_with(&mut self, from: &str, message_id: &str, kind: NoticeKind, detail: Option<String>) {
@@ -851,6 +856,7 @@ impl PeerAdmissionState {
             sender_of: HashMap::new(),
             conv_of: HashMap::new(),
             label_of: HashMap::new(),
+            released: HashSet::new(),
             turn_obs: TurnObs::default(),
             turn_conv: Arc::default(),
             chain: Arc::default(),
@@ -1185,6 +1191,12 @@ impl PeerAdmissionState {
             match g.check_at_drain(p, live, now) {
                 Ok(p) => {
                     g.budget.consume();
+                    if matches!(p.qualification, Qualification::Released(_)) {
+                        if g.released.len() >= RECEIVED_RING {
+                            g.released.clear();
+                        }
+                        g.released.insert(id.clone());
+                    }
                     enter.push(p.envelope.clone());
                     g.queued.insert(msg_key(&p.envelope), p);
                     outcomes.push((id, ReleaseOutcome::Delivered));
@@ -1601,6 +1613,7 @@ impl PeerAdmissionState {
                 g.sender_of.remove(&old);
                 g.conv_of.remove(&old);
                 g.label_of.remove(&old);
+                g.released.remove(&old);
             }
             g.received.push_back(id.clone());
         }
@@ -1693,12 +1706,23 @@ impl PeerAdmissionState {
             return false;
         }
         let Some(from) = Self::sender_for(&g, message_id) else { return false };
+        let watched = self.gate.watches.is_watched(message_id);
         let declined = refusal_stop || obs.provider_refused;
         if declined || !obs.text_seen {
             let (name, sref) = g.label_of.get(message_id).cloned().unwrap_or_default();
             let label = format!("{} [{}]", fuigo_peer::host::display_escape(&name, 64), fuigo_peer::host::display_escape(&sref, 64));
             let kind = if declined { NoticeKind::PeerTurnDeclined } else { NoticeKind::PeerTurnNoReply };
             g.notice_with(&from, message_id, kind, Some(label));
+        }
+        // A message the human released was explicitly accepted: the empty-reply / declined notices above still show, but it is not
+        // also recorded as refused (no refused row, no refused notice to the sender, an idle watch still fires).
+        if g.released.contains(message_id) {
+            return false;
+        }
+        // A text-only reply is not a refusal: unless the sender asked to be told when this turn ends (a watched message), the
+        // sender hears nothing and the human sees no "refused" row. Only an explicit refusal (the tool, the human) counts.
+        if !watched {
+            return false;
         }
         Self::refuse_locked(&mut g, message_id, AUTO_REFUSE_REASON, true).is_ok()
     }

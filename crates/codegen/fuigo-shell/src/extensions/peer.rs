@@ -426,6 +426,9 @@ pub(crate) fn notice_event(session_id: &str, n: &PeerNotice) -> Value {
         // The turn notices carry the sender in the sentence; a subject would only repeat the message id.
         update["subject"] = json!(if turn_text.is_some() { String::new() } else { escaped_id });
     }
+    if matches!(n.kind, NoticeKind::Refused(_) | NoticeKind::ModelRefused) {
+        update["senderTold"] = json!(n.told);
+    }
     if let NoticeKind::Refused(r) = &n.kind {
         update["reason"] = json!(format!("{r:?}"));
     }

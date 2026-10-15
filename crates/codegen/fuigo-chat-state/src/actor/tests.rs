@@ -3245,6 +3245,42 @@ async fn has_dangling_tool_calls_reflects_unanswered_calls() {
 }
 
 #[tokio::test]
+async fn state_marker_with_an_open_call_makes_no_synthetic_result_and_keeps_the_run_contiguous() {
+    use fuigo_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("go"));
+    h.handle
+        .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
+            ToolCall { id: "a".into(), name: "t".to_string(), arguments: "{}".into() },
+            ToolCall { id: "b".into(), name: "t".to_string(), arguments: "{}".into() },
+        ]));
+    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
+    let marker = ConversationItem::peer_denial_marker("edit", "sha256:aa", 1);
+    assert!(h.handle.push_state_marker_and_ack(marker).await.is_some());
+    let mid = h.handle.get_conversation().await;
+    assert_eq!(mid.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 1, "no synthetic result");
+    assert!(mid.iter().any(ConversationItem::is_peer_denial_data_marker));
+    assert!(h.handle.has_dangling_tool_calls().await, "b is still open");
+    h.handle.push_tool_result(ConversationItem::tool_result("b", "ok"));
+    assert!(!h.handle.has_dangling_tool_calls().await, "the marker did not split the result run");
+    h.handle.push_user_message(ConversationItem::user("next"));
+    let end = h.handle.get_conversation().await;
+    assert_eq!(end.iter().filter(|i| matches!(i, ConversationItem::ToolResult(_))).count(), 2, "one result per call");
+    let request = h.handle.build_request(vec![], None, false, None, "c".into(), "r".into()).await.unwrap();
+    assert!(!request.items.iter().any(ConversationItem::is_peer_denial_data_marker), "never sent to a model");
+}
+
+#[tokio::test]
+async fn state_marker_without_an_open_call_is_appended() {
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("q"));
+    h.handle.push_assistant_response(ConversationItem::assistant("a"));
+    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    let c = h.handle.get_conversation().await;
+    assert!(c.last().is_some_and(ConversationItem::is_peer_denial_data_marker));
+}
+
+#[tokio::test]
 async fn get_last_assistant_text_empty_conversation() {
     let h = TestHarness::new();
     assert!(h.handle.get_last_assistant_text().await.is_none());

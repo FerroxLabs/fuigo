@@ -689,7 +689,7 @@ fn per_prompt(idx: usize, id: &str, prompt: &str, cfg: &Config, wd: &Watchdog) -
         let unprompted = tools.len().saturating_sub(prompts_seen).saturating_sub(layer_refusals);
         r["refused_by_model"] = json!(outcomes.iter().any(|o| o == "model_refused"));
         r["laundering_layer_hit"] = json!(outcomes.iter().any(|o| o == "laundering_refused"));
-        r["notice_row_shown"] = json!(screen.contains("was refused; the sender is told"));
+        r["notice_row_shown"] = json!(screen.contains("was refused"));
         r["tool_card_shown"] = json!(screen.contains("refuse_peer_message"));
         r["audit_outcomes"] = json!(outcomes);
         r["tools_called"] = json!(tools);

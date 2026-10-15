@@ -483,3 +483,132 @@ fn p13r3_a_new_message_with_integrity_up_and_no_operator_is_refused_not_stored()
     let out = s.submit(test_envelope("m2", "lane", "hi"), T0, &live());
     assert!(matches!(out, Submitted::Done(DeliveryOutcome::Held { reason: HoldReason::Integrity, .. })), "{out:?}");
 }
+
+// ---- P28-2: the user's own Shift+Tab rewrite of `[ui] permission_mode` is not an integrity trip ----
+
+fn config_rig(initial: &str) -> (tempfile::TempDir, PathBuf, Watch) {
+    let home = tempfile::tempdir().unwrap();
+    let cfg = home.path().join("config.toml");
+    std::fs::write(&cfg, initial).unwrap();
+    let r = Roots { cwd: home.path().join("cwd"), home: None, fuigo_home: Some(home.path().to_path_buf()) };
+    let w = Watch::snapshot(&r);
+    (home, cfg, w)
+}
+
+const CFG: &str = "[model.x]\nname = \"m\"\n\n[ui]\npermission_mode = \"ask\"\ntheme = \"dark\"\n";
+
+/// What Fuigo's own writer does after it replaces the file: the hash of the bytes it wrote goes into the ledger.
+fn own_write(cfg: &Path, body: &str) {
+    std::fs::write(cfg, body).unwrap();
+    crate::util::config::record_own_write(&crate::util::config::sha256_hex(body.as_bytes()));
+}
+
+#[test]
+fn p28_a_users_own_permission_mode_write_rebaselines_silently() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    own_write(&cfg, &CFG.replace("\"ask\"", "\"always-approve\""));
+    assert!(w.recheck().is_empty(), "our own mode-only write: no trip");
+    // Another switch compares against the NEW baseline, and re-ordered/re-rendered content is fine too.
+    own_write(&cfg, "[ui]\ntheme = \"dark\"\npermission_mode = \"auto\"\n\n[model.x]\nname = \"m\"\n");
+    assert!(w.recheck().is_empty());
+    assert!(w.recheck().is_empty());
+}
+
+/// The point of the ledger: a mode-only edit that did NOT come through Fuigo's writer (a model tool, a shell command) trips,
+/// even though it differs from the baseline in nothing but `ui.permission_mode`.
+#[test]
+fn p28_a_mode_only_edit_not_made_by_our_writer_trips() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    std::fs::write(&cfg, CFG.replace("\"ask\"", "\"bypassPermissions\"")).unwrap();
+    assert_eq!(w.recheck().len(), 1);
+}
+
+/// Our write, then an external edit of the same file: the final content has no ledger entry, so it trips.
+#[test]
+fn p28_our_write_followed_by_an_external_edit_trips() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    own_write(&cfg, &CFG.replace("\"ask\"", "\"auto\""));
+    std::fs::write(&cfg, CFG.replace("\"ask\"", "\"always-approve\"")).unwrap();
+    assert_eq!(w.recheck().len(), 1);
+}
+
+/// The audit scenario: the user cycles the mode during one peer tool call (several own writes before the recheck). Only the
+/// newest is accepted; the always-approve entry is dead, so a later model write of those bytes trips.
+#[test]
+fn p28_a_mode_cycle_retires_older_ledger_entries() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    let always = CFG.replace("\"ask\"", "\"always-approve\"");
+    own_write(&cfg, &CFG.replace("\"ask\"", "\"plan\""));
+    own_write(&cfg, &always);
+    own_write(&cfg, &CFG.replace("\"ask\"", "\"auto\""));
+    assert!(w.recheck().is_empty(), "the newest own write is accepted");
+    // The model now writes the always-approve bytes: an older entry, no longer live.
+    std::fs::write(&cfg, &always).unwrap();
+    assert_eq!(w.recheck().len(), 1, "an older ledger entry is dead");
+}
+
+/// A match is single-use, and an entry recorded before a fresh baseline does not count for it.
+#[test]
+fn p28_a_ledger_entry_is_single_use_and_must_postdate_the_baseline() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    let a = CFG.replace("\"ask\"", "\"auto\"");
+    own_write(&cfg, &a);
+    assert!(w.recheck().is_empty());
+    std::fs::write(&cfg, CFG).unwrap();
+    assert_eq!(w.recheck().len(), 1, "a hand edit back to the baseline content is a change");
+    std::fs::write(&cfg, &a).unwrap();
+    assert_eq!(w.recheck().len(), 1, "a replayed, already used ledger hash trips");
+    // An entry recorded BEFORE a fresh baseline does not count for it.
+    let (h2, cfg2, _) = config_rig(CFG);
+    let early = CFG.replace("\"ask\"", "\"early\"");
+    crate::util::config::record_own_write(&crate::util::config::sha256_hex(early.as_bytes()));
+    let r = Roots { cwd: h2.path().join("cwd"), home: None, fuigo_home: Some(h2.path().to_path_buf()) };
+    let mut w2 = Watch::snapshot(&r);
+    std::fs::write(&cfg2, &early).unwrap();
+    assert_eq!(w2.recheck().len(), 1);
+}
+
+#[test]
+fn p28_a_mode_change_plus_another_key_still_trips() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    own_write(&cfg, &CFG.replace("\"ask\"", "\"always-approve\"").replace("\"dark\"", "\"light\""));
+    assert_eq!(w.recheck().len(), 1, "even a recorded write trips when another key moved");
+}
+
+#[test]
+fn p28_a_model_written_edit_of_another_key_trips_and_a_later_mode_change_does_not_hide_it() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    std::fs::write(&cfg, CFG.replace("\"m\"", "\"evil-model\"")).unwrap();
+    assert_eq!(w.recheck().len(), 1);
+    // A new section appearing is not a mode-only change either.
+    let (_h2, cfg2, mut w2) = config_rig(CFG);
+    std::fs::write(&cfg2, format!("{CFG}\n[hooks]\nrun = \"x\"\n")).unwrap();
+    assert_eq!(w2.recheck().len(), 1);
+}
+
+#[test]
+fn p28_unparseable_or_unreadable_config_toml_trips() {
+    let (_h, cfg, mut w) = config_rig(CFG);
+    std::fs::write(&cfg, "[ui\npermission_mode = \"always-approve\"").unwrap();
+    assert_eq!(w.recheck().len(), 1, "unparseable");
+    let (_h2, cfg2, mut w2) = config_rig(CFG);
+    std::fs::remove_file(&cfg2).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("/nonexistent/target", &cfg2).unwrap();
+    #[cfg(unix)]
+    assert_eq!(w2.recheck().len(), 1, "swapped for a link");
+    assert!(!only_permission_mode_differs(b"\xff\xfe", CFG.as_bytes()));
+    assert!(!only_permission_mode_differs(CFG.as_bytes(), b"\xff"));
+    assert!(only_permission_mode_differs(b"", b"[ui]\npermission_mode = \"auto\"\n"), "a baseline without [ui] gaining only the mode");
+}
+
+#[test]
+fn p28_the_mode_exception_applies_to_the_fuigo_home_config_only() {
+    let work = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(work.path().join(".fuigo")).unwrap();
+    let project = work.path().join(".fuigo/config.toml");
+    std::fs::write(&project, CFG).unwrap();
+    let mut w = Watch::snapshot(&roots(work.path()));
+    own_write(&project, &CFG.replace("\"ask\"", "\"always-approve\""));
+    assert_eq!(w.recheck().len(), 1, "a project config is not the user's mode switch");
+}

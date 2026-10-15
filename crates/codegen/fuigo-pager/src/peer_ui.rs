@@ -328,7 +328,7 @@ pub fn held_row_text(h: &PeerHold, now_secs: u64) -> String {
 pub enum PeerNotice {
     Delivered { name: String },
     Released { name: String },
-    Refused { name: String },
+    Refused { name: String, told: bool },
     Expired { name: String },
     /// A protected file changed while peer-influenced (packet 6).
     IntegrityWarning { path: String },
@@ -350,7 +350,9 @@ pub fn notice_row_text(n: &PeerNotice) -> Option<String> {
         PeerNotice::Released { name } => {
             format!("Held peer message from {} was released. No tool call was approved.", name_field(name))
         }
-        PeerNotice::Refused { name } => format!("Held peer message from {} was refused; the sender is told.", name_field(name)),
+        PeerNotice::Refused { name, told } => {
+            format!("Peer message from {} was refused{}", name_field(name), if *told { "; the sender is told." } else { "." })
+        }
         PeerNotice::Expired { name } => format!("Held peer message from {} expired and was dropped.", name_field(name)),
         PeerNotice::IntegrityWarning { path } => format!(
             "Warning: a protected file changed while this session was peer-influenced: {}. Peer messages are held until you review it.",
