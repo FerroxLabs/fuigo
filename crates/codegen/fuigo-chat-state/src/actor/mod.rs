@@ -121,6 +121,7 @@ impl ChatStateActor {
             ChatStateCommand::PushUserMessage { .. }
             | ChatStateCommand::PushUserMessagesBatch { .. }
             | ChatStateCommand::PushUserMessageAndAck { .. }
+            | ChatStateCommand::PushStateMarkerAndAck { .. }
             | ChatStateCommand::AppendWorkingDirectorySwitchAndAck { .. }
             | ChatStateCommand::PushUserMessageWithRepairReason { .. }
             | ChatStateCommand::PushAssistantResponse { .. }
@@ -183,6 +184,10 @@ impl ChatStateActor {
             }
             ChatStateCommand::PushUserMessageAndAck { item, reply } => {
                 self.push_user_message(item);
+                let _ = reply.send(());
+            }
+            ChatStateCommand::PushStateMarkerAndAck { item, reply } => {
+                self.push_state_marker(item);
                 let _ = reply.send(());
             }
             ChatStateCommand::AppendWorkingDirectorySwitchAndAck {

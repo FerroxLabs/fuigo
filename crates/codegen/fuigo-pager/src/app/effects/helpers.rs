@@ -1373,7 +1373,7 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let enabled = canonical == "always-approve";
     let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
-    let disk_result = fuigo_shell::util::config::update_config(|cfg| {
+    let disk_result = fuigo_shell::util::config::update_config_as_user(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
         })
         .await;

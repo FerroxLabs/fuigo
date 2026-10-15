@@ -89,6 +89,13 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<()>,
     },
 
+    /// Store a peer state marker (never model input) without the integrity repair, and acknowledge. Placed BEFORE the
+    /// trailing assistant item when that item has tool calls still open, so it never splits a call from its result.
+    PushStateMarkerAndAck {
+        item: ConversationItem,
+        reply: oneshot::Sender<()>,
+    },
+
     /// Append one working-directory switch without repair or pruning, then
     /// acknowledge only after persistence processes the generation-aware append.
     AppendWorkingDirectorySwitchAndAck {

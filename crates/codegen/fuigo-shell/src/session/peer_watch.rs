@@ -62,6 +62,9 @@ struct Rec {
     watch: bool,
     /// The message started or joined a turn: the watch fires when that turn ends.
     bound: bool,
+    /// The message was held for its receiver's user. A plain record that is NOT held (delivered, or not yet settled) only lets
+    /// a refusal reach the sender: it is dropped silently when its turn ends or the session ends, and goes first at the cap.
+    held: bool,
     out: NoticeOut,
     _ticket: Option<WatchTicket>,
 }
@@ -124,6 +127,7 @@ impl WatchBook {
             from: from.clone(),
             watch: true,
             bound: false,
+            held: false,
             out: out.clone(),
             _ticket: Some(ticket),
         });
@@ -163,22 +167,50 @@ impl WatchBook {
         Ok(())
     }
 
+    /// Register a plain (unwatched) record BEFORE the send, so a turn that starts at once cannot miss it. Best effort: at the
+    /// plain-record cap the oldest delivered plain record is dropped; when none can go (all held) nothing is added.
+    pub(crate) fn register_plain(&self, message_id: &str, from: &Address, out: &NoticeOut) {
+        let mut g = self.lock();
+        if g.recs.iter().any(|r| r.message_id == message_id) {
+            return;
+        }
+        if g.recs.iter().filter(|r| !r.watch).count() >= MAX_HELD_RECORDS {
+            let Some(old) = g.recs.iter().position(|r| !r.watch && !r.held) else { return };
+            g.recs.remove(old);
+        }
+        g.recs.push_back(Rec {
+            message_id: message_id.to_owned(),
+            from: from.clone(),
+            watch: false,
+            bound: false,
+            held: false,
+            out: out.clone(),
+            _ticket: None,
+        });
+    }
+
     /// The outcome of the delivery: a rejected send forgets its record; a held one keeps it (it arms at release); a plain held
-    /// message (no watch) gets a record so its release, expiry or refusal reaches the sender.
+    /// message (no watch) gets a record so its release, expiry or refusal reaches the sender; a delivered one is marked so, which
+    /// keeps a plain record until its turn ends (an explicit refusal of it still reaches the sender).
     pub(crate) fn settled(&self, message_id: &str, from: &Address, held: bool, rejected: bool, out: &NoticeOut) {
         let mut g = self.lock();
         let known = g.recs.iter().any(|r| r.message_id == message_id);
         if rejected {
             g.recs.retain(|r| r.message_id != message_id);
-        } else if held && !known && g.recs.iter().filter(|r| !r.watch).count() < MAX_HELD_RECORDS {
-            g.recs.push_back(Rec {
-                message_id: message_id.to_owned(),
-                from: from.clone(),
-                watch: false,
-                bound: false,
-                out: out.clone(),
-                _ticket: None,
-            });
+        } else if !known {
+            if held && g.recs.iter().filter(|r| !r.watch).count() < MAX_HELD_RECORDS {
+                g.recs.push_back(Rec {
+                    message_id: message_id.to_owned(),
+                    from: from.clone(),
+                    watch: false,
+                    bound: false,
+                    held: true,
+                    out: out.clone(),
+                    _ticket: None,
+                });
+            }
+        } else if held && let Some(r) = g.recs.iter_mut().find(|r| r.message_id == message_id) {
+            r.held = true;
         }
     }
 
@@ -188,8 +220,12 @@ impl WatchBook {
         if let Some(r) = g.recs.iter_mut().find(|r| r.message_id == message_id) {
             r.bound = true;
         }
-        // A delivered, unwatched message needs no record.
-        g.recs.retain(|r| r.watch || r.message_id != message_id);
+    }
+
+    /// Did the sender ask for an idle notice about `message_id` (a watched send)? Only then does a text-only reply count as a
+    /// refusal the sender is told about.
+    pub(crate) fn is_watched(&self, message_id: &str) -> bool {
+        self.lock().recs.iter().any(|r| r.watch && r.message_id == message_id)
     }
 
     pub(crate) fn turn_started(&self) {
@@ -207,32 +243,39 @@ impl WatchBook {
     }
 
     fn fire_bound(g: &mut BookInner) {
-        let (fire, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut g.recs).into_iter().partition(|r| r.watch && r.bound);
+        let (fire, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut g.recs).into_iter().partition(|r| r.bound);
         g.recs = keep.into();
-        for r in fire {
+        // A plain record bound to the turn ends with it, silently.
+        for r in fire.into_iter().filter(|r| r.watch) {
             emit(&r.out, &r, NoticeKind::Idle);
         }
     }
 
     /// The session's typed notice for a held (or refused) message. `Released` keeps a watch armed; every other kind is terminal.
-    pub(crate) fn on_session_notice(&self, message_id: &str, kind: &SessionNotice) {
-        let Some(wire) = held_wire_kind(kind) else { return };
+    /// Returns true when a notice went to the sender.
+    pub(crate) fn on_session_notice(&self, message_id: &str, kind: &SessionNotice) -> bool {
+        let Some(wire) = held_wire_kind(kind) else { return false };
         let mut g = self.lock();
-        let Some(pos) = g.recs.iter().position(|r| r.message_id == message_id) else { return };
-        if wire == NoticeKind::Released && g.recs[pos].watch {
-            let r = &g.recs[pos];
+        let Some(pos) = g.recs.iter().position(|r| r.message_id == message_id) else { return false };
+        if wire == NoticeKind::Released {
+            // A watch stays armed. A plain record stays too, no longer held: the message is delivered at the next drain, and
+            // an explicit refusal of it (the model's tool) must still reach the sender. It ends silently with its turn.
+            let r = &mut g.recs[pos];
+            r.held = false;
             emit(&r.out, r, wire);
-            return;
+            return true;
         }
         if let Some(r) = g.recs.remove(pos) {
             emit(&r.out, &r, wire);
         }
+        true
     }
 
     /// The session or the host is ending: every outstanding record is told `kind` (`exited`).
     pub(crate) fn end_all(&self, kind: NoticeKind) {
         let mut g = self.lock();
-        for r in std::mem::take(&mut g.recs) {
+        // A plain record of a delivered message is not told: it never asked, and 1.0.27 told it nothing either.
+        for r in std::mem::take(&mut g.recs).into_iter().filter(|r| r.watch || r.held) {
             emit(&r.out, &r, kind);
         }
     }
