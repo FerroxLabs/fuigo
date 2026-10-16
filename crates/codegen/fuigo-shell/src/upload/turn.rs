@@ -469,17 +469,33 @@ pub(crate) fn lookup_session_model(
 ) -> agent_client_protocol::ModelId {
     session_model.unwrap_or_else(|| default_model_id.clone())
 }
+/// Which sessions a `fuigo/yolo_mode_changed` notification may change.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SenderScope<'a> {
+    /// Direct (single-client stdio) mode: match on the client's product string; no product matches every session.
+    Product(Option<&'a str>),
+    /// Leader mode: only sessions owned by this leader-stamped connection id; `None` (no stamp) matches nothing.
+    Connection(Option<u64>),
+}
+impl SenderScope<'_> {
+    pub(crate) fn matches(self, owner: Option<u64>, h: &crate::session::SessionHandle) -> bool {
+        match self {
+            Self::Product(sender) => {
+                sender.is_none() || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender
+            }
+            Self::Connection(sender) => sender.is_some() && owner == sender,
+        }
+    }
+}
+/// Applies the change to every `(owner connection id, session)` pair the scope matches; returns how many changed.
 pub(crate) fn apply_yolo_mode_to_matching_sessions<'a>(
-    sessions: impl IntoIterator<Item = &'a mut crate::session::SessionHandle>,
-    sender_id: Option<&str>,
+    sessions: impl IntoIterator<Item = (Option<u64>, &'a mut crate::session::SessionHandle)>,
+    scope: SenderScope<'_>,
     yolo_mode: bool,
 ) -> usize {
-    let matches_sender = |h: &crate::session::SessionHandle| -> bool {
-        sender_id.is_none() || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender_id
-    };
     let mut updated = 0;
-    for handle in sessions {
-        if matches_sender(handle) {
+    for (owner, handle) in sessions {
+        if scope.matches(owner, handle) {
             handle.yolo_mode = yolo_mode;
             let _ = handle
                 .cmd_tx

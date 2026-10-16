@@ -162,7 +162,11 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
             let affected = match find_session_match(app, &notif.request.session_id) {
                 Some(SessionMatch::Root(id)) => {
-                    let is_active = is_matched_agent_active(app, id);
+                    let mut is_active = is_matched_agent_active(app, id);
+                    // P29-B: a live peer message for the hidden home session (welcome screen up, no turn run yet).
+                    let peer_delivery_to_home = !meta.is_replay
+                        && app.home_session_agent == Some(id)
+                        && meta.prompt_id.as_deref().is_some_and(|p| p.starts_with("peer-message-"));
                     let stashed_adoption_pid = app
                         .pending_running_adoptions
                         .get(&id)
@@ -394,6 +398,10 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     }
                     if workflows_modal_refresh {
                         queue_open_workflows_modal_refresh(app, id);
+                    }
+                    if peer_delivery_to_home {
+                        crate::app::dispatch::reveal_home_session_for_peer_delivery(app, id);
+                        is_active = is_matched_agent_active(app, id);
                     }
 
                     mutated && is_active

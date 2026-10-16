@@ -609,7 +609,7 @@ jobs:
       # It is also unnecessary: sync-version.js and
       # assemble-platform-packages.js use only Node builtins (fs, path, zlib,
       # child_process). The single runtime dependency, @iarna/toml, is used by
-      # bin/postinstall.js, which runs on the USER's machine at install time.
+      # bin/fuigo-install.js, which runs on the USER's machine on first launch (there is no install script).
 
       # Fails if any npm version disagrees with fuigo-version/Cargo.toml.
       - name: Check versions
@@ -702,7 +702,7 @@ jobs:
       # sibling publish from the same account, fails identically. The token
       # `win32-arm64` in an unscoped name is what it refuses -- which is why
       # that one platform publishes as `fuigo-windows-arm64` (see the case
-      # statement below and bin/postinstall.js). The sleep stays because it is
+      # statement below and bin/fuigo-bootstrap.js). The sleep stays because it is
       # cheap, not because it was ever the fix.
       #
       # The loop no longer aborts on the first failure. When the 403 hit

@@ -916,15 +916,28 @@ pub async fn run_install_script(
     let started = Instant::now();
     // Internal reports the version it actually activated; npm/gh-release resolve their own artifact, so the requested target stands in
     let result: Result<Option<String>> = match installer {
-        "npm" => install_npm_checked(
-            target,
-            &update_config.channel,
-            update_config.npm_registry.as_deref(),
-            crate::version::NPM_VIEW_TIMEOUT,
-            NPM_INSTALL_TIMEOUT,
-        )
-        .await
-        .map(|()| None),
+        "npm" => {
+            // An automatic check must not re-run a ~150 MB npm install for a version whose setup step just failed.
+            if !matches!(trigger, CliUpdateTrigger::UserCommand)
+                && let Some(version) = target
+                && setup_failed_recently(version)
+            {
+                tracing::warn!(version, "skipping npm update: the setup step of this version failed recently");
+                Err(anyhow::anyhow!(
+                    "not reinstalling fuigo@{version}: its setup step failed recently (run `fuigo update` to retry)"
+                ))
+            } else {
+                install_npm_checked(
+                    target,
+                    &update_config.channel,
+                    update_config.npm_registry.as_deref(),
+                    crate::version::NPM_VIEW_TIMEOUT,
+                    NPM_INSTALL_TIMEOUT,
+                )
+                .await
+                .map(|()| None)
+            }
+        }
         "gh-release" => install_gh_release(target).await.map(|()| None),
         _ => install_internal(target, update_config).await.map(Some),
     };
@@ -2490,7 +2503,7 @@ fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<TempNpmrc>> {
 /// Any fuigo process running from that vendored path will be SIGKILL'd by the kernel.
 /// macOS (Apple Silicon in particular) can no longer verify the code signature of the mmap'd executable pages once the backing inode is unlinked.
 ///
-/// While our postinstall.js now uses versioned binaries under ~/.fuigo/bin/
+/// While the npm launcher (fuigo-install.js) now uses versioned binaries under ~/.fuigo/bin/
 /// (so processes launched from there are safe), older installations or npx
 /// invocations may still be running the vendored binary directly.
 #[cfg(target_os = "macos")]
@@ -2676,8 +2689,160 @@ async fn install_npm_with_timeout(
     if !status.success() {
         anyhow::bail!("npm install failed. Please try again.");
     }
+    // The npm package has no install script (npm 11 warns about every package with one), so nothing has pointed
+    // `~/.fuigo/bin/fuigo` at the new version yet. The leader and the post-update restart both exec that path, so a
+    // success reported before this step would restart the OLD binary, which would see the newer registry version and
+    // reinstall it on every check.
+    if let Err(e) = run_npm_setup(target, npm_registry, NPM_SETUP_TIMEOUT).await {
+        let version = target.unwrap_or("latest");
+        record_setup_failure(version);
+        tracing::error!(version, "npm setup step failed: {e:#}");
+        anyhow::bail!(
+            "npm installed {version_arg} but its setup step failed: {e:#}. ~/.fuigo/bin/fuigo was not moved to the new \
+             version. Background updates will not retry this version for {} hours; to finish by hand run `fuigo update` \
+             again or `npm i -g {version_arg}`.",
+            NPM_SETUP_BACKOFF.as_secs() / 3600
+        );
+    }
+    clear_setup_failure();
     fuigo_tty_utils::cli_eprintln!();
     Ok(())
+}
+
+/// Bound on the setup step (decompressing the ~150 MB platform binary and linking it).
+const NPM_SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// After a failed setup step, automatic updates (not an explicit `fuigo update`) leave that version alone this long,
+/// so a broken package cannot make every launch and every hourly leader check re-run the large npm install.
+const NPM_SETUP_BACKOFF: Duration = Duration::from_secs(6 * 60 * 60);
+
+fn setup_failure_marker() -> std::path::PathBuf {
+    fuigo_home().join(".npm-setup-failed")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn record_setup_failure(version: &str) {
+    let path = setup_failure_marker();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, format!("{version}\n{}\n", unix_now()));
+}
+
+fn clear_setup_failure() {
+    let _ = std::fs::remove_file(setup_failure_marker());
+}
+
+/// Whether a setup step for exactly `version` failed within [`NPM_SETUP_BACKOFF`].
+fn setup_failed_recently(version: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(setup_failure_marker()) else {
+        return false;
+    };
+    let mut lines = text.lines();
+    let (Some(v), Some(ts)) = (lines.next(), lines.next().and_then(|t| t.trim().parse::<u64>().ok())) else {
+        return false;
+    };
+    v == version && unix_now().saturating_sub(ts) < NPM_SETUP_BACKOFF.as_secs()
+}
+
+/// The registry to record in config.toml by the setup step: only one without embedded credentials.
+fn registry_safe_to_record(registry: &str) -> bool {
+    url::Url::parse(registry)
+        .map(|u| u.username().is_empty() && u.password().is_none())
+        .unwrap_or(false)
+}
+
+/// After `npm i -g`: run the freshly installed package's own setup step synchronously
+/// (`node <npm root -g>/fuigo/bin/fuigo-bootstrap.js` with `FUIGO_INSTALL_ONLY=1`; no exec of the binary), then confirm
+/// `~/.fuigo/bin/fuigo` points at the installed version. Works the same for npm 10 and below and npm 11, which differ
+/// only in whether npm itself runs install scripts; this package has none on either.
+async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout: Duration) -> Result<String> {
+    let mut root_cmd = crate::npm_command::npm_invocation()?.tokio_command();
+    root_cmd.args(["root", "-g"]);
+    root_cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    fuigo_tools::util::detach_command(&mut root_cmd);
+    let root = match crate::npm_command::run_tree_bounded(&mut root_cmd, Duration::from_secs(30)).await? {
+        crate::npm_command::Bounded::Done(out) if out.status.success() => {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+        crate::npm_command::Bounded::Done(out) => anyhow::bail!("`npm root -g` failed with {}", out.status),
+        crate::npm_command::Bounded::TimedOut => anyhow::bail!("`npm root -g` did not answer in 30 s"),
+    };
+    let pkg_dir = std::path::Path::new(&root).join("fuigo");
+    let manifest = std::fs::read_to_string(pkg_dir.join("package.json"))
+        .with_context(|| format!("the installed package was not found at {}", pkg_dir.display()))?;
+    let installed: String = serde_json::from_str::<serde_json::Value>(&manifest)?
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .context("the installed package.json has no version")?;
+    if let Some(want) = target
+        && want != installed
+    {
+        anyhow::bail!("npm reported success but installed fuigo@{installed}, not fuigo@{want}");
+    }
+
+    let script = pkg_dir.join("bin").join("fuigo-bootstrap.js");
+    let home = fuigo_home();
+    let mut cmd = tokio::process::Command::new("node");
+    cmd.arg(&script)
+        .env("FUIGO_INSTALL_ONLY", "1")
+        .env("FUIGO_HOME", &home)
+        // Never the user's project: the node side looks up the npm registry from this directory.
+        .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    if let Some(registry) = npm_registry
+        && registry_safe_to_record(registry)
+    {
+        cmd.env("FUIGO_NPM_REGISTRY", registry);
+    }
+    fuigo_tools::util::detach_command(&mut cmd);
+    match crate::npm_command::run_tree_bounded(&mut cmd, timeout).await? {
+        crate::npm_command::Bounded::Done(out) if out.status.success() => {}
+        crate::npm_command::Bounded::Done(out) => anyhow::bail!("`node {}` exited with {}", script.display(), out.status),
+        crate::npm_command::Bounded::TimedOut => {
+            anyhow::bail!("`node {}` did not finish within {} s", script.display(), timeout.as_secs())
+        }
+    }
+    if !canonical_points_at(&installed) {
+        anyhow::bail!("{} does not point at fuigo-{installed} after the setup step", fuigo_application().display());
+    }
+    Ok(installed)
+}
+
+/// Whether `~/.fuigo/bin/fuigo` now runs the versioned binary `fuigo-<version>` next to it.
+fn canonical_points_at(version: &str) -> bool {
+    let app = fuigo_application();
+    let Some(dir) = app.parent() else { return false };
+    let name = format!("fuigo-{version}{}", if cfg!(windows) { ".exe" } else { "" });
+    if !dir.join(&name).is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        std::fs::read_link(&app).ok().as_deref() == Some(std::path::Path::new(&name))
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows copies the versioned binary over fuigo.exe (symlinks need elevation).
+        match (std::fs::metadata(&app), std::fs::metadata(dir.join(&name))) {
+            (Ok(a), Ok(b)) => a.is_file() && a.len() == b.len(),
+            _ => false,
+        }
+    }
+}
+
+/// Test-only: the back-off check, so tests can assert on it without a network round trip.
+#[doc(hidden)]
+pub fn npm_setup_failed_recently_for_test(version: &str) -> bool {
+    setup_failed_recently(version)
 }
 
 pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {

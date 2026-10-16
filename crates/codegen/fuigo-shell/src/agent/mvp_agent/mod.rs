@@ -749,6 +749,11 @@ pub struct MvpAgent {
     pub(crate) config_watcher_path_tx: Option<
         tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
     >,
+    /// True only under the leader. LEADER-SAFE(init-once): set by `set_leader_mode` before the agent is shared.
+    pub(crate) leader_mode: bool,
+    /// Owner connection id per session id, taken from the leader-stamped `_meta` on session/new, load and resume.
+    /// LEADER-SAFE(per-session): the last connection to load or resume a session becomes its owner.
+    session_owner_conn: RefCell<HashMap<String, u64>>,
     relay_sync_enabled: bool,
     /// LEADER-SAFE(init-once): set once per connection during initialize from client capabilities, read when spawning sessions.
     /// In leader mode, the last client to initialize overwrites previous settings.
