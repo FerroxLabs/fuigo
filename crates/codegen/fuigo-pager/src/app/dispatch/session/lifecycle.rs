@@ -303,6 +303,18 @@ pub(in crate::app::dispatch) fn reveal_home_session(app: &mut AppView) {
         }
     }
 }
+/// A live peer message was delivered to the hidden home session while the welcome screen is up. The session is no longer
+/// unused: bring it on screen (so the delivered row and the turn it starts are seen) and stop treating it as a husk (so a later
+/// Ctrl+N or load does not delete a conversation that holds a peer message). A no-op for any other session or view.
+pub(crate) fn reveal_home_session_for_peer_delivery(app: &mut AppView, id: AgentId) {
+    if app.home_session_agent != Some(id) || !matches!(app.active_view, ActiveView::Welcome) {
+        return;
+    }
+    reveal_home_session(app);
+    if app.optimistic_home_husk == Some(id) {
+        app.optimistic_home_husk = None;
+    }
+}
 /// Callers must handle the view staying on Welcome (gate closed).
 /// `WorktreeMode::Always` never reveals the in-cwd optimistic session.
 pub(in crate::app::dispatch) fn leave_welcome_for_session(app: &mut AppView) -> Vec<Effect> {

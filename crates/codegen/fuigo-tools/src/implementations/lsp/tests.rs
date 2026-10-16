@@ -1827,8 +1827,20 @@ async fn a_server_that_announces_it_is_ready_is_waited_on_again() {
 
     // Past the first pull (refused, leaving the server looking silent) and the
     // announcement that followed it. The re-pull that announcement queued is in
-    // flight but has not answered yet.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // flight but has not answered yet (it takes the server 250 ms). Wait for the
+    // announcement itself, not for a guessed time: a bounded poll of the flag it
+    // raises, so a loaded host only makes this wait longer.
+    let announced_by = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if mgr.lock().await.clients["mock-ts"].refresh.is_invalidated() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < announced_by,
+            "the server never announced that it is ready"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
     let summary = drain_lsp_diagnostics(&mgr, std::time::Duration::from_secs(2))
         .await

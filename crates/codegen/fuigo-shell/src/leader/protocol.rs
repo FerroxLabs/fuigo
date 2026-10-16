@@ -171,6 +171,12 @@ where
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(pub u64);
 
+/// `_meta` / params key under which the leader stamps the id of the accepted client connection onto session requests
+/// and `fuigo/yolo_mode_changed` notifications. Only the leader writes it: any client-supplied value is stripped first.
+/// Set by the leader (never by a client) on a `session/load`/`session/resume` `_meta` when another still-connected client drives that session.
+pub const LEADER_FOREIGN_DRIVER_KEY: &str = "fuigo/leaderForeignDriverLive";
+pub const LEADER_CONNECTION_ID_KEY: &str = "fuigo/leaderConnectionId";
+
 impl ClientId {
     /// Generate a new unique client ID from an atomic counter that wraps at u64::MAX.
     /// Collisions would need 2^64 IDs, which never happens in practice.

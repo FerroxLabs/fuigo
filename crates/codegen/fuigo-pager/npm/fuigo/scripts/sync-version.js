@@ -40,7 +40,7 @@ const PLATFORMS = [
 ];
 
 // Platform packages publish scoped: @fuigo/<platform>-<arch>. The meta package
-// stays unscoped. See bin/postinstall.js for why the scope is load-bearing.
+// stays unscoped. See bin/fuigo-bootstrap.js for why the scope is load-bearing.
 // The DIRECTORY stays fuigo-<platform>-<arch>; only the npm name is scoped.
 const packageNameFor = (p) => `@fuigo/${p}`;
 
@@ -114,7 +114,7 @@ function main() {
 
     // Meta package: its own version, plus the six pins. npm resolves an
     // optionalDependency by exact version, so a stale pin means the platform
-    // package is silently skipped and postinstall reports "unsupported
+    // package is silently skipped and the launcher reports "unsupported
     // platform" on a platform that is in fact supported.
     let meta = readJson(META_PKG);
     note('meta version', meta.version, version);

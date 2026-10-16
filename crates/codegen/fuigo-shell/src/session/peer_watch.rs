@@ -254,6 +254,14 @@ impl WatchBook {
     /// The session's typed notice for a held (or refused) message. `Released` keeps a watch armed; every other kind is terminal.
     /// Returns true when a notice went to the sender.
     pub(crate) fn on_session_notice(&self, message_id: &str, kind: &SessionNotice) -> bool {
+        if matches!(kind, SessionNotice::Reheld) {
+            // The released message went back on hold at the drain: its record is held again, like at the first hold, so a
+            // later release, expiry or refusal reaches the sender and the session ending tells it. The sender is not told.
+            if let Some(r) = self.lock().recs.iter_mut().find(|r| r.message_id == message_id) {
+                r.held = true;
+            }
+            return false;
+        }
         let Some(wire) = held_wire_kind(kind) else { return false };
         let mut g = self.lock();
         let Some(pos) = g.recs.iter().position(|r| r.message_id == message_id) else { return false };
