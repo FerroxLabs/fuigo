@@ -48,7 +48,9 @@ pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
 pub(crate) use session::load::fail_agent_after_failed_reconnect;
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
-pub(crate) use session::lifecycle::{abandon_unused_home_session, maybe_create_home_session};
+pub(crate) use session::lifecycle::{
+    abandon_unused_home_session, maybe_create_home_session, reveal_home_session_for_peer_delivery,
+};
 pub(in crate::app) use prompt::{present_export_copy_tip, show_small_screen_tip, show_ssh_wrap_tip};
 pub(super) use queue::{
     apply_turn_start_shim, arm_send_now_and_paint, maybe_drain_queue_and_note_peek,

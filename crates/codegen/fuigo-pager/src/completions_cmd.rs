@@ -1,6 +1,6 @@
 //! `fuigo completions <shell>`: generate shell completion scripts.
 //!
-//! Used by the installers and npm postinstall; must stay side-effect free (no network, auth, tracing, or tokio).
+//! Used by the installers and the npm launcher's first run; must stay side-effect free (no network, auth, tracing, or tokio).
 
 use clap::CommandFactory as _;
 use clap_complete::{Shell, generate};

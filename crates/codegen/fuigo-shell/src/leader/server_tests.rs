@@ -2299,20 +2299,33 @@ fn inject_capabilities_adds_leader_client_id_to_session_load() {
 }
 
 #[test]
-fn inject_capabilities_does_not_override_existing_leader_client_id() {
-    let payload = format!(
-        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"fuigo/leaderClientId":7}}}}}}"#,
-        AGENT_METHOD_NAMES.session_load
-    );
-    let caps = ClientCapabilities::default();
-
-    let mut json = pv(&payload);
-    inject_session_request_context(&mut json, &caps, "fuigo-tui", ClientId(42));
-    // An explicit value already present is respected (mirrors the clientIdentifier guard)
-    assert_eq!(
-        json["params"]["_meta"]["fuigo/leaderClientId"].as_u64(),
-        Some(7)
-    );
+fn client_supplied_leader_client_id_is_overwritten_with_real_connection_id() {
+    // Connection B (id 42) names connection A's id (7) in a session request, with and without capabilities set.
+    for method in [
+        AGENT_METHOD_NAMES.session_new,
+        AGENT_METHOD_NAMES.session_load,
+        AGENT_METHOD_NAMES.session_resume,
+    ] {
+        let payload = format!(
+            r#"{{"jsonrpc":"2.0","method":"{method}","id":1,"params":{{"sessionId":"sess-1","_meta":{{"fuigo/leaderClientId":7}}}}}}"#
+        );
+        let mut json = pv(&payload);
+        assert!(stamp_connection_id_into_session_request(&mut json, ClientId(42)));
+        inject_session_request_context(
+            &mut json,
+            &ClientCapabilities::default(),
+            "fuigo-tui",
+            ClientId(42),
+        );
+        assert_eq!(
+            json["params"]["_meta"]["fuigo/leaderClientId"].as_u64(),
+            Some(42),
+            "{method}: replay target must be the real connection"
+        );
+        // The replay the agent stamps from this request routes to B, not A.
+        let replay = serde_json::json!({"params": {"_meta": json["params"]["_meta"].clone()}});
+        assert_eq!(extract_target_client_id(&replay), Some(ClientId(42)));
+    }
 }
 
 #[test]
@@ -2344,9 +2357,11 @@ fn inject_yolo_notification_adds_client_identifier() {
 
     assert!(inject_client_identity_into_yolo_notification(
         &mut json,
-        "fuigo-tui"
+        "fuigo-tui",
+        ClientId(5)
     ));
     assert_eq!(json["params"]["clientIdentifier"], "fuigo-tui");
+    assert_eq!(json["params"]["fuigo/leaderConnectionId"], 5);
     assert_eq!(json["params"]["yolo_mode"], true);
 }
 
@@ -2357,9 +2372,74 @@ fn inject_yolo_notification_skips_non_yolo_methods() {
 
     assert!(!inject_client_identity_into_yolo_notification(
         &mut json,
-        "fuigo-tui"
+        "fuigo-tui",
+        ClientId(5)
     ));
     assert_eq!(json, before);
+}
+
+#[test]
+fn yolo_notification_overwrites_client_supplied_identity() {
+    // A client forges both the product string and a connection id, in params and in _meta, for each mode shape.
+    for body in [
+        r#""yolo_mode":true"#,
+        r#""permission_mode":"auto""#,
+        r#""permission_mode":"always-approve""#,
+    ] {
+        let mut json = pv(&format!(
+            r#"{{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{{{body},"clientIdentifier":"fuigo-pager","fuigo/leaderConnectionId":1,"_meta":{{"clientIdentifier":"fuigo-pager","fuigo/leaderConnectionId":1}}}}}}"#
+        ));
+        assert!(inject_client_identity_into_yolo_notification(
+            &mut json,
+            "attacker",
+            ClientId(9)
+        ));
+        assert_eq!(json["params"]["fuigo/leaderConnectionId"], 9);
+        assert_eq!(json["params"]["clientIdentifier"], "attacker");
+        assert!(json["params"]["_meta"].get("clientIdentifier").is_none());
+        assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+    }
+}
+
+#[test]
+fn yolo_notification_strips_client_identifier_when_client_type_empty() {
+    let mut json = pv(
+        r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true,"clientIdentifier":"fuigo-pager","fuigo/leaderConnectionId":1}}"#,
+    );
+    assert!(inject_client_identity_into_yolo_notification(
+        &mut json,
+        "",
+        ClientId(4)
+    ));
+    assert!(json["params"].get("clientIdentifier").is_none());
+    assert_eq!(json["params"]["fuigo/leaderConnectionId"], 4);
+}
+
+#[test]
+fn two_connections_claiming_one_product_get_distinct_stamps() {
+    let raw = r#"{"jsonrpc":"2.0","method":"fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
+    let mut a = pv(raw);
+    let mut b = pv(raw);
+    inject_client_identity_into_yolo_notification(&mut a, "fuigo-pager", ClientId(1));
+    inject_client_identity_into_yolo_notification(&mut b, "fuigo-pager", ClientId(2));
+    assert_eq!(a["params"]["clientIdentifier"], b["params"]["clientIdentifier"]);
+    assert_ne!(
+        a["params"]["fuigo/leaderConnectionId"],
+        b["params"]["fuigo/leaderConnectionId"]
+    );
+}
+
+#[test]
+fn session_requests_get_leader_connection_id_overwriting_client_value() {
+    for method in ["session/new", "session/load", "session/resume"] {
+        let mut json = pv(&format!(
+            r#"{{"jsonrpc":"2.0","method":"{method}","id":1,"params":{{"_meta":{{"fuigo/leaderConnectionId":1}}}}}}"#
+        ));
+        assert!(stamp_connection_id_into_session_request(&mut json, ClientId(6)));
+        assert_eq!(json["params"]["_meta"]["fuigo/leaderConnectionId"], 6);
+    }
+    let mut other = pv(r#"{"jsonrpc":"2.0","method":"session/prompt","id":1,"params":{}}"#);
+    assert!(!stamp_connection_id_into_session_request(&mut other, ClientId(6)));
 }
 
 #[test]
@@ -6041,4 +6121,55 @@ async fn p161_outbound_queued_as_cancel_fires_is_drained_not_lost() {
         matches!(got, Ok(Ok(ServerMessage::Pong))),
         "the outbound message queued before cancel must be drained to the client, got {got:?}"
     );
+}
+
+#[test]
+fn yolo_notification_recognised_in_both_wire_forms_top_level_only() {
+    for m in ["fuigo/yolo_mode_changed", "_fuigo/yolo_mode_changed"] {
+        let raw = format!(r#"{{"jsonrpc":"2.0","method":"{m}","params":{{"yolo_mode":true}}}}"#);
+        assert_eq!(extract_yolo_mode_change(&pv(&raw)), Some(true), "{m}");
+        let mut json = pv(&raw);
+        assert!(inject_client_identity_into_yolo_notification(&mut json, "fuigo-tui", ClientId(5)), "{m}");
+        assert_eq!(json["params"]["fuigo/leaderConnectionId"], 5);
+    }
+    // The agent strips exactly one `_`; a double prefix is a different method to it.
+    let double = r#"{"jsonrpc":"2.0","method":"__fuigo/yolo_mode_changed","params":{"yolo_mode":true}}"#;
+    assert_eq!(extract_yolo_mode_change(&pv(double)), None);
+    // params.method never decides: the agent ignores it.
+    let evade = r#"{"jsonrpc":"2.0","method":"_fuigo/yolo_mode_changed","params":{"method":"other","yolo_mode":true,"fuigo/leaderConnectionId":1,"_meta":{"fuigo/leaderConnectionId":1}}}"#;
+    let mut json = pv(evade);
+    assert_eq!(extract_yolo_mode_change(&json), Some(true));
+    assert!(stamp_inbound_client_identity(&mut json, "", ClientId(9)));
+    assert_eq!(json["params"]["fuigo/leaderConnectionId"], 9);
+    assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+    // Reverse evasion: params.method claims yolo but the top-level method is something else.
+    let other = r#"{"jsonrpc":"2.0","method":"_fuigo/other","params":{"method":"fuigo/yolo_mode_changed","yolo_mode":true}}"#;
+    assert_eq!(extract_yolo_mode_change(&pv(other)), None);
+}
+
+#[test]
+fn connection_id_is_stripped_from_every_inbound_method() {
+    let mut json = pv(
+        r#"{"jsonrpc":"2.0","method":"session/prompt","id":1,"params":{"fuigo/leaderConnectionId":1,"_meta":{"fuigo/leaderConnectionId":1,"keep":true}}}"#,
+    );
+    assert!(stamp_inbound_client_identity(&mut json, "x", ClientId(3)));
+    assert!(json["params"].get("fuigo/leaderConnectionId").is_none());
+    assert!(json["params"]["_meta"].get("fuigo/leaderConnectionId").is_none());
+    assert_eq!(json["params"]["_meta"]["keep"], true);
+}
+
+#[test]
+fn relay_messages_get_the_reserved_connection_id_and_forged_ids_are_dropped() {
+    let new = r#"{"jsonrpc":"2.0","method":"session/new","id":1,"params":{"_meta":{"fuigo/leaderConnectionId":1,"fuigo/leaderClientId":1}}}"#;
+    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(new)).unwrap();
+    assert_eq!(out["params"]["_meta"]["fuigo/leaderConnectionId"], RELAY_CONNECTION_ID);
+    assert!(out["params"]["_meta"].get("fuigo/leaderClientId").is_none());
+    let yolo = r#"{"jsonrpc":"2.0","method":"_fuigo/yolo_mode_changed","params":{"yolo_mode":true,"fuigo/leaderConnectionId":1,"clientIdentifier":"fuigo-pager"}}"#;
+    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(yolo)).unwrap();
+    assert_eq!(out["params"]["fuigo/leaderConnectionId"], RELAY_CONNECTION_ID);
+    assert!(out["params"].get("clientIdentifier").is_none());
+    let prompt = r#"{"jsonrpc":"2.0","method":"session/prompt","id":2,"params":{"fuigo/leaderConnectionId":1}}"#;
+    let out: serde_json::Value = serde_json::from_str(&stamp_relay_connection_identity(prompt)).unwrap();
+    assert!(out["params"].get("fuigo/leaderConnectionId").is_none());
+    assert_eq!(stamp_relay_connection_identity("not json"), "not json");
 }

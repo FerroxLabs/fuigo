@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Tests for the versioned-binary + symlink installation logic used by
-// postinstall.js and bin/fuigo-bootstrap.js.
+// bin/fuigo-install.js and bin/fuigo-bootstrap.js (there is no npm postinstall script).
 //
-// Run with:  node scripts/test-postinstall.js
+// Run with:  node scripts/test-fuigo-install.js
 //
 // Uses only Node.js built-in modules (no test framework needed).
 
@@ -35,7 +35,7 @@ function cleanup(dir) {
     fs.rmSync(dir, { recursive: true, force: true });
 }
 
-// ─── Extracted logic (mirrors postinstall.js and bin/fuigo-bootstrap.js) ─
+// ─── Extracted logic (mirrors bin/fuigo-install.js and bin/fuigo-bootstrap.js) ─
 
 /** Comparator: sort "<prefix>X.Y.Z" filenames by version, newest first. */
 function byVersionDescending(prefix) {
@@ -49,7 +49,7 @@ function byVersionDescending(prefix) {
     };
 }
 
-/** Install a versioned binary + atomic symlink (same as postinstall.js). */
+/** Install a versioned binary + atomic symlink (same as fuigo-install.js). */
 function installVersionedBinary(vendoredBinPath, version, canonicalDir) {
     const canonicalPath = path.join(canonicalDir, 'fuigo');
     fs.mkdirSync(canonicalDir, { recursive: true });
@@ -76,7 +76,7 @@ function installVersionedBinary(vendoredBinPath, version, canonicalDir) {
     return { canonicalPath, versionedPath, versionedName };
 }
 
-/** Cleanup old versioned binaries (same as postinstall.js). */
+/** Cleanup old versioned binaries (same as fuigo-install.js). */
 function cleanupOldVersions(canonicalDir, currentVersionedName) {
     const entries = fs.readdirSync(canonicalDir);
     const versionedBinaries = entries
@@ -89,7 +89,7 @@ function cleanupOldVersions(canonicalDir, currentVersionedName) {
     return versionedBinaries;
 }
 
-/** Fuigo bin dir resolution (mirrors postinstall.js and bin/fuigo-bootstrap.js). */
+/** Fuigo bin dir resolution (mirrors bin/fuigo-install.js and bin/fuigo-bootstrap.js). */
 function resolveFuigoBinDir(env, homedir) {
     const fuigoHome = env.FUIGO_HOME ?? path.join(homedir, '.fuigo');
     return path.join(fuigoHome, 'bin');
@@ -716,7 +716,7 @@ test('non-fuigo files in bin dir are not touched by cleanup', () => {
 console.log('\nfuigo vs fuigo-pager isolation tests\n');
 
 /**
- * Cleanup for a named binary (mirrors postinstall.js cleanupOldVersions).
+ * Cleanup for a named binary (mirrors fuigo-install.js cleanupOldVersions).
  * Uses prefix + leading digit to avoid fuigo-* matching fuigo-pager-*.
  */
 function cleanupOldVersionsNamed(canonicalDir, binName, version) {
@@ -738,7 +738,7 @@ function cleanupOldVersionsNamed(canonicalDir, binName, version) {
     return versionedBinaries;
 }
 
-/** Install a named binary (mirrors postinstall.js installBinary). */
+/** Install a named binary (mirrors fuigo-install.js installBinary). */
 function installNamedBinary(vendoredBinPath, binName, version, canonicalDir) {
     fs.mkdirSync(canonicalDir, { recursive: true });
     const versionedName = `${binName}-${version}`;
@@ -1150,107 +1150,447 @@ if (process.platform !== 'win32') {
         }
     });
 
-    test('mirrored link matches postinstall.js and the shipped entry wires the bootstrap', () => {
+    test('mirrored link matches fuigo-install.js and the shipped entry wires the bootstrap', () => {
         const pkgRoot = path.join(__dirname, '..');
-        const postinstall = fs.readFileSync(path.join(pkgRoot, 'bin', 'postinstall.js'), 'utf8');
+        const installer = fs.readFileSync(path.join(pkgRoot, 'bin', 'fuigo-install.js'), 'utf8');
         for (const line of [
-            "if (!(process.env.npm_config_user_agent ?? '').startsWith('npm/')) return;",
+            "if (agent && !agent.startsWith('npm/')) return;",
             "fs.symlinkSync('./fuigo-native', tmp);",
         ]) {
-            assert.ok(postinstall.includes(line), `postinstall.js lost link line: ${line}`);
+            assert.ok(installer.includes(line), `fuigo-install.js lost link line: ${line}`);
         }
         const launcher = fs.readFileSync(path.join(pkgRoot, 'bin', 'fuigo'), 'utf8');
         assert.ok(launcher.startsWith('#!/usr/bin/env node'), 'shipped entry must stay a node script for Windows cmd shims');
         assert.ok(launcher.includes("require('./fuigo-bootstrap.js')"), 'entry must run the bootstrap');
         assert.ok(fs.existsSync(path.join(pkgRoot, 'bin', 'fuigo-bootstrap.js')), 'bootstrap must ship in bin/');
+        assert.ok(fs.existsSync(path.join(pkgRoot, 'bin', 'fuigo-install.js')), 'installer must ship in bin/');
     });
 }
 
-// ─── Installer config (runs the real bin/postinstall.js) ────────────────
+test('package.json declares no install script (npm 11 warns about every package that has one)', () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+    for (const hook of ['preinstall', 'install', 'postinstall', 'prepare']) {
+        assert.strictEqual(manifest.scripts[hook], undefined, `scripts.${hook} must not exist`);
+    }
+    assert.ok(!fs.existsSync(path.join(__dirname, '..', 'bin', 'post' + 'install.js')), 'the postinstall script must be gone');
+    assert.ok(manifest.files.includes('bin/'), 'bin/ (launcher + installer) must ship');
+});
+
+// ─── First-run install (runs the real bin/fuigo-bootstrap.js) ───────────
 
 if (process.platform !== 'win32') {
-    console.log('\ninstaller config tests\n');
+    console.log('\nfirst-run install tests\n');
 
     const { spawnSync } = require('child_process');
     const platformKey = `${process.platform}-${process.arch}`;
+    const supported = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].includes(platformKey);
+    const pkgRoot = path.join(__dirname, '..');
 
     /**
-     * Lay out a minimal installed package around the shipped bin/postinstall.js:
-     * the platform package with a plain binary, and a stub @iarna/toml (the
-     * release job does not `npm install`, so the real one is absent here).
+     * Lay out an installed package around the shipped bin/: the platform package with a
+     * brotli stub binary, and a stub @iarna/toml (the release job does not `npm install`).
+     * The npm-style PATH entry is a symlink to bin/fuigo, as npm makes it.
      */
-    function sandboxPackage(dir) {
-        const pkgRoot = path.join(__dirname, '..');
-        const pkg = path.join(dir, 'pkg');
+    function sandboxPackage(dir, { version = '1.2.3', payload = 'v1', local = false, nmDir = null } = {}) {
+        // A global npm install lives under <prefix>/lib/node_modules; a project-local one under <project>/node_modules.
+        const nm = nmDir ?? (local ? path.join(dir, 'node_modules') : path.join(dir, 'lib', 'node_modules'));
+        const pkg = path.join(nm, 'fuigo');
         fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
-        fs.copyFileSync(path.join(pkgRoot, 'bin', 'postinstall.js'), path.join(pkg, 'bin', 'postinstall.js'));
-        fs.copyFileSync(path.join(pkgRoot, 'bin', 'fuigo-replace.js'), path.join(pkg, 'bin', 'fuigo-replace.js'));
-        fs.copyFileSync(path.join(pkgRoot, 'package.json'), path.join(pkg, 'package.json'));
-        const toml = path.join(pkg, 'node_modules', '@iarna', 'toml');
+        for (const f of ['fuigo', 'fuigo-bootstrap.js', 'fuigo-install.js', 'fuigo-replace.js']) {
+            fs.copyFileSync(path.join(pkgRoot, 'bin', f), path.join(pkg, 'bin', f));
+        }
+        fs.chmodSync(path.join(pkg, 'bin', 'fuigo'), 0o755);
+        fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'fuigo', version }));
+        const toml = path.join(nm, '@iarna', 'toml');
         fs.mkdirSync(toml, { recursive: true });
         fs.writeFileSync(path.join(toml, 'package.json'), '{"name":"@iarna/toml","main":"index.js"}');
         fs.writeFileSync(path.join(toml, 'index.js'),
             'module.exports = { parse: (t) => JSON.parse(t.replace(/^#.*$/m, "") || "{}"), stringify: (o) => "# stub\\n" + JSON.stringify(o) };');
-        const platform = path.join(pkg, 'node_modules', '@fuigo', platformKey);
+        const platform = path.join(nm, '@fuigo', platformKey);
         fs.mkdirSync(path.join(platform, 'bin'), { recursive: true });
-        fs.writeFileSync(path.join(platform, 'package.json'), `{"name":"@fuigo/${platformKey}","version":"0.0.0"}`);
-        fs.writeFileSync(path.join(platform, 'bin', 'fuigo'), '#!/bin/sh\necho stub\n');
-        return pkg;
+        fs.writeFileSync(path.join(platform, 'package.json'), `{"name":"@fuigo/${platformKey}","version":"${version}"}`);
+        setPayload(nm, payload);
+        const pathEntry = path.join(dir, 'bin', 'fuigo');
+        fs.mkdirSync(path.dirname(pathEntry), { recursive: true });
+        fs.symlinkSync(path.join(pkg, 'bin', 'fuigo'), pathEntry);
+        return { pkg, pathEntry };
     }
 
-    function runPostinstall(pkg, home) {
-        const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/' };
-        delete env.npm_config_user_agent;
+    /** Replace the vendored binary (a same-version reinstall with a different build). */
+    function setPayload(nm, payload) {
+        const br = path.join(nm, '@fuigo', platformKey, 'bin', 'fuigo.br');
+        fs.writeFileSync(br, zlib.brotliCompressSync(Buffer.from(`#!/bin/sh\necho "${payload} $*"\n`)));
+        const future = new Date(Date.now() + 5000 * (setPayload.n = (setPayload.n || 0) + 1));
+        fs.utimesSync(br, future, future);
+    }
+
+    function run(sb, home, args = ['arg'], extraEnv = {}, opts = {}) {
+        const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'),
+            FUIGO_NPM_REGISTRY: 'https://registry.invalid/', ...extraEnv };
         delete env.FUIGO_INSTALL_COMPLETIONS;
-        const res = spawnSync(process.execPath, [path.join(pkg, 'bin', 'postinstall.js')], { encoding: 'utf8', env });
-        assert.strictEqual(res.status, 0, `postinstall failed: ${res.stderr}`);
-        return path.join(home, '.fuigo', 'config.toml');
+        // The launch environment of a real run: no package-manager variables.
+        for (const k of ['npm_config_user_agent', 'npm_config_prefix', 'FUIGO_INSTALL_ONLY']) {
+            if (!(k in extraEnv)) delete env[k];
+        }
+        return spawnSync(sb.pathEntry, args, { encoding: 'utf8', env, ...opts });
     }
 
-    const supported = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64'].includes(platformKey);
-    test('postinstall creates a fresh Fuigo home 0700 under umask 002 and leaves an existing 775 home alone', () => {
+    test('first run installs like postinstall did: versioned binary, symlink, config, bin link, clean stdout', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const sb = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const res = run(sb, home, ['hello', 'a b']);
+            assert.strictEqual(res.status, 0, res.stderr);
+            assert.strictEqual(res.stdout, 'v1 hello a b\n', 'stdout must be only the program output');
+            const bin = path.join(home, '.fuigo', 'bin');
+            assert.ok(fs.statSync(path.join(bin, 'fuigo-1.2.3')).mode & 0o100, 'versioned binary is executable');
+            assert.strictEqual(fs.readlinkSync(path.join(bin, 'fuigo')), 'fuigo-1.2.3');
+            assert.strictEqual(fs.readlinkSync(path.join(sb.pkg, 'bin', 'fuigo')), './fuigo-native');
+            const cfg = fs.readFileSync(path.join(home, '.fuigo', 'config.toml'), 'utf8');
+            assert.ok(cfg.includes('"installer":"npm"'), `installer not recorded: ${cfg}`);
+            assert.ok(cfg.includes('registry.invalid'), `registry not recorded: ${cfg}`);
+            // Second run goes through the symlinked native binary.
+            const res2 = run(sb, home, ['again']);
+            assert.strictEqual(res2.stdout, 'v1 again\n');
+        } finally { cleanup(dir); }
+    });
+
+    test('node launcher stays when the entry is not reached through a symlink (non-npm wrappers)', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const sb = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/' };
+            const res = spawnSync(process.execPath, [path.join(sb.pkg, 'bin', 'fuigo'), 'x'], { encoding: 'utf8', env });
+            assert.strictEqual(res.stdout, 'v1 x\n', res.stderr);
+            assert.ok(!fs.lstatSync(path.join(sb.pkg, 'bin', 'fuigo')).isSymbolicLink(), 'entry must be left alone');
+            assert.ok(!fs.existsSync(path.join(sb.pkg, 'bin', 'fuigo-native')));
+        } finally { cleanup(dir); }
+    });
+
+    test('other package managers (user agent) keep the node launcher', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const sb = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const res = run(sb, home, ['x'], { npm_config_user_agent: 'pnpm/9.0.0 npm/? node/v22' });
+            assert.strictEqual(res.stdout, 'v1 x\n', res.stderr);
+            assert.ok(!fs.lstatSync(path.join(sb.pkg, 'bin', 'fuigo')).isSymbolicLink());
+        } finally { cleanup(dir); }
+    });
+
+    test('upgrade: a canonical binary from an older version is replaced on first run', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const old = sandboxPackage(dir, { version: '1.2.2', payload: 'old' });
+            assert.strictEqual(run(old, home).stdout, 'old arg\n');
+            cleanup(path.join(dir, 'lib')); cleanup(path.join(dir, 'bin'));
+            const next = sandboxPackage(dir, { version: '1.2.3', payload: 'new' });
+            assert.strictEqual(run(next, home).stdout, 'new arg\n', 'must not keep running the old canonical binary');
+            const bin = path.join(home, '.fuigo', 'bin');
+            assert.strictEqual(fs.readlinkSync(path.join(bin, 'fuigo')), 'fuigo-1.2.3');
+            assert.ok(fs.existsSync(path.join(bin, 'fuigo-1.2.2')), 'previous version is kept');
+        } finally { cleanup(dir); }
+    });
+
+    test('same-version reinstall with a changed binary is picked up', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            let sb = sandboxPackage(dir, { payload: 'build-a' });
+            assert.strictEqual(run(sb, home).stdout, 'build-a arg\n');
+            cleanup(path.join(dir, 'lib')); cleanup(path.join(dir, 'bin'));
+            sb = sandboxPackage(dir, { payload: 'build-b' });
+            assert.strictEqual(run(sb, home).stdout, 'build-b arg\n');
+            assert.strictEqual(fs.readFileSync(path.join(home, '.fuigo', 'bin', 'fuigo-1.2.3'), 'utf8'), '#!/bin/sh\necho "build-b $*"\n');
+        } finally { cleanup(dir); }
+    });
+
+    test('a current install is not rewritten by later node launches (stamp fast path)', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const sb = sandboxPackage(dir);
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home);
+            const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/' };
+            const boot = path.join(sb.pkg, 'bin', 'fuigo-bootstrap.js');
+            spawnSync(process.execPath, [boot], { encoding: 'utf8', env });
+            const bin = path.join(home, '.fuigo', 'bin');
+            const cfg = path.join(home, '.fuigo', 'config.toml');
+            const before = [fs.statSync(path.join(bin, 'fuigo-1.2.3')).ino, fs.lstatSync(path.join(bin, 'fuigo')).ino,
+                fs.statSync(cfg).mtimeMs];
+            const res = spawnSync(process.execPath, [boot, 'z'], { encoding: 'utf8', env });
+            assert.strictEqual(res.stdout, 'v1 z\n');
+            const after = [fs.statSync(path.join(bin, 'fuigo-1.2.3')).ino, fs.lstatSync(path.join(bin, 'fuigo')).ino,
+                fs.statSync(cfg).mtimeMs];
+            assert.deepStrictEqual(after, before);
+        } finally { cleanup(dir); }
+    });
+
+    test('a fresh Fuigo home is 0700 under umask 002; an existing 775 home is left alone', () => {
         if (!supported) return;
         const dir = makeTmpDir();
         const oldMask = process.umask(0o002);
         try {
-            const pkg = sandboxPackage(dir);
+            const sb = sandboxPackage(dir);
             const home = path.join(dir, 'home');
             fs.mkdirSync(home);
-            runPostinstall(pkg, home);
+            assert.strictEqual(run(sb, home).status, 0);
             assert.strictEqual(fs.statSync(path.join(home, '.fuigo')).mode & 0o777, 0o700, 'fresh home must be 0700');
-            // An existing home keeps its mode.
+            const dir2 = path.join(dir, 'twox');
+            fs.mkdirSync(dir2);
+            const sb2 = sandboxPackage(dir2);
             const home2 = path.join(dir, 'home2');
             fs.mkdirSync(path.join(home2, '.fuigo'), { recursive: true });
             fs.chmodSync(path.join(home2, '.fuigo'), 0o775);
-            runPostinstall(pkg, home2);
+            assert.strictEqual(run(sb2, home2).status, 0);
             assert.strictEqual(fs.statSync(path.join(home2, '.fuigo')).mode & 0o777, 0o775, 'an existing home must not be changed');
-        } finally {
-            process.umask(oldMask);
-            cleanup(dir);
-        }
+        } finally { process.umask(oldMask); cleanup(dir); }
     });
 
-    test('P150: postinstall creates ~/.fuigo/config.toml owner-only (0600) and keeps an existing file\'s mode', () => {
+    test('P150: config.toml is created owner-only (0600) and an existing file keeps its mode', () => {
         if (!supported) return;
         const dir = makeTmpDir();
         try {
-            const pkg = sandboxPackage(dir);
             const home = path.join(dir, 'home');
             fs.mkdirSync(home);
-            const configPath = runPostinstall(pkg, home);
-            const written = fs.readFileSync(configPath, 'utf8');
-            assert.ok(written.includes('"installer":"npm"'), `installer not recorded: ${written}`);
-            assert.ok(written.includes('registry.invalid'), `registry not recorded: ${written}`);
-            assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o600, `new config.toml mode ${(fs.statSync(configPath).mode & 0o777).toString(8)}`);
-
-            // A file the user made readable on purpose keeps its mode (as Fuigo's own writer does).
+            let sb = sandboxPackage(dir, { payload: 'a' });
+            assert.strictEqual(run(sb, home).status, 0);
+            const configPath = path.join(home, '.fuigo', 'config.toml');
+            assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o600);
             fs.chmodSync(configPath, 0o644);
-            runPostinstall(pkg, home);
+            cleanup(path.join(dir, 'lib')); cleanup(path.join(dir, 'bin'));
+            sb = sandboxPackage(dir, { payload: 'b', version: '1.2.4' });
+            assert.strictEqual(run(sb, home).stdout, 'b arg\n');
             assert.strictEqual(fs.statSync(configPath).mode & 0o777, 0o644, 'an existing config.toml must keep its mode');
-        } finally {
-            cleanup(dir);
-        }
+        } finally { cleanup(dir); }
     });
+    // ─── P29-NPM-R2 ─────────────────────────────────────────────────────
+
+    const linkOf = (home, name = 'fuigo') => fs.readlinkSync(path.join(home, '.fuigo', 'bin', name));
+    const mkHome = (dir, name = 'home') => { const h = path.join(dir, name); fs.mkdirSync(h, { recursive: true }); return h; };
+
+    test('F5: a local/npx install of another version does not touch ~/.fuigo and runs its own binary', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const global = sandboxPackage(path.join(dir, 'g'), { version: '1.2.3', payload: 'global' });
+            assert.strictEqual(run(global, home).stdout, 'global arg\n');
+            const cfgPath = path.join(home, '.fuigo', 'config.toml');
+            const binDir = path.join(home, '.fuigo', 'bin');
+            const snap = () => JSON.stringify([fs.readlinkSync(path.join(binDir, 'fuigo')), fs.readdirSync(binDir).sort(),
+                fs.readFileSync(path.join(binDir, '.fuigo-npm-stamp'), 'utf8'), fs.readFileSync(cfgPath, 'utf8')]);
+            const before = snap();
+            // Older and newer project-local installs, launched repeatedly, alternate with the global one.
+            for (const [version, payload] of [['1.2.2', 'local-old'], ['2.0.0', 'local-new']]) {
+                const sb = sandboxPackage(path.join(dir, `p-${version}`), { version, payload, local: true });
+                for (let n = 0; n < 2; n++) {
+                    assert.strictEqual(run(sb, home).stdout, `${payload} arg\n`);
+                    assert.strictEqual(run(global, home).stdout, 'global arg\n', 'the global install still runs ITS binary');
+                }
+                assert.strictEqual(snap(), before, `a local ${version} install must not change ~/.fuigo`);
+                assert.ok(!fs.lstatSync(path.join(sb.pkg, 'bin', 'fuigo')).isSymbolicLink(), 'no bin link swap for a local install');
+            }
+        } finally { cleanup(dir); }
+    });
+
+    test('F5: a local install on a fresh machine creates nothing under ~/.fuigo', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const sb = sandboxPackage(dir, { local: true });
+            assert.strictEqual(run(sb, home).stdout, 'v1 arg\n');
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo')), '~/.fuigo must not be created by a local install');
+        } finally { cleanup(dir); }
+    });
+
+    test('F5: a launch never downgrades ~/.fuigo/bin, an older global package runs in place', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const newer = sandboxPackage(path.join(dir, 'a'), { version: '1.2.3', payload: 'new' });
+            assert.strictEqual(run(newer, home).stdout, 'new arg\n');
+            const older = sandboxPackage(path.join(dir, 'b'), { version: '1.2.2', payload: 'old' });
+            assert.strictEqual(run(older, home).stdout, 'old arg\n', 'the older package still runs its own binary');
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.3', 'launch must not move the link back');
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo', 'bin', 'fuigo-1.2.2')));
+            // A prerelease of the same core is older than the release.
+            const pre = sandboxPackage(path.join(dir, 'c'), { version: '1.2.3-alpha.1', payload: 'pre' });
+            assert.strictEqual(run(pre, home).stdout, 'pre arg\n');
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.3');
+        } finally { cleanup(dir); }
+    });
+
+    test('F5: a project .npmrc registry is not written to the global config.toml', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const project = mkHome(dir, 'project');
+            fs.writeFileSync(path.join(project, '.npmrc'), 'registry=https://evil.invalid/\n');
+            // A stand-in `npm` that answers like the real one: the project .npmrc of the CURRENT directory wins.
+            const stub = path.join(dir, 'stub-bin');
+            fs.mkdirSync(stub);
+            fs.writeFileSync(path.join(stub, 'npm'),
+                '#!/bin/sh\nif [ -f .npmrc ]; then sed -n "s/^registry=//p" .npmrc; else echo https://user.example/; fi\n', { mode: 0o755 });
+            fs.writeFileSync(path.join(home, '.npmrc'), 'registry=https://user.example/\n');
+            const sb = sandboxPackage(dir);
+            const env = { PATH: `${stub}${path.delimiter}${process.env.PATH}` };
+            // No FUIGO_NPM_REGISTRY, so the `npm config get registry` lookup is actually exercised.
+            const e2 = { ...process.env, ...env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo') };
+            delete e2.FUIGO_NPM_REGISTRY;
+            const r2 = spawnSync(sb.pathEntry, ['x'], { encoding: 'utf8', env: e2, cwd: project });
+            assert.strictEqual(r2.status, 0, r2.stderr);
+            const cfg = fs.readFileSync(path.join(home, '.fuigo', 'config.toml'), 'utf8');
+            assert.ok(!cfg.includes('evil.invalid'), `project registry leaked into config: ${cfg}`);
+            assert.ok(cfg.includes('user.example'), `user registry expected: ${cfg}`);
+        } finally { cleanup(dir); }
+    });
+
+    test('F6: an unparsable config.toml is left untouched; the install still completes', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            fs.mkdirSync(path.join(home, '.fuigo'));
+            const cfgPath = path.join(home, '.fuigo', 'config.toml');
+            const broken = '[cli\nauto_update = = tru\n# my settings\n';
+            fs.writeFileSync(cfgPath, broken, { mode: 0o640 });
+            const sb = sandboxPackage(dir);
+            const res = run(sb, home);
+            assert.strictEqual(res.stdout, 'v1 arg\n', res.stderr);
+            assert.strictEqual(fs.readFileSync(cfgPath, 'utf8'), broken, 'settings must not be wiped');
+            assert.strictEqual(fs.statSync(cfgPath).mode & 0o777, 0o640);
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.3', 'the binary install is independent of the config step');
+            assert.deepStrictEqual(fs.readdirSync(path.join(home, '.fuigo')).filter((f) => f.includes('.tmp.')), []);
+        } finally { cleanup(dir); }
+    });
+
+    test('F6: config.toml is written through a temp file and renamed (no partial file, no temp left)', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const sb = sandboxPackage(dir);
+            assert.strictEqual(run(sb, home).status, 0);
+            const files = fs.readdirSync(path.join(home, '.fuigo'));
+            assert.deepStrictEqual(files.filter((f) => f.includes('.tmp.')), []);
+            const cfg = path.join(home, '.fuigo', 'config.toml');
+            assert.strictEqual(fs.statSync(cfg).mode & 0o777, 0o600);
+            // Keep the existing keys when adding ours.
+            fs.writeFileSync(cfg, '# keep\n{"cli":{"channel":"alpha"},"x":1}'.replace('# keep\n', '# keep\n'));
+            cleanup(path.join(dir, 'lib')); cleanup(path.join(dir, 'bin'));
+            const sb2 = sandboxPackage(dir, { version: '1.2.4', payload: 'v2' });
+            assert.strictEqual(run(sb2, home).stdout, 'v2 arg\n');
+            const after = fs.readFileSync(cfg, 'utf8');
+            assert.ok(after.includes('"channel":"alpha"') && after.includes('"installer":"npm"') && after.includes('"x":1'), after);
+        } finally { cleanup(dir); }
+    });
+
+    test('F7: no user agent at launch: the bin link is still npm-only (npm global yes; pnpm/yarn stores and projects no)', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const npm = sandboxPackage(path.join(dir, 'n'), { payload: 'n' });
+            assert.strictEqual(run(npm, home).stdout, 'n arg\n');
+            assert.strictEqual(fs.readlinkSync(path.join(npm.pkg, 'bin', 'fuigo')), './fuigo-native');
+            for (const [name, rel] of [['pnpm', 'pnpm/global/5/node_modules'], ['yarn', 'yarn/global/node_modules'], ['project', 'proj/node_modules']]) {
+                const d = path.join(dir, name);
+                const sb = sandboxPackage(d, { payload: name, nmDir: path.join(d, rel) });
+                const h = mkHome(dir, `home-${name}`);
+                assert.strictEqual(run(sb, h).stdout, `${name} arg\n`, name);
+                assert.ok(!fs.lstatSync(path.join(sb.pkg, 'bin', 'fuigo')).isSymbolicLink(), `${name}: stays on the node launcher`);
+            }
+        } finally { cleanup(dir); }
+    });
+
+    test('F2: pnpm/yarn global stores still manage ~/.fuigo; a project does not', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            for (const [name, rel, managed] of [['pnpm', 'pnpm/global/5/node_modules', true], ['yarn', 'yarn/global/node_modules', true],
+                ['project', 'proj/node_modules', false]]) {
+                const d = path.join(dir, name);
+                const sb = sandboxPackage(d, { nmDir: path.join(d, rel) });
+                const h = mkHome(dir, `home-${name}`);
+                assert.strictEqual(run(sb, h).status, 0);
+                assert.strictEqual(fs.existsSync(path.join(h, '.fuigo', 'bin', 'fuigo')), managed, name);
+            }
+        } finally { cleanup(dir); }
+    });
+
+    // The setup step Fuigo's own updater runs after `npm i -g` (crates/codegen/fuigo-update).
+    const setupStep = (sb, home, extraEnv = {}) => spawnSync(process.execPath, [path.join(sb.pkg, 'bin', 'fuigo-bootstrap.js')], {
+        encoding: 'utf8', env: { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_INSTALL_ONLY: '1',
+            FUIGO_NPM_REGISTRY: 'https://registry.invalid/', ...extraEnv },
+    });
+
+    test('F2: the setup step moves ~/.fuigo/bin to the new version without running the binary', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const old = sandboxPackage(dir, { version: '1.2.2', payload: 'old' });
+            assert.strictEqual(run(old, home).stdout, 'old arg\n');
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.2');
+            // `npm i -g fuigo@1.2.3` replaces the package; no install script runs.
+            cleanup(path.join(dir, 'lib')); cleanup(path.join(dir, 'bin'));
+            const next = sandboxPackage(dir, { version: '1.2.3', payload: 'new' });
+            const res = setupStep(next, home);
+            assert.strictEqual(res.status, 0, res.stderr);
+            assert.strictEqual(res.stdout, '', 'the binary is not run and nothing is printed');
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.3', '~/.fuigo/bin/fuigo points at the new version');
+            assert.strictEqual(fs.readlinkSync(path.join(next.pkg, 'bin', 'fuigo')), './fuigo-native', 'bin link set up for later launches');
+            // The next launch goes straight to the new binary, no further install work.
+            assert.strictEqual(run(next, home).stdout, 'new arg\n');
+            assert.strictEqual(spawnSync(path.join(home, '.fuigo', 'bin', 'fuigo'), ['q'], { encoding: 'utf8' }).stdout, 'new q\n');
+        } finally { cleanup(dir); }
+    });
+
+    test('F2: the setup step is an explicit request, so it may move to an older version', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const newer = sandboxPackage(path.join(dir, 'a'), { version: '1.2.3', payload: 'new' });
+            assert.strictEqual(run(newer, home).stdout, 'new arg\n');
+            const older = sandboxPackage(path.join(dir, 'b'), { version: '1.2.2', payload: 'old' });
+            assert.strictEqual(setupStep(older, home).status, 0);
+            assert.strictEqual(linkOf(home), 'fuigo-1.2.2');
+        } finally { cleanup(dir); }
+    });
+
+    test('F2: the setup step fails loudly (non-zero, stderr) when nothing can be installed', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const sb = sandboxPackage(dir);
+            cleanup(path.join(dir, 'lib', 'node_modules', '@fuigo'));
+            const res = setupStep(sb, home);
+            assert.notStrictEqual(res.status, 0);
+            assert.ok(/setup failed/.test(res.stderr), res.stderr);
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo', 'bin', 'fuigo')));
+        } finally { cleanup(dir); }
+    });
+
 }
 
 // ─── Summary ───────────────────────────────────────────────────────────

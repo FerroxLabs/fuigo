@@ -1159,6 +1159,7 @@ pub async fn run_leader(
                     models_manager_for_agent,
                 );
                 agent.set_activity(agent_activity_for_agent);
+                agent.set_leader_mode();
                 if let Some(mc) = memory_config {
                     agent.set_memory_config(mc);
                 }
@@ -1198,6 +1199,8 @@ pub async fn run_leader(
             let acp_incoming_tx_ws = acp_incoming_tx.clone();
             tokio::task::spawn_local(async move {
                 while let Some(msg) = ws_to_agent_rx.recv().await {
+                    // Relay messages skip the leader's client slots: stamp them with the reserved relay connection id.
+                    let msg = crate::leader::server::stamp_relay_connection_identity(&msg);
                     let mut tx = acp_incoming_tx_ws.lock().await;
                     if tx.write_all(msg.as_bytes()).await.is_err()
                         || tx.write_all(b"\n").await.is_err()

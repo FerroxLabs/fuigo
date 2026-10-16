@@ -122,6 +122,38 @@ fn p28_a_released_unwatched_message_can_still_be_refused_by_the_model() {
     assert_eq!(drain(&mut rx), vec![("p".to_owned(), NoticeKind::Released), ("p".to_owned(), NoticeKind::Denied)]);
 }
 
+/// P29-A: a released plain record that goes back on hold at the drain is held again (its `held` flag was left false, so the
+/// session ending did not tell its sender, and at the record cap it could be evicted as a delivered one).
+#[test]
+fn p29_a_re_held_plain_record_is_held_again() {
+    let (b, tx, mut rx, _t) = rig();
+    b.settled("p", &from(1), true, false, &tx);
+    b.on_session_notice("p", &SessionNotice::Released);
+    assert_eq!(drain(&mut rx), vec![("p".to_owned(), NoticeKind::Released)]);
+    assert!(!b.on_session_notice("p", &SessionNotice::Reheld), "the sender is not told about the re-hold");
+    assert!(drain(&mut rx).is_empty());
+    // Held again: the session ending tells the sender, as for a first hold.
+    b.end_all(NoticeKind::Exited);
+    assert_eq!(drain(&mut rx), vec![("p".to_owned(), NoticeKind::Exited)]);
+}
+
+#[test]
+fn p29_a_re_held_plain_record_is_not_evicted_as_a_delivered_one_at_the_cap() {
+    let (b, tx, mut rx, _t) = rig();
+    b.settled("p", &from(1), true, false, &tx);
+    b.on_session_notice("p", &SessionNotice::Released);
+    b.on_session_notice("p", &SessionNotice::Reheld);
+    for i in 1..MAX_HELD_RECORDS {
+        b.settled(&format!("d{i}"), &from(1), true, false, &tx);
+    }
+    drain(&mut rx);
+    // At the cap with every record held, a new plain registration finds nothing to evict.
+    b.register_plain("new", &from(2), &tx);
+    assert_eq!(b.len(), MAX_HELD_RECORDS);
+    assert!(b.on_session_notice("p", &SessionNotice::Expired), "the re-held record is still there");
+    assert_eq!(drain(&mut rx), vec![("p".to_owned(), NoticeKind::Expired)]);
+}
+
 #[test]
 fn p11_the_65th_watch_ends_the_oldest_with_unavailable_and_the_host_cap_refuses() {
     let (b, tx, mut rx, total) = rig();

@@ -62,7 +62,7 @@ pub(crate) mod peer_auth;
 #[cfg(all(test, windows))]
 mod peer_auth_tests;
 pub mod protocol;
-mod server;
+pub(crate) mod server;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;

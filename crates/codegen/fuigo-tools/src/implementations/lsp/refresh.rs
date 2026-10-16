@@ -87,6 +87,12 @@ impl RefreshTarget {
     pub fn take_invalidated(&self) -> bool {
         self.invalidated.swap(false, Ordering::Acquire)
     }
+
+    /// Whether a refresh is waiting to be taken, without taking it (tests wait on the server's announcement with this).
+    #[cfg(test)]
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.invalidated.load(Ordering::Acquire)
+    }
 }
 
 #[cfg(test)]

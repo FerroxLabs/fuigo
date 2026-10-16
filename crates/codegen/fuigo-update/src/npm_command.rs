@@ -129,8 +129,9 @@ impl Drop for TreeGuard {
 
 /// Run npm with a wall-clock bound, killing the WHOLE process tree on timeout or cancellation (P145).
 ///
-/// `kill_on_drop` alone kills only the direct child: `cmd.exe` for a batch shim, or npm while its `node
-/// bin/postinstall.js` keeps writing the install. Containment comes first and fails closed:
+/// `kill_on_drop` alone kills only the direct child: `cmd.exe` for a batch shim, or npm while a dependency's install
+/// script (or the `node` setup step the updater runs after npm) keeps writing the install. The `fuigo` package itself
+/// has no install script. Containment comes first and fails closed:
 /// - Unix: the child leads its own session/process group (`detach_command`); killed with SIGKILL to the group. The
 ///   output pipes are drained BEFORE the child is reaped, so the group id stays owned (a zombie leader still holds
 ///   it) until the last possible signal (r2 #1).

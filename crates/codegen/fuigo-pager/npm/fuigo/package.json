@@ -1,6 +1,6 @@
 {
     "name": "fuigo",
-    "version": "1.0.28",
+    "version": "1.0.29",
     "description": "Bring Fuigo into your terminal",
     "license": "Apache-2.0",
     "repository": {
@@ -29,7 +29,6 @@
         "x64"
     ],
     "scripts": {
-        "postinstall": "node bin/postinstall.js",
         "sync-version": "node scripts/sync-version.js",
         "check-version": "node scripts/sync-version.js --check",
         "assemble": "node scripts/assemble-platform-packages.js",
@@ -45,11 +44,11 @@
         "@iarna/toml": "^3.0.0"
     },
     "optionalDependencies": {
-        "@fuigo/darwin-arm64": "1.0.28",
-        "@fuigo/darwin-x64": "1.0.28",
-        "@fuigo/linux-arm64": "1.0.28",
-        "@fuigo/linux-x64": "1.0.28",
-        "@fuigo/win32-arm64": "1.0.28",
-        "@fuigo/win32-x64": "1.0.28"
+        "@fuigo/darwin-arm64": "1.0.29",
+        "@fuigo/darwin-x64": "1.0.29",
+        "@fuigo/linux-arm64": "1.0.29",
+        "@fuigo/linux-x64": "1.0.29",
+        "@fuigo/win32-arm64": "1.0.29",
+        "@fuigo/win32-x64": "1.0.29"
     }
 }

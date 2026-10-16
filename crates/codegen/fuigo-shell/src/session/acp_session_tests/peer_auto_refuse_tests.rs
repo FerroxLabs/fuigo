@@ -302,6 +302,138 @@ async fn p28_dup_refusal_pending_when_a_tool_result_lands_leaves_one_result_per_
                 "exactly one tool result for call-1; follow-up input: {}",
                 serde_json::to_string_pretty(&input).unwrap()
             );
+            // P29-C: the marker stored while the call was open sits BEFORE the assistant item that made it.
+            let stored = r.actor.chat_state_handle.get_conversation().await;
+            assert_one_result_and_markers_before_call(&stored, "call-1");
+            assert!(!fuigo_sampling_types::history_peer_carried(&stored).is_empty(), "the refusal state is stored");
+        })
+        .await;
+}
+
+type Conv = [fuigo_sampling_types::ConversationItem];
+
+/// The placement contract of `push_state_marker_and_ack` as production callers hit it: exactly one `tool_result` for the call,
+/// directly after the assistant item that made the call (a marker never splits that run), and at least one peer state marker
+/// stored while the call was open, which therefore sits BEFORE that assistant item (never between call and result).
+#[track_caller]
+fn assert_one_result_and_markers_before_call(conv: &Conv, call_id: &str) {
+    use fuigo_sampling_types::ConversationItem as C;
+    let at = conv
+        .iter()
+        .position(|i| matches!(i, C::Assistant(a) if a.tool_calls.iter().any(|c| &*c.id == call_id)))
+        .unwrap_or_else(|| panic!("no assistant item for {call_id}"));
+    let results: Vec<usize> =
+        conv.iter().enumerate().filter(|(_, i)| matches!(i, C::ToolResult(r) if r.tool_call_id == call_id)).map(|(n, _)| n).collect();
+    assert_eq!(results, vec![at + 1], "one result for {call_id}, directly after its assistant item");
+    let markers: Vec<usize> = conv.iter().enumerate().filter(|(_, i)| i.is_peer_influence_marker()).map(|(n, _)| n).collect();
+    assert!(markers.iter().any(|&m| m < at), "a marker stored while the call was open sits before its assistant item: markers {markers:?}, call at {at}");
+    assert!(!markers.contains(&(at + 1)), "no marker between the call and its result");
+}
+
+fn follow_up_results(r: &Rig, call_id: &str) -> usize {
+    let bodies = r.server.request_bodies();
+    assert!(bodies.len() >= 2, "a follow-up request was sent: {}", bodies.len());
+    let input = bodies[1]["input"].as_array().cloned().unwrap_or_default();
+    input.iter().filter(|i| i["type"] == "function_call_output" && i["call_id"] == call_id).count()
+}
+
+/// P29-C: the same as the success-path test, through `handle_tool_error` (tool_calls.rs, the dispatch-failure result handler:
+/// it runs `persist_peer_state` before it pushes the failure result). `search_replace` on a file that does not exist fails in
+/// dispatch.
+#[tokio::test(flavor = "current_thread")]
+async fn p29_dup_refusal_pending_when_a_tool_error_lands_leaves_one_result_per_call() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let r = rig().await;
+            *r.actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                fuigo_tools::registry::types::ToolConfig::for_tool::<fuigo_tools::implementations::fuigo_build::read_file::ReadFileTool>(),
+                fuigo_tools::registry::types::ToolConfig::for_tool::<fuigo_tools::implementations::fuigo_build::search_replace::SearchReplaceTool>(),
+            ])
+            .await;
+            let missing = format!("{}/p29-no-such-file.txt", r.actor.session_info.cwd);
+            let args = serde_json::json!({"file_path": missing, "old_string": "a", "new_string": "b"}).to_string();
+            r.server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(fuigo_test_support::sse::responses_api_reasoning_then_tool_call_events(
+                    "thinking",
+                    "call-1",
+                    "search_replace",
+                    &args,
+                    "test",
+                )),
+            );
+            r.server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("done", "test")));
+            let env = envelope("m1");
+            r.actor.peer_admission.note_delivered(&env);
+            let guard = r.actor.peer_admission.begin_turn(false, Some("m1"));
+            let args = fuigo_peer::tools::RefusePeerMessageArgs { message_id: "m1".into(), reason: "not mine".into() };
+            r.actor.refuse_peer_message(&args).expect("refused by the model");
+            let result = run_parent_turn(&r.actor, peer_turn_request(&env)).await;
+            drop(guard);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(follow_up_results(&r, "call-1"), 1, "exactly one tool result for call-1 in the follow-up request");
+            let stored = r.actor.chat_state_handle.get_conversation().await;
+            let failure = stored.iter().find_map(|i| match i {
+                fuigo_sampling_types::ConversationItem::ToolResult(t) if t.tool_call_id == "call-1" => Some(t.content.to_string()),
+                _ => None,
+            });
+            assert!(
+                failure.as_deref().is_some_and(|m| m.starts_with("Tool `search_replace` failed:")),
+                "the result came from handle_tool_error: {failure:?}"
+            );
+            assert_one_result_and_markers_before_call(&stored, "call-1");
+            assert!(!fuigo_sampling_types::history_peer_carried(&stored).is_empty(), "the refusal state is stored");
+        })
+        .await;
+}
+
+/// P29-C: a denial made by the real permission manager (tool_calls.rs, right after `permissions.request`, which stores the
+/// denial NOW, with the call still open). A peer-influenced session may not edit `CLAUDE.md`: the model's `search_replace` of it
+/// is denied by policy with no prompt. One result for the call, and the `peer_denial` marker sits before its assistant item.
+#[tokio::test(flavor = "current_thread")]
+async fn p29_a_policy_denial_is_stored_now_and_leaves_one_result_per_call() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let _on = force_peer_messaging_for_test(true);
+            let server = MockInferenceServer::start().await.expect("mock inference server");
+            let (actor, _h, _c, _p) = actor_with_sampler_in(
+                &server,
+                Arc::new(RecordingTerminal { calls: Arc::new(AtomicUsize::new(0)) }),
+                false,
+                Some(false),
+            )
+            .await;
+            let r = Rig { server, actor };
+            *r.actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                fuigo_tools::registry::types::ToolConfig::for_tool::<fuigo_tools::implementations::fuigo_build::read_file::ReadFileTool>(),
+                fuigo_tools::registry::types::ToolConfig::for_tool::<fuigo_tools::implementations::fuigo_build::search_replace::SearchReplaceTool>(),
+            ])
+            .await;
+            let target = format!("{}/CLAUDE.md", r.actor.session_info.cwd);
+            let args = serde_json::json!({"file_path": target, "old_string": "a", "new_string": "b"}).to_string();
+            r.server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(fuigo_test_support::sse::responses_api_reasoning_then_tool_call_events(
+                    "thinking",
+                    "call-1",
+                    "search_replace",
+                    &args,
+                    "test",
+                )),
+            );
+            r.server.enqueue_response("/v1/responses", ScriptedResponse::sse(responses_api_script_exact("done", "test")));
+            let env = envelope("m1");
+            r.actor.peer_admission.note_delivered(&env);
+            let guard = r.actor.peer_admission.begin_turn(false, Some("m1"));
+            r.actor.mark_peer_influenced();
+            let result = run_parent_turn(&r.actor, peer_turn_request(&env)).await;
+            drop(guard);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(follow_up_results(&r, "call-1"), 1, "exactly one tool result for call-1 in the follow-up request");
+            let stored = r.actor.chat_state_handle.get_conversation().await;
+            assert_eq!(fuigo_sampling_types::history_peer_denials(&stored).len(), 1, "the denial is stored");
+            assert_one_result_and_markers_before_call(&stored, "call-1");
         })
         .await;
 }

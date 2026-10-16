@@ -1948,6 +1948,8 @@ impl MvpAgent {
             ),
             memory_config: None,
             config_watcher_path_tx: None,
+            leader_mode: false,
+            session_owner_conn: RefCell::new(HashMap::new()),
             relay_sync_enabled,
             buffering_settings: RefCell::new(None),
             background_copy_context: BackgroundCopyContext::new(),
@@ -2116,6 +2118,8 @@ impl MvpAgent {
             self.request_session_shutdown(&id);
             if self.take_session(&id).is_some() {
                 self.session_registry.clear_resident(&id);
+                // Its owner connection is gone; a later load or resume records the new one.
+                self.session_owner_conn.borrow_mut().remove(id.0.as_ref());
                 self.set_session_live_state(&id, SessionLiveState::Dormant);
                 unloaded += 1;
                 tracing::debug!(session_id = %id.0, "idle session unloaded to disk on disconnect");

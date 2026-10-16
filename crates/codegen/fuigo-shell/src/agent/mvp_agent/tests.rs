@@ -1996,7 +1996,11 @@ async fn yolo_toggle_scoped_by_client_identifier() {
     ]
     .into();
     let updated =
-        apply_yolo_mode_to_matching_sessions(sessions.values_mut(), Some("fuigo-tui"), true);
+        apply_yolo_mode_to_matching_sessions(
+            sessions.values_mut().map(|h| (None, h)),
+            crate::upload::turn::SenderScope::Product(Some("fuigo-tui")),
+            true,
+        );
     assert_eq!(updated, 1, "exactly one matching session should be updated");
     assert!(
         sessions[&sid_tui].yolo_mode,
@@ -2024,7 +2028,11 @@ async fn yolo_toggle_can_disable_session_started_with_yolo_enabled() {
     ]
     .into();
     let updated =
-        apply_yolo_mode_to_matching_sessions(sessions.values_mut(), Some("fuigo-tui"), false);
+        apply_yolo_mode_to_matching_sessions(
+            sessions.values_mut().map(|h| (None, h)),
+            crate::upload::turn::SenderScope::Product(Some("fuigo-tui")),
+            false,
+        );
     assert_eq!(updated, 1, "only the sender's session should be updated");
     assert!(
         !sessions[&sid_tui].yolo_mode,
@@ -8944,4 +8952,318 @@ async fn authenticate_with_a_runtime_key_clears_the_model_list_wait() {
         .await
         .expect("authenticate with a runtime key succeeds");
     assert_eq!(held(&file), 0, "authenticate cleared the URL-level wait through note_successful_sign_in");
+}
+
+/// Leader mode: a second connection that claims the pager's product string cannot change the owner's sessions.
+#[tokio::test]
+async fn leader_scope_only_changes_sessions_owned_by_stamped_connection() {
+    use crate::upload::turn::SenderScope;
+    let mut owner = make_test_handle("grok-3", false, Some("fuigo-pager"));
+    let mut other = make_test_handle("grok-3", false, Some("fuigo-pager"));
+    // Connection 2 stamps itself; connection 1 owns `owner`, connection 3 owns `other`.
+    let n = apply_yolo_mode_to_matching_sessions(
+        [(Some(1), &mut owner), (Some(3), &mut other)],
+        SenderScope::Connection(Some(2)),
+        true,
+    );
+    assert_eq!(n, 0, "a non-owner connection must change nothing");
+    assert!(!owner.yolo_mode && !other.yolo_mode);
+    let n = apply_yolo_mode_to_matching_sessions(
+        [(Some(1), &mut owner), (Some(3), &mut other)],
+        SenderScope::Connection(Some(1)),
+        true,
+    );
+    assert_eq!(n, 1, "the owner connection toggles only its own session");
+    assert!(owner.yolo_mode && !other.yolo_mode);
+}
+/// Leader mode fails closed: no stamped connection id matches no session, even ones with no recorded owner.
+#[tokio::test]
+async fn leader_scope_without_stamp_changes_nothing() {
+    use crate::upload::turn::SenderScope;
+    let mut owned = make_test_handle("grok-3", false, Some("fuigo-pager"));
+    let mut unowned = make_test_handle("grok-3", false, None);
+    let n = apply_yolo_mode_to_matching_sessions(
+        [(Some(1), &mut owned), (None, &mut unowned)],
+        SenderScope::Connection(None),
+        true,
+    );
+    assert_eq!(n, 0);
+    assert!(!owned.yolo_mode && !unowned.yolo_mode);
+}
+/// The auto / always-approve paths share `SenderScope::matches`; it must apply the same ownership rule.
+#[tokio::test]
+async fn leader_scope_matches_is_owner_only_for_auto_modes() {
+    use crate::upload::turn::SenderScope;
+    let h = make_test_handle("grok-3", false, Some("fuigo-pager"));
+    assert!(SenderScope::Connection(Some(7)).matches(Some(7), &h));
+    assert!(!SenderScope::Connection(Some(8)).matches(Some(7), &h));
+    assert!(!SenderScope::Connection(Some(7)).matches(None, &h));
+    assert!(!SenderScope::Connection(None).matches(Some(7), &h));
+    // Direct mode is unchanged: product match, or everything when absent.
+    assert!(SenderScope::Product(Some("fuigo-pager")).matches(None, &h));
+    assert!(!SenderScope::Product(Some("fuigo-tui")).matches(None, &h));
+    assert!(SenderScope::Product(None).matches(None, &h));
+}
+
+/// Minimal client for driving a real `ClientSideConnection` so the wire form comes from the protocol crate.
+struct WireClient;
+#[async_trait::async_trait(?Send)]
+impl acp::Client for WireClient {
+    async fn request_permission(
+        &self,
+        _args: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        Err(acp::Error::method_not_found())
+    }
+    async fn session_notification(&self, _args: acp::SessionNotification) -> acp::Result<()> {
+        Ok(())
+    }
+}
+/// Send `params` as a client ext notification through a real `ClientSideConnection` and return the exact JSON line it wrote.
+async fn real_wire_ext_notification(method: &str, params: serde_json::Value) -> serde_json::Value {
+    use acp::Agent as _;
+    use tokio::io::AsyncBufReadExt as _;
+    use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+    let (client_out, wire) = tokio::io::duplex(1 << 16);
+    let (_keep_open, client_in) = tokio::io::duplex(1 << 16);
+    let (conn, io) = acp::ClientSideConnection::new(
+        WireClient,
+        client_out.compat_write(),
+        client_in.compat(),
+        |fut| {
+            tokio::task::spawn_local(fut);
+        },
+    );
+    tokio::task::spawn_local(io);
+    let raw = serde_json::value::to_raw_value(&params).unwrap();
+    conn.ext_notification(acp::ExtNotification::new(method.to_string(), raw.into()))
+        .await
+        .expect("client ext_notification");
+    let mut line = String::new();
+    tokio::io::BufReader::new(wire).read_line(&mut line).await.unwrap();
+    serde_json::from_str(&line).expect("wire line is JSON")
+}
+/// What the agent's protocol layer does with an inbound line: strip ONE leading `_` from the top-level `method`, hand the params over untouched.
+async fn deliver_like_the_agent(agent: &MvpAgentHandle, wire: &serde_json::Value) {
+    use acp::Agent as _;
+    let method = wire["method"].as_str().expect("method");
+    let method = method.strip_prefix('_').unwrap_or(method).to_string();
+    let raw = serde_json::value::to_raw_value(&wire["params"]).unwrap();
+    agent
+        .ext_notification(acp::ExtNotification::new(method, raw.into()))
+        .await
+        .expect("agent ext_notification");
+}
+fn yolo_of(agent: &MvpAgentHandle, sid: &acp::SessionId) -> bool {
+    let mut out = None;
+    agent.for_each_resident(|id, h| {
+        if id == sid {
+            out = Some(h.yolo_mode);
+        }
+    });
+    out.expect("session resident")
+}
+fn leader_agent_with_two_owned_sessions() -> (MvpAgentHandle, acp::SessionId, acp::SessionId) {
+    let mut agent = build_minimal_agent_for_tests();
+    agent.set_leader_mode();
+    let sid_a = acp::SessionId::new("wire-owner-a");
+    let sid_b = acp::SessionId::new("wire-owner-b");
+    agent.insert_resident(&sid_a, make_test_handle("grok-3", false, Some("fuigo-pager")));
+    agent.insert_resident(&sid_b, make_test_handle("grok-3", false, Some("fuigo-pager")));
+    agent.record_session_owner(&sid_a, Some(1));
+    agent.record_session_owner(&sid_b, Some(2));
+    (agent, sid_a, sid_b)
+}
+/// REAL wire: the `_` prefix on the notification comes from the protocol crate, not hand-written JSON.
+/// Connection 1's change applies to its sessions; connection 2's (including forged ids and the `params.method` evasion) changes none of connection 1's.
+#[tokio::test]
+async fn real_wire_yolo_notification_is_owner_scoped_through_leader_stamping() {
+    use crate::leader::protocol::ClientId;
+    use crate::leader::server::stamp_inbound_client_identity;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (agent, sid_a, sid_b) = leader_agent_with_two_owned_sessions();
+            let send = |conn: u64, params: serde_json::Value| {
+                let agent = &agent;
+                async move {
+                    let mut wire =
+                        real_wire_ext_notification("fuigo/yolo_mode_changed", params).await;
+                    assert_eq!(
+                        wire["method"], "_fuigo/yolo_mode_changed",
+                        "the protocol crate prefixes client ext notifications with `_`"
+                    );
+                    assert!(stamp_inbound_client_identity(&mut wire, "fuigo-pager", ClientId(conn)));
+                    deliver_like_the_agent(agent, &wire).await;
+                }
+            };
+            // Connection 2 forges connection 1's id in params and _meta, and sets params.method to dodge a method_of-style match.
+            send(
+                2,
+                serde_json::json!({
+                    "yolo_mode": true,
+                    "method": "other",
+                    "fuigo/leaderConnectionId": 1,
+                    "clientIdentifier": "fuigo-pager",
+                    "_meta": {"fuigo/leaderConnectionId": 1}
+                }),
+            )
+            .await;
+            assert!(!yolo_of(&agent, &sid_a), "connection 2 must not change connection 1's session");
+            assert!(yolo_of(&agent, &sid_b), "connection 2 changes its own session");
+            // Connection 1's own change applies to its session only.
+            send(1, serde_json::json!({"yolo_mode": true})).await;
+            assert!(yolo_of(&agent, &sid_a), "the owner's change applies");
+            // Connection 2 turns its own off while forging again: connection 1's stays on.
+            send(
+                2,
+                serde_json::json!({"yolo_mode": false, "method": "other", "fuigo/leaderConnectionId": 1, "_meta": {"fuigo/leaderConnectionId": 1}}),
+            )
+            .await;
+            assert!(yolo_of(&agent, &sid_a), "forged id must not reach connection 1's session");
+            assert!(!yolo_of(&agent, &sid_b));
+        })
+        .await;
+}
+/// REAL wire, relay path: a remote message forging connection 1's id changes only sessions owned by the reserved relay connection.
+#[tokio::test]
+async fn real_wire_relay_notification_cannot_forge_a_leader_connection() {
+    use crate::leader::server::{RELAY_CONNECTION_ID, stamp_relay_connection_identity};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (agent, sid_a, sid_b) = leader_agent_with_two_owned_sessions();
+            let sid_r = acp::SessionId::new("wire-relay");
+            agent.insert_resident(&sid_r, make_test_handle("grok-3", false, Some("fuigo-web")));
+            agent.record_session_owner(&sid_r, Some(RELAY_CONNECTION_ID));
+            let wire = real_wire_ext_notification(
+                "fuigo/yolo_mode_changed",
+                serde_json::json!({"yolo_mode": true, "fuigo/leaderConnectionId": 1, "_meta": {"fuigo/leaderConnectionId": 1}}),
+            )
+            .await;
+            let stamped: serde_json::Value =
+                serde_json::from_str(&stamp_relay_connection_identity(&wire.to_string())).unwrap();
+            assert_eq!(stamped["params"]["fuigo/leaderConnectionId"], RELAY_CONNECTION_ID);
+            deliver_like_the_agent(&agent, &stamped).await;
+            assert!(yolo_of(&agent, &sid_r), "the relay client changes its own session");
+            assert!(!yolo_of(&agent, &sid_a) && !yolo_of(&agent, &sid_b), "and no leader client's");
+        })
+        .await;
+}
+/// Closing/removing a session drops its owner entry so the map cannot grow without bound.
+#[tokio::test]
+async fn remove_session_forgets_its_owner_connection() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("owner-cleanup");
+    agent.insert_resident(&sid, make_test_handle("grok-3", false, None));
+    agent.record_session_owner(&sid, Some(7));
+    assert_eq!(agent.session_owner(&sid), Some(7));
+    agent.remove_session(&sid);
+    assert_eq!(agent.session_owner(&sid), None, "owner entry must be removed with the session");
+}
+
+/// Drives the REAL `run_leader_server` (via `spawn_leader_server`) and the real agent decode path (`ext_notification` after the
+/// protocol crate's `_` prefix is stripped). The only stand-in is the session itself: `session/new` is answered by the test,
+/// which then registers the resident session and its owner exactly as `new_session_inner` does from the leader's stamp.
+/// The harness observes the session mode through `SessionHandle::yolo_mode`.
+// Unix only: it waits on the leader socket with a UnixStream (Windows uses a named pipe).
+#[cfg(unix)]
+#[tokio::test]
+async fn e2e_real_leader_pager_yolo_notification_and_foreign_load_cannot_upgrade() {
+    use crate::leader::{ClientCapabilities, ClientMode, LeaderClient};
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let temp = tempfile::TempDir::new().unwrap();
+            let sock = temp.path().join("leader.sock");
+            let server = crate::leader::server::spawn_leader_server(sock.clone()).await.unwrap();
+            let mut acp_rx = server.acp_rx;
+            let response_tx = server.response_tx;
+            for _ in 0..500 {
+                if sock.exists() && tokio::net::UnixStream::connect(&sock).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            async fn next(rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>) -> serde_json::Value {
+                let line = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                    .await
+                    .expect("leader forwarded a message")
+                    .expect("channel open");
+                serde_json::from_str(&line).unwrap()
+            }
+            let mut a = LeaderClient::connect(sock.clone(), "fuigo-pager", ClientMode::Stdio, ClientCapabilities::default()).await.unwrap();
+            let b = LeaderClient::connect(sock.clone(), "fuigo-pager", ClientMode::Stdio, ClientCapabilities::default()).await.unwrap();
+            // A creates a session through the leader.
+            a.send(r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}"#.to_string()).unwrap();
+            let new_req = next(&mut acp_rx).await;
+            let a_conn = new_req["params"]["_meta"]["fuigo/leaderConnectionId"].as_u64().expect("leader stamped A");
+            response_tx.send(format!(r#"{{"jsonrpc":"2.0","result":{{"sessionId":"e2e-sess"}},"id":{}}}"#, new_req["id"])).unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), a.recv()).await.unwrap().unwrap();
+            let mut agent = build_minimal_agent_for_tests();
+            agent.set_leader_mode();
+            let sid = acp::SessionId::new("e2e-sess");
+            let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut handle = make_test_handle("grok-3", false, Some("fuigo-pager"));
+            handle.cmd_tx = cmd_tx;
+            agent.insert_resident(&sid, handle);
+            agent.record_session_owner(&sid, Some(a_conn));
+            // The pager's notification, with its `_` prefix produced by the real protocol crate, through the leader to the agent.
+            async fn pager_send(client: &LeaderClient, params: serde_json::Value) {
+                let wire = real_wire_ext_notification("fuigo/yolo_mode_changed", params).await;
+                assert_eq!(wire["method"], "_fuigo/yolo_mode_changed");
+                client.send(wire.to_string()).unwrap();
+            }
+            pager_send(&a, serde_json::json!({"yolo_mode": true, "clientIdentifier": "fuigo-pager"})).await;
+            let fwd = next(&mut acp_rx).await;
+            assert_eq!(fwd["params"]["fuigo/leaderConnectionId"], a_conn);
+            deliver_like_the_agent(&agent, &fwd).await;
+            assert!(yolo_of(&agent, &sid), "owner A's pager notification changes its session");
+            // B sends the same for A's session: nothing changes.
+            pager_send(&b, serde_json::json!({"yolo_mode": false, "clientIdentifier": "fuigo-pager"})).await;
+            let fwd = next(&mut acp_rx).await;
+            assert_ne!(fwd["params"]["fuigo/leaderConnectionId"], a_conn);
+            let b_conn = fwd["params"]["fuigo/leaderConnectionId"].as_u64().unwrap();
+            deliver_like_the_agent(&agent, &fwd).await;
+            assert!(yolo_of(&agent, &sid), "B must not change A's session");
+            // B loads A's resident session asking for yolo: the leader flags it, the agent ignores the upgrade and keeps A as owner.
+            pager_send(&a, serde_json::json!({"yolo_mode": false, "clientIdentifier": "fuigo-pager"})).await;
+            deliver_like_the_agent(&agent, &next(&mut acp_rx).await).await;
+            assert!(!yolo_of(&agent, &sid));
+            while cmd_rx.try_recv().is_ok() {}
+            b.send(r#"{"jsonrpc":"2.0","id":7,"method":"session/load","params":{"sessionId":"e2e-sess","cwd":"/tmp","mcpServers":[],"_meta":{"yoloMode":true,"autoMode":true,"fuigo/leaderForeignDriverLive":false}}}"#.to_string()).unwrap();
+            let load = next(&mut acp_rx).await;
+            assert_eq!(load["params"]["_meta"]["fuigo/leaderConnectionId"], b_conn);
+            assert_eq!(load["params"]["_meta"]["fuigo/leaderForeignDriverLive"], true, "leader overwrites a client-supplied flag");
+            let req: acp::LoadSessionRequest = serde_json::from_value(load["params"].clone()).unwrap();
+            assert!(agent.is_foreign_resident_attach(&req));
+            agent.refresh_reconnect_session_state(&sid, false, true, true, true);
+            agent.record_attach_owner(&sid, Some(b_conn), true);
+            assert!(!yolo_of(&agent, &sid), "foreign load must not upgrade the mode");
+            assert!(cmd_rx.try_recv().is_err(), "foreign load sent no SetYoloMode/SetAutoMode command");
+            assert_eq!(agent.session_owner(&sid), Some(a_conn), "owner unchanged by a foreign load");
+            pager_send(&b, serde_json::json!({"yolo_mode": true, "clientIdentifier": "fuigo-pager"})).await;
+            deliver_like_the_agent(&agent, &next(&mut acp_rx).await).await;
+            assert!(!yolo_of(&agent, &sid), "B still cannot flip A's session after loading it");
+            // A's own reload (no other live driver) is not flagged and still honours `_meta`.
+            a.send(r#"{"jsonrpc":"2.0","id":8,"method":"session/load","params":{"sessionId":"e2e-sess","cwd":"/tmp","mcpServers":[],"_meta":{"yoloMode":true}}}"#.to_string()).unwrap();
+            let own = next(&mut acp_rx).await;
+            assert!(own["params"]["_meta"].get("fuigo/leaderForeignDriverLive").is_none());
+            let req: acp::LoadSessionRequest = serde_json::from_value(own["params"].clone()).unwrap();
+            assert!(!agent.is_foreign_resident_attach(&req));
+            agent.refresh_reconnect_session_state(&sid, false, true, false, false);
+            assert!(yolo_of(&agent, &sid), "owner's own reload applies yoloMode");
+            // Cold load (not resident) is never foreign, even with the flag.
+            let mut cold = req.clone();
+            cold.session_id = acp::SessionId::new("not-resident");
+            cold.meta.get_or_insert_with(Default::default).insert("fuigo/leaderForeignDriverLive".into(), true.into());
+            assert!(!agent.is_foreign_resident_attach(&cold));
+            // Direct (non-leader) mode ignores the flag entirely.
+            let direct = build_minimal_agent_for_tests();
+            direct.insert_resident(&sid, make_test_handle("grok-3", false, None));
+            let mut flagged = req.clone();
+            flagged.meta.get_or_insert_with(Default::default).insert("fuigo/leaderForeignDriverLive".into(), true.into());
+            assert!(!direct.is_foreign_resident_attach(&flagged));
+            a.cancel();
+            b.cancel();
+            server.cancel.cancel();
+        })
+        .await;
 }
