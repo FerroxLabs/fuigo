@@ -58,6 +58,11 @@ impl MvpAgentHandle {
         self.state_mut_while_unshared().activity = activity;
     }
 
+    /// Mark this agent as serving several leader clients: `fuigo/yolo_mode_changed` is then scoped by session owner connection id and fails closed.
+    pub(crate) fn set_leader_mode(&mut self) {
+        self.state_mut_while_unshared().leader_mode = true;
+    }
+
     /// Install the channel that fans new session cwds into the leader's `ConfigFileWatcher::watch_path`.
     /// Called once after the watcher is constructed in `agent/app.rs`.
     /// In simple / non-leader mode the channel is never wired and `notify_session_cwd_for_watch` is a no-op.

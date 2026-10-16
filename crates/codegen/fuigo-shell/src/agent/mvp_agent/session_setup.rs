@@ -199,6 +199,11 @@ struct SessionWorkspace {
     mcp_servers: Vec<acp::McpServer>,
     mcp_meta_config_map: McpMetaConfigMap,
 }
+/// The leader-minted connection id stamped into a session request's `_meta`; `None` outside the leader.
+fn leader_connection_id(meta: Option<&acp::Meta>) -> Option<u64> {
+    meta.and_then(|m| m.get(crate::leader::protocol::LEADER_CONNECTION_ID_KEY))
+        .and_then(|v| v.as_u64())
+}
 fn session_info_for(session_id: &acp::SessionId, cwd: &AbsPathBuf) -> SessionInfo {
     SessionInfo {
         id: session_id.clone(),
@@ -326,9 +331,27 @@ impl MvpAgent {
         // P138 d-2: the scope is closed however the setup ends (an error before it announced, or the request being
         // dropped), so failing `session/new` calls cannot pile up open scopes and push a live one out.
         let _closer = notice_scope.close_on_drop();
-        notice_scope
+        let owner = leader_connection_id(arguments.meta.as_ref());
+        let resp = notice_scope
             .scoped(self.new_session_in_scope(arguments, notice_scope))
-            .await
+            .await?;
+        self.record_session_owner(&resp.session_id, owner);
+        Ok(resp)
+    }
+    /// Record which leader connection drives `session_id`; `None` (no stamp, or direct mode) clears any owner.
+    pub(crate) fn record_session_owner(&self, session_id: &acp::SessionId, owner: Option<u64>) {
+        let mut owners = self.session_owner_conn.borrow_mut();
+        match owner {
+            Some(conn) => {
+                owners.insert(session_id.0.to_string(), conn);
+            }
+            None => {
+                owners.remove(session_id.0.as_ref());
+            }
+        }
+    }
+    pub(crate) fn session_owner(&self, session_id: &acp::SessionId) -> Option<u64> {
+        self.session_owner_conn.borrow().get(session_id.0.as_ref()).copied()
     }
     async fn new_session_in_scope(
         &self,
@@ -812,6 +835,23 @@ impl MvpAgent {
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         self.attach_session(arguments, AttachOperation::Load).await
     }
+    /// The connection that successfully loads or resumes a session is now the one driving it, unless the attach was foreign.
+    pub(super) fn record_attach_owner(&self, session_id: &acp::SessionId, owner: Option<u64>, foreign_attach: bool) {
+        if !foreign_attach {
+            self.record_session_owner(session_id, owner);
+        }
+    }
+    /// True when the leader flagged this load/resume as targeting a session another live connection drives, and it is resident.
+    pub(super) fn is_foreign_resident_attach(&self, arguments: &acp::LoadSessionRequest) -> bool {
+        self.leader_mode
+            && arguments
+                .meta
+                .as_ref()
+                .and_then(|m| m.get(crate::leader::protocol::LEADER_FOREIGN_DRIVER_KEY))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            && self.is_resident(&arguments.session_id)
+    }
     async fn attach_session(
         &self,
         arguments: acp::LoadSessionRequest,
@@ -821,15 +861,32 @@ impl MvpAgent {
         let notice_scope = fuigo_config::key_naming::NoticeScope::new();
         // P138 d-2: see `new_session_inner`.
         let _closer = notice_scope.close_on_drop();
-        notice_scope
-            .scoped(self.attach_session_in_scope(arguments, op, notice_scope))
-            .await
+        let owner = leader_connection_id(arguments.meta.as_ref());
+        let session_id = arguments.session_id.clone();
+        // Ownership rule (leader mode): a resident session whose driver is a DIFFERENT, still-connected client keeps its
+        // owner. The loader may attach (replay/routing) but is neither made owner nor allowed to upgrade the mode from
+        // `_meta` (yoloMode/autoMode): making it owner would let it call `yolo_mode_changed` next, which is the same
+        // upgrade by another route. When the old driver is gone (a reconnecting pager is a new connection), the load
+        // takes over as before; a cold load from disk also behaves as before.
+        let foreign_attach = self.is_foreign_resident_attach(&arguments);
+        if foreign_attach {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "session load/resume of a resident session driven by another live connection: mode upgrades and ownership transfer ignored"
+            );
+        }
+        let resp = notice_scope
+            .scoped(self.attach_session_in_scope(arguments, op, notice_scope, foreign_attach))
+            .await?;
+        self.record_attach_owner(&session_id, owner, foreign_attach);
+        Ok(resp)
     }
     async fn attach_session_in_scope(
         &self,
         arguments: acp::LoadSessionRequest,
         op: AttachOperation,
         notice_scope: fuigo_config::key_naming::NoticeScope,
+        foreign_attach: bool,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         let attach_started_at = std::time::Instant::now();
         let _load_guard = self.begin_session_load(&arguments.session_id);
@@ -1257,6 +1314,7 @@ impl MvpAgent {
             client_code_nav_enabled,
             session_yolo_mode,
             session_auto_mode,
+            foreign_attach,
         );
         self.maybe_spawn_interactive_trust_prompt(
             &session_id,
@@ -1697,13 +1755,17 @@ impl MvpAgent {
         }
     }
     /// Reconnect phase: re-apply per-client capability and permission state to the resident handle, which still reflects the client that spawned it.
-    fn refresh_reconnect_session_state(
+    /// `foreign_attach`: another live connection drives this session, so the request's `_meta` mode (upgrade) is ignored.
+    pub(super) fn refresh_reconnect_session_state(
         &self,
         session_id: &acp::SessionId,
         client_code_nav_enabled: bool,
         session_yolo_mode: bool,
         session_auto_mode: bool,
+        foreign_attach: bool,
     ) {
+        let (session_yolo_mode, session_auto_mode) =
+            (session_yolo_mode && !foreign_attach, session_auto_mode && !foreign_attach);
         let session_id = session_id.clone();
         self.with_resident_mut(&session_id, |handle| {
             handle.code_nav_enabled = client_code_nav_enabled;

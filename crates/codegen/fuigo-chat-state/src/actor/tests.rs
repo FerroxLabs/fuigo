@@ -3280,6 +3280,49 @@ async fn state_marker_without_an_open_call_is_appended() {
     assert!(c.last().is_some_and(ConversationItem::is_peer_denial_data_marker));
 }
 
+/// P29-C: the placement contract, by index. With a call open the marker goes in BEFORE the last tool-calling assistant item
+/// (not before an earlier one, not between the call and its results); the persisted history gets the same order.
+#[tokio::test]
+async fn state_marker_with_an_open_call_is_inserted_before_the_last_tool_calling_assistant_item() {
+    use fuigo_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    let call = |id: &str| ToolCall { id: id.into(), name: "t".to_string(), arguments: "{}".into() };
+    h.handle.push_user_message(ConversationItem::user("go"));
+    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![call("old")]));
+    h.handle.push_tool_result(ConversationItem::tool_result("old", "ok"));
+    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![call("a"), call("b")]));
+    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
+    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    let c = h.handle.get_conversation().await;
+    // user, assistant(old), result(old), MARKER, assistant(a,b), result(a)
+    assert_eq!(c.len(), 6, "{c:?}");
+    assert!(c[3].is_peer_denial_data_marker(), "marker is right before the open call's assistant item: {c:?}");
+    assert!(matches!(&c[4], ConversationItem::Assistant(a) if a.tool_calls.len() == 2));
+    assert!(matches!(&c[5], ConversationItem::ToolResult(r) if r.tool_call_id == "a"));
+    h.handle.push_tool_result(ConversationItem::tool_result("b", "ok"));
+    let end = h.handle.get_conversation().await;
+    assert_eq!(end.len(), 7);
+    assert!(matches!(&end[6], ConversationItem::ToolResult(r) if r.tool_call_id == "b"), "the second result lands after the first");
+}
+
+/// P29-C: with no call open the marker is appended last, even after an earlier tool-calling assistant item.
+#[tokio::test]
+async fn state_marker_after_all_calls_are_answered_is_appended_last() {
+    use fuigo_sampling_types::ToolCall;
+    let h = TestHarness::new();
+    h.handle.push_user_message(ConversationItem::user("go"));
+    h.handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+        id: "a".into(),
+        name: "t".to_string(),
+        arguments: "{}".into(),
+    }]));
+    h.handle.push_tool_result(ConversationItem::tool_result("a", "ok"));
+    assert!(h.handle.push_state_marker_and_ack(ConversationItem::peer_denial_marker("edit", "sha256:aa", 1)).await.is_some());
+    let c = h.handle.get_conversation().await;
+    assert_eq!(c.len(), 4);
+    assert!(c[3].is_peer_denial_data_marker(), "appended last: {c:?}");
+}
+
 #[tokio::test]
 async fn get_last_assistant_text_empty_conversation() {
     let h = TestHarness::new();

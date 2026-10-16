@@ -13,7 +13,9 @@ mod common;
 use serial_test::serial;
 
 use common::FakeBinGuard;
-use fuigo_update::auto_update::{install_npm_checked_for_test, install_npm_for_test};
+use fuigo_update::auto_update::{
+    install_npm_checked_for_test, install_npm_for_test, npm_setup_failed_recently_for_test, run_install_script,
+};
 use fuigo_update::version::npm_view_version_for_test;
 use std::time::{Duration, Instant};
 use fuigo_update::version::{
@@ -651,4 +653,120 @@ async fn p145_npm_view_uses_the_install_configuration_context() {
     let here = std::env::current_dir().unwrap();
     assert_eq!(cwd.len(), 1, "{cwd:?}");
     assert_eq!(std::path::Path::new(&cwd[0]), here.as_path(), "same cwd as the install");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P29-NPM-R2: the package has no install script, so Fuigo's own updater runs the setup step after `npm i -g`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn canonical_target(name: &str) -> Option<String> {
+    let link = common::test_home().join("bin").join(name);
+    std::fs::read_link(link).ok().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// After the update installs a new version, `~/.fuigo/bin/fuigo` points at it, from an older one.
+#[tokio::test]
+#[serial]
+async fn p29_after_npm_update_the_canonical_binary_points_at_the_new_version() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    // An old npm-installed version, as the pre-update postinstall/first run left it.
+    let bin = common::test_home().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(bin.join("fuigo-1.0.28"), "#!/bin/sh\n").unwrap();
+    std::os::unix::fs::symlink("fuigo-1.0.28", bin.join("fuigo")).unwrap();
+
+    install_npm_for_test(Some("1.0.29"), "stable", Some("https://npm.example.com")).await.unwrap();
+
+    assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.29"));
+    let node = g.node_log();
+    assert_eq!(node.len(), 1, "the setup step ran exactly once: {node:?}");
+    assert!(node[0].contains("fuigo/bin/fuigo-bootstrap.js"), "{node:?}");
+    assert!(node[0].contains("INSTALL_ONLY=1"), "{node:?}");
+    assert!(node[0].contains("REGISTRY=https://npm.example.com"), "{node:?}");
+    // never the user's project directory: the node side resolves the npm registry from its cwd
+    let cwd = std::fs::read_to_string(g.dir().join("node-cwd.log")).unwrap();
+    assert_eq!(dunce::canonicalize(cwd.trim()).unwrap(), dunce::canonicalize(common::test_home()).unwrap());
+}
+
+/// A registry with embedded credentials is not handed to the setup step (it would land in config.toml).
+#[tokio::test]
+#[serial]
+async fn p29_a_credentialed_registry_is_not_passed_to_the_setup_step() {
+    let g = FakeBinGuard::install_npm();
+    install_npm_for_test(Some("1.0.29"), "stable", Some("https://user:pw@npm.example.com")).await.unwrap();
+    let node = g.node_log();
+    assert!(!node[0].contains("pw@") && node[0].contains("REGISTRY="), "{node:?}");
+    assert!(!node[0].contains("REGISTRY=https"), "{node:?}");
+}
+
+/// The npm install succeeded but the setup step failed: the update reports failure (so nothing restarts onto the old
+/// binary and calls it new), and the canonical binary is untouched.
+#[tokio::test]
+#[serial]
+async fn p29_a_failed_setup_step_fails_the_update_and_leaves_the_binary_alone() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    g.set_setup_exit_code(1);
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("setup step failed"), "{msg}");
+    assert_eq!(canonical_target("fuigo"), None);
+    assert!(npm_setup_failed_recently_for_test("1.0.30"));
+    common::reset_home();
+}
+
+/// The package setup claims success without moving the link: the updater does not trust it.
+#[tokio::test]
+#[serial]
+async fn p29_a_setup_step_that_did_not_move_the_link_is_a_failure() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    // npm "installs" 1.0.31 while 1.0.30 was asked for.
+    g.set_installed_package_version("1.0.31");
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"), "{err:#}");
+    assert!(g.node_log().is_empty(), "no setup step for the wrong package");
+    common::reset_home();
+}
+
+/// The loop that motivated this packet: a failing setup step must not make every automatic check re-run the npm
+/// install. First attempt installs and fails; the automatic retries are refused without touching npm; an explicit
+/// `fuigo update` still retries.
+#[tokio::test]
+#[serial]
+async fn p29_a_failed_setup_step_does_not_cause_a_reinstall_loop() {
+    use fuigo_update::auto_update::CliUpdateTrigger;
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    g.set_stdout("\"1.0.30\"");
+    g.set_setup_exit_code(1);
+    let cfg = common::make_update_config("stable");
+
+    let first = run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::LeaderConverge).await;
+    assert!(first.is_err());
+    let installs = |g: &FakeBinGuard| g.args_log().iter().filter(|l| l.starts_with("i -g")).count();
+    assert_eq!(installs(&g), 1);
+
+    for trigger in [CliUpdateTrigger::LeaderConverge, CliUpdateTrigger::AutoBackground, CliUpdateTrigger::LeaderConverge] {
+        let again = run_install_script("npm", Some("1.0.30"), &cfg, trigger).await.unwrap_err();
+        assert!(format!("{again:#}").contains("setup step failed recently"), "{again:#}");
+    }
+    assert_eq!(installs(&g), 1, "automatic checks must not reinstall: {:?}", g.args_log());
+    assert_eq!(g.node_log().len(), 1);
+
+    // A different (newer) version is a new attempt; and an explicit user update retries the same version.
+    let _ = run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::UserCommand).await;
+    assert_eq!(installs(&g), 2);
+    g.set_stdout("\"1.0.31\"");
+    let _ = run_install_script("npm", Some("1.0.31"), &cfg, CliUpdateTrigger::LeaderConverge).await;
+    assert_eq!(installs(&g), 3);
+
+    // Once the setup step works, the marker is cleared and the link moves.
+    g.set_stdout("\"1.0.30\"");
+    std::fs::remove_file(g.dir().join("node-exit")).unwrap();
+    run_install_script("npm", Some("1.0.30"), &cfg, CliUpdateTrigger::UserCommand).await.unwrap();
+    assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.30"));
+    assert!(!npm_setup_failed_recently_for_test("1.0.30"));
+    common::reset_home();
 }

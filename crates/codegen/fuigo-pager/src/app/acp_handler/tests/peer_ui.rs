@@ -610,3 +610,61 @@ async fn the_focused_view_changing_through_dispatch_closes_the_dialog() {
     app.note_focus_change_since(before);
     assert!(!peer(&app).dialog_open());
 }
+
+/// P29-B: a peer message delivered to the hidden home session (the welcome screen is up, no turn has run) used to land in a
+/// scrollback nobody could see, and the unused-husk cleanup could later delete the conversation. The delivery now brings that
+/// session on screen: the delivered row is visible, and the session is no longer an unused husk.
+#[test]
+fn a_peer_message_delivered_to_the_hidden_home_session_brings_it_on_screen() {
+    let _g = force_peer_ui_for_test(true);
+    let mut app = make_app_with_agent("sess-1");
+    let home = AgentId(5);
+    app.agents.insert(home, make_agent(Some("home-sess")));
+    app.home_session_agent = Some(home);
+    app.optimistic_home_husk = Some(home);
+    app.active_view = ActiveView::Welcome;
+
+    let text = "<cross-session-message from-name=\"lane a\" from-ref=\"ab12\" message-id=\"m-1\">\nhello there\n</cross-session-message>";
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let request = acp::SessionNotification::new(
+        acp::SessionId::new("home-sess"),
+        acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))),
+    )
+    .meta(json!({"promptId": "peer-message-m-1", "isReplay": false}).as_object().cloned());
+    let _ = handle(AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs { request, response_tx: tx }), &mut app);
+
+    let sb = &app.agents[&home].scrollback;
+    let rows: Vec<String> = (0..sb.len())
+        .filter_map(|i| match sb.get(i).map(|e| &e.block) {
+            Some(RenderBlock::System(b)) => Some(b.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(rows.iter().any(|r| r.contains("lane a") && r.contains("hello there")), "the delivered row is in the session: {rows:?}");
+    assert_eq!(app.active_view, ActiveView::Agent(home), "the welcome screen gives way to the session that got the message");
+    assert_eq!(app.home_session_agent, None, "no longer the hidden home session");
+    assert_eq!(app.optimistic_home_husk, None, "a session that received a peer message is not an unused husk");
+}
+
+/// Replay of an old peer message, or any non-peer update, leaves the hidden home session hidden.
+#[test]
+fn only_a_live_peer_delivery_reveals_the_hidden_home_session() {
+    let _g = force_peer_ui_for_test(true);
+    let mut app = make_app_with_agent("sess-1");
+    let home = AgentId(5);
+    app.agents.insert(home, make_agent(Some("home-sess")));
+    app.home_session_agent = Some(home);
+    app.active_view = ActiveView::Welcome;
+    let text = "<cross-session-message from-name=\"lane a\" from-ref=\"ab12\" message-id=\"m-1\">\nhi\n</cross-session-message>";
+    for meta in [json!({"promptId": "peer-message-m-1", "isReplay": true}), json!({"promptId": "user-1", "isReplay": false})] {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new("home-sess"),
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text)))),
+        )
+        .meta(meta.as_object().cloned());
+        let _ = handle(AcpClientMessage::SessionNotification(fuigo_acp_lib::AcpArgs { request, response_tx: tx }), &mut app);
+        assert_eq!(app.active_view, ActiveView::Welcome, "{meta}");
+        assert_eq!(app.home_session_agent, Some(home));
+    }
+}

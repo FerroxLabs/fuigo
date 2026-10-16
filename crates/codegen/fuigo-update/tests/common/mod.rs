@@ -66,6 +66,7 @@ pub fn reset_home() {
     let _ = std::fs::remove_file(home.join("version.json.tmp"));
     let _ = std::fs::remove_dir_all(home.join("bin"));
     let _ = std::fs::remove_dir_all(home.join("downloads"));
+    let _ = std::fs::remove_file(home.join(".npm-setup-failed"));
     // SAFETY: tests using this helper must be `#[serial]`.
     unsafe {
         std::env::remove_var("FUIGO_TEST_VERSION");
@@ -207,8 +208,39 @@ impl FakeBinGuard {
     }
 
     /// Install a fake `npm` using the standard [`fake_npm_script`] template.
+    ///
+    /// Also places a fake `node` beside it (the updater runs the installed package's setup step with `node`), and
+    /// points `FUIGO_HOME` at the per-binary test home so that step can never touch a real `~/.fuigo`.
     pub fn install_npm() -> Self {
-        Self::install("npm", fake_npm_script)
+        let _ = test_home();
+        let g = Self::install("npm", fake_npm_script);
+        let node = g.dir().join("node");
+        std::fs::write(&node, fake_node_script(&g.dir())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        g
+    }
+
+    /// Make the fake `node` (the package setup step) exit with `code` without installing anything.
+    pub fn set_setup_exit_code(&self, code: i32) {
+        std::fs::write(self.dir().join("node-exit"), code.to_string()).unwrap();
+    }
+
+    /// Argv + selected env, one line per fake `node` invocation.
+    pub fn node_log(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir().join("node-args.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
+    }
+
+    /// Override the version the fake npm writes into the package it "installs" (default: the requested one).
+    pub fn set_installed_package_version(&self, v: &str) {
+        std::fs::write(self.dir().join("npm-pkg-version"), v).unwrap();
     }
 
     /// Install a fake `gh` using the standard [`fake_gh_script`] template.
@@ -358,6 +390,7 @@ pub fn fake_npm_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(
         r#"#!/bin/sh
+if [ "$1" = "root" ]; then echo {dq}/npm-root; exit 0; fi
 echo "$@" >> {dq}/npm-args.log
 pwd >> {dq}/npm-cwd.log
 if [ -f {dq}/npm-grandchild ]; then sleep 300 & echo $! > {dq}/npm-grandchild.pid; fi
@@ -376,7 +409,38 @@ fi
 if [ -f {dq}/npm-stderr ]; then cat {dq}/npm-stderr >&2; fi
 exit_code=0
 if [ -f {dq}/npm-exit ]; then exit_code=$(cat {dq}/npm-exit); fi
+if [ "$1" = "i" ] && [ "$exit_code" = "0" ]; then
+  # "install" the package into the fake global root: only its manifest and the setup entry matter here
+  ver=none
+  for a in "$@"; do case "$a" in fuigo@*) ver="${{a#fuigo@}}";; esac; done
+  case "$ver" in latest|alpha|none) ver=9.9.9;; esac
+  if [ -f {dq}/npm-pkg-version ]; then ver=$(cat {dq}/npm-pkg-version); fi
+  mkdir -p {dq}/npm-root/fuigo/bin
+  printf '{{"name":"fuigo","version":"%s"}}' "$ver" > {dq}/npm-root/fuigo/package.json
+  : > {dq}/npm-root/fuigo/bin/fuigo-bootstrap.js
+fi
 exit "$exit_code"
+"#
+    )
+}
+
+/// sh script body for a fake `node`: stands in for `node <root>/fuigo/bin/fuigo-bootstrap.js` with
+/// `FUIGO_INSTALL_ONLY=1`, doing what the real setup step does (versioned binary + `fuigo` symlink under `$FUIGO_HOME/bin`).
+/// Logs argv and env to `<dir>/node-args.log`; exits with `<dir>/node-exit` (and installs nothing) when that file exists.
+pub fn fake_node_script(dir: &Path) -> String {
+    let dq = single_quote_for_sh(dir);
+    format!(
+        r#"#!/bin/sh
+echo "$@ INSTALL_ONLY=$FUIGO_INSTALL_ONLY FUIGO_HOME=$FUIGO_HOME REGISTRY=$FUIGO_NPM_REGISTRY" >> {dq}/node-args.log
+pwd >> {dq}/node-cwd.log
+if [ -f {dq}/node-exit ]; then echo "fake setup failing" >&2; exit "$(cat {dq}/node-exit)"; fi
+pkg=$(dirname "$(dirname "$1")")
+ver=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$pkg/package.json")
+mkdir -p "$FUIGO_HOME/bin"
+printf '#!/bin/sh\n' > "$FUIGO_HOME/bin/fuigo-$ver"
+chmod 755 "$FUIGO_HOME/bin/fuigo-$ver"
+ln -sfn "fuigo-$ver" "$FUIGO_HOME/bin/fuigo"
+exit 0
 "#
     )
 }

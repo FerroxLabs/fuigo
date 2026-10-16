@@ -931,10 +931,31 @@ fn inject_client_identity_into_initialize(
     }
     (mutated, true)
 }
+/// True when the TOP-LEVEL `method` is the yolo-mode notification, in either wire form.
+/// The protocol crate prefixes every client ext notification with one `_` on the wire (`_fuigo/yolo_mode_changed`), then the agent strips that one `_` and dispatches on the result.
+/// So exactly `fuigo/yolo_mode_changed` and `_fuigo/yolo_mode_changed` match; `__fuigo/...` does not (the agent would see `_fuigo/...`).
+/// This deliberately does NOT use `method_of`: it prefers the client-controlled `params.method`, which the agent never looks at.
+fn is_yolo_mode_notification(json: &serde_json::Value) -> bool {
+    json.get("method")
+        .and_then(|m| m.as_str())
+        .is_some_and(|m| m.strip_prefix('_').unwrap_or(m) == "fuigo/yolo_mode_changed")
+}
+/// Remove any client-supplied connection id from `params` and `params._meta` of an inbound client message, whatever its method.
+/// Only the leader may write `fuigo/leaderConnectionId`.
+fn strip_client_supplied_connection_id(json: &mut serde_json::Value) -> bool {
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let key = crate::leader::protocol::LEADER_CONNECTION_ID_KEY;
+    let mut mutated = params.remove(key).is_some();
+    if let Some(meta) = params.get_mut("_meta").and_then(|m| m.as_object_mut()) {
+        mutated |= meta.remove(key).is_some();
+    }
+    mutated
+}
 /// Extract yolo_mode change from fuigo/yolo_mode_changed notification.
 fn extract_yolo_mode_change(json: &serde_json::Value) -> Option<bool> {
-    let method = json.get("method")?.as_str()?;
-    if method != "fuigo/yolo_mode_changed" {
+    if !is_yolo_mode_notification(json) {
         return None;
     }
     let params = json.get("params")?;
@@ -946,8 +967,7 @@ fn extract_yolo_mode_change(json: &serde_json::Value) -> Option<bool> {
 /// That would re-enable Auto after the user opted out.
 /// Returns `None` when the notification doesn't change auto state.
 fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
-    let method = json.get("method")?.as_str()?;
-    if method != "fuigo/yolo_mode_changed" {
+    if !is_yolo_mode_notification(json) {
         return None;
     }
     let params = json.get("params")?;
@@ -960,38 +980,154 @@ fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
         _ => None,
     }
 }
-/// Inject `clientIdentifier` into a `yolo_mode_changed` notification's params.
+/// Stamp the leader-minted connection id onto a `yolo_mode_changed` notification's params.
 ///
 /// In leader mode, multiple clients share one agent.
-/// Without this injection, the agent can't tell which client sent the yolo toggle and updates ALL sessions.
-/// With the `clientIdentifier` in params, the agent scopes the update to only sessions owned by the sending client.
+/// The agent scopes the toggle to sessions OWNED BY THE SENDING CONNECTION (the id the leader assigned when it accepted the socket).
+/// `clientIdentifier` (the self-declared product string) is not an authority: any same-user process can claim it.
+/// So every client-supplied `clientIdentifier` and connection id (in params and in `params._meta`) is stripped first, then the leader's own values are stamped.
+/// `clientIdentifier` is stamped only when the registration `client_type` is non-empty.
 ///
 /// Mutates `json` in place; returns `true` when mutated.
 fn inject_client_identity_into_yolo_notification(
     json: &mut serde_json::Value,
     client_type: &str,
+    client_id: ClientId,
 ) -> bool {
-    if client_type.is_empty() {
+    if !is_yolo_mode_notification(json) {
         return false;
     }
-    let is_yolo = json
-        .get("method")
-        .and_then(|m| m.as_str())
-        .is_some_and(|m| m == "fuigo/yolo_mode_changed");
-    if !is_yolo {
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
         return false;
+    };
+    params.remove("clientIdentifier");
+    params.remove(crate::leader::protocol::LEADER_CONNECTION_ID_KEY);
+    if let Some(meta) = params.get_mut("_meta").and_then(|m| m.as_object_mut()) {
+        meta.remove("clientIdentifier");
+        meta.remove(crate::leader::protocol::LEADER_CONNECTION_ID_KEY);
     }
-    let mut mutated = false;
-    if let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) {
+    if !client_type.is_empty() {
         params.insert(
             "clientIdentifier".to_string(),
             serde_json::json!(client_type),
         );
-        mutated = true;
-        debug!(
-            client_type,
-            "Injected clientIdentifier into yolo_mode_changed notification"
+    }
+    params.insert(
+        crate::leader::protocol::LEADER_CONNECTION_ID_KEY.to_string(),
+        serde_json::json!(client_id.0),
+    );
+    debug!(
+        client_type,
+        client_id = client_id.0,
+        "Stamped connection identity into yolo_mode_changed notification"
+    );
+    true
+}
+/// Everything the leader does to the identity fields of an inbound client message: strip any client-supplied connection id (every method), stamp session requests, and strip + stamp the yolo notification.
+pub(crate) fn stamp_inbound_client_identity(
+    json: &mut serde_json::Value,
+    client_type: &str,
+    client_id: ClientId,
+) -> bool {
+    let mut mutated = strip_client_supplied_connection_id(json);
+    mutated |= stamp_connection_id_into_session_request(json, client_id);
+    mutated |= inject_client_identity_into_yolo_notification(json, client_type, client_id);
+    mutated
+}
+/// Connection id the leader reserves for messages arriving over the relay (remote clients). Client ids count up from a small number, so this never collides with one.
+pub(crate) const RELAY_CONNECTION_ID: u64 = u64::MAX;
+/// Sanitise one relay-delivered JSON-RPC line before the agent sees it: relay messages never pass through a leader client slot, so they get the same treatment.
+/// Any client-supplied `fuigo/leaderConnectionId` / `clientIdentifier` is stripped, then `RELAY_CONNECTION_ID` is stamped so the relay client owns the sessions it creates or loads and can change only those.
+/// Unparseable lines are returned unchanged (the agent rejects them itself).
+pub(crate) fn stamp_relay_connection_identity(line: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return line.to_string();
+    };
+    let mut changed = false;
+    let mut visit = |json: &mut serde_json::Value| {
+        changed |= strip_client_supplied_connection_id(json);
+        if stamp_connection_id_into_session_request(json, ClientId(RELAY_CONNECTION_ID)) {
+            // The replay-unicast target is a leader client slot; a relay has none.
+            if let Some(meta) = json
+                .get_mut("params")
+                .and_then(|p| p.get_mut("_meta"))
+                .and_then(|m| m.as_object_mut())
+            {
+                meta.remove("fuigo/leaderClientId");
+            }
+            changed = true;
+        }
+        changed |= inject_client_identity_into_yolo_notification(
+            json,
+            "",
+            ClientId(RELAY_CONNECTION_ID),
         );
+    };
+    match &mut value {
+        serde_json::Value::Array(items) => items.iter_mut().for_each(&mut visit),
+        other => visit(other),
+    }
+    if changed {
+        serde_json::to_string(&value).unwrap_or_else(|_| line.to_string())
+    } else {
+        line.to_string()
+    }
+}
+/// Stamp the leader-minted connection id into a `session/new`, `session/load` or `session/resume` request's `_meta`, **in place**.
+/// The agent records it as the session's owner: a load or resume by another connection makes that connection the owner (it is the one now driving the session).
+/// Any client-supplied value is overwritten, so a client cannot claim ownership as another connection.
+/// Returns `true` when `json` was mutated.
+fn stamp_connection_id_into_session_request(
+    json: &mut serde_json::Value,
+    client_id: ClientId,
+) -> bool {
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if method != AGENT_METHOD_NAMES.session_new
+        && method != AGENT_METHOD_NAMES.session_load
+        && method != AGENT_METHOD_NAMES.session_resume
+    {
+        return false;
+    }
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let meta = params
+        .entry("_meta")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(meta_obj) = meta.as_object_mut() else {
+        return false;
+    };
+    meta_obj.insert(
+        crate::leader::protocol::LEADER_CONNECTION_ID_KEY.to_string(),
+        serde_json::json!(client_id.0),
+    );
+    // `fuigo/leaderClientId` is the replay-unicast target. No flow routes one connection's replay to another (a
+    // reconnecting client is a new connection with a new id), so a client-supplied value is always overwritten.
+    meta_obj.insert(
+        "fuigo/leaderClientId".to_string(),
+        serde_json::json!(client_id.0),
+    );
+    true
+}
+/// Stamp (or strip) the foreign-driver flag on a `session/load`/`session/resume` request; any client-supplied value is removed first.
+fn stamp_foreign_driver_flag(json: &mut serde_json::Value, foreign_driver_live: bool) -> bool {
+    if !is_session_attach_request(json) {
+        return false;
+    }
+    let key = crate::leader::protocol::LEADER_FOREIGN_DRIVER_KEY;
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let mut mutated = false;
+    if let Some(meta) = params.get_mut("_meta").and_then(|m| m.as_object_mut()) {
+        mutated |= meta.remove(key).is_some();
+        if foreign_driver_live {
+            meta.insert(key.to_string(), serde_json::json!(true));
+            mutated = true;
+        }
+    } else if foreign_driver_live {
+        params.insert("_meta".to_string(), serde_json::json!({ key: true }));
+        mutated = true;
     }
     mutated
 }
@@ -2201,6 +2337,12 @@ pub async fn run_leader_server(
                             }
                         }
                     }
+                    let foreign_driver_live = json
+                        .as_ref()
+                        .filter(|j| is_session_attach_request(j))
+                        .and_then(extract_session_id)
+                        .and_then(|sid| session_driver.get(&sid).copied())
+                        .is_some_and(|d| d != id && clients.contains_key(&d));
                     if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
                         if let Some(yolo_mode) = extract_yolo_mode_change(json) {
                             client.capabilities.yolo_mode = yolo_mode;
@@ -2242,6 +2384,8 @@ pub async fn run_leader_server(
                         if let Some(hints) = initialize_startup_hints(json) {
                             client.init_startup_hints = Some(hints);
                         }
+                        payload_mutated |=
+                            stamp_inbound_client_identity(json, &client.client_type, id);
                         payload_mutated |= inject_session_request_context(
                             json,
                             &client.capabilities,
@@ -2250,10 +2394,12 @@ pub async fn run_leader_server(
                         );
                         payload_mutated |=
                             inject_client_startup_hints(json, client.init_startup_hints.as_ref());
-                        payload_mutated |= inject_client_identity_into_yolo_notification(
-                            json,
-                            &client.client_type,
-                        );
+                        payload_mutated |= stamp_foreign_driver_flag(json, foreign_driver_live);
+                    } else if json.is_some() && !clients.contains_key(&id) {
+                        // Fail closed: a message from a client that is no longer registered cannot be stamped with its
+                        // connection identity, and forwarding it unstamped would bypass the ownership checks.
+                        debug!(client_id = id.0, "Dropped message from unregistered client");
+                        continue;
                     }
                     let rewritten = json.as_mut().and_then(|j| rewrite_request_id(j, id));
                     payload_mutated |= rewritten.is_some();

@@ -2780,6 +2780,19 @@ impl acp::Agent for MvpAgent {
             >(args.params.get())
         {
             let sender_id = params.get("clientIdentifier").and_then(|v| v.as_str());
+            let stamped_conn = params
+                .get(crate::leader::protocol::LEADER_CONNECTION_ID_KEY)
+                .and_then(|v| v.as_u64());
+            // Leader mode is fail-closed: only the connection id the leader stamped selects sessions, and a
+            // notification without one changes none. Direct mode keeps the product-string match.
+            let scope = if self.leader_mode {
+                if stamped_conn.is_none() {
+                    tracing::warn!("yolo_mode_changed without a leader connection stamp; ignoring");
+                }
+                crate::upload::turn::SenderScope::Connection(stamped_conn)
+            } else {
+                crate::upload::turn::SenderScope::Product(sender_id)
+            };
             let permission_mode = params
                 .get("permission_mode")
                 .and_then(|v| v.as_str())
@@ -2788,11 +2801,11 @@ impl acp::Agent for MvpAgent {
             if let Some(yolo_mode) = yolo_signal {
                 let mut updated_sessions = 0;
                 self.session_registry
-                    .for_each_resident_mut(|_, handle| {
+                    .for_each_resident_mut(|sid, handle| {
                         updated_sessions
                             += apply_yolo_mode_to_matching_sessions(
-                                std::iter::once(handle),
-                                sender_id,
+                                std::iter::once((self.session_owner(sid), handle)),
+                                scope,
                                 yolo_mode,
                             );
                     });
@@ -2813,16 +2826,14 @@ impl acp::Agent for MvpAgent {
             let enable_auto = want_auto && yolo_signal != Some(true);
             if enable_auto || clear_auto {
                 let enabled = enable_auto;
-                let matches_sender = |h: &crate::session::SessionHandle| -> bool {
-                    sender_id.is_none()
-                        || h.origin_client.as_ref().map(|c| c.product.as_str())
-                            == sender_id
+                let matches_sender = |owner: Option<u64>, h: &crate::session::SessionHandle| -> bool {
+                    scope.matches(owner, h)
                 };
                 let total_sessions = self.resident_count();
                 let mut updated = 0;
                 self.session_registry
-                    .for_each_resident_mut(|_, h| {
-                        if !matches_sender(h) {
+                    .for_each_resident_mut(|sid, h| {
+                        if !matches_sender(self.session_owner(sid), h) {
                             return;
                         }
                         if h
