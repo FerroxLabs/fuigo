@@ -2,14 +2,13 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **Campaign nudge via the real remote path.**
-/// The campaign arrives through `GET /v1/settings`: the response fills `RemoteSettings.campaigns` and seeds the process cache for apply and dismiss.
-/// The sibling test injects the campaign through `FUIGO_CAMPAIGNS_OVERRIDE` instead.
+/// **Campaign nudge applies to new sessions; an explicit `/model` pick dismisses it, across reboots.**
+/// The campaign is supplied by `FUIGO_CAMPAIGNS_OVERRIDE` (a PTY pager cannot receive a server-served campaign; see the comment below).
 ///
-/// - Boot with a `[models].default` in config.toml plus a **server-served** campaign nudging a *different* model.
+/// - Boot with a `[models].default` in config.toml plus a campaign nudging a *different* model.
 ///   A new session, possibly not the first (see [`wait_for_model_via_new_sessions`]), opens on the **campaign** model.
 /// - Pick the config model via `/model`. The remote campaign id is recorded dismissed in `campaigns_state.json`.
-/// - Reboot against the *same* server settings. The **config** model wins and stays winning across `/new`.
+/// - Reboot with the *same* campaign. The **config** model wins and stays winning across `/new`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn campaign_remote_settings_nudge_and_dismiss() {
@@ -24,15 +23,6 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
     .await
     .expect("start content with two models");
 
-    // Serve the campaign from the settings endpoint
-    // This replaces the preset settings, so `allow_access` must be restated or the pager parks on the upsell screen
-    content.server().set_settings(json!({
-        "allow_access": true,
-        "campaigns": [
-            { "id": CAMPAIGN_ID, "models": { "default": CAMPAIGN_MODEL } }
-        ]
-    }));
-
     // Seed config.toml with the user's own default model.
     let fuigo_home = content.home().join(".fuigo");
     std::fs::create_dir_all(&fuigo_home).expect("create FUIGO_HOME");
@@ -42,18 +32,21 @@ async fn campaign_remote_settings_nudge_and_dismiss() {
     )
     .expect("write config.toml");
 
-    // Use session (OAuth) auth, not the harness's default FUIGO_API_KEY: the settings fetch requires `auth_manager.auth()`
-    // In ApiKey/BYOK mode the pager never requests `/v1/settings`, so a remote campaign could never arrive (see `spawn_polling_session`'s doc)
-    seed_fake_oauth(&content, "pty-campaign-remote");
+    // Supply the campaign via the override env (what the leader-mode and sibling PTY tests do).
+    // A server-served `/v1/settings` campaign can never reach a PTY harness: Fuigo ships with no OAuth issuer, so the
+    // settings prefetch (which needs session auth) never runs, and service_trust refuses cleartext/loopback destinations.
+    // The remote seed (`set_remote_campaigns_from_settings`) is covered by the campaigns.rs unit tests.
+    let campaign_json =
+        format!(r#"[{{"id":"{CAMPAIGN_ID}","models":{{"default":"{CAMPAIGN_MODEL}"}}}}]"#);
     let binary = pager_binary().expect("resolve pager binary");
     let spawn = || -> PtyHarness {
-        PtyHarness::spawn_with_content_env_ops(
+        PtyHarness::spawn_with_content_env(
             &binary,
             DEFAULT_ROWS,
             DEFAULT_COLS,
             &content,
             &[],
-            &oauth_credential_ops(),
+            &[("FUIGO_CAMPAIGNS_OVERRIDE", campaign_json.as_str())],
         )
         .expect("spawn pager")
     };

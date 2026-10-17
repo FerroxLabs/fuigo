@@ -3,12 +3,12 @@
 use super::common::*;
 
 /// Switching mid-session between models whose agent types differ shows the "requires starting a new session" modal in both directions.
-/// This drives the reverse leg, cursor to fuigo-build.
+/// This drives the reverse leg, codex to fuigo-build.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn reverse_agent_type_mismatch_cursor_to_default() {
     let content = ContentController::start_with_models(vec![
-        MockModel::with_agent_type("cursor-model", "cursor"),
+        MockModel::with_agent_type("codex-model", "codex"),
         MockModel::new("default-model"),
     ])
     .await
@@ -24,9 +24,9 @@ async fn reverse_agent_type_mismatch_cursor_to_default() {
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
-        &["--model", "cursor-model"],
+        &["--model", "codex-model"],
     )
-    .expect("spawn pager with cursor model");
+    .expect("spawn pager with codex model");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
@@ -40,7 +40,7 @@ async fn reverse_agent_type_mismatch_cursor_to_default() {
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
         .expect("response rendered");
 
-    // Switch to default-model, which crosses agent types from cursor to fuigo-build
+    // Switch to default-model, which crosses agent types from codex to fuigo-build
     harness
         .inject_keys(b"/model default-model\r")
         .expect("type model switch");

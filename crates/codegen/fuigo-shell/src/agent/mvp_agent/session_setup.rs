@@ -200,9 +200,30 @@ struct SessionWorkspace {
     mcp_meta_config_map: McpMetaConfigMap,
 }
 /// The leader-minted connection id stamped into a session request's `_meta`; `None` outside the leader.
-fn leader_connection_id(meta: Option<&acp::Meta>) -> Option<u64> {
+pub(super) fn leader_connection_id(meta: Option<&acp::Meta>) -> Option<u64> {
     meta.and_then(|m| m.get(crate::leader::protocol::LEADER_CONNECTION_ID_KEY))
         .and_then(|v| v.as_u64())
+}
+/// The leader's ownership verdict stamped into a typed request's `_meta` (`self`, `other` or `none`); `None` when unstamped.
+fn owner_state_in_meta(meta: Option<&acp::Meta>) -> Option<&str> {
+    meta.and_then(|m| m.get(crate::leader::protocol::LEADER_OWNER_STATE_KEY)).and_then(|v| v.as_str())
+}
+/// What a foreign cold load keeps of its request: the routing of its own replay and nothing that configures the session.
+const FOREIGN_COLD_LOAD_KEEPS: [&str; 6] = [
+    crate::leader::protocol::LEADER_CONNECTION_ID_KEY,
+    crate::leader::protocol::LEADER_FOREIGN_DRIVER_KEY,
+    "fuigo/leaderClientId",
+    "fuigo/persist",
+    "cursor",
+    "noReplay",
+];
+/// A load the leader flagged foreign that has to start the session itself must not apply what the loader asked for: its MCP
+/// servers and every `_meta` key but the replay routing are dropped, so the session starts from its saved config and defaults.
+pub(super) fn sanitize_foreign_cold_attach(arguments: &mut acp::LoadSessionRequest) {
+    arguments.mcp_servers.clear();
+    if let Some(meta) = arguments.meta.as_mut() {
+        meta.retain(|key, _| FOREIGN_COLD_LOAD_KEEPS.contains(&key.as_str()));
+    }
 }
 fn session_info_for(session_id: &acp::SessionId, cwd: &AbsPathBuf) -> SessionInfo {
     SessionInfo {
@@ -331,27 +352,47 @@ impl MvpAgent {
         // P138 d-2: the scope is closed however the setup ends (an error before it announced, or the request being
         // dropped), so failing `session/new` calls cannot pile up open scopes and push a live one out.
         let _closer = notice_scope.close_on_drop();
-        let owner = leader_connection_id(arguments.meta.as_ref());
         let resp = notice_scope
             .scoped(self.new_session_in_scope(arguments, notice_scope))
             .await?;
-        self.record_session_owner(&resp.session_id, owner);
         Ok(resp)
     }
-    /// Record which leader connection drives `session_id`; `None` (no stamp, or direct mode) clears any owner.
-    pub(crate) fn record_session_owner(&self, session_id: &acp::SessionId, owner: Option<u64>) {
-        let mut owners = self.session_owner_conn.borrow_mut();
-        match owner {
-            Some(conn) => {
-                owners.insert(session_id.0.to_string(), conn);
-            }
-            None => {
-                owners.remove(session_id.0.as_ref());
-            }
-        }
+    /// Leader mode: only the session's owner may change its mode, model or config (the same rule as yolo/auto). The leader is
+    /// the single authority on ownership and stamps its verdict (`fuigo/leaderOwnerState`, see `leader::drivers`) after
+    /// stripping any client-supplied value; the agent keeps no copy of who owns what. A request without the stamp, or one that
+    /// is not `self`, changes nothing. Direct mode is unchanged.
+    pub(crate) fn ensure_session_owner(&self, meta: Option<&acp::Meta>, what: &str) -> Result<(), acp::Error> {
+        self.check_owner_state(owner_state_in_meta(meta), false, what)
     }
-    pub(crate) fn session_owner(&self, session_id: &acp::SessionId) -> Option<u64> {
-        self.session_owner_conn.borrow().get(session_id.0.as_ref()).copied()
+    /// As [`Self::ensure_session_owner`], for session admin (close, park, ...): the owner, or anyone when the session has no
+    /// live owner (not resident, or its owner left and the grace window is over).
+    pub(crate) fn ensure_owner_or_unowned(&self, meta: Option<&acp::Meta>, what: &str) -> Result<(), acp::Error> {
+        self.check_owner_state(owner_state_in_meta(meta), true, what)
+    }
+    /// As [`Self::ensure_session_owner`] / [`Self::ensure_owner_or_unowned`] for an extension request or notification, whose
+    /// stamp rides in the top level of its params.
+    pub(crate) fn ensure_owner_ext(&self, raw_params: &str, allow_unowned: bool, what: &str) -> Result<(), acp::Error> {
+        if !self.leader_mode {
+            return Ok(());
+        }
+        let state = serde_json::from_str::<serde_json::Value>(raw_params).ok().and_then(|v| {
+            v.get(crate::leader::protocol::LEADER_OWNER_STATE_KEY).and_then(|s| s.as_str()).map(str::to_owned)
+        });
+        self.check_owner_state(state.as_deref(), allow_unowned, what)
+    }
+    fn check_owner_state(&self, state: Option<&str>, allow_unowned: bool, what: &str) -> Result<(), acp::Error> {
+        if !self.leader_mode {
+            return Ok(());
+        }
+        match state {
+            Some("self") => return Ok(()),
+            Some("none") if allow_unowned => return Ok(()),
+            _ => {}
+        }
+        tracing::warn!(what, "ignoring a session change from a connection that does not own the session");
+        Err(crate::acp_error::invalid_request(
+            "this session is driven by another client; only the driving client can change it",
+        ))
     }
     async fn new_session_in_scope(
         &self,
@@ -835,14 +876,10 @@ impl MvpAgent {
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         self.attach_session(arguments, AttachOperation::Load).await
     }
-    /// The connection that successfully loads or resumes a session is now the one driving it, unless the attach was foreign.
-    pub(super) fn record_attach_owner(&self, session_id: &acp::SessionId, owner: Option<u64>, foreign_attach: bool) {
-        if !foreign_attach {
-            self.record_session_owner(session_id, owner);
-        }
-    }
-    /// True when the leader flagged this load/resume as targeting a session another live connection drives, and it is resident.
-    pub(super) fn is_foreign_resident_attach(&self, arguments: &acp::LoadSessionRequest) -> bool {
+    /// True when the leader flagged this load/resume as targeting a session somebody else owns (a live client, the relay within
+    /// its lease, a departed owner's grace window, or a load of it still in flight). The leader's flag is trusted as it
+    /// stands, whether or not the session is resident here (it may be evicted, or owned through the relay).
+    pub(super) fn is_foreign_attach(&self, arguments: &acp::LoadSessionRequest) -> bool {
         self.leader_mode
             && arguments
                 .meta
@@ -850,35 +887,139 @@ impl MvpAgent {
                 .and_then(|m| m.get(crate::leader::protocol::LEADER_FOREIGN_DRIVER_KEY))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
-            && self.is_resident(&arguments.session_id)
+    }
+    /// Record that `conn` is loading `session_id`; the mark is removed when the returned guard drops (success, error or cancel).
+    pub(super) fn mark_session_loading(&self, session_id: &acp::SessionId, conn: Option<u64>) -> SessionLoaderMark<'_> {
+        self.session_loaders
+            .borrow_mut()
+            .entry(session_id.0.to_string())
+            .or_default()
+            .push(conn);
+        SessionLoaderMark { agent: self, session_id: session_id.0.to_string(), conn }
+    }
+    /// Wait (bounded) until the connection `conn` has no `session/load` or `resume` of `session_id` in flight. A request
+    /// pipelined right behind its own connection's load waits for the whole load, not only for the session to turn resident.
+    pub(crate) async fn wait_for_own_session_loads(&self, session_id: &acp::SessionId, conn: Option<u64>) {
+        let Some(conn) = conn else { return };
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            let notified = self.loader_changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let loading = self
+                .session_loaders
+                .borrow()
+                .get(session_id.0.as_ref())
+                .is_some_and(|marks| marks.contains(&Some(conn)));
+            if !loading {
+                return;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                tracing::warn!(session_id = %session_id.0, "timed out waiting for the connection's own session/load");
+                return;
+            }
+        }
+    }
+    /// Resident reconnect: replace the session's MCP servers (and the attaching client's startup hints) from the loader's request.
+    /// A foreign attach (another live connection drives the session) keeps the session's existing MCP servers: the loader must
+    /// not steer a session it does not drive. Hints are the attaching client's own strategy and still apply.
+    pub(super) fn apply_resident_attach_mcp(
+        &self,
+        session_id: &acp::SessionId,
+        foreign_attach: bool,
+        initial_client_mcp_servers: crate::session::managed_mcp::ClientMcpSeed,
+        mcp_servers: Vec<acp::McpServer>,
+        attach_hints: Option<crate::session::StartupHints>,
+    ) {
+        self.with_resident_mut(session_id, |handle| {
+            if !foreign_attach {
+                // The actor's plugin reload re-merges its own copy of the seed (P141, Astra r1): it gets the new one too.
+                let _ = handle.cmd_tx.send(crate::session::SessionCommand::SetClientMcpSeed {
+                    seed: initial_client_mcp_servers.clone(),
+                });
+                handle.initial_client_mcp_servers = initial_client_mcp_servers;
+            }
+            if let Some(hints) = attach_hints {
+                let _ = handle
+                    .cmd_tx
+                    .send(crate::session::SessionCommand::UpdateAttachPolicy {
+                        startup_hints: Box::new(hints),
+                    });
+            }
+            if !foreign_attach {
+                let (tx, _rx) = tokio::sync::oneshot::channel();
+                let _ = handle
+                    .cmd_tx
+                    .send(crate::session::SessionCommand::UpdateMcpServers {
+                        mcp_servers,
+                        respond_to: tx,
+                    });
+            }
+        });
+    }
+    /// Resident reconnect: replace the session's system prompt override and client hooks from the loader's `_meta`.
+    /// A foreign attach keeps both as they are (under yolo, a hook or prompt from another window would steer this session).
+    pub(super) fn apply_attach_prompt_and_hooks(
+        &self,
+        session_id: &acp::SessionId,
+        request_meta: Option<&acp::Meta>,
+        init_meta: Option<&acp::Meta>,
+        foreign_attach: bool,
+    ) {
+        if foreign_attach {
+            tracing::warn!(
+                session_id = %session_id.0,
+                "foreign session load: keeping the session's system prompt and client hooks"
+            );
+            return;
+        }
+        if let Some(handle) = self.resident_handle(session_id) {
+            enqueue_replace_system_prompt_override(&handle.cmd_tx, request_meta, init_meta);
+        }
+        if let Some(hooks) = crate::extensions::hooks::reconnect_client_hooks(request_meta)
+            && let Some(handle) = self.resident_handle(session_id)
+        {
+            handle.set_client_hooks(hooks);
+        }
     }
     async fn attach_session(
         &self,
-        arguments: acp::LoadSessionRequest,
+        mut arguments: acp::LoadSessionRequest,
         op: AttachOperation,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
         // P136: as for `session/new`, the refusals this load records are this session's.
         let notice_scope = fuigo_config::key_naming::NoticeScope::new();
         // P138 d-2: see `new_session_inner`.
         let _closer = notice_scope.close_on_drop();
-        let owner = leader_connection_id(arguments.meta.as_ref());
         let session_id = arguments.session_id.clone();
-        // Ownership rule (leader mode): a resident session whose driver is a DIFFERENT, still-connected client keeps its
-        // owner. The loader may attach (replay/routing) but is neither made owner nor allowed to upgrade the mode from
-        // `_meta` (yoloMode/autoMode): making it owner would let it call `yolo_mode_changed` next, which is the same
-        // upgrade by another route. When the old driver is gone (a reconnecting pager is a new connection), the load
-        // takes over as before; a cold load from disk also behaves as before.
-        let foreign_attach = self.is_foreign_resident_attach(&arguments);
+        // Ownership rule (leader mode): the leader decides who owns a session and flags a load of a session somebody else
+        // owns. Such a load attaches (replay, routing) but is neither an owner nor allowed to steer the session: no mode
+        // upgrade from `_meta` (yoloMode/autoMode), no replacement of its MCP servers, system prompt or hooks. The agent
+        // records no owner: the leader stamps its verdict on every owner-gated request.
+        let foreign_attach = self.is_foreign_attach(&arguments);
+        let owner = leader_connection_id(arguments.meta.as_ref());
+        // Registered in the same synchronous step as the check above, so a request pipelined behind this load waits for it.
+        let _loader_mark = self.mark_session_loading(&session_id, owner);
         if foreign_attach {
             tracing::warn!(
                 session_id = %session_id.0,
-                "session load/resume of a resident session driven by another live connection: mode upgrades and ownership transfer ignored"
+                "session load/resume of a session somebody else owns: mode upgrades and MCP/prompt/hook replacement ignored"
             );
+            if !self.is_resident(&session_id) {
+                // The owner's cold load may be in flight: let it register the session first, so this load joins it
+                // (resident branch, nothing replaced) instead of spawning the session from this loader's request.
+                self.wait_for_in_flight_session_load(&session_id).await;
+            }
+            if !self.is_resident(&session_id) {
+                // Nobody loaded it (the owner's load failed or timed out, or the session was evicted): this loader cold-starts
+                // it, but from the session's saved config and the defaults, never from its own MCP servers, system prompt,
+                // hooks, modes or client capabilities.
+                sanitize_foreign_cold_attach(&mut arguments);
+            }
         }
         let resp = notice_scope
             .scoped(self.attach_session_in_scope(arguments, op, notice_scope, foreign_attach))
             .await?;
-        self.record_attach_owner(&session_id, owner, foreign_attach);
         Ok(resp)
     }
     async fn attach_session_in_scope(
@@ -1051,16 +1192,22 @@ impl MvpAgent {
             .and_then(|m| m.get("cursor"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let session_yolo_mode = request_meta
-            .as_ref()
-            .and_then(|m| m.get("yoloMode"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(self.default_yolo_mode);
-        let session_auto_mode = resolve_session_auto_mode(
-            request_meta.as_ref(),
-            self.default_auto_mode,
-            session_yolo_mode,
-        );
+        // A foreign cold load (another connection's load of this session was in flight and it failed) is not the
+        // session's driver: its `_meta` cannot raise the mode, so the configured defaults apply.
+        let session_yolo_mode = if foreign_attach {
+            self.default_yolo_mode
+        } else {
+            request_meta
+                .as_ref()
+                .and_then(|m| m.get("yoloMode"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(self.default_yolo_mode)
+        };
+        let session_auto_mode = if foreign_attach {
+            self.default_auto_mode && !session_yolo_mode
+        } else {
+            resolve_session_auto_mode(request_meta.as_ref(), self.default_auto_mode, session_yolo_mode)
+        };
         #[allow(unused_variables)]
         let session_computer_sessions = resolve_session_computer_sessions(request_meta.as_ref())?;
         let code_restore_info = self
@@ -1251,28 +1398,13 @@ impl MvpAgent {
                 self.finish_deferred_recovery(session_id.clone(), deferred, broadcast_replay);
             }
             let attach_hints = explicit_startup_hints(request_meta.as_ref());
-            self.with_resident_mut(&session_id, |handle| {
-                // The actor's plugin reload re-merges its own copy of the seed (P141, Astra r1): it gets the new one too.
-                let _ = handle.cmd_tx.send(crate::session::SessionCommand::SetClientMcpSeed {
-                    seed: initial_client_mcp_servers.clone(),
-                });
-                handle.initial_client_mcp_servers = initial_client_mcp_servers;
-                if let Some(hints) = attach_hints {
-                    let _ =
-                        handle
-                            .cmd_tx
-                            .send(crate::session::SessionCommand::UpdateAttachPolicy {
-                                startup_hints: Box::new(hints),
-                            });
-                }
-                let (tx, _rx) = tokio::sync::oneshot::channel();
-                let _ = handle
-                    .cmd_tx
-                    .send(crate::session::SessionCommand::UpdateMcpServers {
-                        mcp_servers,
-                        respond_to: tx,
-                    });
-            });
+            self.apply_resident_attach_mcp(
+                &session_id,
+                foreign_attach,
+                initial_client_mcp_servers,
+                mcp_servers,
+                attach_hints,
+            );
             false
         };
         if let Some(notice) = history_repair_notice
@@ -1285,24 +1417,6 @@ impl MvpAgent {
         self.announce_config_notices(&session_id, notice_scope).await;
         self.emit_background_tasks_snapshot_and_wait(&session_id)
             .await;
-        {
-            let init_meta = self
-                .initialize_request
-                .get()
-                .and_then(|init| init.meta.as_ref());
-            if let Some(handle) = self.resident_handle(&session_id) {
-                enqueue_replace_system_prompt_override(
-                    &handle.cmd_tx,
-                    request_meta.as_ref(),
-                    init_meta,
-                );
-            }
-        }
-        if let Some(hooks) = crate::extensions::hooks::reconnect_client_hooks(request_meta.as_ref())
-            && let Some(handle) = self.resident_handle(&session_id)
-        {
-            handle.set_client_hooks(hooks);
-        }
         #[allow(unused_variables)]
         let local_transcript_rendered = !no_replay
             && updates_file_path
@@ -1325,6 +1439,16 @@ impl MvpAgent {
             .await;
         self.restore_persisted_model(&session_id, &summary, initial_reasoning_effort)
             .await;
+        // After the persisted-model restore, not before: a restore that changes the model rewrites the system head to the new
+        // model's default prompt, which would silently discard the override the owner just loaded with. Commands reach the
+        // actor in order, so enqueued last the override is the head the next model request is built from.
+        {
+            let init_meta = self
+                .initialize_request
+                .get()
+                .and_then(|init| init.meta.as_ref());
+            self.apply_attach_prompt_and_hooks(&session_id, request_meta.as_ref(), init_meta, foreign_attach);
+        }
         let (model_state, response_meta) = self
             .build_attach_response_meta(&session_id, &summary, persist_data, code_restore_info)
             .await;

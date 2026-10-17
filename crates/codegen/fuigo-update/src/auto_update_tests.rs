@@ -1657,6 +1657,7 @@ impl InstallerEnvGuard {
         const VARS: &[&str] = &[
             "FUIGO_INSTALLER",
             "FUIGO_MANAGED_BY_NPM",
+            "FUIGO_NPM_LOCAL",
             "FUIGO_MANAGED_BY_INTERNAL",
             "npm_config_user_agent",
             "NPM_TOKEN",
@@ -1809,6 +1810,69 @@ fn test_env_installer_explicit_internal_wins_over_npm_managed() {
         std::env::set_var("FUIGO_MANAGED_BY_NPM", "1");
     }
     assert_eq!(env_installer(), Some("internal"));
+}
+
+/// P30: a project-local or npx copy (`FUIGO_NPM_LOCAL=1`) has no installer, even when an inherited
+/// `FUIGO_MANAGED_BY_NPM` or an npm user agent says otherwise, so no automatic path runs `npm i -g` for it.
+#[tokio::test]
+#[serial_test::serial]
+async fn p30_local_npm_copy_has_no_installer() {
+    let _g = InstallerEnvGuard::isolate();
+    unsafe {
+        std::env::set_var("FUIGO_NPM_LOCAL", "1");
+        std::env::set_var("FUIGO_MANAGED_BY_NPM", "1");
+        std::env::set_var("npm_config_user_agent", "npm/10.2.0 node/v20.11.0 linux x64");
+    }
+    assert!(is_npm_local_copy());
+    assert_eq!(get_installer().await, None);
+}
+
+/// P30: an explicit `FUIGO_INSTALLER` still decides; unset/`0`/empty `FUIGO_NPM_LOCAL` is a global install.
+#[tokio::test]
+#[serial_test::serial]
+async fn p30_explicit_installer_and_non_local_values_are_not_local() {
+    let _g = InstallerEnvGuard::isolate();
+    unsafe {
+        std::env::set_var("FUIGO_NPM_LOCAL", "1");
+        std::env::set_var("FUIGO_INSTALLER", "npm");
+    }
+    assert!(!is_npm_local_copy());
+    assert_eq!(get_installer().await, Some("npm"));
+    unsafe {
+        std::env::remove_var("FUIGO_INSTALLER");
+        std::env::set_var("FUIGO_NPM_LOCAL", "0");
+    }
+    assert!(!is_npm_local_copy());
+    unsafe { std::env::set_var("FUIGO_NPM_LOCAL", "") };
+    assert!(!is_npm_local_copy());
+}
+
+/// P30: `fuigo update` in a local copy says how to update it and installs nothing.
+#[tokio::test]
+#[serial_test::serial]
+async fn p30_update_in_a_local_copy_prints_the_local_hint_and_does_nothing() {
+    let _g = InstallerEnvGuard::isolate();
+    unsafe { std::env::set_var("FUIGO_NPM_LOCAL", "1") };
+    assert!(NPM_LOCAL_UPDATE_HINT.contains("npm i fuigo@latest") && NPM_LOCAL_UPDATE_HINT.contains("npx fuigo@latest"));
+    let mut uc = UpdateConfig {
+        proxy_base_url: String::new(),
+        auth_scope: String::new(),
+        deployment_key: None,
+        alpha_test_key: None,
+        channel: "stable".to_string(),
+        npm_registry: None,
+    };
+    let r = run_update(false, None, None, &mut uc, CliUpdateTrigger::UserCommand).await.unwrap();
+    assert_eq!(r, None);
+}
+
+/// P30: npm 11 prints `***` for UUID-looking path segments; such a root must not be used.
+#[test]
+fn p30_masked_or_empty_npm_root_is_not_usable() {
+    assert!(root_is_usable("/usr/local/lib/node_modules"));
+    assert!(root_is_usable(r"C:\Users\a\AppData\Roaming\npm\node_modules"));
+    assert!(!root_is_usable("/home/u/***/g/lib/node_modules"));
+    assert!(!root_is_usable(""));
 }
 
 // ──────────────────────────────────────────────────────────────────────

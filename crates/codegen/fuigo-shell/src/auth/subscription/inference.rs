@@ -301,6 +301,24 @@ pub(crate) fn from_models(
     Some(provider)
 }
 
+
+/// Only an unchanged model/recipient inherits a parent's subscription capability.
+pub(crate) fn inherit(
+    child: &mut fuigo_sampler::SamplerConfig,
+    parent: &fuigo_sampler::SamplerConfig,
+) {
+    if child.model == parent.model
+        && child.base_url == parent.base_url
+        && parent.subscription.is_some()
+    {
+        child.subscription = parent.subscription;
+        child.subscription_resolver = parent.subscription_resolver.clone();
+        child.api_key = None;
+        child.bearer_resolver = None;
+        child.attribution_callback = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,22 +441,5 @@ mod tests {
             )
             .is_err()
         );
-    }
-}
-
-/// Only an unchanged model/recipient inherits a parent's subscription capability.
-pub(crate) fn inherit(
-    child: &mut fuigo_sampler::SamplerConfig,
-    parent: &fuigo_sampler::SamplerConfig,
-) {
-    if child.model == parent.model
-        && child.base_url == parent.base_url
-        && parent.subscription.is_some()
-    {
-        child.subscription = parent.subscription;
-        child.subscription_resolver = parent.subscription_resolver.clone();
-        child.api_key = None;
-        child.bearer_resolver = None;
-        child.attribution_callback = None;
     }
 }

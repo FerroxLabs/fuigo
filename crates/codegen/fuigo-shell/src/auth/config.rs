@@ -233,17 +233,18 @@ static TEST_ISSUER_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::
 #[cfg(test)]
 pub(crate) fn test_config_with_oauth2() -> FuigoComConfig {
     set_test_oauth2_issuer(GROK_OAUTH2_ISSUER);
-    let mut cfg = FuigoComConfig::default();
-    cfg.oauth2 = Some(OAuth2ProviderConfig {
-        issuer: GROK_OAUTH2_ISSUER.to_owned(),
-        client_id: "test-client-id".to_owned(),
-        scopes: default_oauth2_scopes(),
-        principal_type: None,
-        principal_id: None,
-        referrer: None,
-    });
-    cfg.oidc = None;
-    cfg
+    FuigoComConfig {
+        oauth2: Some(OAuth2ProviderConfig {
+            issuer: GROK_OAUTH2_ISSUER.to_owned(),
+            client_id: "test-client-id".to_owned(),
+            scopes: default_oauth2_scopes(),
+            principal_type: None,
+            principal_id: None,
+            referrer: None,
+        }),
+        oidc: None,
+        ..FuigoComConfig::default()
+    }
 }
 
 /// Install the configured issuer for tests. Idempotent; first write wins.

@@ -176,6 +176,23 @@ pub struct ClientId(pub u64);
 /// Set by the leader (never by a client) on a `session/load`/`session/resume` `_meta` when another still-connected client drives that session.
 pub const LEADER_FOREIGN_DRIVER_KEY: &str = "fuigo/leaderForeignDriverLive";
 pub const LEADER_CONNECTION_ID_KEY: &str = "fuigo/leaderConnectionId";
+/// `_meta` key carrying the reconnect token: leader to client in a `session/new` / owning-load response, and back from the
+/// client in the `session/load` it sends after reconnecting to the leader. Never logged; the leader strips it from every
+/// request before the agent sees it.
+pub const LEADER_RECONNECT_TOKEN_KEY: &str = "fuigo/leaderReconnectToken";
+/// Leader to client notification handing a queued claimant that was just promoted to owner its reconnect token, outside
+/// any load response: `params` = `{ "sessionId": .., "_meta": { LEADER_RECONNECT_TOKEN_KEY: .. } }`. The client keeps the
+/// token (like the one in a load response) and presents it on its reload after a disconnect; apps never see it.
+pub const LEADER_OWNER_TOKEN_METHOD: &str = "_fuigo/leader/owner_token";
+/// The leader's ownership verdict for the requester of an owner-gated request: `"self"` (it owns the session), `"other"`
+/// (somebody else does, or a departed owner's grace window is open) or `"none"` (nobody does). Typed session requests carry
+/// it in `_meta`, extension requests and notifications in `params`. Only the leader writes it: every client-supplied value
+/// is stripped first, and the agent trusts nothing else in leader mode.
+pub const LEADER_OWNER_STATE_KEY: &str = "fuigo/leaderOwnerState";
+/// On `fuigo/yolo_mode_changed`: the ids of the sessions the sender owns (the only ones the change may touch).
+pub const LEADER_OWNED_SESSIONS_KEY: &str = "fuigo/leaderOwnedSessions";
+/// On `fuigo/permissions/reset`: the ids of the sessions somebody other than the sender owns (the reset skips them).
+pub const LEADER_FOREIGN_SESSIONS_KEY: &str = "fuigo/leaderForeignSessions";
 
 impl ClientId {
     /// Generate a new unique client ID from an atomic counter that wraps at u64::MAX.

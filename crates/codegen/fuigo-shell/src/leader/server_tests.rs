@@ -3683,6 +3683,25 @@ async fn load_session(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_i
         .unwrap();
 }
 
+/// As [`load_session`], presenting the reconnect token the leader issued to this session's owner (a reconnecting pager does).
+async fn load_session_with_token(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_id: &str, token: &str) {
+    let msg = format!(
+        r#"{{"jsonrpc":"2.0","method":"session/load","id":1,"params":{{"sessionId":"{session_id}","_meta":{{"fuigo/leaderReconnectToken":"{token}"}}}}}}"#
+    );
+    write_message(writer, &ClientMessage::Acp { payload: msg })
+        .await
+        .unwrap();
+}
+
+/// The reconnect token in a load/new response the leader sent to the session's owner.
+fn reconnect_token_in(payload: &str) -> String {
+    let json: serde_json::Value = serde_json::from_str(payload).unwrap();
+    json["result"]["_meta"]["fuigo/leaderReconnectToken"]
+        .as_str()
+        .expect("the owner's response carries a reconnect token")
+        .to_string()
+}
+
 /// Regression for the race where live traffic beats replay.
 /// A live `session/notification` arriving WHILE a viewer's `session/load` is in flight must be BUFFERED, then flushed in order AFTER the response.
 /// Delivering it early would raise the client's highest-seen eventId, so the lower-eventId replay that follows would be deduped away.
@@ -3965,7 +3984,8 @@ async fn reattached_client_backfilled_into_child_routes() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-sub").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_a).await;
+    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-sub","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub"}}}"#;
@@ -3982,10 +4002,11 @@ async fn reattached_client_backfilled_into_child_routes() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // A2 reconnects and reloads the parent
+    // A2 reconnects and reloads the parent, presenting A's reconnect token (the departed owner is not replaced by a tokenless
+    // loader: it would be foreign for the grace window, even when A was the only subscriber)
     // No replayed spawn line is sent, so receiving child updates proves the response-time BACKFILL (not replay registration)
     let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
-    load_session(&mut writer_a2, "sess-sub").await;
+    load_session_with_token(&mut writer_a2, "sess-sub", &a_token).await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a2).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4681,9 +4702,11 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     cancel.cancel();
 }
 
-/// When the driver disconnects but another subscriber remains, the session is NOT evicted and the driver role transfers to the remaining client.
+/// When the driver disconnects but another subscriber remains, the session is NOT evicted, and the driver role is NOT handed to the
+/// remaining subscriber (P30: any local program could be that subscriber). Driver-only messages are dropped until the driver's
+/// reconnect token reclaims the role within the grace window, or the window ends and the first loader owns.
 #[tokio::test]
-async fn driver_disconnect_transfers_not_evicts() {
+async fn driver_disconnect_does_not_hand_off_and_does_not_evict() {
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("test.sock");
     let (acp_tx, mut acp_rx) = mpsc::unbounded_channel();
@@ -4736,16 +4759,14 @@ async fn driver_disconnect_transfers_not_evicts() {
         "session must NOT be evicted while another subscriber remains"
     );
 
-    // A NON-interaction reverse-request now reaches B (driver transferred).
+    // A NON-interaction reverse-request is driver-only and the session now has no driver: it is dropped, NOT routed to B.
     // (A non-interaction method exercises the driver-only path; interaction reverse-requests broadcast instead, see the shared-interaction tests.)
     let req = r#"{"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"sessionId":"sess-xfer","path":"/tmp/x"}}"#;
     response_tx.send(req.to_string()).unwrap();
     let req_b = next_acp_payload(&mut reader_b).await;
     assert!(
-        req_b
-            .as_deref()
-            .is_some_and(|p| p.contains("read_text_file")),
-        "after driver disconnect, B should become driver and receive the reverse-request, got {req_b:?}"
+        req_b.is_none(),
+        "after the driver disconnects, B must NOT inherit the driver role, got {req_b:?}"
     );
 
     cancel.cancel();

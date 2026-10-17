@@ -1064,6 +1064,7 @@ impl acp::Agent for MvpAgent {
         &self,
         args: acp::CloseSessionRequest,
     ) -> Result<acp::CloseSessionResponse, acp::Error> {
+        self.ensure_owner_or_unowned(args.meta.as_ref(), "session/close")?;
         self.close_session_inner(args).await
     }
     #[tracing::instrument(
@@ -2355,6 +2356,7 @@ impl acp::Agent for MvpAgent {
     ) -> Result<acp::SetSessionModeResponse, acp::Error> {
         tracing::info!("Received set session mode request {args:?}");
         let handle = self.session_handle_waiting_for_load(&args.session_id).await;
+        self.ensure_session_owner(args.meta.as_ref(), "set_mode")?;
         let (tx, rx) = oneshot::channel();
         if let Some(handle) = handle {
             let _ = handle
@@ -2372,9 +2374,15 @@ impl acp::Agent for MvpAgent {
         Ok(acp::SetSessionModeResponse::new())
     }
     async fn set_session_model(&self, args: acp::SetSessionModelRequest) -> Result<acp::SetSessionModelResponse, acp::Error> {
+        self.wait_for_in_flight_session_load(&args.session_id).await;
+        self.wait_for_own_session_loads(&args.session_id, super::session_setup::leader_connection_id(args.meta.as_ref())).await;
+        self.ensure_session_owner(args.meta.as_ref(), "set_model")?;
         self.set_model_gated(args).await
     }
     async fn set_session_config_option(&self, args: acp::SetSessionConfigOptionRequest) -> Result<acp::SetSessionConfigOptionResponse, acp::Error> {
+        self.wait_for_in_flight_session_load(&args.session_id).await;
+        self.wait_for_own_session_loads(&args.session_id, super::session_setup::leader_connection_id(args.meta.as_ref())).await;
+        self.ensure_session_owner(args.meta.as_ref(), "set_config_option")?;
         crate::agent::handlers::config_option::apply(self, args).await
     }
     #[tracing::instrument(
@@ -2393,6 +2401,18 @@ impl acp::Agent for MvpAgent {
             fuigo_file_utils::trace_context::link_current_span_to_meta(meta);
         }
         tracing::info!("Received extension method call: method={}", args.method);
+        // Session admin (rename, delete, MCP servers, close, park): the session's owner, or anyone when it has no live owner.
+        if matches!(
+            args.method.as_ref(),
+            "fuigo/session/rename"
+                | "fuigo/session/delete"
+                | "fuigo/session/update_mcp_servers"
+                | "fuigo/session/close"
+                | "fuigo/session/park"
+                | "fuigo/session/unpark"
+        ) {
+            self.ensure_owner_ext(args.params.get(), true, args.method.as_ref())?;
+        }
         #[allow(unused_mut)]
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
@@ -2780,16 +2800,17 @@ impl acp::Agent for MvpAgent {
             >(args.params.get())
         {
             let sender_id = params.get("clientIdentifier").and_then(|v| v.as_str());
-            let stamped_conn = params
-                .get(crate::leader::protocol::LEADER_CONNECTION_ID_KEY)
-                .and_then(|v| v.as_u64());
-            // Leader mode is fail-closed: only the connection id the leader stamped selects sessions, and a
-            // notification without one changes none. Direct mode keeps the product-string match.
+            // Leader mode is fail-closed: only the sessions the leader stamped as owned by the sender are selected, and a
+            // notification without that list changes none. Direct mode keeps the product-string match.
+            let owned_sessions: Option<std::collections::HashSet<String>> = params
+                .get(crate::leader::protocol::LEADER_OWNED_SESSIONS_KEY)
+                .and_then(|v| v.as_array())
+                .map(|ids| ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect());
             let scope = if self.leader_mode {
-                if stamped_conn.is_none() {
-                    tracing::warn!("yolo_mode_changed without a leader connection stamp; ignoring");
+                if owned_sessions.is_none() {
+                    tracing::warn!("yolo_mode_changed without a leader ownership stamp; ignoring");
                 }
-                crate::upload::turn::SenderScope::Connection(stamped_conn)
+                crate::upload::turn::SenderScope::Owned(owned_sessions.as_ref())
             } else {
                 crate::upload::turn::SenderScope::Product(sender_id)
             };
@@ -2804,7 +2825,7 @@ impl acp::Agent for MvpAgent {
                     .for_each_resident_mut(|sid, handle| {
                         updated_sessions
                             += apply_yolo_mode_to_matching_sessions(
-                                std::iter::once((self.session_owner(sid), handle)),
+                                std::iter::once((sid.0.as_ref(), handle)),
                                 scope,
                                 yolo_mode,
                             );
@@ -2826,14 +2847,14 @@ impl acp::Agent for MvpAgent {
             let enable_auto = want_auto && yolo_signal != Some(true);
             if enable_auto || clear_auto {
                 let enabled = enable_auto;
-                let matches_sender = |owner: Option<u64>, h: &crate::session::SessionHandle| -> bool {
-                    scope.matches(owner, h)
+                let matches_sender = |sid: &str, h: &crate::session::SessionHandle| -> bool {
+                    scope.matches(sid, h)
                 };
                 let total_sessions = self.resident_count();
                 let mut updated = 0;
                 self.session_registry
                     .for_each_resident_mut(|sid, h| {
-                        if !matches_sender(self.session_owner(sid), h) {
+                        if !matches_sender(sid.0.as_ref(), h) {
                             return;
                         }
                         if h
@@ -2859,17 +2880,37 @@ impl acp::Agent for MvpAgent {
             }
         }
         if args.method.as_ref() == "fuigo/permissions/reset" {
-            let mut updated = 0;
-            self.session_registry
-                .for_each_resident(|_, h| {
-                    if h
-                        .cmd_tx
-                        .send(crate::session::SessionCommand::ResetPermissionState)
-                        .is_ok()
-                    {
-                        updated += 1;
-                    }
+            // Leader mode: the reset skips the sessions the leader stamped as owned by somebody else; the sender's own
+            // sessions and the ones nobody owns are reset. Without the stamp (fail closed) nothing is.
+            let skip: Option<std::collections::HashSet<String>> = if self.leader_mode {
+                let stamped = serde_json::from_str::<serde_json::Value>(args.params.get()).ok().and_then(|v| {
+                    v.get(crate::leader::protocol::LEADER_FOREIGN_SESSIONS_KEY).and_then(|l| l.as_array()).map(|ids| {
+                        ids.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect::<std::collections::HashSet<_>>()
+                    })
                 });
+                if stamped.is_none() {
+                    tracing::warn!("permissions/reset without a leader ownership stamp; ignoring");
+                }
+                stamped
+            } else {
+                Some(std::collections::HashSet::new())
+            };
+            let mut updated = 0;
+            if let Some(skip) = skip {
+                self.session_registry
+                    .for_each_resident(|sid, h| {
+                        if skip.contains(sid.0.as_ref()) {
+                            return;
+                        }
+                        if h
+                            .cmd_tx
+                            .send(crate::session::SessionCommand::ResetPermissionState)
+                            .is_ok()
+                        {
+                            updated += 1;
+                        }
+                    });
+            }
             tracing::info!(
                 target_sessions = updated,
                 total_sessions = self.resident_count(),
@@ -2904,7 +2945,13 @@ impl acp::Agent for MvpAgent {
                 .get("sessionId")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let handle = self.resident_handle(&acp::SessionId::new(session_id_str));
+            // Plan mode is a session mode: only the owner may switch it (a notification has no reply, so a refusal is logged).
+            let permitted = self.ensure_owner_ext(args.params.get(), false, "toggle_plan_mode").is_ok();
+            let handle = if permitted {
+                self.resident_handle(&acp::SessionId::new(session_id_str))
+            } else {
+                None
+            };
             if let Some(handle) = handle {
                 let is_engaged = handle.plan_mode.lock().state()
                     != crate::session::plan_mode::PlanModeState::Inactive;
@@ -2925,7 +2972,7 @@ impl acp::Agent for MvpAgent {
                         "toggle_plan_mode: session mode update failed"
                     );
                 }
-            } else {
+            } else if permitted {
                 tracing::warn!(
                     session_id = %session_id_str,
                     "toggle_plan_mode: session not found"

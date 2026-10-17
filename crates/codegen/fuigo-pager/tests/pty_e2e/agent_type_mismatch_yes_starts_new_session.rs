@@ -29,7 +29,7 @@ async fn agent_type_mismatch_yes_starts_new_session() {
         .expect("response rendered");
 
     harness
-        .inject_keys(b"/model cursor-model\r")
+        .inject_keys(b"/model codex-model\r")
         .expect("type model switch");
 
     harness

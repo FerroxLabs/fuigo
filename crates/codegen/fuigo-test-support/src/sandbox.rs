@@ -181,6 +181,95 @@ impl TestSandbox {
     }
 }
 
+/// A sandbox owns a private `FUIGO_HOME`, so any leader recorded in a `*.lock` file beneath it was started by (and only
+/// serves) this sandbox's test. A pager TUI auto-spawns that leader detached, in its own process group, and
+/// `--no-exit-on-disconnect` keeps it alive after the pager is gone, so the PTY child's process-tree cleanup never reaches
+/// it. Stop it here, when the sandbox is dropped (including unwinding from a failed assertion).
+impl Drop for TestSandbox {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        stop_sandbox_leaders(&self.fuigo_home);
+    }
+}
+
+/// Kill (and wait out) every `agent leader` that belongs to `fuigo_home`: the pid in a `*.lock` file directly beneath it
+/// and, on Linux, any leader whose own environment carries this `FUIGO_HOME` (covers a leader that has not yet written
+/// its lock file).
+#[cfg(unix)]
+fn stop_sandbox_leaders(fuigo_home: &Path) {
+    let mut pids: Vec<libc::pid_t> = Vec::new();
+    for entry in std::fs::read_dir(fuigo_home)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("lock") {
+            continue;
+        }
+        if let Some(pid) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| content.trim().parse::<libc::pid_t>().ok())
+        {
+            pids.push(pid);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let want = format!("FUIGO_HOME={}", fuigo_home.display());
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<libc::pid_t>().ok())
+            else {
+                continue;
+            };
+            let carries_home = std::fs::read(entry.path().join("environ"))
+                .is_ok_and(|environ| environ.split(|b| *b == 0).any(|var| var == want.as_bytes()));
+            if carries_home {
+                pids.push(pid);
+            }
+        }
+    }
+    pids.sort_unstable();
+    pids.dedup();
+    for pid in pids {
+        // A pid read from a file or a scan is only signalled while it is still an `agent leader` (guards against reuse).
+        if pid <= 1 || !is_agent_leader(pid) {
+            continue;
+        }
+        // SAFETY: plain signal syscalls on a pid just verified to be a leader of this sandbox.
+        unsafe {
+            if libc::getpgid(pid) == pid {
+                libc::killpg(pid, libc::SIGKILL);
+            }
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && is_agent_leader(pid) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// Whether `pid` is a live (non-zombie) process whose command line is `... agent leader ...`.
+#[cfg(unix)]
+fn is_agent_leader(pid: libc::pid_t) -> bool {
+    let Ok(output) = Command::new("ps")
+        .args(["-o", "stat=,args=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    let Some((stat, args)) = text.split_once(char::is_whitespace) else {
+        return false;
+    };
+    !stat.starts_with('Z') && args.contains(" agent leader")
+}
+
 impl Default for TestSandbox {
     fn default() -> Self {
         Self::new()
@@ -527,6 +616,49 @@ fn sanitize_endpoint(value: &OsStr) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Dropping a sandbox stops a detached leader recorded in its `FUIGO_HOME` lock file, and leaves other processes alone.
+    #[cfg(unix)]
+    #[test]
+    fn drop_stops_detached_leader_recorded_in_lock_file() {
+        use std::os::unix::process::CommandExt;
+
+        let spawn = |args: &[&str]| {
+            let mut cmd = Command::new("sh");
+            cmd.args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            cmd.process_group(0);
+            #[allow(clippy::disallowed_methods)] // reaped below
+            cmd.spawn().expect("spawn fixture")
+        };
+        let sandbox = TestSandbox::new();
+        let mut leader = spawn(&["-c", "sleep 60; true", "sh", "agent", "leader"]);
+        let mut bystander = spawn(&["-c", "sleep 60; true", "sh", "unrelated"]);
+        std::fs::write(
+            sandbox.fuigo_home().join("leader.lock"),
+            leader.id().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            sandbox.fuigo_home().join("other.lock"),
+            bystander.id().to_string(),
+        )
+        .unwrap();
+        drop(sandbox);
+        let status = leader.wait().expect("leader reaped");
+        assert!(
+            !status.success(),
+            "leader must have been killed: {status:?}"
+        );
+        assert!(
+            bystander.try_wait().unwrap().is_none(),
+            "non-leader must survive"
+        );
+        bystander.kill().unwrap();
+        bystander.wait().unwrap();
+    }
+
     use super::*;
 
     fn env_value(sandbox: &TestSandbox, key: &str) -> Option<OsString> {

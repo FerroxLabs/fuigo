@@ -50,6 +50,7 @@ pub mod process;
 pub mod reexec;
 pub mod resources;
 pub mod sandbox;
+pub mod session_front;
 pub mod scripted;
 pub mod sse;
 #[cfg(unix)]
@@ -78,3 +79,4 @@ pub use process::{
 };
 pub use resources::{ResourceGrowth, ResourceSnapshot, RssMeasurement, RssOutcome, RssSampler};
 pub use sandbox::{TestSandbox, TestSandboxBuilder};
+pub use session_front::SessionFront;

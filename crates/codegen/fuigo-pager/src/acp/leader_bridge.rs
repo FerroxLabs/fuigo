@@ -180,6 +180,112 @@ impl InflightRequests {
     }
 }
 
+/// The leader's reconnect tokens, kept in memory only (never written to disk or logged; stripped from every line before the
+/// app sees it). The leader issues one to the client that drives a session, in the `_meta` of the `session/new` or
+/// owning-`session/load` response. After a leader reconnect the pager's reload of that session presents it, so the
+/// departed driver (and not whichever local program loads first) takes the driver role back within the leader's grace window.
+/// A token is presented on every load of its session: outside a grace window the leader ignores it and strips it.
+#[derive(Default)]
+struct ReconnectTokens {
+    by_session: std::collections::HashMap<String, String>,
+    /// Canonical ids of in-flight `session/new` requests.
+    new_reqs: std::collections::HashSet<String>,
+    /// In-flight `session/load` / `session/resume` requests: canonical id to session id.
+    load_reqs: std::collections::HashMap<String, String>,
+}
+
+impl ReconnectTokens {
+    /// Pager to leader. Returns the line to send instead when it needed the token added.
+    fn on_outbound(&mut self, line: &str) -> Option<String> {
+        if !(line.contains("session/load") || line.contains("session/resume") || line.contains("session/new")) {
+            return None;
+        }
+        let mut json = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        let id = json.get("id").filter(|id| !id.is_null())?.to_string();
+        match json.get("method")?.as_str()? {
+            "session/new" => {
+                self.new_reqs.insert(id);
+                None
+            }
+            "session/load" | "session/resume" => {
+                let session_id = json.get("params")?.get("sessionId")?.as_str()?.to_owned();
+                self.load_reqs.insert(id, session_id.clone());
+                let token = self.by_session.get(&session_id)?.clone();
+                let params = json.get_mut("params")?.as_object_mut()?;
+                let meta = params.entry("_meta").or_insert_with(|| serde_json::json!({}));
+                meta.as_object_mut()?.insert(
+                    fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY.to_string(),
+                    serde_json::json!(token),
+                );
+                Some(json.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// Leader to pager. Takes a token out of a response (remembering it for its session) and returns the line without it.
+    fn on_inbound(&mut self, line: &str) -> Option<String> {
+        let key = fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY;
+        let has_token = line.contains(key);
+        if !has_token && self.new_reqs.is_empty() && self.load_reqs.is_empty() {
+            return None;
+        }
+        let mut json = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        if json.get("method").is_some() {
+            return None;
+        }
+        let id = json.get("id").filter(|id| !id.is_null())?.to_string();
+        let session_id = if self.new_reqs.remove(&id) {
+            json.get("result")?.get("sessionId").and_then(|v| v.as_str()).map(str::to_owned)
+        } else {
+            self.load_reqs.remove(&id)
+        };
+        if !has_token {
+            return None;
+        }
+        let meta = json.get_mut("result")?.get_mut("_meta")?.as_object_mut()?;
+        let token = meta.remove(key)?;
+        let meta_empty = meta.is_empty();
+        if meta_empty {
+            json.get_mut("result")?.as_object_mut()?.remove("_meta");
+        }
+        if let (Some(session_id), Some(token)) = (session_id, token.as_str()) {
+            self.by_session.insert(session_id, token.to_owned());
+        }
+        Some(json.to_string())
+    }
+
+    /// Leader to pager. A token handed over outside any response (a queued window promoted to owner): remembers it for its
+    /// session. True when the line was such a notice, which the app must not see.
+    fn on_owner_token(&mut self, line: &str) -> bool {
+        if !line.contains(fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD) {
+            return false;
+        }
+        let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else { return false };
+        if json.get("id").is_some()
+            || json.get("method").and_then(|m| m.as_str()) != Some(fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD)
+        {
+            return false;
+        }
+        let params = json.get("params");
+        let session_id = params.and_then(|p| p.get("sessionId")).and_then(|v| v.as_str());
+        let token = params
+            .and_then(|p| p.get("_meta"))
+            .and_then(|m| m.get(fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY))
+            .and_then(|v| v.as_str());
+        if let (Some(session_id), Some(token)) = (session_id, token) {
+            self.by_session.insert(session_id.to_owned(), token.to_owned());
+        }
+        true
+    }
+
+    /// The connection was replaced: its in-flight requests will never be answered.
+    fn connection_replaced(&mut self) {
+        self.new_reqs.clear();
+        self.load_reqs.clear();
+    }
+}
+
 /// Version-mismatch notice as leaders before the `_`-prefix fix sent it.
 const LEGACY_VERSION_MISMATCH_METHOD: &str = "fuigo/leader/version_mismatch";
 const VERSION_MISMATCH_METHOD: &str = "_fuigo/leader/version_mismatch";
@@ -249,6 +355,8 @@ pub(crate) fn bridge_channels(
                 let (inject_tx, mut inject_rx) = mpsc::unbounded_channel::<String>();
                 let inflight = std::rc::Rc::new(InflightRequests::default());
                 let inflight_r = inflight.clone();
+                let tokens = std::rc::Rc::new(std::cell::RefCell::new(ReconnectTokens::default()));
+                let tokens_r = tokens.clone();
 
                 // Reader: forwards leader IPC lines into the incoming simplex pipe read by ClientSideConnection
                 let cancel_r = bridge_cancel.clone();
@@ -272,6 +380,10 @@ pub(crate) fn bridge_channels(
                                 match msg {
                                     Some(json_line) => {
                                         inflight_r.note_leader_line(&json_line);
+                                        if tokens_r.borrow_mut().on_owner_token(&json_line) {
+                                            continue;
+                                        }
+                                        let json_line = tokens_r.borrow_mut().on_inbound(&json_line).unwrap_or(json_line);
                                         let json_line = normalize_legacy_leader_line(json_line);
                                         if incoming_write.write_all(json_line.as_bytes()).await.is_err()
                                             || incoming_write.write_all(b"\n").await.is_err()
@@ -302,6 +414,7 @@ pub(crate) fn bridge_channels(
                                                 Ok((new_tx, new_rx, _disconnect_rx)) => {
                                                     tracing::info!("Reconnected to leader IPC");
                                                     leader_rx = new_rx;
+                                                    tokens_r.borrow_mut().connection_replaced();
                                                     // Swap and drain under one lock: a request recorded before this
                                                     // point went to the old connection (P152).
                                                     let owed = {
@@ -352,10 +465,11 @@ pub(crate) fn bridge_channels(
                                         if pending.is_empty() {
                                             continue;
                                         }
+                                        let outbound = tokens.borrow_mut().on_outbound(pending).unwrap_or_else(|| pending.to_string());
                                         match forward_outbound_line_tracked(
                                             &leader_tx_for_writer,
                                             &cancel_w,
-                                            pending.to_string(),
+                                            outbound,
                                             Some(&*inflight),
                                         )
                                         .await
@@ -534,6 +648,53 @@ pub(crate) mod real_leader_harness {
 mod tests {
     use super::*;
     use fuigo_acp_lib::acp_send;
+
+    #[test]
+    fn a_token_handed_over_outside_a_response_is_kept_for_its_session_and_hidden_from_the_app() {
+        let key = fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY;
+        let method = fuigo_shell::leader::protocol::LEADER_OWNER_TOKEN_METHOD;
+        let mut t = ReconnectTokens::default();
+        let notice = serde_json::json!({ "jsonrpc": "2.0", "method": method, "params": { "sessionId": "s1", "_meta": { key: "tok-promoted" } } }).to_string();
+        assert!(t.on_owner_token(&notice), "consumed, not shown to the app");
+        let load = r#"{"jsonrpc":"2.0","id":9,"method":"session/load","params":{"sessionId":"s1","cwd":"/","mcpServers":[]}}"#;
+        let sent: serde_json::Value = serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
+        assert_eq!(sent["params"]["_meta"][key], "tok-promoted");
+        assert!(!t.on_owner_token(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#));
+    }
+
+    #[test]
+    fn reconnect_tokens_are_kept_in_memory_presented_on_reload_and_hidden_from_the_app() {
+        let key = fuigo_shell::leader::protocol::LEADER_RECONNECT_TOKEN_KEY;
+        let mut t = ReconnectTokens::default();
+        // session/new: the response's token is stored for the new session and stripped from the line the app sees.
+        assert!(t.on_outbound(r#"{"jsonrpc":"2.0","id":1,"method":"session/new","params":{"cwd":"/tmp"}}"#).is_none());
+        let resp = format!(r#"{{"jsonrpc":"2.0","id":1,"result":{{"sessionId":"s1","_meta":{{"{key}":"tok-a","keep":1}}}}}}"#);
+        let shown: serde_json::Value = serde_json::from_str(&t.on_inbound(&resp).expect("token stripped")).unwrap();
+        assert_eq!(shown["result"]["sessionId"], "s1");
+        assert_eq!(shown["result"]["_meta"]["keep"], 1);
+        assert!(shown["result"]["_meta"].get(key).is_none(), "the app never sees the token");
+        // A reload of that session (after a leader reconnect) presents it; another session's does not.
+        let load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","mcpServers":[]}}"#;
+        let sent: serde_json::Value = serde_json::from_str(&t.on_outbound(load).expect("token added")).unwrap();
+        assert_eq!(sent["params"]["_meta"][key], "tok-a");
+        let other = r#"{"jsonrpc":"2.0","id":3,"method":"session/load","params":{"sessionId":"s2","cwd":"/tmp","mcpServers":[]}}"#;
+        assert!(t.on_outbound(other).is_none(), "no token for a session this pager never drove");
+        // The reload's response carries a rotated token; it replaces the old one and is stripped.
+        let resp = format!(r#"{{"jsonrpc":"2.0","id":2,"result":{{"_meta":{{"{key}":"tok-b"}}}}}}"#);
+        let shown: serde_json::Value = serde_json::from_str(&t.on_inbound(&resp).unwrap()).unwrap();
+        assert!(shown["result"].get("_meta").is_none(), "an emptied _meta is dropped");
+        let sent: serde_json::Value = serde_json::from_str(
+            &t.on_outbound(r#"{"jsonrpc":"2.0","id":4,"method":"session/load","params":{"sessionId":"s1"}}"#).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sent["params"]["_meta"][key], "tok-b");
+        // A foreign load (no token in the response) leaves it alone; unrelated lines pass untouched.
+        assert!(t.on_inbound(r#"{"jsonrpc":"2.0","id":3,"result":{}}"#).is_none());
+        assert!(t.on_inbound(r#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#).is_none());
+        assert!(t.on_outbound(r#"{"jsonrpc":"2.0","id":9,"method":"session/prompt","params":{"sessionId":"s1"}}"#).is_none());
+        t.connection_replaced();
+        assert!(t.new_reqs.is_empty() && t.load_reqs.is_empty());
+    }
 
     const OLD_LEADER_LINE: &str = r#"{"jsonrpc":"2.0","method":"fuigo/leader/version_mismatch","params":{"clientVersion":"0.1.157","leaderVersion":"0.1.150"}}"#;
 

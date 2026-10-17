@@ -2883,6 +2883,7 @@ mod tests {
     /// (the workspace routes real traffic through `fuigo_extra_ca::dispatch`), and these probes
     /// never dispatch — they build a request and read its headers.
     fn probe_builder(url: &str) -> reqwest::RequestBuilder {
+        #[allow(clippy::disallowed_methods)] // never dispatched: the probes only read the built headers
         reqwest::Client::new().post(url)
     }
 
