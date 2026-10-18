@@ -979,21 +979,95 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Spawn a fake ACP agent that counts `fuigo/yolo_mode_changed` notifications.
 /// Exits when the channel closes.
 fn spawn_fake_acp_agent(
+    rx: tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpAgentMessage>,
+) -> Arc<AtomicUsize> {
+    spawn_fake_acp_agent_as(rx, true)
+}
+/// As [`spawn_fake_acp_agent`]; `owner == false` refuses `fuigo/session/owner_check` the way the shared leader refuses a
+/// window that does not own the session.
+fn spawn_fake_acp_agent_as(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<fuigo_acp_lib::AcpAgentMessage>,
+    owner: bool,
 ) -> Arc<AtomicUsize> {
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            if let fuigo_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
-                if args.request.method.as_ref() == "fuigo/yolo_mode_changed" {
-                    counter_clone.fetch_add(1, Ordering::SeqCst);
+            match msg {
+                fuigo_acp_lib::AcpAgentMessage::ExtNotification(args) => {
+                    if args.request.method.as_ref() == "fuigo/yolo_mode_changed" {
+                        counter_clone.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let _ = args.response_tx.send(Ok(()));
                 }
-                let _ = args.response_tx.send(Ok(()));
+                fuigo_acp_lib::AcpAgentMessage::ExtMethod(args)
+                    if args.request.method.as_ref() == "fuigo/session/owner_check" =>
+                {
+                    let answer = if owner {
+                        let raw = serde_json::value::RawValue::from_string("{}".into()).expect("raw {}");
+                        Ok(acp::ExtResponse::new(Arc::from(raw)))
+                    } else {
+                        Err(fuigo_shell::acp_error::invalid_request(
+                            "this session is driven by another client; only the driving client can change it",
+                        ))
+                    };
+                    let _ = args.response_tx.send(answer);
+                }
+                _ => {}
             }
         }
     });
     counter
+}
+/// 1.0.30 (Windows check, shared leader): Shift+Tab in a window that does not own the session is refused by the leader.
+/// The refused mode must not become the user's default (`ui.permission_mode`), which every new window starts from, and the
+/// agent gets no change notification. Before, the default was written first and the refusal went unnoticed.
+#[tokio::test]
+async fn persist_permission_mode_refused_by_the_leader_is_not_saved() {
+    if fuigo_test_support::env::rerun_in_own_process() {
+        return;
+    }
+    let home = setup_fuigo_home_in_tempdir();
+    let saved = || std::fs::read_to_string(home.path().join("config.toml")).unwrap_or_default();
+    for persist in [PermissionModePersist::BestEffort, PermissionModePersist::WithRollback("ask")] {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let counter = spawn_fake_acp_agent_as(rx, false);
+        let result = persist_permission_mode_and_notify(
+                "always-approve",
+                Some(acp::SessionId::new("theirs")),
+                persist,
+                tx,
+            )
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "{persist:?}: no change notification for a refused change");
+        assert!(!saved().contains("always-approve"), "{persist:?}: the refused mode was saved: {}", saved());
+        match (persist, result) {
+            (
+                PermissionModePersist::BestEffort,
+                TaskResult::SettingPersistFailedBestEffort { key: "permission_mode", error },
+            )
+            | (
+                PermissionModePersist::WithRollback(_),
+                TaskResult::PermissionModeRefused { rollback: "ask", error, .. },
+            ) => assert!(error.contains("driven by another client"), "the refusal is reported: {error}"),
+            (persist, result) => panic!("{persist:?}: expected the refusal, got {result:?}"),
+        }
+    }
+    // The owner's change is saved and announced as before.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let counter = spawn_fake_acp_agent_as(rx, true);
+    let result = persist_permission_mode_and_notify(
+            "always-approve",
+            Some(acp::SessionId::new("mine")),
+            PermissionModePersist::BestEffort,
+            tx,
+        )
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(matches!(result, TaskResult::SettingPersisted { key: "permission_mode", .. }), "{result:?}");
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    assert!(saved().contains("always-approve"), "the owner's mode is the new default: {}", saved());
 }
 /// Redirect `FUIGO_HOME` to a tempdir for test isolation.
 fn setup_fuigo_home_in_tempdir() -> tempfile::TempDir {
@@ -2972,4 +3046,12 @@ fn session_info_fields_show_the_sandbox_warning_only_when_given() {
     let off = fuigo_sandbox::unavailable_warning_for("off", true);
     let none = session_info_fields_with_sandbox_warning(&info, None, false, off.as_deref());
     assert!(none.iter().all(|f| f.label != "Sandbox warning"));
+}
+/// 1.0.30 P30-DIRECT: a `/resume` pick of a session that is open in another window shows the agent's refusal whole in the
+/// new tab ("Couldn't load session: ..."); the current session is left as it was.
+#[test]
+fn session_open_elsewhere_refusal_reaches_the_user_whole() {
+    let message = fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
+    let err = fuigo_shell::session::session_writer_lock::held_elsewhere_error();
+    assert_eq!(super::helpers::acp_error_user_text(&err), message);
 }

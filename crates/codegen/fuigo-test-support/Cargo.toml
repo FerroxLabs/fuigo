@@ -24,6 +24,10 @@ tokio-util = { workspace = true, features = ["compat"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 url = { workspace = true }
+# Trusted-HTTPS front for session-auth tests (`session_front`): a throwaway CA and a TLS acceptor.
+rcgen = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
 fuigo-acp-lib = { workspace = true }
 fuigo-tty-utils = { workspace = true }
 

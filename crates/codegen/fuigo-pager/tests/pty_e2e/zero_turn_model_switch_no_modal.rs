@@ -19,7 +19,7 @@ async fn zero_turn_model_switch_no_modal() {
 
     // Switch models BEFORE sending any prompt.
     harness
-        .inject_keys(b"/model cursor-model\r")
+        .inject_keys(b"/model codex-model\r")
         .expect("type model switch");
 
     // When the switch lands before the session exists, deferred_model_switch applies it silently on SessionCreated and no "Switched to" line prints
@@ -27,7 +27,7 @@ async fn zero_turn_model_switch_no_modal() {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
         harness.update(Duration::from_millis(100));
-        if !harness.contains_text("/model") && harness.contains_text("cursor-model") {
+        if !harness.contains_text("/model") && harness.contains_text("codex-model") {
             break;
         }
         assert!(

@@ -147,6 +147,16 @@ pub struct RelayHandle {
 struct AttachSlot {
     guard: Option<crate::peer_inbox::driver::RemoteAttachGuard>,
     finished: bool,
+    /// Called whenever the relay socket goes away (a session ended or a connect attempt failed), so the leader can drop
+    /// the relay's ownership claims.
+    link_down: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+/// Tell the leader the relay socket is down.
+fn fire_link_down(slot: &std::sync::Mutex<AttachSlot>) {
+    let hook = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).link_down.clone();
+    if let Some(hook) = hook {
+        hook();
+    }
 }
 /// The relay task is over (normally or by unwinding): release the fact, and drop any guard handed in later at once.
 fn finish_attach(slot: &std::sync::Mutex<AttachSlot>) {
@@ -172,6 +182,10 @@ impl RelayHandle {
             if g.finished { Some(guard) } else { g.guard = Some(guard); None }
         };
         drop(rejected);
+    }
+    /// Call `hook` each time this relay's socket goes away, so the leader can drop the ownership claims the relay held.
+    pub(crate) fn on_link_down(&self, hook: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.peer_attach.lock().unwrap_or_else(std::sync::PoisonError::into_inner).link_down = Some(hook);
     }
     /// Stop the relay connection. Only cancels: the attach fact is released when the task has actually finished.
     pub fn stop(&self) {
@@ -220,6 +234,7 @@ pub(crate) fn spawn_relay_connection_with_callback(
     let (agent_to_ws_tx, agent_to_ws_rx) = mpsc::unbounded_channel::<String>();
     let peer_attach = std::sync::Arc::new(std::sync::Mutex::new(AttachSlot::default()));
     let task_slot = FinishAttachOnDrop(peer_attach.clone());
+    let link_slot = peer_attach.clone();
     tokio::spawn(async move {
         let _finish = task_slot;
         run_relay_loop(
@@ -228,6 +243,7 @@ pub(crate) fn spawn_relay_connection_with_callback(
             agent_to_ws_rx,
             cancel_clone,
             on_first_connect,
+            link_slot,
         )
         .await;
     });
@@ -358,6 +374,7 @@ async fn run_relay_loop(
     mut agent_to_ws_rx: mpsc::UnboundedReceiver<String>,
     cancel: CancellationToken,
     mut on_first_connect: Option<FirstConnectCallback>,
+    link_slot: std::sync::Arc<std::sync::Mutex<AttachSlot>>,
 ) {
     // P47: a relay URL that may not receive the session token is a configuration fact no reconnect can change, so
     // the relay stops here, once, and says why (the gate also logs the refusal with its remedy).
@@ -404,6 +421,7 @@ async fn run_relay_loop(
                         &config.body_identity(),
                     )
                     .await;
+                fire_link_down(&link_slot);
                 match result {
                     Ok(SessionEndReason::Normal) => {
                         info!("WebSocket session ended normally");
@@ -429,6 +447,7 @@ async fn run_relay_loop(
                 info!("WebSocket disconnected, will reconnect");
             }
             Err(e) => {
+                fire_link_down(&link_slot);
                 let handshake_401 = is_handshake_unauthorized(&e);
                 tracing::info!(
                     target: crate::instrumentation::TARGET,

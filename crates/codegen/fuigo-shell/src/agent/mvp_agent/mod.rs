@@ -751,9 +751,11 @@ pub struct MvpAgent {
     >,
     /// True only under the leader. LEADER-SAFE(init-once): set by `set_leader_mode` before the agent is shared.
     pub(crate) leader_mode: bool,
-    /// Owner connection id per session id, taken from the leader-stamped `_meta` on session/new, load and resume.
-    /// LEADER-SAFE(per-session): the last connection to load or resume a session becomes its owner.
-    session_owner_conn: RefCell<HashMap<String, u64>>,
+    /// Connections with a `session/load`/`resume` in flight, per session (a cold load is not resident yet); see `mark_session_loading`.
+    /// There is deliberately no owner map here: the leader alone decides who owns a session and stamps it on owner-gated requests.
+    session_loaders: RefCell<HashMap<String, Vec<Option<u64>>>>,
+    /// Woken when a loader mark is removed (`wait_for_own_session_loads`).
+    loader_changed: tokio::sync::Notify,
     relay_sync_enabled: bool,
     /// LEADER-SAFE(init-once): set once per connection during initialize from client capabilities, read when spawning sessions.
     /// In leader mode, the last client to initialize overwrites previous settings.
@@ -835,6 +837,10 @@ pub struct MvpAgent {
     /// A second concurrent check would double IdP/HTTP traffic for the same verdict and race the gate writes.
     /// Cleared by [`TierRecheckInFlightGuard`] on exit (including panic/abort).
     tier_recheck_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    /// Completion counter for the claimed tier re-check: bumped by [`TierRecheckInFlightGuard`] when the check exits.
+    /// A duplicate `fuigo/auth/check_subscription` awaits this (see [`MvpAgent::check_subscription_awaiting_in_flight`]).
+    /// Otherwise it would answer with the stale meta while the live `/user` check is still running, and the pager paints from it.
+    tier_recheck_done: Arc<tokio::sync::watch::Sender<u64>>,
     /// Local workspace ops, built lazily via [`Self::ensure_local_workspace_ops`].
     /// The agent never opens Computer Hub as a harness/client; remote cloud sandboxes are gateway-owned (`gateway_bridge` / `computer_sessions`).
     workspace_ops: RefCell<Option<fuigo_workspace::WorkspaceOps>>,
@@ -1406,6 +1412,27 @@ impl Drop for SessionLoadGuard<'_> {
         self.agent.session_registry.settle_attach(&self.session_id, &self.rx);
     }
 }
+/// RAII mark for a connection's in-flight load of a session; dropping it removes exactly one such mark.
+pub(crate) struct SessionLoaderMark<'a> {
+    agent: &'a MvpAgent,
+    session_id: String,
+    conn: Option<u64>,
+}
+impl Drop for SessionLoaderMark<'_> {
+    fn drop(&mut self) {
+        let mut loaders = self.agent.session_loaders.borrow_mut();
+        if let Some(marks) = loaders.get_mut(&self.session_id) {
+            if let Some(pos) = marks.iter().position(|c| *c == self.conn) {
+                marks.swap_remove(pos);
+            }
+            if marks.is_empty() {
+                loaders.remove(&self.session_id);
+            }
+        }
+        drop(loaders);
+        self.agent.loader_changed.notify_waiters();
+    }
+}
 mod code_nav;
 mod folder_trust_prompt;
 mod heap_profile;
@@ -1652,6 +1679,32 @@ impl MvpAgent {
             self.retry_subscription_check().await;
         }
     }
+    /// Upper bound a duplicate `check_subscription` waits for the in-flight live check.
+    /// The check's own awaits: the 10s `/user` request, the bounded refresh inside `single_check`, the settings fetch, and the post-unblock bounded refresh.
+    const TIER_RECHECK_WAIT_BOUND: std::time::Duration = std::time::Duration::from_secs(
+        10 + 2 * crate::auth::manager::BEST_EFFORT_REFRESH_TIMEOUT.as_secs() + 10,
+    );
+    /// `fuigo/auth/check_subscription` entry: runs the check, or when one is already in flight awaits its completion.
+    /// The caller then reads fresh meta, never the pre-check (gated/stale) snapshot the in-flight check is about to replace.
+    /// The wait is bounded by [`Self::TIER_RECHECK_WAIT_BOUND`]; on timeout it returns and the caller answers with the current meta.
+    /// That is exactly what a live check that failed or timed out yields.
+    pub(crate) async fn check_subscription_awaiting_in_flight(&self) {
+        let mut done = self.tier_recheck_done.subscribe();
+        if self
+            .tier_recheck_in_flight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::debug!("tier re-check already in flight, awaiting its result");
+            if tokio::time::timeout(Self::TIER_RECHECK_WAIT_BOUND, done.changed())
+                .await
+                .is_err()
+            {
+                tracing::warn!("tier re-check wait timed out, answering with current meta");
+            }
+            return;
+        }
+        self.retry_subscription_check().await;
+    }
     /// Single-shot subscription check called by the pager's "Check subscription" button (`fuigo/auth/check_subscription`).
     /// The pager calls this every 5s while the paywall is shown, acting as the poller.
     ///
@@ -1674,6 +1727,7 @@ impl MvpAgent {
         }
         let _in_flight_guard = TierRecheckInFlightGuard {
             flag: self.tier_recheck_in_flight.clone(),
+            done: self.tier_recheck_done.clone(),
         };
         #[cfg(test)]
         self.tier_recheck_run_count.set(self.tier_recheck_run_count.get() + 1);
@@ -2503,10 +2557,12 @@ impl Drop for PostUnblockJwtRetryInFlightGuard {
 /// So the single-flight flag cannot wedge `true` for the rest of the process.
 struct TierRecheckInFlightGuard {
     flag: Arc<std::sync::atomic::AtomicBool>,
+    done: Arc<tokio::sync::watch::Sender<u64>>,
 }
 impl Drop for TierRecheckInFlightGuard {
     fn drop(&mut self) {
         self.flag.store(false, std::sync::atomic::Ordering::Release);
+        self.done.send_modify(|n| *n = n.wrapping_add(1));
     }
 }
 /// Background retry when post-unblock JWT lacks a tier claim that matches the live `/user` tier.

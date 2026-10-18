@@ -136,6 +136,29 @@ fn seed_fake_oauth_raw(
     .expect("seed fake oauth auth.json");
 }
 
+/// The OAuth2 client id [`seed_fake_oauth`] stores its entry under (the second half of the `<issuer>::<client_id>` scope key).
+pub const FAKE_OAUTH_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+
+/// Configure the OAuth2 provider the seeded entry belongs to, the way an operator does (`FUIGO_OAUTH2_ISSUER` plus
+/// `FUIGO_OAUTH2_CLIENT_ID`).
+///
+/// Fuigo ships with no issuer. Without one the shell looks its credential up under the `unconfigured::` scope and never
+/// finds the entry [`seed_fake_oauth`] wrote, so the pager shows the API-key screen instead of a session.
+/// Pair with [`seed_fake_oauth`] and [`oauth_credential_ops`]; reach the mock over HTTPS with
+/// [`crate::ContentController::session_front_env`].
+pub fn oauth_provider_ops() -> [crate::EnvOp<'static>; 2] {
+    [
+        crate::EnvOp::set("FUIGO_OAUTH2_ISSUER", "https://auth.x.ai"),
+        crate::EnvOp::set("FUIGO_OAUTH2_CLIENT_ID", FAKE_OAUTH_CLIENT_ID),
+    ]
+}
+
+/// Only the client id half of [`oauth_provider_ops`], for tests that select the local-dev issuer with
+/// `FUIGO_LOCAL_AUTH=1` (`http://localhost:22255`) and seed their entry under it.
+pub fn oauth_client_id_op() -> crate::EnvOp<'static> {
+    crate::EnvOp::set("FUIGO_OAUTH2_CLIENT_ID", FAKE_OAUTH_CLIENT_ID)
+}
+
 /// Remove only the sandbox's fake API-key credential.
 /// The `auth.json` entry written by [`seed_fake_oauth`] then determines the advertised auth method.
 pub fn oauth_credential_ops() -> [crate::EnvOp<'static>; 1] {

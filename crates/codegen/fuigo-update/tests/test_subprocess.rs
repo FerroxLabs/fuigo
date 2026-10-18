@@ -689,6 +689,60 @@ async fn p29_after_npm_update_the_canonical_binary_points_at_the_new_version() {
     assert_eq!(dunce::canonicalize(cwd.trim()).unwrap(), dunce::canonicalize(common::test_home()).unwrap());
 }
 
+/// P30-NPM: npm 11 masks UUID-looking path segments (`/home/u/<uuid>/g` prints as `/home/u/***/g`), so the root npm
+/// prints cannot be used. The setup step then runs through `npm explore -g fuigo`, which resolves the directory
+/// itself, and the update still succeeds.
+#[tokio::test]
+#[serial]
+async fn p30_a_masked_npm_root_still_completes_the_setup_step() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
+    install_npm_for_test(Some("1.0.30"), "stable", Some("https://npm.example.com")).await.unwrap();
+    assert_eq!(canonical_target("fuigo").as_deref(), Some("fuigo-1.0.30"));
+    let explore = std::fs::read_to_string(g.dir().join("npm-explore.log")).unwrap();
+    assert!(explore.contains("explore -g fuigo -- node bin/fuigo-bootstrap.js"), "{explore}");
+    let node = g.node_log();
+    assert_eq!(node.len(), 1, "{node:?}");
+    assert!(node[0].contains("INSTALL_ONLY=1") && node[0].contains("REGISTRY=https://npm.example.com"), "{node:?}");
+    assert!(!npm_setup_failed_recently_for_test("1.0.30"));
+    // the report file is cleaned up
+    let leftovers: Vec<_> = std::fs::read_dir(common::test_home())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".npm-setup-report"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    common::reset_home();
+}
+
+/// P30-NPM: through `npm explore` the version check still holds: another version than requested is a failure.
+#[tokio::test]
+#[serial]
+async fn p30_masked_root_explore_path_rejects_the_wrong_version() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
+    g.set_installed_package_version("1.0.31");
+    let err = install_npm_for_test(Some("1.0.30"), "stable", None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("installed fuigo@1.0.31, not fuigo@1.0.30"), "{err:#}");
+    common::reset_home();
+}
+
+/// P30-NPM: a failing setup step through `npm explore` is the same recorded failure as through the root path.
+#[tokio::test]
+#[serial]
+async fn p30_masked_root_explore_path_failure_is_a_setup_failure() {
+    let g = FakeBinGuard::install_npm();
+    common::reset_home();
+    std::fs::write(g.dir().join("npm-root-masked"), "").unwrap();
+    g.set_setup_exit_code(1);
+    let err = install_npm_for_test(Some("1.0.32"), "stable", None).await.unwrap_err();
+    assert!(format!("{err:#}").contains("setup step failed"), "{err:#}");
+    assert!(npm_setup_failed_recently_for_test("1.0.32"));
+    common::reset_home();
+}
+
 /// A registry with embedded credentials is not handed to the setup step (it would land in config.toml).
 #[tokio::test]
 #[serial]

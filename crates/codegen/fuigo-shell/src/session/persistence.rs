@@ -843,6 +843,11 @@ pub(crate) fn find_summary_by_session_id(session_id: &str) -> Option<Summary> {
     find_summary_by_session_id_in_root(session_id, &fuigo_home().join("sessions"))
 }
 
+/// The folder of the persisted session `session_id`, under whichever cwd it was recorded (scans all CWD directories).
+pub(crate) fn find_persisted_session_dir(session_id: &str) -> Option<PathBuf> {
+    storage_view(&fuigo_home().join("sessions")).ok()?.find_persisted_session_dir(session_id).ok().flatten()
+}
+
 /// Inner implementation with injectable root for testing.
 pub(crate) fn find_summary_by_session_id_in_root(
     session_id: &str,
@@ -3564,7 +3569,15 @@ pub enum DeleteSessionError {
     /// The local on-disk session directory could not be removed.
     #[error("failed to delete session: {0}")]
     Local(#[source] io::Error),
+    /// Another Fuigo process has the session open (1.0.30 P30-DIRECT). Checked before anything else, so neither the
+    /// remote copy nor the local folder was touched.
+    #[error("{}", crate::session::session_writer_lock::HELD_ELSEWHERE)]
+    HeldElsewhere,
 }
+
+/// A remote delete that has been built but not started: [`delete_session_history_in`] only polls it after the local
+/// session's writer lock is held.
+type RemoteDelete = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), crate::remote::client::BackendError>> + Send>>;
 
 /// Where a session copy was actually removed by [`delete_session_history`].
 ///
@@ -3602,11 +3615,71 @@ pub async fn delete_session_history(
     auth_manager: Arc<crate::auth::AuthManager>,
     search_index: Option<&fuigo_session_search::SearchIndexManager>,
 ) -> Result<SessionDeletion, DeleteSessionError> {
+    let remote: Option<RemoteDelete> = needs_remote.then(|| {
+        let client = crate::remote::client::BackendClient::new().with_auth_manager(auth_manager);
+        let session_id = session_id.to_owned();
+        Box::pin(async move { client.delete_session_data(&session_id).await }) as RemoteDelete
+    });
+    delete_session_history_in(&fuigo_home(), session_id, cwd, remote, search_index).await
+}
+
+/// Prefix of the name a session folder is moved to (next to it, in its cwd folder) while it is being deleted:
+/// `.fuigo-deleting-<id>-<pid>`. A dot name is never listed or resolved as a session, and a leftover (a delete that
+/// died between the move and the removal) is removed by the next sweep once nothing holds it.
+const DELETING_PREFIX: &str = ".fuigo-deleting-";
+
+/// Removes one session's folder with no window in which another process can open it and then lose it.
+///
+/// While this call still holds the session's writer lock, the folder is renamed to a tombstone name no lookup resolves
+/// (same on every OS; one atomic step). From then on the session's path names nothing: another process's open finds no
+/// session, and the lock it would need is the one inside the tombstone, which this call still holds. Only then is the
+/// hold released and the tombstone removed, so Windows has no open handle of ours in the folder being removed. If the
+/// rename is refused (on Windows, a file inside open without share-delete), the folder is removed in place after the
+/// hold is released, as before. A session live in this same process keeps its actor's hold (the lock is counted).
+/// `after_rename` is a test window between the rename and the release.
+async fn delete_local_session(
+    storage: &JsonlStorageAdapter,
+    info: &Info,
+    session_dir: &Path,
+    writer_lock: Option<crate::session::session_writer_lock::SessionWriterLock>,
+    after_rename: impl FnOnce(&Path),
+) -> io::Result<()> {
+    let tombstone = session_dir.file_name().and_then(|name| {
+        let name = format!("{DELETING_PREFIX}{}-{}", name.to_string_lossy(), std::process::id());
+        session_dir.parent().map(|parent| parent.join(name))
+    });
+    if let Some(tombstone) = tombstone
+        && std::fs::rename(session_dir, &tombstone).is_ok()
+    {
+        after_rename(&tombstone);
+        drop(writer_lock);
+        return match tokio::fs::remove_dir_all(&tombstone).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    drop(writer_lock);
+    storage.delete_session(info).await
+}
+
+/// [`delete_session_history`] against an explicit Fuigo home, with the remote delete (when there is one) passed in
+/// unstarted. Order: find the local session, take its writer lock (refused when another process has it open: nothing
+/// has been touched yet), then the remote delete, then the local folder.
+async fn delete_session_history_in(
+    root: &Path,
+    session_id: &str,
+    cwd: Option<&str>,
+    remote: Option<RemoteDelete>,
+    search_index: Option<&fuigo_session_search::SearchIndexManager>,
+) -> Result<SessionDeletion, DeleteSessionError> {
     let sid = acp::SessionId::new(Arc::from(session_id));
 
     // Resolve the local session info, scoping to cwd if provided
     // A remote-only session won't be found here; that's fine, the remote delete (if applicable) still runs
-    let summaries = list_summaries(cwd)
+    let storage = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let summaries = storage
+        .list_sessions(cwd)
         .await
         .map_err(DeleteSessionError::List)?;
     let local_info = summaries
@@ -3617,20 +3690,23 @@ pub async fn delete_session_history(
     // Remote delete first (authoritative for cloud history)
     // A genuine failure aborts before any local mutation so the row does not reappear
     // A `404` means the copy is already gone, so deletion stays idempotent and falls through to local cleanup
-    let remote_removed = if needs_remote {
-        let result = crate::remote::client::BackendClient::new()
-            .with_auth_manager(auth_manager)
-            .delete_session_data(session_id)
-            .await;
-        classify_remote_delete(result)?
-    } else {
-        false
+    // The local session's writer lock comes first (1.0.30 P30-DIRECT): a session open in another window is refused
+    // before the cloud copy is touched, so a refused delete leaves both copies as they were
+    let writer_lock = match &local_info {
+        Some(info) => crate::session::session_writer_lock::acquire(&session_dir_in(root, info))
+            .await
+            .map_err(|crate::session::session_writer_lock::HeldElsewhere| DeleteSessionError::HeldElsewhere)?,
+        None => None,
+    };
+
+    let remote_removed = match remote {
+        Some(delete) => classify_remote_delete(delete.await)?,
+        None => false,
     };
 
     let removed = match local_info {
         Some(info) => {
-            JsonlStorageAdapter::default()
-                .delete_session(&info)
+            delete_local_session(&storage, &info, &session_dir_in(root, &info), writer_lock, |_| {})
                 .await
                 .map_err(DeleteSessionError::Local)?;
             Some(info)
@@ -3641,11 +3717,7 @@ pub async fn delete_session_history(
 
     // Also evict when no workspace was named: that row outlives the directory and nothing else prunes it
     if local_removed || cwd.is_none() {
-        crate::session::storage::search::evict_session(
-            &crate::util::fuigo_home::fuigo_home(),
-            session_id,
-        )
-        .await;
+        crate::session::storage::search::evict_session(root, session_id).await;
     }
     // The eviction above is a point in time
     // Queue the indexer too so an upsert already under way, which would otherwise write the row back, is followed by a re-read that finds nothing
@@ -3680,6 +3752,10 @@ fn classify_remote_delete(
 #[cfg(test)]
 #[path = "persistence_tests.rs"]
 mod durable_update_tests;
+
+#[cfg(test)]
+#[path = "persistence_delete_held_elsewhere_tests.rs"]
+mod delete_held_elsewhere_tests;
 
 #[cfg(test)]
 #[path = "persistence_delete_session_history_tests.rs"]
@@ -4141,6 +4217,17 @@ fn cleanup_pinned_level(
             }
             continue;
         }
+        if name_text.starts_with(DELETING_PREFIX) && matches!(level, CleanupLevel::Cwd) {
+            // A delete that died between moving the session aside and removing it. Removed once nothing holds it (a
+            // running delete still has its hold, or is past it and removing the same folder).
+            if dir.child_info(&name).is_ok_and(|info| info.kind == EntryKind::Dir)
+                && !crate::session::session_writer_lock::dir_open_elsewhere(&dir.child_path(&name))
+                && dir.remove_child_tree(&name).is_ok()
+            {
+                stats.dirs_removed += 1;
+            }
+            continue;
+        }
         if name_text.starts_with('.') {
             continue;
         }
@@ -4314,6 +4401,16 @@ fn cleanup_pinned_session(
     };
     let session_dir = cwd.child_path(name);
     let session_dir = session_dir.as_path();
+    // A session another Fuigo process has open (1.0.30 P30-DIRECT) is that window's to change: the sweep neither
+    // removes it nor prunes its caches. One of this process's own is not "elsewhere". Never creates the lock file.
+    if crate::session::session_writer_lock::dir_open_elsewhere(session_dir) {
+        tracing::debug!(
+            target: "fuigo_shell::session::persistence",
+            dir = %session_dir.display(),
+            "SESSION_CLEANUP_SKIPPED: session is open in another process"
+        );
+        return stats;
+    }
     let first_look = session_last_activity(session_dir).and_then(|newest_file| match newest_file {
         Some(mtime) => Ok(mtime),
         // A folder without files of its own (a stub) is judged by its own mtime, read before the sweep's lock files

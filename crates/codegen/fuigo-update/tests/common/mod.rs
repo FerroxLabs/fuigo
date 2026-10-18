@@ -390,7 +390,18 @@ pub fn fake_npm_script(dir: &Path) -> String {
     let dq = single_quote_for_sh(dir);
     format!(
         r#"#!/bin/sh
-if [ "$1" = "root" ]; then echo {dq}/npm-root; exit 0; fi
+if [ "$1" = "root" ]; then
+  # npm 11 masks UUID-looking path segments as ***: `npm-root-masked` makes the fake do the same
+  if [ -f {dq}/npm-root-masked ]; then echo "/home/u/***/g/lib/node_modules"; else echo {dq}/npm-root; fi
+  exit 0
+fi
+if [ "$1" = "explore" ]; then
+  # npm explore -g fuigo -- <cmd...>: run <cmd> in the installed package directory
+  echo "$@" >> {dq}/npm-explore.log
+  cd {dq}/npm-root/fuigo || exit 1
+  shift 4
+  exec "$@"
+fi
 echo "$@" >> {dq}/npm-args.log
 pwd >> {dq}/npm-cwd.log
 if [ -f {dq}/npm-grandchild ]; then sleep 300 & echo $! > {dq}/npm-grandchild.pid; fi
@@ -436,6 +447,7 @@ pwd >> {dq}/node-cwd.log
 if [ -f {dq}/node-exit ]; then echo "fake setup failing" >&2; exit "$(cat {dq}/node-exit)"; fi
 pkg=$(dirname "$(dirname "$1")")
 ver=$(sed -n 's/.*"version":"\([^"]*\)".*/\1/p' "$pkg/package.json")
+if [ -n "$FUIGO_INSTALL_REPORT" ]; then printf '{{"version":"%s"}}' "$ver" > "$FUIGO_INSTALL_REPORT"; fi
 mkdir -p "$FUIGO_HOME/bin"
 printf '#!/bin/sh\n' > "$FUIGO_HOME/bin/fuigo-$ver"
 chmod 755 "$FUIGO_HOME/bin/fuigo-$ver"

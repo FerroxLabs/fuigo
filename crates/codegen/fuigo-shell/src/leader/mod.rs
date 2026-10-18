@@ -61,6 +61,7 @@ mod starter_identity_tests;
 pub(crate) mod peer_auth;
 #[cfg(all(test, windows))]
 mod peer_auth_tests;
+pub(crate) mod drivers;
 pub mod protocol;
 pub(crate) mod server;
 #[cfg(test)]
@@ -2570,6 +2571,7 @@ mod tests {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
             fuigo_tty_utils::detach_std_command(&mut cmd);
+            #[allow(clippy::disallowed_methods)] // test fixture; killed and reaped by `SpawnedChild::drop`
             SpawnedChild(cmd.spawn().expect("spawn test child"))
         };
         let marked = spawn(&["-c", "sleep 30; true", "sh", RELAY_ON_DEMAND_FLAG]);

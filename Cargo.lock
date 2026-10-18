@@ -5280,11 +5280,14 @@ dependencies = [
  "futures-util",
  "libc",
  "portable-pty",
+ "rcgen",
  "reqwest 0.12.24",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
@@ -5537,7 +5540,7 @@ dependencies = [
 
 [[package]]
 name = "fuigo-version"
-version = "1.0.29"
+version = "1.0.30"
 dependencies = [
  "semver",
 ]

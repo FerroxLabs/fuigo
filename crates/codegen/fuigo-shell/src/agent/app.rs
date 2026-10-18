@@ -765,6 +765,13 @@ fn relay_config_for_session(
         Some(shared_auth_manager.clone()),
     )
 }
+/// When the relay's socket drops, every ownership claim the relay held lapses (a session it owned goes to the first queued
+/// local claimant, or to the next local load).
+fn watch_relay_link(handle: &crate::agent::relay::RelayHandle, board: &crate::leader::RelayRefusalBoard) {
+    if let Some(owners) = board.owner_board() {
+        handle.on_link_down(std::sync::Arc::new(move || owners.relay_dropped()));
+    }
+}
 /// Start the leader's grok.com relay connection according to the start policy.
 /// Parks the [`RelayHandle`](crate::agent::relay::RelayHandle) in `slot` once the connection task is running.
 ///
@@ -811,6 +818,7 @@ fn spawn_leader_relay(
         let attach = crate::peer_inbox::driver::attach_remote();
         let (tx, mut handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
         handle.hold_peer_attach(attach);
+        watch_relay_link(&handle, &refusal_board);
         *agent_to_ws_tx.lock() = Some(tx);
         *slot.borrow_mut() = Some(handle);
         return;
@@ -842,6 +850,7 @@ fn spawn_leader_relay(
         let attach = crate::peer_inbox::driver::attach_remote();
         let (tx, mut handle) = spawn_relay_connection(relay_config, ws_to_agent_tx, cancel);
         handle.hold_peer_attach(attach);
+        watch_relay_link(&handle, &refusal_board);
         *agent_to_ws_tx.lock() = Some(tx);
         *slot_for_task.borrow_mut() = Some(handle);
     });
@@ -1035,6 +1044,7 @@ pub async fn run_leader(
     .with_default_hub_url(agent_config.hub.url.clone());
     let workspace_control = control_state.workspace.clone();
     let relay_refusal_board = control_state.relay_refusal_board();
+    let relay_driver_board = control_state.driver_board();
     let ipc_server_cancel = cancel.clone();
     let socket_path_for_server = socket_path.clone();
     let client_count_for_server = client_count.clone();
@@ -1197,10 +1207,17 @@ pub async fn run_leader(
                 }
             });
             let acp_incoming_tx_ws = acp_incoming_tx.clone();
+            let agent_out_board = relay_driver_board.clone();
             tokio::task::spawn_local(async move {
                 while let Some(msg) = ws_to_agent_rx.recv().await {
-                    // Relay messages skip the leader's client slots: stamp them with the reserved relay connection id.
-                    let msg = crate::leader::server::stamp_relay_connection_identity(&msg);
+                    // The relay's answer to one of the agent's session requests counts only when the leader gave it that
+                    // request (the relay owns the session); otherwise it is dropped, like a non-owner window's.
+                    let Some(msg) = crate::leader::server::filter_relay_answers(&msg, &relay_driver_board) else {
+                        continue;
+                    };
+                    // Relay messages skip the leader's client slots: stamp them with the reserved relay connection id,
+                    // and track the relay as a driver beside the local clients (foreign flag for a contested session).
+                    let msg = crate::leader::server::stamp_relay_connection_identity_with(&msg, &relay_driver_board);
                     let mut tx = acp_incoming_tx_ws.lock().await;
                     if tx.write_all(msg.as_bytes()).await.is_err()
                         || tx.write_all(b"\n").await.is_err()
@@ -1224,6 +1241,8 @@ pub async fn run_leader(
                         Ok(_) => {
                             let msg = line.trim_end_matches(['\r', '\n']).to_string();
                             if !msg.is_empty() {
+                                // Before the fan-out: no answer to a session request counts until the leader delivers it.
+                                crate::leader::server::note_agent_request(&msg, &agent_out_board);
                                 let maybe_tx = agent_to_ws_tx_clone.lock();
                                 if let Some(ref tx) = *maybe_tx {
                                     let _ = tx.send(msg.clone());

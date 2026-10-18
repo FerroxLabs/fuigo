@@ -856,12 +856,12 @@ impl SessionActor {
     ) -> (Vec<ConversationItem>, bool) {
         let compacted_len = compacted_history.len();
         let release_candidate = compacted_history.clone();
-        match preserve_inherited_prefix(&full_conv, compacted_history, prefix_len) {
+        match preserve_inherited_prefix(full_conv, compacted_history, prefix_len) {
             Ok(preserved) => {
                 let projected_preserved = project_preserved_reseed_tokens(
                     fuigo_chat_state::estimate_conversation_tokens(&preserved),
                     tokens_before,
-                    fuigo_chat_state::estimate_conversation_tokens(&full_conv),
+                    fuigo_chat_state::estimate_conversation_tokens(full_conv),
                 );
                 if fuigo_token_estimation::exceeds_threshold(
                     projected_preserved,

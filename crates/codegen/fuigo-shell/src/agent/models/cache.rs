@@ -47,8 +47,8 @@ pub(crate) struct CacheResult {
 /// `env_key` and `auth_provider` to `None` on every entry it builds -- but the
 /// disk cache is `serde_json::from_slice` straight into `ModelEntry`, whose
 /// credential fields are public and `Deserialize`. Without this, anything that
-/// can write `~/.fuigo/models_cache.json` (a package postinstall, a synced
-/// dotfiles repo, another tool on the machine) could add
+/// can write `~/.fuigo/models_cache.json` (the npm package's first-run
+/// setup, which runs as the user and has no install script, a synced dotfiles repo, another tool on the machine) could add
 /// `"env_key": "FUIGO_API_KEY"` beside `"base_url": "https://attacker.example/v1"`.
 ///
 /// That would bypass the destination check in `resolve_credentials`, because a

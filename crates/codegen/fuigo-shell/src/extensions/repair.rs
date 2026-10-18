@@ -115,6 +115,17 @@ async fn repair_on_disk(
     })?;
     let info = summary.info.clone();
 
+    // 1.0.30 P30-DIRECT: a repair that writes is refused while another window has the session open. A dry run only
+    // reads, so it stays lock-free. Held from before the load to after the write, so the repair works on what it read.
+    let writer_lock = if dry_run {
+        None
+    } else {
+        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(fuigo_root, &info.cwd).join(info.id.to_string());
+        crate::session::session_writer_lock::acquire(&dir)
+            .await
+            .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?
+    };
+
     let storage = JsonlStorageAdapter::with_root(fuigo_root.to_path_buf());
     let mut chat_history = storage
         .load_session_without_updates(&info)
@@ -142,6 +153,7 @@ async fn repair_on_disk(
         );
     }
 
+    drop(writer_lock);
     to_raw_response(&RepairSessionResponse::new(report, dry_run, false))
 }
 
@@ -287,5 +299,36 @@ mod tests {
             err.code,
             acp::Error::resource_not_found(None::<String>).code
         );
+    }
+
+    #[tokio::test]
+    async fn disk_repair_is_refused_while_the_session_is_open_in_another_window() {
+        let tmp = TempDir::new().unwrap();
+        let (adapter, info) = seed_session(tmp.path(), &corrupted_history()).await;
+        let dir = crate::util::fuigo_home::sessions_cwd_dir_in(tmp.path(), &info.cwd).join(info.id.to_string());
+        let window_a = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(crate::session::session_writer_lock::SESSION_WRITER_LOCK_FILE))
+            .unwrap();
+        window_a.try_lock().expect("the other window takes the session");
+        let chat_before = std::fs::read(dir.join("chat_history.jsonl")).unwrap();
+
+        let err = repair_on_disk(tmp.path(), SESSION_ID, false).await.expect_err("repaired a session open elsewhere");
+        assert!(format!("{err:?}").contains(crate::session::session_writer_lock::HELD_ELSEWHERE), "{err:?}");
+        assert_eq!(std::fs::read(dir.join("chat_history.jsonl")).unwrap(), chat_before);
+
+        // A dry run only reads, so it is allowed.
+        let v = parse(&repair_on_disk(tmp.path(), SESSION_ID, true).await.expect("dry run reads only"));
+        assert_eq!(v["repaired"], true);
+        assert_eq!(v["dryRun"], true);
+
+        window_a.unlock().unwrap();
+        drop(window_a);
+        let v = parse(&repair_on_disk(tmp.path(), SESSION_ID, false).await.expect("free session"));
+        assert_eq!(v["repaired"], true);
+        let _ = adapter;
     }
 }

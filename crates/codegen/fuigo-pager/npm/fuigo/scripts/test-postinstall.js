@@ -1213,7 +1213,8 @@ if (process.platform !== 'win32') {
         const pathEntry = path.join(dir, 'bin', 'fuigo');
         fs.mkdirSync(path.dirname(pathEntry), { recursive: true });
         fs.symlinkSync(path.join(pkg, 'bin', 'fuigo'), pathEntry);
-        return { pkg, pathEntry };
+        // A default-layout global sandbox is named as npm's prefix, as `npm config get prefix` would be.
+        return { pkg, pathEntry, prefix: local || nmDir ? null : dir };
     }
 
     /** Replace the vendored binary (a same-version reinstall with a different build). */
@@ -1228,6 +1229,7 @@ if (process.platform !== 'win32') {
         const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'),
             FUIGO_NPM_REGISTRY: 'https://registry.invalid/', ...extraEnv };
         delete env.FUIGO_INSTALL_COMPLETIONS;
+        if (sb.prefix && !('FUIGO_NPM_PREFIX' in extraEnv)) env.FUIGO_NPM_PREFIX = sb.prefix;
         // The launch environment of a real run: no package-manager variables.
         for (const k of ['npm_config_user_agent', 'npm_config_prefix', 'FUIGO_INSTALL_ONLY']) {
             if (!(k in extraEnv)) delete env[k];
@@ -1325,7 +1327,7 @@ if (process.platform !== 'win32') {
             const sb = sandboxPackage(dir);
             const home = path.join(dir, 'home');
             fs.mkdirSync(home);
-            const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/' };
+            const env = { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_REGISTRY: 'https://registry.invalid/', FUIGO_NPM_PREFIX: sb.prefix };
             const boot = path.join(sb.pkg, 'bin', 'fuigo-bootstrap.js');
             spawnSync(process.execPath, [boot], { encoding: 'utf8', env });
             const bin = path.join(home, '.fuigo', 'bin');
@@ -1453,7 +1455,7 @@ if (process.platform !== 'win32') {
             const sb = sandboxPackage(dir);
             const env = { PATH: `${stub}${path.delimiter}${process.env.PATH}` };
             // No FUIGO_NPM_REGISTRY, so the `npm config get registry` lookup is actually exercised.
-            const e2 = { ...process.env, ...env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo') };
+            const e2 = { ...process.env, ...env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_NPM_PREFIX: sb.prefix };
             delete e2.FUIGO_NPM_REGISTRY;
             const r2 = spawnSync(sb.pathEntry, ['x'], { encoding: 'utf8', env: e2, cwd: project });
             assert.strictEqual(r2.status, 0, r2.stderr);
@@ -1539,7 +1541,49 @@ if (process.platform !== 'win32') {
     // The setup step Fuigo's own updater runs after `npm i -g` (crates/codegen/fuigo-update).
     const setupStep = (sb, home, extraEnv = {}) => spawnSync(process.execPath, [path.join(sb.pkg, 'bin', 'fuigo-bootstrap.js')], {
         encoding: 'utf8', env: { ...process.env, HOME: home, FUIGO_HOME: path.join(home, '.fuigo'), FUIGO_INSTALL_ONLY: '1',
-            FUIGO_NPM_REGISTRY: 'https://registry.invalid/', ...extraEnv },
+            FUIGO_NPM_REGISTRY: 'https://registry.invalid/', ...(sb.prefix ? { FUIGO_NPM_PREFIX: sb.prefix } : {}), ...extraEnv },
+    });
+
+    test('P30: a local/npx copy is not npm-managed: FUIGO_NPM_LOCAL, no FUIGO_MANAGED_BY_NPM, ~/.fuigo untouched', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const local = sandboxPackage(path.join(dir, 'proj'), { local: true, payload: 'L=$FUIGO_NPM_LOCAL M=$FUIGO_MANAGED_BY_NPM' });
+            const res = run(local, home, ['x'], { FUIGO_MANAGED_BY_NPM: '1' });
+            assert.strictEqual(res.stdout, 'L=1 M= x\n', res.stderr);
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo', 'bin')), 'a local copy must not create ~/.fuigo/bin');
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo', 'config.toml')));
+            const global = sandboxPackage(path.join(dir, 'g'), { payload: 'L=$FUIGO_NPM_LOCAL M=$FUIGO_MANAGED_BY_NPM' });
+            assert.strictEqual(run(global, home, ['x']).stdout, 'L= M=1 x\n');
+        } finally { cleanup(dir); }
+    });
+
+    test('P30: a project whose root dir is named lib is local, not global', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const sb = sandboxPackage(dir, { payload: 'L=$FUIGO_NPM_LOCAL', nmDir: path.join(dir, 'lib', 'node_modules') });
+            fs.writeFileSync(path.join(dir, "lib", "package.json"), "{}");
+            assert.strictEqual(run(sb, home, ['x']).stdout, 'L=1 x\n');
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo', 'bin')));
+        } finally { cleanup(dir); }
+    });
+
+    test('P30: the setup step writes the FUIGO_INSTALL_REPORT file (version and package dir)', () => {
+        if (!supported) return;
+        const dir = makeTmpDir();
+        try {
+            const home = mkHome(dir);
+            const sb = sandboxPackage(dir, { version: '1.2.3' });
+            const report = path.join(dir, 'report.json');
+            const res = setupStep(sb, home, { FUIGO_INSTALL_REPORT: report });
+            assert.strictEqual(res.status, 0, res.stderr);
+            const got = JSON.parse(fs.readFileSync(report, 'utf8'));
+            assert.strictEqual(got.version, '1.2.3');
+            assert.strictEqual(fs.realpathSync(got.dir), fs.realpathSync(sb.pkg));
+        } finally { cleanup(dir); }
     });
 
     test('F2: the setup step moves ~/.fuigo/bin to the new version without running the binary', () => {
@@ -1591,6 +1635,321 @@ if (process.platform !== 'win32') {
         } finally { cleanup(dir); }
     });
 
+}
+
+// ─── Global-install detection and the Windows downgrade guard (P30) ─────
+
+console.log('\nglobal install detection\n');
+{
+    const { classifyGlobal, globalPrefixes, npmrcPrefix, canonicalVersion } = require('../bin/fuigo-replace.js');
+    const detect = (platform, pkgBin, env = {}, extra = {}) => {
+        const ctx = { platform, env, home: platform === 'win32' ? 'C:\\Users\\sean' : '/home/sean', ...extra };
+        // extra.pkgJson lists directories that contain a package.json (a project root).
+        const pj = new Set((extra.pkgJson || []).map((d) => d.replace(/[\\/]+$/, '')));
+        ctx.exists = (f) => pj.has(f.replace(/[\\/]package\.json$/, ''));
+        ctx.prefixes = globalPrefixes({ ...ctx, execPaths: ctx.execPaths || [] });
+        if (extra.globalRoots) ctx.globalRoots = extra.globalRoots;
+        return classifyGlobal(pkgBin, ctx);
+    };
+    const W = 'win32';
+    const winCases = [
+        ['default %APPDATA%\\npm', 'C:\\Users\\sean\\AppData\\Roaming\\npm\\node_modules\\fuigo\\bin', { APPDATA: 'C:\\Users\\sean\\AppData\\Roaming' }, {}, 'npm'],
+        ['custom prefix via npm_config_prefix', 'D:\\tools\\npm-global\\node_modules\\fuigo\\bin', { npm_config_prefix: 'D:\\tools\\npm-global' }, {}, 'npm'],
+        ['custom prefix from npmrc', 'D:\\tools\\npm-global\\node_modules\\fuigo\\bin', {}, { npmrcPrefixes: ['D:\\tools\\npm-global'] }, 'npm'],
+        ['case-insensitive prefix', 'd:\\Tools\\NPM-Global\\node_modules\\fuigo\\bin', { npm_config_prefix: 'D:\\tools\\npm-global\\' }, {}, 'npm'],
+        ['prefix next to node.exe', 'C:\\Program Files\\nodejs\\node_modules\\fuigo\\bin', {}, { execPaths: ['C:\\Program Files\\nodejs\\node.exe'] }, 'npm'],
+        ['nvm-windows, running under another node version', 'C:\\Users\\sean\\AppData\\Roaming\\nvm\\v18.19.0\\node_modules\\fuigo\\bin',
+            {}, { execPaths: ['C:\\Users\\sean\\AppData\\Roaming\\nvm\\v20.11.0\\node.exe'] }, 'npm'],
+        ['Scoop nodejs, current\\bin', 'C:\\Users\\sean\\scoop\\apps\\nodejs\\current\\bin\\node_modules\\fuigo\\bin', {}, { execPaths: ['C:\\Users\\sean\\scoop\\apps\\nodejs\\current\\node.exe'] }, 'npm'],
+        ['Scoop nodejs, persist layout', 'C:\\Users\\sean\\scoop\\persist\\nodejs\\bin\\node_modules\\fuigo\\bin', { SCOOP: 'C:\\Users\\sean\\scoop' }, {}, 'npm'],
+        ['Scoop nodejs, versioned app dir, custom SCOOP', 'E:\\apps-root\\apps\\nodejs\\21.6.0\\bin\\node_modules\\fuigo\\bin', { SCOOP: 'E:\\apps-root' }, {}, 'npm'],
+        ['Volta', 'C:\\Users\\sean\\AppData\\Local\\Volta\\tools\\image\\packages\\fuigo\\lib\\node_modules\\fuigo\\bin', { LOCALAPPDATA: 'C:\\Users\\sean\\AppData\\Local' }, {}, 'other'],
+        ['Volta, VOLTA_HOME', 'F:\\v\\tools\\image\\packages\\fuigo\\node_modules\\fuigo\\bin', { VOLTA_HOME: 'F:\\v' }, {}, 'other'],
+        ['Yarn classic', 'C:\\Users\\sean\\AppData\\Local\\Yarn\\Data\\global\\node_modules\\fuigo\\bin', { LOCALAPPDATA: 'C:\\Users\\sean\\AppData\\Local' }, {}, 'other'],
+        ['pnpm via PNPM_HOME', 'D:\\pn\\global\\5\\node_modules\\.pnpm\\fuigo@1.0.30\\node_modules\\fuigo\\bin', { PNPM_HOME: 'D:\\pn' }, {}, 'other'],
+        ['pnpm default', 'C:\\Users\\sean\\AppData\\Local\\pnpm\\global\\5\\node_modules\\fuigo\\bin', {}, {}, 'other'],
+        ['project-local', 'C:\\work\\app\\node_modules\\fuigo\\bin', { npm_config_prefix: 'D:\\tools\\npm-global' }, { execPaths: ['C:\\Program Files\\nodejs\\node.exe'], pkgJson: ['C:\\work\\app'] }, null],
+        ['project named npm', 'C:\\work\\npm\\node_modules\\fuigo\\bin', { APPDATA: 'C:\\Users\\sean\\AppData\\Roaming' }, { pkgJson: ['C:\\work\\npm'] }, null],
+        ['project called scoop-like but not nodejs', 'C:\\work\\scoop\\apps\\other\\bin\\node_modules\\fuigo\\bin', {}, { pkgJson: ['C:\\work\\scoop\\apps\\other\\bin'] }, null],
+        ['pnpm project (.pnpm)', 'C:\\work\\app\\node_modules\\.pnpm\\fuigo@1.0.30\\node_modules\\fuigo\\bin', {}, {}, null],
+        ['yarn berry project (.yarn)', 'C:\\work\\app\\.yarn\\unplugged\\fuigo-npm-abc\\node_modules\\fuigo\\bin', {}, {}, null],
+        ['M4: plain APPDATA\\npm with no env and no npmrc', 'C:\\Users\\sean\\AppData\\Roaming\\npm\\node_modules\\fuigo\\bin', {}, {}, 'npm'],
+        ['M4: unknown prefix drive, nothing set', 'Z:\\weird\\prefix\\node_modules\\fuigo\\bin', {}, {}, 'npm'],
+        ['npx cache', 'C:\\Users\\sean\\AppData\\Local\\npm-cache\\_npx\\abc123\\node_modules\\fuigo\\bin', { APPDATA: 'C:\\Users\\sean\\AppData\\Roaming' }, {}, null],
+        ['not under node_modules', 'C:\\src\\fuigo\\bin', {}, {}, null],
+    ];
+    for (const [name, p, env, extra, want] of winCases) {
+        test(`windows: ${name} -> ${want}`, () => assert.strictEqual(detect(W, p, env, extra), want));
+    }
+    const U = 'linux';
+    const unixCases = [
+        ['/usr/local prefix', '/usr/local/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['prefix from node location', '/opt/node-22/lib/node_modules/fuigo/bin', {}, { execPaths: ['/opt/node-22/bin/node'] }, 'npm'],
+        ['npm_config_prefix', '/data/g/lib/node_modules/fuigo/bin', { npm_config_prefix: '/data/g' }, {}, 'npm'],
+        ['PREFIX', '/data/p/lib/node_modules/fuigo/bin', { PREFIX: '/data/p' }, {}, 'npm'],
+        ['~/.npm-global', '/home/sean/.npm-global/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['npmrc prefix', '/srv/x/lib/node_modules/fuigo/bin', {}, { npmrcPrefixes: ['/srv/x'] }, 'npm'],
+        ['nvm, another node version', '/home/sean/.nvm/versions/node/v18.20.0/lib/node_modules/fuigo/bin', {}, { execPaths: ['/home/sean/.nvm/versions/node/v22.1.0/bin/node'] }, 'npm'],
+        ['Yarn classic ~/.config/yarn/global', '/home/sean/.config/yarn/global/node_modules/fuigo/bin', {}, {}, 'other'],
+        ['Yarn classic, XDG_CONFIG_HOME', '/cfg/yarn/global/node_modules/fuigo/bin', { XDG_CONFIG_HOME: '/cfg' }, {}, 'other'],
+        ['pnpm global store', '/home/sean/.local/share/pnpm/global/5/node_modules/.pnpm/fuigo@1/node_modules/fuigo/bin', {}, {}, 'other'],
+        ['pnpm, PNPM_HOME', '/pn/global/5/node_modules/fuigo/bin', { PNPM_HOME: '/pn' }, {}, 'other'],
+        ['bun', '/home/sean/.bun/install/global/node_modules/fuigo/bin', {}, {}, 'other'],
+        ['Volta', '/home/sean/.volta/tools/image/packages/fuigo/lib/node_modules/fuigo/bin', {}, {}, 'other'],
+        ['a project whose root dir is named lib', '/home/sean/work/lib/node_modules/fuigo/bin', {}, { execPaths: ['/usr/local/bin/node'], pkgJson: ['/home/sean/work/lib'] }, null],
+        ['project-local', '/home/sean/work/app/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/work/app'] }, null],
+        ['known prefix /usr/local with a stray package.json beside node_modules is still global (r3)', '/usr/local/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/usr/local/lib'] }, 'npm'],
+        ['project-local, not lib-shaped, no package.json', '/home/sean/work/app/node_modules/fuigo/bin', {}, {}, null],
+        ['pnpm project (.pnpm)', '/home/sean/work/app/node_modules/.pnpm/fuigo@1.0.30/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/work/app'] }, null],
+        ['pnpm project (.pnpm), package.json absent', '/home/sean/work/app/node_modules/.pnpm/fuigo@1.0.30/node_modules/fuigo/bin', {}, {}, null],
+        ['yarn berry project (.yarn)', '/home/sean/work/app/.yarn/unplugged/fuigo-npm-abc/node_modules/fuigo/bin', {}, {}, null],
+        ['nested dependency of a package', '/home/sean/work/app/node_modules/other/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/work/app/node_modules/other'] }, null],
+        ['M4: asdf legacy <ver>/.npm prefix', '/home/sean/.asdf/installs/nodejs/20.11.0/.npm/lib/node_modules/fuigo/bin', {}, { execPaths: ['/home/sean/.asdf/installs/nodejs/20.11.0/bin/node'] }, 'npm'],
+        ['M4: env prefix not inherited (shell from a GUI app)', '/data/g/lib/node_modules/fuigo/bin', {}, { execPaths: ['/opt/node/bin/node'] }, 'npm'],
+        ['M4: prefix only in npm builtin npmrc', '/srv/builtin/lib/node_modules/fuigo/bin', {}, { execPaths: ['/opt/node/bin/node'] }, 'npm'],
+        ['M4: nvm with non-default NVM_DIR under another version', '/data/nvmdir/versions/node/v18.20.0/lib/node_modules/fuigo/bin', { NVM_DIR: '/data/nvmdir' }, { execPaths: ['/data/nvmdir/versions/node/v22.1.0/bin/node'] }, 'npm'],
+        ['Homebrew /opt/homebrew', '/opt/homebrew/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['Homebrew Cellar realpath', '/opt/homebrew/Cellar/node/22.1.0/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['mise', '/home/sean/.local/share/mise/installs/node/22.1.0/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['linuxbrew', '/home/linuxbrew/.linuxbrew/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['/usr prefix', '/usr/lib/node_modules/fuigo/bin', {}, {}, 'npm'],
+        ['npx cache', '/home/sean/.npm/_npx/9f8e/node_modules/fuigo/bin', {}, {}, null],
+        ['npx cache with a package.json inside', '/home/sean/.npm/_npx/9f8e/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/.npm/_npx/9f8e'] }, null],
+    ];
+    for (const [name, p, env, extra, want] of unixCases) {
+        test(`unix: ${name} -> ${want}`, () => assert.strictEqual(detect(U, p, env, extra), want));
+    }
+    // A global prefix with a package.json beside its node_modules is global when npm says so.
+    const rootsOf = (...r) => ({ globalRoots: () => r });
+    const failing = { globalRoots: () => { throw new Error('npm: not found'); } };
+    test('windows: prefix = home dir with ~\\package.json beside node_modules is global (npm root -g matches)', () => {
+        assert.strictEqual(detect(W, 'C:\\Users\\sean\\node_modules\\fuigo\\bin', { npm_config_prefix: 'C:\\Users\\sean' },
+            { pkgJson: ['C:\\Users\\sean'], ...rootsOf('C:\\Users\\sean\\node_modules') }), 'npm');
+    });
+    test('windows: root compare is case-insensitive and separator-normalised', () => {
+        assert.strictEqual(detect(W, 'c:\\users\\SEAN\\node_modules\\fuigo\\bin', {}, { pkgJson: ['c:\\users\\SEAN'], ...rootsOf('C:/Users/sean/node_modules/') }), 'npm');
+    });
+    test('unix: ~/.local prefix with a stray package.json is global (npm root -g matches)', () => {
+        assert.strictEqual(detect(U, '/home/sean/.local/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/.local/lib'], ...rootsOf('/home/sean/.local/lib/node_modules') }), 'npm');
+    });
+    test('unix: project with package.json stays local when npm root -g names another dir', () => {
+        assert.strictEqual(detect(U, '/home/sean/work/app/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/work/app'], ...rootsOf('/usr/local/lib/node_modules') }), null);
+    });
+    test('unix: masked `***` global root matches exactly one segment per star', () => {
+        const bin = '/home/u/3f2b9c1e-8d4a-4f6b-9a7c-1e2d3f4a5b6c/g/lib/node_modules/fuigo/bin';
+        assert.strictEqual(detect(U, bin, {}, { pkgJson: ['/home/u/3f2b9c1e-8d4a-4f6b-9a7c-1e2d3f4a5b6c/g/lib'], ...rootsOf('/home/u/***/g/lib/node_modules') }), 'npm');
+        // a different tail, or a different depth, is not the same root
+        assert.strictEqual(detect(U, bin, {}, { pkgJson: ['/home/u/3f2b9c1e-8d4a-4f6b-9a7c-1e2d3f4a5b6c/g/lib'], ...rootsOf('/home/u/***/h/lib/node_modules') }), null);
+        assert.strictEqual(detect(U, bin, {}, { pkgJson: ['/home/u/3f2b9c1e-8d4a-4f6b-9a7c-1e2d3f4a5b6c/g/lib'], ...rootsOf('/home/***/lib/node_modules') }), null);
+    });
+    test('npm missing or failing falls back to the package.json rule (local)', () => {
+        assert.strictEqual(detect(U, '/srv/zz/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/srv/zz/lib'], ...failing }), null);
+        assert.strictEqual(detect(U, '/srv/zz/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/srv/zz/lib'], ...rootsOf() }), null);
+        assert.strictEqual(detect(U, '/srv/zz/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/srv/zz/lib'] }), null);
+    });
+    test('npm is consulted only in the ambiguous package.json case', () => {
+        let calls = 0;
+        const spy = { globalRoots: () => { calls++; return []; } };
+        detect(U, '/usr/local/lib/node_modules/fuigo/bin', {}, { ...spy });
+        detect(U, '/home/sean/.npm/_npx/9f8e/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/.npm/_npx/9f8e'], ...spy });
+        assert.strictEqual(calls, 0);
+        detect(U, '/home/sean/work/app/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/work/app'], ...spy });
+        assert.strictEqual(calls, 1);
+    });
+    test('a known prefix resolves the ambiguous case without asking npm (home prefix, ~/.local)', () => {
+        let calls = 0;
+        const spy = { globalRoots: () => { calls++; return []; } };
+        assert.strictEqual(detect(W, 'C:\\Users\\sean\\node_modules\\fuigo\\bin', { npm_config_prefix: 'C:\\Users\\sean' }, { pkgJson: ['C:\\Users\\sean'], ...spy }), 'npm');
+        assert.strictEqual(detect(W, 'c:\\users\\SEAN\\node_modules\\fuigo\\bin', { npm_config_prefix: 'C:\\Users\\sean\\' }, { pkgJson: ['c:\\users\\SEAN'], ...spy }), 'npm');
+        assert.strictEqual(detect(U, '/home/sean/.local/lib/node_modules/fuigo/bin', {}, { pkgJson: ['/home/sean/.local/lib'], ...spy }), 'npm');
+        assert.strictEqual(calls, 0);
+    });
+    test('real globalInstallKind: read-only package dir -> per-user cache, one npm spawn over 3 launches, no ~/.fuigo', () => {
+        const dir = makeTmpDir();
+        const saved = { HOME: process.env.HOME, XDG: process.env.XDG_CACHE_HOME, LA: process.env.LOCALAPPDATA };
+        const cpm = require('child_process');
+        const orig = cpm.execFileSync;
+        try {
+            const home = path.join(dir, 'home');
+            fs.mkdirSync(home, { recursive: true });
+            process.env.HOME = home;
+            process.env.XDG_CACHE_HOME = path.join(home, 'xdg');
+            process.env.LOCALAPPDATA = path.join(home, 'lad');
+            const pkg = path.join(dir, 'proj', 'node_modules', 'fuigo');
+            const bin = path.join(pkg, 'bin');
+            fs.mkdirSync(bin, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'proj', 'package.json'), '{"name":"proj"}');
+            fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"fuigo","version":"1.0.30"}');
+            // a directory squatting on the cache name makes the package-dir write fail even as root
+            fs.mkdirSync(path.join(pkg, '.fuigo-npm-root.json'));
+            let calls = 0;
+            cpm.execFileSync = () => { calls++; return '/some/other/lib/node_modules\n'; };
+            const { globalInstallKind } = require('../bin/fuigo-replace.js');
+            for (let i = 0; i < 3; i++) assert.strictEqual(globalInstallKind(bin), null);
+            assert.strictEqual(calls, 1, 'second and third launch hit the user cache');
+            const files = [];
+            (function walk(d) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) walk(f); else files.push(f); } })(home);
+            assert.ok(files.some((f) => path.basename(f) === 'fuigo-npm-root.json'), 'user cache written: ' + files.join(','));
+            assert.ok(!fs.existsSync(path.join(home, '.fuigo')), '~/.fuigo must not be created');
+            // a version bump re-asks, then is cached too
+            fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"fuigo","version":"1.0.31"}');
+            assert.strictEqual(globalInstallKind(bin), null);
+            assert.strictEqual(calls, 2);
+            assert.strictEqual(globalInstallKind(bin), null);
+            assert.strictEqual(calls, 2);
+            // a failed (timed out) npm is not cached
+            fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"fuigo","version":"1.0.32"}');
+            cpm.execFileSync = () => { calls++; throw new Error('ETIMEDOUT'); };
+            assert.strictEqual(globalInstallKind(bin), null);
+            assert.strictEqual(globalInstallKind(bin), null);
+            assert.strictEqual(calls, 4, 'failures stay uncached');
+        } finally {
+            cpm.execFileSync = orig;
+            for (const [k, v] of [['HOME', saved.HOME], ['XDG_CACHE_HOME', saved.XDG], ['LOCALAPPDATA', saved.LA]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+            cleanup(dir);
+        }
+    });
+    for (const attack of ['other-owner', 'group-writable', 'symlinked-dir', 'planted-file-other-owner']) {
+        test(`user npm-root cache ignored when untrusted: ${attack}`, () => {
+            if (process.platform === 'win32') return;
+            const dir = makeTmpDir();
+            const saved = { HOME: process.env.HOME, XDG: process.env.XDG_CACHE_HOME, TMPDIR: process.env.TMPDIR };
+            const cpm = require('child_process');
+            const orig = cpm.execFileSync;
+            const { globalInstallKind, npmRootCacheHooks } = require('../bin/fuigo-replace.js');
+            const origLstat = npmRootCacheHooks.lstat;
+            try {
+                process.env.HOME = path.join(dir, 'home');
+                process.env.XDG_CACHE_HOME = path.join(dir, 'xdg');
+                process.env.TMPDIR = path.join(dir, 'tmp');
+                fs.mkdirSync(process.env.TMPDIR, { recursive: true });
+                const proj = path.join(dir, 'proj');
+                const pkg = path.join(proj, 'node_modules', 'fuigo');
+                const bin = path.join(pkg, 'bin');
+                fs.mkdirSync(bin, { recursive: true });
+                fs.writeFileSync(path.join(proj, 'package.json'), '{"name":"proj"}');
+                fs.writeFileSync(path.join(pkg, 'package.json'), '{"name":"fuigo","version":"1.0.30"}');
+                fs.mkdirSync(path.join(pkg, '.fuigo-npm-root.json')); // package dir not writable
+                const cdir = path.join(dir, 'xdg', 'fuigo');
+                const cfile = path.join(cdir, 'fuigo-npm-root.json');
+                const key = [fs.realpathSync(pkg), '1.0.30', fs.realpathSync(process.execPath)].join('|');
+                // the attacker's file claims the victim project's node_modules is the global root
+                const plant = JSON.stringify({ [key]: [path.join(proj, 'node_modules')] });
+                if (attack === 'symlinked-dir') {
+                    const real = path.join(dir, 'evil'); fs.mkdirSync(real, { mode: 0o700 });
+                    fs.writeFileSync(path.join(real, 'fuigo-npm-root.json'), plant);
+                    fs.mkdirSync(path.dirname(cdir), { recursive: true });
+                    fs.symlinkSync(real, cdir);
+                } else {
+                    fs.mkdirSync(cdir, { recursive: true, mode: 0o700 });
+                    fs.writeFileSync(cfile, plant);
+                    if (attack === 'group-writable') fs.chmodSync(cdir, 0o770);
+                    if (attack === 'other-owner') npmRootCacheHooks.lstat = (f) => { const st = fs.lstatSync(f); return f === cdir ? Object.create(st, { uid: { value: process.getuid() + 1 }, isDirectory: { value: () => true }, isSymbolicLink: { value: () => false } }) : st; };
+                    if (attack === 'planted-file-other-owner') npmRootCacheHooks.lstat = (f) => { const st = fs.lstatSync(f); return f === cfile ? Object.create(st, { uid: { value: process.getuid() + 1 }, isFile: { value: () => true }, isSymbolicLink: { value: () => false } }) : st; };
+                }
+                let calls = 0;
+                cpm.execFileSync = () => { calls++; return '/some/other/lib/node_modules\n'; };
+                assert.strictEqual(globalInstallKind(bin), null, 'planted root must not make the project copy global');
+                assert.strictEqual(calls, 1, 'untrusted cache is ignored, npm asked');
+                if (attack === 'symlinked-dir') assert.strictEqual(fs.readFileSync(path.join(dir, 'evil', 'fuigo-npm-root.json'), 'utf8'), plant, 'nothing written through the symlink');
+            } finally {
+                npmRootCacheHooks.lstat = origLstat;
+                cpm.execFileSync = orig;
+                for (const [k, v] of [['HOME', saved.HOME], ['XDG_CACHE_HOME', saved.XDG], ['TMPDIR', saved.TMPDIR]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+                cleanup(dir);
+            }
+        });
+    }
+    test('real globalInstallKind: a project-local copy spawns nothing on repeat launches (npm output cached)', () => {
+        const dir = makeTmpDir();
+        try {
+            const bin = path.join(dir, 'proj', 'node_modules', 'fuigo', 'bin');
+            fs.mkdirSync(bin, { recursive: true });
+            fs.writeFileSync(path.join(dir, 'proj', 'package.json'), '{"name":"proj"}');
+            fs.writeFileSync(path.join(dir, 'proj', 'node_modules', 'fuigo', 'package.json'), '{"name":"fuigo","version":"1.0.30"}');
+            const cp = require('child_process');
+            const orig = cp.execFileSync;
+            let calls = 0;
+            cp.execFileSync = () => { calls++; return '/some/other/lib/node_modules\n'; };
+            try {
+                const { globalInstallKind } = require('../bin/fuigo-replace.js');
+                assert.strictEqual(globalInstallKind(bin), null);
+                assert.strictEqual(calls, 1, 'first launch asks npm once');
+                assert.strictEqual(globalInstallKind(bin), null);
+                assert.strictEqual(globalInstallKind(bin), null);
+                assert.strictEqual(calls, 1, 'later launches use the cache');
+                // a new installed version re-asks
+                fs.writeFileSync(path.join(dir, 'proj', 'node_modules', 'fuigo', 'package.json'), '{"name":"fuigo","version":"1.0.31"}');
+                assert.strictEqual(globalInstallKind(bin), null);
+                assert.strictEqual(calls, 2);
+                // and the cached npm-only answer still resolves a global copy
+                const gbin = path.join(dir, 'g', 'lib', 'node_modules', 'fuigo', 'bin');
+                fs.mkdirSync(gbin, { recursive: true });
+                fs.writeFileSync(path.join(dir, 'g', 'lib', 'package.json'), '{}');
+                fs.writeFileSync(path.join(dir, 'g', 'lib', 'node_modules', 'fuigo', 'package.json'), '{"name":"fuigo","version":"1.0.30"}');
+                cp.execFileSync = () => { calls++; return fs.realpathSync(path.join(dir, 'g', 'lib', 'node_modules')) + '\n'; };
+                assert.strictEqual(globalInstallKind(gbin), 'npm');
+            } finally { cp.execFileSync = orig; }
+        } finally { cleanup(dir); }
+    });
+    test('a normal global install (no package.json beside node_modules) never spawns npm', () => {
+        const dir = makeTmpDir();
+        try {
+            const gbin = path.join(dir, 'g', 'lib', 'node_modules', 'fuigo', 'bin');
+            fs.mkdirSync(gbin, { recursive: true });
+            const cp = require('child_process');
+            const orig = cp.execFileSync;
+            let calls = 0;
+            cp.execFileSync = () => { calls++; return ''; };
+            try {
+                assert.strictEqual(require('../bin/fuigo-replace.js').globalInstallKind(gbin), 'npm');
+                assert.strictEqual(calls, 0);
+            } finally { cp.execFileSync = orig; }
+        } finally { cleanup(dir); }
+    });
+    test('npmrcPrefix reads prefix=, expands ${VAR} and ~, ignores comments, last one wins', () => {
+        assert.strictEqual(npmrcPrefix('; prefix=/no\nregistry=x\nprefix = "D:\\\\npm"\n', {}, '/h'), 'D:\\\\npm');
+        assert.strictEqual(npmrcPrefix('prefix=${APPDATA}\\npm', { APPDATA: 'C:\\Users\\s\\AppData\\Roaming' }, 'C:\\h'), 'C:\\Users\\s\\AppData\\Roaming\\npm');
+        assert.strictEqual(npmrcPrefix('prefix=~/.npm-global', {}, '/home/s'), '/home/s/.npm-global');
+        assert.strictEqual(npmrcPrefix('registry=x', {}, '/h'), null);
+    });
+
+    console.log('\nWindows downgrade guard (canonicalVersion)\n');
+    const winBin = (dir, files, stamp) => {
+        for (const [n, c] of Object.entries(files)) fs.writeFileSync(path.join(dir, n), c);
+        if (stamp !== undefined) fs.writeFileSync(path.join(dir, '.fuigo-npm-stamp'), JSON.stringify([stamp, 'C:\\pkg', '1:2']));
+        return path.join(dir, 'fuigo.exe');
+    };
+    test('windows: the stamp names the version of the fuigo.exe copy', () => {
+        const dir = makeTmpDir();
+        try {
+            const exe = winBin(dir, { 'fuigo.exe': 'BBBB', 'fuigo-1.0.29.exe': 'AAAA', 'fuigo-1.0.30.exe': 'BBBB' }, '1.0.30');
+            assert.strictEqual(canonicalVersion(exe, 'win32'), '1.0.30');
+        } finally { cleanup(dir); }
+    });
+    test('windows: no stamp -> the newest versioned exe with the same size', () => {
+        const dir = makeTmpDir();
+        try {
+            const exe = winBin(dir, { 'fuigo.exe': 'BBBB', 'fuigo-1.0.9.exe': 'BBBB', 'fuigo-1.0.10.exe': 'BBBB', 'fuigo-1.0.11.exe': 'CCCCCC' });
+            assert.strictEqual(canonicalVersion(exe, 'win32'), '1.0.10');
+        } finally { cleanup(dir); }
+    });
+    test('windows: a stamp for a version that is not on disk is ignored', () => {
+        const dir = makeTmpDir();
+        try {
+            const exe = winBin(dir, { 'fuigo.exe': 'AAAA', 'fuigo-1.0.28.exe': 'AAAA' }, '1.0.99');
+            assert.strictEqual(canonicalVersion(exe, 'win32'), '1.0.28');
+        } finally { cleanup(dir); }
+    });
+    test('windows: missing fuigo.exe, a garbage stamp and a non-win32 platform all give null/fallback', () => {
+        const dir = makeTmpDir();
+        try {
+            assert.strictEqual(canonicalVersion(path.join(dir, 'fuigo.exe'), 'win32'), null);
+            const exe = winBin(dir, { 'fuigo.exe': 'AAAA', 'fuigo-1.0.28.exe': 'AAAA', '.fuigo-npm-stamp': 'not json' });
+            assert.strictEqual(canonicalVersion(exe, 'win32'), '1.0.28');
+            assert.strictEqual(canonicalVersion(exe, 'linux'), null, 'a Unix regular file stays unknown');
+        } finally { cleanup(dir); }
+    });
 }
 
 // ─── Summary ───────────────────────────────────────────────────────────
