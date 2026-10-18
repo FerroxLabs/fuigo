@@ -12,9 +12,13 @@ pub(crate) const LIVE_ORPHAN_RECONCILE_INTERVAL: std::time::Duration =
 
 /// A notification buffered for idle-gated drain (see `maybe_drain_notifications`).
 pub(crate) struct PendingNotification {
-    #[expect(
-        dead_code,
-        reason = "Retained for debugging / future per-notification tracing."
+    // Read by the test build, so the expectation only holds outside it
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for debugging / future per-notification tracing."
+        )
     )]
     pub(crate) prompt_id: String,
     pub(crate) prompt_blocks: Vec<acp::ContentBlock>,

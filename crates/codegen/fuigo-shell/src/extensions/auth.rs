@@ -184,7 +184,7 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 /// Re-checks the subscription once, for the retry button on the paywall screen.
 /// Returns the updated auth response with gate info so the pager can refresh the gate state.
 async fn handle_check_subscription(agent: &MvpAgent) -> ExtResult {
-    agent.retry_subscription_check().await;
+    agent.check_subscription_awaiting_in_flight().await;
     let response = agent.auth_response_with_meta();
     to_raw_response(&serde_json::json!({
         "authenticated": response.meta.is_some(),

@@ -339,6 +339,59 @@ fn capture_prev_permission_canonical(app: &AppView, prev_yolo: bool) -> &'static
     }
 }
 
+/// The permission mode agent `id` is in, as a canonical string (where a refused change goes back to).
+fn agent_permission_canonical(app: &AppView, id: crate::app::agent::AgentId) -> &'static str {
+    let Some(agent) = app.agents.get(&id) else {
+        return "ask";
+    };
+    if agent.session.is_yolo() {
+        "always-approve"
+    } else if agent.session.is_auto() {
+        "auto"
+    } else if app.current_ui.permission_mode.as_deref() == Some("default") {
+        "default"
+    } else {
+        "ask"
+    }
+}
+
+/// The leader refused a permission mode change for `session_id` (this window does not own the session): put the window
+/// back in `rollback`, the mode it was in, so the indicator is right and a later `/new` does not start in the refused mode.
+pub(super) fn roll_back_refused_permission_mode(
+    app: &mut AppView,
+    session_id: &acp::SessionId,
+    rollback: &'static str,
+) -> Vec<Effect> {
+    let Some(target) = super::ctx::find_agent_id_by_session_id(&app.agents, &session_id.0) else {
+        return vec![];
+    };
+    if matches!(app.active_view, ActiveView::Agent(id) if id == target) {
+        let effects = super::settings::ui::apply_setting_rollback(
+            app,
+            "permission_mode",
+            &crate::settings::SettingValue::Enum(rollback),
+        );
+        refresh_open_settings_modals(app);
+        return effects;
+    }
+    // The user has moved to another tab: restore that session's own flags, and the window's default for new tabs from the
+    // tab in view (the refused change had set it).
+    let yolo = rollback == "always-approve" && app.yolo_policy_block.is_none();
+    let auto = rollback == "auto" && app.auto_mode_gate;
+    if let Some(agent) = app.agents.get_mut(&target) {
+        agent.session.yolo_mode = yolo;
+        agent.session.auto_mode = auto;
+    }
+    if let ActiveView::Agent(active) = app.active_view
+        && let Some(agent) = app.agents.get(&active)
+    {
+        app.default_yolo = agent.session.is_yolo();
+    }
+    super::ctx::sync_active_permission_mode_mirror(app);
+    refresh_open_settings_modals(app);
+    vec![]
+}
+
 /// Set YOLO (`permission_mode`).
 /// SHELL-owned, emits `Effect::PersistPermissionMode` with rollback.
 /// The drain runs unconditionally when YOLO turns ON (even duplicate dispatches) because a permission could arrive between dispatches.
@@ -509,8 +562,24 @@ pub(super) fn dispatch_cycle_mode(app: &mut AppView) -> Vec<Effect> {
     // A disabled/absent nudge never emits
     let (nudge_showing, in_plan_before) = active_agent_plan_nudge_state(app);
     // Tip copy promises Plan in one Shift+Tab; collapse Auto/Always-Approve to ask first so the ring's Normal-to-Plan arm is the sole Plan entry
+    // A refused press goes back to the mode before the whole press, collapse included.
+    let before_press = match app.active_view {
+        ActiveView::Agent(id) => Some(agent_permission_canonical(app, id)),
+        _ => None,
+    };
     let mut effects = collapse_to_ask_for_nudge_jump(app).unwrap_or_default();
     effects.extend(dispatch_cycle_mode_and_sync(app));
+    if let Some(before_press) = before_press {
+        for effect in &mut effects {
+            if let Effect::PersistPermissionMode {
+                persist: crate::app::actions::PermissionModePersist::Cycle(rollback),
+                ..
+            } = effect
+            {
+                *rollback = before_press;
+            }
+        }
+    }
     // Re-read only `in_plan`, via the same mut agent handle used to retire the nudge: entering Plan with the nudge up is an acceptance
     if nudge_showing
         && !in_plan_before
@@ -554,6 +623,7 @@ fn collapse_to_ask_for_nudge_jump(app: &mut AppView) -> Option<Vec<Effect>> {
         return None;
     }
     let session_id = agent.session.session_id.clone()?;
+    let prev_canonical = if in_yolo { "always-approve" } else { "auto" };
 
     if in_yolo {
         set_yolo_mode_inner(app, false);
@@ -564,7 +634,7 @@ fn collapse_to_ask_for_nudge_jump(app: &mut AppView) -> Option<Vec<Effect>> {
     Some(vec![Effect::PersistPermissionMode {
         canonical: "ask",
         session_id: Some(session_id),
-        persist: crate::app::actions::PermissionModePersist::BestEffort,
+        persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
     }])
 }
 
@@ -602,6 +672,8 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    // Where a change the leader refuses for this session goes back to.
+    let prev_canonical = agent_permission_canonical(app, id);
     // Capture the pin before borrowing `agent`: the arms that enter Always-Approve enable yolo
     // A `yolo_enable_blocked(app, _)` call would conflict with the live `&mut agent`
     // This is the same predicate (enabling = true here)
@@ -768,7 +840,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                         Effect::PersistPermissionMode {
                             canonical: "ask",
                             session_id: Some(session_id),
-                            persist: crate::app::actions::PermissionModePersist::BestEffort,
+                            persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                         },
                     ];
                 }
@@ -789,7 +861,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                     Effect::PersistPermissionMode {
                         canonical: "always-approve",
                         session_id: Some(session_id),
-                        persist: crate::app::actions::PermissionModePersist::BestEffort,
+                        persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                     },
                 ];
             }
@@ -810,7 +882,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 Effect::PersistPermissionMode {
                     canonical: "auto",
                     session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
+                    persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                 },
             ]
         }
@@ -828,7 +900,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 return vec![Effect::PersistPermissionMode {
                     canonical: "ask",
                     session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
+                    persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                 }];
             }
             set_yolo_mode_inner(app, true);
@@ -841,7 +913,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
             vec![Effect::PersistPermissionMode {
                 canonical: "always-approve",
                 session_id: Some(session_id),
-                persist: crate::app::actions::PermissionModePersist::BestEffort,
+                persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
             }]
         }
         // Always-Approve to Normal
@@ -856,7 +928,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
             vec![Effect::PersistPermissionMode {
                 canonical: "ask",
                 session_id: Some(session_id),
-                persist: crate::app::actions::PermissionModePersist::BestEffort,
+                persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
             }]
         }
 
@@ -880,7 +952,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 Effect::PersistPermissionMode {
                     canonical: "auto",
                     session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
+                    persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                 },
             ]
         }
@@ -912,7 +984,7 @@ fn dispatch_cycle_mode_inner(app: &mut AppView) -> Vec<Effect> {
                 effects.push(Effect::PersistPermissionMode {
                     canonical: "ask",
                     session_id: Some(session_id),
-                    persist: crate::app::actions::PermissionModePersist::BestEffort,
+                    persist: crate::app::actions::PermissionModePersist::Cycle(prev_canonical),
                 });
             }
             effects

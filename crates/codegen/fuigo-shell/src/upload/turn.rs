@@ -474,28 +474,28 @@ pub(crate) fn lookup_session_model(
 pub(crate) enum SenderScope<'a> {
     /// Direct (single-client stdio) mode: match on the client's product string; no product matches every session.
     Product(Option<&'a str>),
-    /// Leader mode: only sessions owned by this leader-stamped connection id; `None` (no stamp) matches nothing.
-    Connection(Option<u64>),
+    /// Leader mode: only the sessions the leader stamped as owned by the sender; `None` (no stamp) matches nothing.
+    Owned(Option<&'a std::collections::HashSet<String>>),
 }
 impl SenderScope<'_> {
-    pub(crate) fn matches(self, owner: Option<u64>, h: &crate::session::SessionHandle) -> bool {
+    pub(crate) fn matches(self, session_id: &str, h: &crate::session::SessionHandle) -> bool {
         match self {
             Self::Product(sender) => {
                 sender.is_none() || h.origin_client.as_ref().map(|c| c.product.as_str()) == sender
             }
-            Self::Connection(sender) => sender.is_some() && owner == sender,
+            Self::Owned(owned) => owned.is_some_and(|ids| ids.contains(session_id)),
         }
     }
 }
-/// Applies the change to every `(owner connection id, session)` pair the scope matches; returns how many changed.
+/// Applies the change to every `(session id, session)` pair the scope matches; returns how many changed.
 pub(crate) fn apply_yolo_mode_to_matching_sessions<'a>(
-    sessions: impl IntoIterator<Item = (Option<u64>, &'a mut crate::session::SessionHandle)>,
+    sessions: impl IntoIterator<Item = (&'a str, &'a mut crate::session::SessionHandle)>,
     scope: SenderScope<'_>,
     yolo_mode: bool,
 ) -> usize {
     let mut updated = 0;
-    for (owner, handle) in sessions {
-        if scope.matches(owner, handle) {
+    for (session_id, handle) in sessions {
+        if scope.matches(session_id, handle) {
             handle.yolo_mode = yolo_mode;
             let _ = handle
                 .cmd_tx

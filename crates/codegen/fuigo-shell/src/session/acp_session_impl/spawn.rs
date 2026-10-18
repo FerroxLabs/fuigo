@@ -2688,6 +2688,11 @@ pub(crate) async fn spawn_session_on_thread(
     // unlocked, and a load dropped during the wait leaves nothing behind. The wait is async (this runs on the agent's
     // `LocalSet`) and bounded; a recovery elsewhere that holds the session past the bound fails the load with a retry
     // message instead of waiting forever, and no actor is started.
+    // 1.0.30 P30-DIRECT: the actor holds the session's writer lock for its whole life (moved into its thread below), so
+    // no other process opens the session while this one can write it. Re-entrant within this process.
+    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&session_info))
+        .await
+        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
     #[cfg(test)]
     crate::session::persistence::test_seam::run_before_turn_owner_lock(
         &session_info.id.0,
@@ -2710,6 +2715,8 @@ pub(crate) async fn spawn_session_on_thread(
         .name(thread_name)
         .stack_size(SESSION_THREAD_STACK_SIZE)
         .spawn(move || {
+            // Released when the session's thread ends: after the actor and its last writes.
+            let _writer_lock = writer_lock;
             let _notice_scope = notice_scope.map(fuigo_config::key_naming::NoticeScope::enter);
             let (initial_last_compaction, initial_prompt_texts) = {
                 let session_dir = crate::session::persistence::session_dir(&session_info);

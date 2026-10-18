@@ -7,8 +7,8 @@
 
 pub(crate) use fuigo_pager_pty_harness::{
     AgentTurnExpectation, ContentController, EnvOp, MockModel, PtyExitPoll, PtyHarness,
-    ScriptedResponse, SseEvent, keys, oauth_credential_ops, pager_binary, seed_fake_oauth, sse,
-    wait_for_labels_absent, wait_for_model_via_new_sessions,
+    ScriptedResponse, SseEvent, keys, oauth_client_id_op, oauth_credential_ops, oauth_provider_ops,
+    pager_binary, seed_fake_oauth, sse, wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub(crate) use serde_json::json;
 pub(crate) use std::path::{Path, PathBuf};
@@ -166,7 +166,11 @@ pub(crate) fn spawn_polling_session_with_env(
 ) -> PtyHarness {
     seed_fake_oauth(content, oauth_user);
     let mut overrides = Vec::from(oauth_credential_ops());
+    overrides.extend(oauth_provider_ops());
     overrides.push(EnvOp::set("FUIGO_ANNOUNCEMENTS_REFRESH_INTERVAL_SECS", "1"));
+    // Session auth only reaches `/v1/settings` and the models/inference endpoints over a trusted HTTPS origin.
+    let front_env = content.session_front_env();
+    overrides.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
     overrides.extend(extra_env.iter().map(|(key, value)| EnvOp::set(key, value)));
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -201,7 +205,7 @@ pub(crate) fn spawn_polling_session_with_env(
 pub(crate) async fn start_dual_agent_type_content() -> ContentController {
     ContentController::start_with_models(vec![
         MockModel::new("default-model"),
-        MockModel::with_agent_type("cursor-model", "cursor"),
+        MockModel::with_agent_type("codex-model", "codex"),
     ])
     .await
     .expect("start content with dual agent types")

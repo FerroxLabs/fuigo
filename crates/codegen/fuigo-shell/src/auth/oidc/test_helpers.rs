@@ -29,6 +29,10 @@ pub(super) fn generate_test_rsa_key() -> (String, String, String) {
 pub(super) async fn mock_idp_token() -> (String, String, Discovery, tokio::task::JoinHandle<()>) {
     let (issuer, handle) = start_mock_idp().await;
     let discovery = discover(&issuer).await.unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "request to the in-process mock IdP on localhost; no destination policy applies to a test fixture"
+    )]
     let resp: serde_json::Value = crate::http::shared_client()
         .post(&discovery.token_endpoint)
         .form(&[("grant_type", "authorization_code")])

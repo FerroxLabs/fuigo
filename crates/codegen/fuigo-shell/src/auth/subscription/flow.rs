@@ -257,10 +257,10 @@ fn parse_credential(provider: SubscriptionProvider, body: serde_json::Value) -> 
         .and_then(|v| v.as_str())
         .and_then(claims);
     for claim in [&access_claims, &id_claims].into_iter().flatten() {
-        if let Some(issuer) = claim.get("iss").and_then(|v| v.as_str()) {
-            if issuer.trim_end_matches('/') != provider.issuer() {
-                return Err(SubscriptionError::InvalidCredentials);
-            }
+        if let Some(issuer) = claim.get("iss").and_then(|v| v.as_str())
+            && issuer.trim_end_matches('/') != provider.issuer()
+        {
+            return Err(SubscriptionError::InvalidCredentials);
         }
     }
     let get_account = |claim: &serde_json::Value| -> Option<String> {

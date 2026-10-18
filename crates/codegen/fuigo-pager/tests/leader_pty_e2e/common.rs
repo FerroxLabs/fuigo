@@ -3,11 +3,10 @@
 //! Drive/seed helpers live in `fuigo_pager_pty_harness::flows` (one canonical copy shared with `pty_e2e`); only suite-local constants stay here.
 
 pub(crate) use fuigo_pager_pty_harness::{
-    ContentController, LeaderCluster, MockModel, PtyHarness, inference_request_count, keys,
-    oauth_credential_ops, pager_binary, seed_fake_oauth, submit_turn, wait_for_labels_absent,
+    ContentController, EnvOp, LeaderCluster, MockModel, PtyHarness, inference_request_count, keys,
+    pager_binary, submit_turn, wait_for_labels_absent,
     wait_for_model_via_new_sessions,
 };
-pub(crate) use serde_json::json;
 pub(crate) use std::time::{Duration, Instant};
 
 /// Default PTY size used by every e2e test (same as `pty_e2e`).

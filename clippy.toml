@@ -53,6 +53,7 @@ disallowed-methods = [
     # which would otherwise warn that the banned path is unreachable.
     { path = "dirs::home_dir", reason = "home-anchored paths resolve via fuigo_dirs::home_dir so all sites agree; Node-based tools use os.homedir, which matches it, not the known-folder API", allow-invalid = true },
     { path = "std::process::Command::spawn", reason = "an unenrolled child outlives its session; use fuigo_tty_utils::ProcessScope::enroll" },
-    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use fuigo_tty_utils::ProcessScope::enroll" },
+    # allow-invalid: crates built without tokio's `process` feature cannot reach this path, which would otherwise warn.
+    { path = "tokio::process::Command::spawn", reason = "an unenrolled child outlives its session; use fuigo_tty_utils::ProcessScope::enroll", allow-invalid = true },
     { path = "portable_pty::SlavePty::spawn_command", reason = "an unenrolled pty child outlives its session; enroll the shell with fuigo_tty_utils::ProcessScope::enroll_terminal_pid" },
 ]

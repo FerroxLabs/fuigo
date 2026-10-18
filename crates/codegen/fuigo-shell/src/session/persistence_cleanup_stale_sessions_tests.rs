@@ -328,7 +328,9 @@ fn mark_session_live_never_follows_a_symlinked_summary() {
     let tmp = sessions_tmp();
     let outside = TempDir::new().unwrap();
     let target = outside.path().join("summary.json");
-    write(&target, days_ago(60));
+    // One timestamp for both the write and the check: computing it twice failed when a second boundary fell between.
+    let age = days_ago(60);
+    write(&target, age);
     let session = tmp.path().join("cwd").join("s1");
     std::fs::create_dir_all(&session).unwrap();
     std::os::unix::fs::symlink(&target, session.join("summary.json")).unwrap();
@@ -336,7 +338,7 @@ fn mark_session_live_never_follows_a_symlinked_summary() {
     mark(&session);
 
     let mtime = FileTime::from_last_modification_time(&std::fs::metadata(&target).unwrap());
-    assert_eq!(days_ago(60).unix_seconds(), mtime.unix_seconds());
+    assert_eq!(age.unix_seconds(), mtime.unix_seconds());
 }
 
 // ── Astra r1 (HIGH): another process attaching an idle session while the sweep is deciding ──

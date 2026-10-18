@@ -11,13 +11,14 @@ use std::{sync::Arc, time::Duration};
 fn billed(text: &str, ticks: i64) -> ScriptedResponse {
     let mut events = sse::chat_completion_script_exact(text, "test-model");
     for event in &mut events {
-        if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&event.data) {
-            if let Some(usage) = data.get_mut("usage") {
-                usage["cost_in_usd_ticks"] = serde_json::json!(ticks);
-                usage["completion_tokens"] = serde_json::json!(5);
-                usage["total_tokens"] = serde_json::json!(15);
-                event.data = data.to_string();
-            }
+        let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&event.data) else {
+            continue;
+        };
+        if let Some(usage) = data.get_mut("usage") {
+            usage["cost_in_usd_ticks"] = serde_json::json!(ticks);
+            usage["completion_tokens"] = serde_json::json!(5);
+            usage["total_tokens"] = serde_json::json!(15);
+            event.data = data.to_string();
         }
     }
     ScriptedResponse::sse(events)
