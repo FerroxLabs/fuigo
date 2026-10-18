@@ -775,6 +775,15 @@ pub async fn run(
     materialize_ctx.restore_progress_on_stdout =
         std::io::IsTerminal::is_terminal(&std::io::stdout());
     let materialized = session_startup::materialize_startup(materialize_ctx, intent).await?;
+    // 1.0.30 P30-DIRECT: without the shared leader this window's own agent opens the session. When another window has
+    // it open, say so and stop before anything starts (the agent refuses the open too; this is the early answer).
+    if !use_leader
+        && !args.chat()
+        && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
+        && fuigo_shell::session::session_writer_lock::session_open_elsewhere(session_id)
+    {
+        anyhow::bail!("{}", fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE);
+    }
     if args.chat()
         && let session_startup::MaterializedStartup::Resume { session_id, .. } = &materialized
     {

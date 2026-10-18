@@ -30,11 +30,11 @@ fn compact_presentation_keeps_instructions_and_native_schemas() {
         let catalog: Vec<serde_json::Value> = serde_json::from_str(include_str!("../src/session/compact_tool_descriptions.json")).unwrap();
         let mut applied = 0;
         for entry in catalog {
-            if let Some(tool) = tools.iter().find(|t| t["function"]["name"] == entry["name"]) {
-                if tool["function"]["description"] == entry["compact"] {
-                    assert_eq!(tool["function"]["parameters"], entry["parameters"]);
-                    applied += 1;
-                }
+            if let Some(tool) = tools.iter().find(|t| t["function"]["name"] == entry["name"])
+                && tool["function"]["description"] == entry["compact"]
+            {
+                assert_eq!(tool["function"]["parameters"], entry["parameters"]);
+                applied += 1;
             }
         }
         assert!(applied >= 5, "compact presentation did not activate on built-ins: {applied}");

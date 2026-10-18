@@ -1337,10 +1337,15 @@ async fn test_capabilities_not_injected_into_non_session_new() {
     let received = acp_rx.recv().await.unwrap();
     let json: serde_json::Value = serde_json::from_str(&received).unwrap();
 
-    assert!(
-        json["params"].get("_meta").is_none(),
-        "session/prompt should not have _meta injected"
-    );
+    // The only `_meta` the leader may add to a prompt is its ownership verdict (1.0.30 P30-LEADER r8), never capabilities
+    if let Some(meta) = json["params"].get("_meta") {
+        let keys: Vec<&String> = meta.as_object().expect("_meta is an object").keys().collect();
+        assert_eq!(
+            keys,
+            vec!["fuigo/leaderOwnerState"],
+            "session/prompt should carry only the owner verdict, no injected capabilities"
+        );
+    }
     assert_eq!(json["params"]["sessionId"], "sess-123");
 
     // Send session/load: it gets clientIdentifier but NOT yoloMode or modelId

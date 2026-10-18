@@ -387,6 +387,7 @@ impl AgentView {
             pending_first_prompt: None,
             pending_fork_banner: None,
             load_failed: false,
+            load_return_to: None,
             load_attempt: 0,
             loading_placeholder_id: None,
             pending_recap_entry: None,

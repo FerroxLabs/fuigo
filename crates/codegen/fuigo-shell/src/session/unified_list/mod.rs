@@ -966,7 +966,7 @@ mod tests {
         }
         {
             let _on = fuigo_test_support::EnvGuard::set("FUIGO_SESSION_LIST_CONVERSATIONS", "1");
-            assert_eq!(conversations_lane_enabled(), false);
+            assert!(!conversations_lane_enabled());
         }
         {
             let _off = fuigo_test_support::EnvGuard::set("FUIGO_SESSION_LIST_CONVERSATIONS", "0");
@@ -987,13 +987,12 @@ mod tests {
         {
             let _desktop =
                 fuigo_test_support::EnvGuard::set("FUIGO_SESSION_LIST_CONVERSATIONS", "1");
-            assert_eq!(conversations_lane_active(), false);
+            assert!(!conversations_lane_active());
         }
         {
             let _chat = fuigo_test_support::EnvGuard::set(FUIGO_CHAT_MODE_ENV, "1");
-            assert_eq!(
-                conversations_lane_active(),
-                false,
+            assert!(
+                !conversations_lane_active(),
                 "process chat mode must enable the lane (chat feature only)"
             );
         }

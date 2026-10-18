@@ -1052,6 +1052,9 @@ pub enum PermissionModePersist {
     /// On disk failure, logs a warning and leaves in-memory state at the optimistic value.
     /// ACP notification fires unconditionally.
     BestEffort,
+    /// Shift+Tab on an existing session: a failed save is handled like `BestEffort`, but a change the leader refuses for the
+    /// session (this window does not own it) puts the window back in this canonical mode.
+    Cycle(&'static str),
 }
 /// Canonical permission-mode state for the `permission_mode` setting.
 ///
@@ -3163,6 +3166,22 @@ pub enum TaskResult {
     },
     SettingPersistFailedBestEffort {
         key: crate::settings::SettingKey,
+        error: String,
+    },
+    /// The leader refused a permission mode change for `session_id` (this window does not own it): nothing was saved or
+    /// sent, and the window goes back to `rollback`, the mode it was in.
+    PermissionModeRefused {
+        session_id: acp::SessionId,
+        rollback: &'static str,
+        error: String,
+    },
+    /// The shared leader predates `fuigo/session/owner_check` (an older version kept running): it cannot say whether this
+    /// window owns the session, so the mode was not saved as the default for new windows.
+    PermissionModeNotSavedOldLeader,
+    /// `session/set_mode` failed (refused for a window that does not own the session): the optimistic plan state goes back
+    /// to the confirmed one.
+    SessionModeChangeFailed {
+        session_id: acp::SessionId,
         error: String,
     },
     /// Off-thread clipboard attachment probe finished (see [`Effect::ProbeClipboardAttachment`]); dispatch attaches the chip.

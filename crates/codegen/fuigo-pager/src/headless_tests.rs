@@ -1027,8 +1027,7 @@ async fn session_new_is_bounded_by_the_run_deadline() {
     )
     .await
     .expect("session/new ignored the run deadline and blocked forever")
-    .err()
-    .expect("an unanswered session/new must fail, not hang");
+    .expect_err("an unanswered session/new must fail, not hang");
     let msg = err.to_string();
     assert!(
         msg.contains("timed out") && msg.contains("session/new"),

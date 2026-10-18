@@ -1678,6 +1678,9 @@ pub struct AgentView {
     pub(crate) pending_fork_banner: Option<PendingForkBanner>,
     /// Set when `session/load` failed, so this tab has no session and a plain prompt is refused with a notice.
     pub(crate) load_failed: bool,
+    /// The tab that was showing when this tab was opened to load a session (`/resume`): where the window goes back to when
+    /// the load is refused because the session is open in another window.
+    pub(crate) load_return_to: Option<crate::app::agent::AgentId>,
     /// Latest load attempt number issued for this agent ([`AgentView::begin_load_attempt`]).
     pub(crate) load_attempt: u64,
     /// Entry ID of the "Loading session ..." placeholder block pushed

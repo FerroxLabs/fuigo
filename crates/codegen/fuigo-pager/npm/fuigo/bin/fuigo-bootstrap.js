@@ -40,6 +40,9 @@ const INSTALL_ONLY = process.env.FUIGO_INSTALL_ONLY === '1';
 const FUIGO_HOME = process.env.FUIGO_HOME ?? defaultFuigoHome();
 const CANONICAL_DIR = path.join(FUIGO_HOME, 'bin');
 const CANONICAL_PATH = path.join(CANONICAL_DIR, BIN_NAME);
+// Decided once, from where this package lives (see globalInstallKind): null for a
+// project-local or npx copy.
+const GLOBAL_KIND = globalInstallKind(__dirname);
 
 function readLocalVersion() {
     try { return require('../package.json').version; } catch { return undefined; }
@@ -106,8 +109,12 @@ function resolveBinary() {
     const brotliPath = binaryPath + '.br';
     const version = readLocalVersion();
 
-    const managed = INSTALL_ONLY || globalInstallKind(__dirname) !== null;
+    const managed = INSTALL_ONLY || GLOBAL_KIND !== null;
     if (INSTALL_ONLY && !version) failSetup('the package has no readable version');
+    const expected = process.env.FUIGO_INSTALL_EXPECT_VERSION;
+    if (INSTALL_ONLY && expected && version !== expected) {
+        failSetup(`the installed package is fuigo@${version}, not the requested fuigo@${expected}`);
+    }
     if (version && managed) {
         const stamp = installStamp(version, __dirname, brotliPath, binaryPath);
         if (isCurrent(stamp)) return CANONICAL_PATH;
@@ -141,8 +148,25 @@ function resolveBinary() {
 }
 
 const execPath = resolveBinary();
-if (INSTALL_ONLY) process.exit(0); // setup only: resolveBinary exits non-zero on failure
-const childEnv = { ...process.env, FUIGO_MANAGED_BY_NPM: '1' };
+if (INSTALL_ONLY) {
+    // setup only: resolveBinary exits non-zero on failure
+    const report = process.env.FUIGO_INSTALL_REPORT;
+    if (report) {
+        try {
+            fs.writeFileSync(report, JSON.stringify({ version: readLocalVersion(), dir: path.resolve(__dirname, '..') }));
+        } catch (e) { failSetup(`cannot write the install report: ${e.message}`); }
+    }
+    process.exit(0);
+}
+const childEnv = { ...process.env };
+if (GLOBAL_KIND !== null) {
+    childEnv.FUIGO_MANAGED_BY_NPM = '1';
+    delete childEnv.FUIGO_NPM_LOCAL;
+} else {
+    // A local/npx copy is not the user's global install: never let it look npm-managed.
+    delete childEnv.FUIGO_MANAGED_BY_NPM;
+    childEnv.FUIGO_NPM_LOCAL = '1';
+}
 const child = spawn(execPath, process.argv.slice(2), { stdio: 'inherit', env: childEnv });
 child.on('exit', (code, signal) => {
     if (signal) {

@@ -143,6 +143,10 @@ fn dispatch_load_session_ungated(
         app.show_toast(SESSION_ALREADY_OPEN_NOTICE);
         return vec![];
     }
+    let return_to = match app.active_view {
+        crate::app::app_view::ActiveView::Agent(id) => Some(id),
+        _ => None,
+    };
     let mut effects = abandon_unused_empty_for_load(app, &session_id);
     let acp_session_id = clear_stale_session_id(app, &session_id);
     let agent_id = AgentId(app.next_agent_id);
@@ -203,6 +207,7 @@ fn dispatch_load_session_ungated(
     app.apply_relay_refusal(agent_id);
     let conversation_entry = session_opens_as_chat(app, chat_kind);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
+    agent_mut.load_return_to = return_to;
     agent_mut.attached_as_viewer = true;
     agent_mut.begin_replay_window();
     agent_mut.loading_placeholder_id = Some(loading_placeholder_id);
@@ -925,6 +930,12 @@ pub(in crate::app::dispatch) fn dispatch_pick_content_session(
     app.session_picker_state.reset();
     app.session_picker_content_results = None;
     app.session_picker_content_loading = false;
+    // Close the `/resume` modal as a row pick does; left open, it covered the tab the load came from.
+    if let Some(agent) = get_active_agent_mut(app)
+        && matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::SessionPicker { .. }))
+    {
+        agent.active_modal = None;
+    }
     invalidate_picker_fetch_on_dismiss(app);
     if chat_kind {
         return dispatch_load_session(app, session_id, None, true);
@@ -1227,6 +1238,11 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
         }
+    }
+    if let Some(effects) = return_from_load_held_elsewhere(app, agent_id, &error) {
+        return effects;
+    }
+    if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.pending_extensions_fetch = false;
         agent.session.prompt_history_loading = false;
         agent.session.finish_command();
@@ -1245,6 +1261,58 @@ pub(in crate::app::dispatch) fn handle_session_load_failed(
             }));
     }
     vec![]
+}
+/// 1.0.30 (Windows check D2): `/resume` of a session that is open in another window is refused. The tab opened for it
+/// has nothing to show and nothing to send to (a prompt there was refused, so the window looked stuck), so it is closed
+/// and the window goes back to the tab it came from, which keeps working; the refusal is shown there. When that tab was
+/// the unused empty session the load dropped, a new session takes its place. Anything typed while the load ran keeps the
+/// usual failed-tab handling, so it is never lost.
+fn return_from_load_held_elsewhere(app: &mut AppView, failed: AgentId, error: &str) -> Option<Vec<Effect>> {
+    if error != fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE {
+        return None;
+    }
+    let agent = app.agents.get(&failed)?;
+    let return_to = agent.load_return_to?;
+    if !agent.session.pending_prompts.is_empty()
+        || agent.pending_first_prompt.is_some()
+        || !agent.prompt.text().trim().is_empty()
+        || !agent.prompt.images.is_empty()
+    {
+        return None;
+    }
+    let mut effects = Vec::new();
+    let target = if return_to != failed && app.agents.contains_key(&return_to) {
+        switch_to_agent(app, return_to, SwitchCause::Picker);
+        return_to
+    } else {
+        let (id, created) = super::lifecycle::dispatch_new_session_inner_with_id(app, None, false);
+        effects.extend(created);
+        id
+    };
+    if let Some(d) = app.dashboard.as_mut()
+        && d.attached_agent == Some(failed)
+    {
+        d.attached_agent = Some(target);
+    }
+    super::modal::remove_agent_and_cleanup(app, failed);
+    let mut picker_closed = false;
+    if let Some(agent) = app.agents.get_mut(&target) {
+        // A `/resume` picker still open here would cover the refusal.
+        if matches!(agent.active_modal, Some(crate::views::modal::ActiveModal::SessionPicker { .. })) {
+            agent.active_modal = None;
+            picker_closed = true;
+        }
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
+                error: format!("Couldn't load session: {}", fuigo_tty_utils::untrusted(error)),
+                elapsed: None,
+            }));
+    }
+    if picker_closed {
+        invalidate_picker_fetch_on_dismiss(app);
+    }
+    Some(effects)
 }
 /// A reconnect load that fails leaves the new leader without this session: unbind the tab and refuse it like any failed open.
 /// Held rows go back to the composer or are listed, and `/resume` starts a fresh load.

@@ -1798,6 +1798,28 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             deliver_provider_write_result(app, report_to, result);
             vec![]
         }
+        TaskResult::PermissionModeRefused { session_id, rollback, error } => {
+            let effects = super::modes::roll_back_refused_permission_mode(app, &session_id, rollback);
+            let scrubbed = scrub_error_for_toast(&error);
+            app.show_toast(&format!("\u{2717} Permission mode not changed: {scrubbed}"));
+            effects
+        }
+        TaskResult::PermissionModeNotSavedOldLeader => {
+            if !app.out_of_date_leader_mode_notice_shown {
+                app.out_of_date_leader_mode_notice_shown = true;
+                app.show_toast(OUT_OF_DATE_LEADER_MODE_NOTICE);
+            }
+            vec![]
+        }
+        TaskResult::SessionModeChangeFailed { session_id, error } => {
+            if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id.0) {
+                agent.plan_mode_pending = None;
+            }
+            super::settings::ui::refresh_open_settings_modals(app);
+            let scrubbed = scrub_error_for_toast(&error);
+            app.show_toast(&format!("\u{2717} Mode not changed: {scrubbed}"));
+            vec![]
+        }
         TaskResult::SettingPersistFailedBestEffort { key, error } => {
             tracing::warn!(
                 target: "settings",
@@ -1811,6 +1833,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
     }
 }
 
+/// Shown once per window when the shared leader is older than `fuigo/session/owner_check`.
+pub(super) const OUT_OF_DATE_LEADER_MODE_NOTICE: &str = "Default permission mode not saved: the shared leader is out of date. \
+     Run `fuigo leader kill`, or restart the leader.";
 /// A `/feedback` outcome whose tab closed before the send finished goes to the tab the user is on (P152).
 fn feedback_outcome_on_active_tab(app: &mut AppView, message: String) {
     if let Some(agent) = get_active_agent_mut(app) {

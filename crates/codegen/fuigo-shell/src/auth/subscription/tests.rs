@@ -483,15 +483,16 @@ async fn pkce_exchange_uses_attempt_verifier_and_saves_binding() {
         );
         result.unwrap();
         assert!(reply.starts_with("HTTP/1.1 200"));
-        let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(
-            URL_SAFE_NO_PAD.encode(Sha256::digest(requests[0]["code_verifier"].as_bytes())),
-            challenge
-        );
-        assert_eq!(requests[0]["code"], "fake-code");
-        assert_eq!(requests[0]["client_id"], provider.client_id());
-        drop(requests);
+        {
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(
+                URL_SAFE_NO_PAD.encode(Sha256::digest(requests[0]["code_verifier"].as_bytes())),
+                challenge
+            );
+            assert_eq!(requests[0]["code"], "fake-code");
+            assert_eq!(requests[0]["client_id"], provider.client_id());
+        }
         assert_eq!(store.status(provider).await.unwrap()[0].account, "a");
         // Released before the token exchange began, not merely by the end.
         assert_eq!(*at_exchange.lock().unwrap(), Some(true));
@@ -1213,6 +1214,10 @@ async fn refresh_is_serialized_across_processes() {
     let temp = tempfile::tempdir().unwrap();
     let store = SubscriptionStore::new(temp.path());
     store.save(record(provider, "a")).await.unwrap();
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "the child is this test binary re-run for one test; kill_on_drop reaps it and it is awaited below"
+    )]
     let spawn = || {
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command

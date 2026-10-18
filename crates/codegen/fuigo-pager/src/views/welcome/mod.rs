@@ -1497,7 +1497,7 @@ fn render_welcome_authenticating(
 
             // A key is ~51 chars; 56 columns shows one whole without scrolling,
             // and stops the box from spanning a wide terminal edge to edge.
-            let box_width = content_area.width.saturating_sub(4).min(56).max(24);
+            let box_width = content_area.width.saturating_sub(4).clamp(24, 56);
             let [_, prompt_centered, _] = Layout::horizontal([
                 Constraint::Min(0),
                 Constraint::Length(box_width),

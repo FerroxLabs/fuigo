@@ -2,16 +2,19 @@
 #[allow(unused_imports)]
 use super::common::*;
 
-/// **Leader mode: a `/model` pick in the TUI dismisses a remote campaign.**
+/// **Leader mode: a `/model` pick in the TUI dismisses a campaign.**
 ///
 /// `persist_user_choice`, the one place a dismissal is recorded, runs in the TUI process.
-/// In leader mode no in-process agent ever seeds the TUI's remote campaign cache.
-/// Only `app::run`'s own seed makes a remote campaign visible to `resolve_dismissable_campaigns`.
-/// Without that seed this test times out in the dismiss phase: the pick persists but no dismissal is recorded.
-/// The leader then re-nudges every new session over the user's explicit choice.
+/// The campaign is served by `FUIGO_CAMPAIGNS_OVERRIDE`, which both the leader and the TUI resolve.
+/// The test proves that in leader mode the nudge applies to new sessions, that a `/model` pick records the dismissal in
+/// `campaigns_state.json` and persists the pick to `config.toml` without ever writing the campaign value there.
 ///
-/// The TUI's settings prefetch is deliberately capped at 2s, so on a loaded runner a spawn can miss the fetch and start with an unseeded cache.
-/// The test retries with fresh TUI spawns (same leader) until a pick lands the dismissal, then proves it sticks.
+/// Why not `GET /v1/settings`: this test used to serve the campaign from the mock settings endpoint, authenticated with a
+/// seeded `auth.x.ai` session. Fuigo has no default OAuth issuer, so that credential is never loaded, and a session
+/// credential is never sent to a cleartext or loopback service origin (P47, `fuigo-extra-ca` `service_trust`: "There is no
+/// exception for loopback or cleartext"). The mock server is both, so no `/v1/settings` request is made and the remote
+/// campaign cache is never seeded. The remote seed itself (`set_remote_campaigns_from_settings`) is covered by the
+/// `campaigns.rs` unit tests; what this end-to-end test guards is the leader-mode dismissal path.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run with cargo test -p fuigo-pager --test leader_pty_e2e -- --ignored --test-threads=1"]
 async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
@@ -26,14 +29,6 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     .await
     .expect("start content with two models");
 
-    // Serve the campaign from the settings endpoint (restating `allow_access`, which the preset otherwise provides)
-    content.server().set_settings(json!({
-        "allow_access": true,
-        "campaigns": [
-            { "id": CAMPAIGN_ID, "models": { "default": CAMPAIGN_MODEL } }
-        ]
-    }));
-
     // Seed config.toml with the user's own default model
     // Pin the leader socket under the shared FUIGO_HOME so every spawn elects or attaches to the same leader (mirrors `LeaderCluster`)
     let fuigo_home = content.home().join(".fuigo");
@@ -46,10 +41,10 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     let socket = fuigo_home.join("leader-e2e.sock");
     let socket = socket.to_str().expect("socket path is utf-8").to_owned();
 
-    // Use session (OAuth) auth instead of the harness's default FUIGO_API_KEY
-    // The settings fetch requires `auth_manager.auth()`: in ApiKey/BYOK mode the pager never requests `/v1/settings`
-    // Without that request a remote campaign can never reach the pager (see `spawn_polling_session`'s doc)
-    seed_fake_oauth(&content, "pty-campaign-leader");
+    // The override stands in for a remotely served campaign; the leader and the TUI both resolve it
+    let campaign_json = format!(
+        r#"[{{"id":"{CAMPAIGN_ID}","models":{{"default":"{CAMPAIGN_MODEL}"}}}}]"#
+    );
     let binary = pager_binary().expect("resolve pager binary");
     let spawn = || -> PtyHarness {
         PtyHarness::spawn_with_content_env_ops(
@@ -58,7 +53,7 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
             DEFAULT_COLS,
             &content,
             &["--leader", "--leader-socket", &socket],
-            &oauth_credential_ops(),
+            &[EnvOp::set("FUIGO_CAMPAIGNS_OVERRIDE", &campaign_json)],
         )
         .expect("spawn leader-mode pager")
     };
@@ -70,7 +65,7 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
     };
 
     // ── Phases 1 and 2: nudge on a new session; a pick records the dismissal in the TUI process
-    // Retries fresh TUI spawns (same leader) so a missed 2s prefetch window on a loaded runner can't hang the test
+    // Retries fresh TUI spawns (same leader) so a slow cold start on a loaded runner can't hang the test
     let mut recorded = false;
     'attempts: for attempt in 0..3 {
         let mut h = spawn();
@@ -105,7 +100,7 @@ async fn campaign_leader_mode_remote_dismiss_on_model_pick() {
             }
         }
         // The regression under test: the pick persisted but the dismissal is missing
-        // With the app::run seed present this only happens when the prefetch missed on this spawn; retry once more before declaring failure
+        // Retry once more with a fresh TUI before declaring failure
         h.quit().expect("clean quit");
     }
     assert!(

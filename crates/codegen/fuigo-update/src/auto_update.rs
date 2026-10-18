@@ -473,7 +473,27 @@ fn env_installer() -> Option<&'static str> {
     None
 }
 
+/// Whether this process runs from a project-local or `npx` copy of the npm package.
+///
+/// The npm launcher marks only a GLOBAL install `FUIGO_MANAGED_BY_NPM` (see `fuigo-bootstrap.js`); any other copy gets
+/// `FUIGO_NPM_LOCAL=1`. Such a copy has no business running `npm i -g`, repointing `~/.fuigo/bin/fuigo` or recording an
+/// installer in `config.toml`, which belong to the user's global install, so it has no installer at all: automatic
+/// updates are off and `fuigo update` explains how to update the local copy. An explicit `FUIGO_INSTALLER` still wins
+/// (the operator said what this is).
+pub fn is_npm_local_copy() -> bool {
+    std::env::var_os("FUIGO_INSTALLER").is_none()
+        && std::env::var_os("FUIGO_NPM_LOCAL").is_some_and(|v| !v.is_empty() && v != "0")
+}
+
+/// What `fuigo update` says in a local/npx copy.
+const NPM_LOCAL_UPDATE_HINT: &str = "This copy of Fuigo was installed locally (in a project or via npx), so it does \
+not update itself and leaves your global install alone. To update it, run `npm i fuigo@latest` in the project, or use \
+`npx fuigo@latest`.";
+
 pub async fn get_installer() -> Option<&'static str> {
+    if is_npm_local_copy() {
+        return None;
+    }
     if let Some(i) = env_installer() {
         return Some(i);
     }
@@ -2758,22 +2778,69 @@ fn registry_safe_to_record(registry: &str) -> bool {
 }
 
 /// After `npm i -g`: run the freshly installed package's own setup step synchronously
-/// (`node <npm root -g>/fuigo/bin/fuigo-bootstrap.js` with `FUIGO_INSTALL_ONLY=1`; no exec of the binary), then confirm
+/// (`node <global root>/fuigo/bin/fuigo-bootstrap.js` with `FUIGO_INSTALL_ONLY=1`; no exec of the binary), then confirm
 /// `~/.fuigo/bin/fuigo` points at the installed version. Works the same for npm 10 and below and npm 11, which differ
 /// only in whether npm itself runs install scripts; this package has none on either.
+///
+/// Finding the package directory. `npm root -g` is tried first, but npm 11 masks any path segment that looks like a
+/// UUID as `***` in everything it prints (`npm root -g --json`, `npm prefix -g`, `npm ls -g --parseable` too), so a
+/// global prefix such as `/home/u/3f2b9c1e-8d4a-4f6b-9a7c-1e2d3f4a5b6c/g` comes back unusable. Then the setup step
+/// is run through `npm explore -g fuigo -- node bin/fuigo-bootstrap.js` instead: npm itself resolves the directory
+/// and starts the child there, so no printed path is parsed. The child reports its version through a file named in
+/// `FUIGO_INSTALL_REPORT` (its own stdout is not npm output, but a file needs no parsing of a terminal stream).
 async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout: Duration) -> Result<String> {
+    match npm_root_global().await {
+        Ok(root) if root_is_usable(&root) => {
+            let pkg_dir = std::path::Path::new(&root).join("fuigo");
+            if pkg_dir.join("package.json").is_file() {
+                return run_npm_setup_at(&pkg_dir, target, npm_registry, timeout).await;
+            }
+            tracing::warn!(root, "npm root -g has no fuigo package; trying npm explore");
+        }
+        Ok(root) => tracing::warn!(root, "npm masked or emptied the global root; trying npm explore"),
+        Err(e) => tracing::warn!("npm root -g unusable ({e:#}); trying npm explore"),
+    }
+    run_npm_setup_via_explore(target, npm_registry, timeout).await
+}
+
+/// `npm root -g` stdout, trimmed.
+async fn npm_root_global() -> Result<String> {
     let mut root_cmd = crate::npm_command::npm_invocation()?.tokio_command();
     root_cmd.args(["root", "-g"]);
     root_cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     fuigo_tools::util::detach_command(&mut root_cmd);
-    let root = match crate::npm_command::run_tree_bounded(&mut root_cmd, Duration::from_secs(30)).await? {
+    match crate::npm_command::run_tree_bounded(&mut root_cmd, Duration::from_secs(30)).await? {
         crate::npm_command::Bounded::Done(out) if out.status.success() => {
-            String::from_utf8_lossy(&out.stdout).trim().to_string()
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         }
         crate::npm_command::Bounded::Done(out) => anyhow::bail!("`npm root -g` failed with {}", out.status),
         crate::npm_command::Bounded::TimedOut => anyhow::bail!("`npm root -g` did not answer in 30 s"),
-    };
-    let pkg_dir = std::path::Path::new(&root).join("fuigo");
+    }
+}
+
+/// A printed root is only usable when it is non-empty and npm did not mask part of it (`***`).
+fn root_is_usable(root: &str) -> bool {
+    !root.is_empty() && !root.contains("***")
+}
+
+/// The environment of the setup step, shared by both ways of starting it.
+fn apply_setup_env(cmd: &mut tokio::process::Command, home: &std::path::Path, npm_registry: Option<&str>) {
+    cmd.env("FUIGO_INSTALL_ONLY", "1");
+    cmd.env("FUIGO_HOME", home);
+    if let Some(registry) = npm_registry
+        && registry_safe_to_record(registry)
+    {
+        cmd.env("FUIGO_NPM_REGISTRY", registry);
+    }
+}
+
+/// Run the setup step as `node <pkg_dir>/bin/fuigo-bootstrap.js`, for a package directory read from `npm root -g`.
+async fn run_npm_setup_at(
+    pkg_dir: &std::path::Path,
+    target: Option<&str>,
+    npm_registry: Option<&str>,
+    timeout: Duration,
+) -> Result<String> {
     let manifest = std::fs::read_to_string(pkg_dir.join("package.json"))
         .with_context(|| format!("the installed package was not found at {}", pkg_dir.display()))?;
     let installed: String = serde_json::from_str::<serde_json::Value>(&manifest)?
@@ -2791,18 +2858,12 @@ async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout
     let home = fuigo_home();
     let mut cmd = tokio::process::Command::new("node");
     cmd.arg(&script)
-        .env("FUIGO_INSTALL_ONLY", "1")
-        .env("FUIGO_HOME", &home)
         // Never the user's project: the node side looks up the npm registry from this directory.
         .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if let Some(registry) = npm_registry
-        && registry_safe_to_record(registry)
-    {
-        cmd.env("FUIGO_NPM_REGISTRY", registry);
-    }
+    apply_setup_env(&mut cmd, &home, npm_registry);
     fuigo_tools::util::detach_command(&mut cmd);
     match crate::npm_command::run_tree_bounded(&mut cmd, timeout).await? {
         crate::npm_command::Bounded::Done(out) if out.status.success() => {}
@@ -2810,6 +2871,53 @@ async fn run_npm_setup(target: Option<&str>, npm_registry: Option<&str>, timeout
         crate::npm_command::Bounded::TimedOut => {
             anyhow::bail!("`node {}` did not finish within {} s", script.display(), timeout.as_secs())
         }
+    }
+    if !canonical_points_at(&installed) {
+        anyhow::bail!("{} does not point at fuigo-{installed} after the setup step", fuigo_application().display());
+    }
+    Ok(installed)
+}
+
+/// Run the setup step through `npm explore -g fuigo -- node bin/fuigo-bootstrap.js` (see [`run_npm_setup`]).
+async fn run_npm_setup_via_explore(target: Option<&str>, npm_registry: Option<&str>, timeout: Duration) -> Result<String> {
+    let home = fuigo_home();
+    let _ = std::fs::create_dir_all(&home);
+    let report = home.join(format!(".npm-setup-report.{}", std::process::id()));
+    let _ = std::fs::remove_file(&report);
+    let mut cmd = crate::npm_command::npm_invocation()?.tokio_command();
+    cmd.args(["explore", "-g", "fuigo", "--", "node", "bin/fuigo-bootstrap.js"])
+        .current_dir(if home.is_dir() { home.clone() } else { std::env::temp_dir() })
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .env("FUIGO_INSTALL_REPORT", &report);
+    if let Some(want) = target {
+        // Refuse before touching ~/.fuigo/bin when npm installed some other version.
+        cmd.env("FUIGO_INSTALL_EXPECT_VERSION", want);
+    }
+    apply_setup_env(&mut cmd, &home, npm_registry);
+    fuigo_tools::util::detach_command(&mut cmd);
+    let ran = crate::npm_command::run_tree_bounded(&mut cmd, timeout).await;
+    let reported = std::fs::read_to_string(&report);
+    let _ = std::fs::remove_file(&report);
+    match ran? {
+        crate::npm_command::Bounded::Done(out) if out.status.success() => {}
+        crate::npm_command::Bounded::Done(out) => {
+            anyhow::bail!("`npm explore -g fuigo` (setup step) exited with {}", out.status)
+        }
+        crate::npm_command::Bounded::TimedOut => {
+            anyhow::bail!("`npm explore -g fuigo` (setup step) did not finish within {} s", timeout.as_secs())
+        }
+    }
+    let installed: String = serde_json::from_str::<serde_json::Value>(&reported.context("the setup step wrote no report")?)?
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .context("the setup report has no version")?;
+    if let Some(want) = target
+        && want != installed
+    {
+        anyhow::bail!("npm reported success but installed fuigo@{installed}, not fuigo@{want}");
     }
     if !canonical_points_at(&installed) {
         anyhow::bail!("{} does not point at fuigo-{installed} after the setup step", fuigo_application().display());
@@ -2874,6 +2982,10 @@ pub async fn run_update(
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,
+        None if is_npm_local_copy() => {
+            fuigo_tty_utils::cli_eprintln!("{}", NPM_LOCAL_UPDATE_HINT);
+            return Ok(None);
+        }
         None => {
             fuigo_tty_utils::cli_eprintln!(
                 "Auto-update is not available for manual installations."

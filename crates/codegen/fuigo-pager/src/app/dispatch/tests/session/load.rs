@@ -4249,3 +4249,177 @@ fn healthy_session_sends_everything_immediately() {
     );
     assert!(matches!(effects.as_slice(), [Effect::SendInterject { .. }]), "{effects:?}");
 }
+
+/// The attempt number the `LoadSession` effect carries.
+fn loading_agent_and_attempt(effects: &[Effect]) -> (AgentId, u64) {
+    effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::LoadSession { agent_id, attempt, .. } => Some((*agent_id, *attempt)),
+            _ => None,
+        })
+        .expect("a LoadSession effect")
+}
+
+fn scrollback_text(app: &AppView, id: AgentId) -> Vec<String> {
+    let agent = &app.agents[&id];
+    (0..agent.scrollback.len())
+        .filter_map(|i| agent.scrollback.get(i))
+        .filter_map(|entry| entry.block.searchable_text())
+        .collect()
+}
+
+/// 1.0.30 (Windows check D2): `/resume` of a session open in another window (direct mode) is refused. The window goes
+/// back to its own session, shows the refusal there, and keeps working: a prompt is sent and `/new` starts a session.
+/// Before, it stayed on the refused tab, where every prompt was refused and the window looked wedged.
+#[test]
+fn refused_resume_of_a_session_open_elsewhere_returns_to_the_own_session() {
+    use fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let own = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: own,
+            session_id: "own-1".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    let effects = dispatch(Action::LoadSession("held-1".into(), None, false), &mut app);
+    let (loading, attempt) = loading_agent_and_attempt(&effects);
+    assert_ne!(loading, own);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt,
+            agent_id: loading,
+            session_id: acp::SessionId::new("held-1"),
+            error: HELD_ELSEWHERE.into(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == own), "back on its own session");
+    assert!(!app.agents.contains_key(&loading), "the refused tab is closed");
+    assert!(
+        scrollback_text(&app, own).iter().any(|t| t.contains(HELD_ELSEWHERE)),
+        "the refusal is shown where the user is"
+    );
+    assert_eq!(app.agents[&own].session.session_id.as_ref().map(|s| s.0.to_string()).as_deref(), Some("own-1"));
+    let effects = dispatch(Action::SendPrompt("hi".into()), &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::SendPrompt { .. })),
+        "a prompt is sent, got {effects:?}"
+    );
+    let effects = dispatch(Action::SendPrompt("/new".into()), &mut app);
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::CreateSession { .. })),
+        "/new starts a session, got {effects:?}"
+    );
+}
+
+/// 1.0.30 (Windows check): a `/resume` picker still open on the window's own session (a content-search pick left it up) is
+/// closed when the refusal brings the window back there, so the refusal is in plain sight. Before, it stayed open over the
+/// refusal until Esc.
+#[test]
+fn refused_resume_closes_the_picker_on_the_own_session() {
+    use fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let own = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: own,
+            session_id: "own-3".into(),
+            models: None,
+            scheduler_background_loops: None,
+        }),
+        &mut app,
+    );
+    open_session_picker_with(&mut app, vec![make_picker_entry("held-3", "/r")]);
+    let effects = dispatch(Action::LoadSession("held-3".into(), None, false), &mut app);
+    let (loading, attempt) = loading_agent_and_attempt(&effects);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt,
+            agent_id: loading,
+            session_id: acp::SessionId::new("held-3"),
+            error: HELD_ELSEWHERE.into(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == own), "back on its own session");
+    assert!(app.agents[&own].active_modal.is_none(), "the picker is closed over the refusal");
+    assert!(scrollback_text(&app, own).iter().any(|t| t.contains(HELD_ELSEWHERE)));
+}
+
+/// A content-search pick closes the `/resume` picker, as a row pick does (it stayed open on the tab the load left).
+#[test]
+fn pick_content_session_closes_the_picker() {
+    let mut app = test_app_with_agent();
+    let origin = match app.active_view {
+        ActiveView::Agent(id) => id,
+        _ => panic!("an active agent"),
+    };
+    open_session_picker_with(&mut app, vec![make_conversation_entry("conv-hit-3")]);
+    dispatch(
+        Action::PickContentSession {
+            session_id: "conv-hit-3".into(),
+            cwd: String::new(),
+        },
+        &mut app,
+    );
+    assert!(app.agents[&origin].active_modal.is_none(), "the picker is closed");
+}
+
+/// When the tab the load left was the unused empty session the load dropped, a refused load opens a new session instead.
+#[test]
+fn refused_resume_whose_origin_tab_is_gone_opens_a_new_session() {
+    use fuigo_shell::session::session_writer_lock::HELD_ELSEWHERE;
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let own = AgentId(0);
+    let effects = dispatch(Action::LoadSession("held-2".into(), None, false), &mut app);
+    let (loading, attempt) = loading_agent_and_attempt(&effects);
+    // As `abandon_unused_empty_for_load` does for the unused husk.
+    app.agents.shift_remove(&own);
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt,
+            agent_id: loading,
+            session_id: acp::SessionId::new("held-2"),
+            error: HELD_ELSEWHERE.into(),
+        }),
+        &mut app,
+    );
+    let fresh = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::CreateSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("a new session is started");
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == fresh));
+    assert!(!app.agents.contains_key(&loading));
+    assert!(scrollback_text(&app, fresh).iter().any(|t| t.contains(HELD_ELSEWHERE)));
+}
+
+/// Any other load failure keeps the failed tab as before (its notice says how to get out).
+#[test]
+fn other_load_failures_keep_the_failed_tab() {
+    let mut app = test_app();
+    dispatch(Action::NewSession, &mut app);
+    let effects = dispatch(Action::LoadSession("dead-2".into(), None, false), &mut app);
+    let (loading, attempt) = loading_agent_and_attempt(&effects);
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            attempt,
+            agent_id: loading,
+            session_id: acp::SessionId::new("dead-2"),
+            error: "busy".into(),
+        }),
+        &mut app,
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if id == loading));
+    assert!(app.agents[&loading].load_failed);
+}

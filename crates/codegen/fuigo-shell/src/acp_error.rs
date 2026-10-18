@@ -232,6 +232,17 @@ pub fn session_unavailable(message: impl Into<String>) -> acp::Error {
     )
 }
 
+/// [`session_unavailable`] with `message` as the error's headline too, so a window shows it as it is and not under a
+/// generic "Internal error".
+pub fn session_unavailable_headline(message: impl Into<String>) -> acp::Error {
+    let message = message.into();
+    typed(
+        acp::Error::new(acp::Error::internal_error().code.into(), message.clone()),
+        AcpErrorKind::SessionUnavailable,
+        message,
+    )
+}
+
 /// `-32603` internal error, kind `session_storage`.
 pub fn session_storage(message: impl Into<String>) -> acp::Error {
     typed(

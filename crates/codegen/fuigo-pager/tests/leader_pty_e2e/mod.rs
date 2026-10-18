@@ -15,6 +15,9 @@ mod common;
 
 mod campaign_leader_mode_remote_dismiss_on_model_pick;
 mod leader_n_clients_shared_session;
+mod leader_non_owner_always_approve;
+mod leader_non_owner_plan_mode;
 mod leader_reattach_cancellation_roundtrips_durable_log;
 mod leader_reattach_completion_roundtrips_durable_log;
 mod leader_two_clients_shared_session;
+mod direct_session_open_elsewhere;

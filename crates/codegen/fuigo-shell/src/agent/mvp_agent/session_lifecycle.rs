@@ -220,7 +220,6 @@ impl MvpAgent {
             .borrow_mut()
             .remove(id.0.as_ref());
         self.session_registry.release(id);
-        self.session_owner_conn.borrow_mut().remove(id.0.as_ref());
         if let Some(ops) = self.workspace_ops.borrow().as_ref() {
             ops.end_local_session(id.0.as_ref());
         }
