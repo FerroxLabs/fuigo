@@ -989,6 +989,8 @@ pub struct AppView {
     /// Cleared on user Shift+Tab / settings / CLI claim.
     /// Not inferred from the rendered permission string.
     pub permission_mode_from_soft_default: bool,
+    /// The "shared leader is out of date, mode not saved" notice was shown (once per window).
+    pub out_of_date_leader_mode_notice_shown: bool,
     /// Whether the **auto** permission-mode feature gate is enabled.
     /// Resolved at startup from env / `[auto_mode] enabled` / remote settings, default OFF.
     /// When `false`, the Shift+Tab cycle skips Auto.
@@ -1640,6 +1642,7 @@ impl AppView {
             cli_effort_token: None,
             default_yolo: false,
             permission_mode_from_soft_default: true,
+            out_of_date_leader_mode_notice_shown: false,
             auto_mode_gate: fuigo_shell::util::config::auto_permission_mode_enabled_from_disk(),
             yolo_policy_block: None,
             yolo_launch_block_notice: None,

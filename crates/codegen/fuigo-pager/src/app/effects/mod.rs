@@ -1469,11 +1469,15 @@ pub(crate) fn execute(
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
-                    let req = acp::SetSessionModeRequest::new(session_id, mode_id);
-                    if let Err(e) = acp_send(req, &tx).await {
-                        tracing::warn!("Failed to set session mode: {}", acp_error_text(&e));
+                    let req = acp::SetSessionModeRequest::new(session_id.clone(), mode_id);
+                    match acp_send(req, &tx).await {
+                        Ok(_) => TaskResult::CancelComplete,
+                        Err(e) => {
+                            let error = acp_error_text(&e);
+                            tracing::warn!("Failed to set session mode: {error}");
+                            TaskResult::SessionModeChangeFailed { session_id, error }
+                        }
                     }
-                    TaskResult::CancelComplete
                 });
         }
         Effect::SetModeThenPrompt {

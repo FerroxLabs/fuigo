@@ -151,6 +151,12 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
 
     let info = summary.info.clone();
 
+    // 1.0.30 P30-DIRECT: a session open in another window is that window's to change (one open in this process is
+    // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
+    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
+        .await
+        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+
     // Update the session title in local storage
     let storage = JsonlStorageAdapter::default();
     storage
@@ -178,6 +184,7 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
             crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
         );
     }
+    drop(writer_lock);
 
     // Update session search index with new title
     crate::session::storage::search::notify_session_updated(
@@ -244,6 +251,12 @@ async fn reset_session_title_to_auto(
 
     let info = summary.info.clone();
 
+    // 1.0.30 P30-DIRECT: a session open in another window is that window's to change (one open in this process is
+    // not "elsewhere"). Held for the local writes only, not the cloud sync after them.
+    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&info))
+        .await
+        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+
     let storage = JsonlStorageAdapter::default();
     let cleared = storage.reset_title_to_auto(&info).await.map_err(|e| {
         crate::acp_error::session_storage(format!("failed to reset session title: {e}"))
@@ -264,6 +277,7 @@ async fn reset_session_title_to_auto(
                 0,
             );
         }
+        drop(writer_lock);
         // Non-resident sessions have no persistence actor / RemoteSync.
         // Mirror the rename writeback path so a dormant unpin cannot leave the remote pin for a later pull to restore
         if agent.is_writeback_storage()

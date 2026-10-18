@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use fuigo_test_support::{MockInferenceServer, TestSandbox};
+use fuigo_test_support::{MockInferenceServer, SessionFront, TestSandbox};
 
 pub use fuigo_test_support::mock_server::LogEntry;
 pub use fuigo_test_support::mock_server::MockModelEntry as MockModel;
@@ -102,6 +102,8 @@ impl AgentTurnExpectation {
 pub struct ContentController {
     server: MockInferenceServer,
     sandbox: TestSandbox,
+    /// Started on first use by [`ContentController::session_front_env`]; stopped when the controller drops.
+    front: std::sync::OnceLock<SessionFront>,
 }
 
 impl ContentController {
@@ -127,7 +129,11 @@ impl ContentController {
         // Keep unrelated autocomplete work out of PTY timing assertions.
         sandbox.set_env("FUIGO_PROMPT_SUGGESTIONS", "false");
 
-        Ok(Self { server, sandbox })
+        Ok(Self {
+            server,
+            sandbox,
+            front: std::sync::OnceLock::new(),
+        })
     }
 
     /// Base URL of the mock server, e.g. `http://127.0.0.1:41823/v1`.
@@ -139,6 +145,40 @@ impl ContentController {
     /// cache/state out of the real home during tests).
     pub fn home(&self) -> &Path {
         self.sandbox.home()
+    }
+
+    /// Child environment that runs the pager with **session auth against a trusted HTTPS origin**.
+    ///
+    /// The product refuses to send a session token to cleartext or loopback endpoints (P42 for inference,
+    /// P47 for `/v1/settings`, `/v1/user` and the other services), so a session-auth spawn pointed at the
+    /// mock's `http://127.0.0.1` URL never fetches settings or models. This starts a [`SessionFront`]
+    /// (once per controller) that serves the mock as `https://api.fluxrouter.ai/v1`, and returns the overrides
+    /// to apply after the sandbox baseline: every endpoint variable the sandbox points at the mock is
+    /// re-pointed at the HTTPS origin, `HTTPS_PROXY` routes it through the front, and
+    /// `FUIGO_EXTRA_CA_BUNDLE` makes the child trust the front's throwaway CA. No product trust rule changes.
+    ///
+    /// Pair with [`crate::flows::seed_fake_oauth`] and [`crate::flows::oauth_credential_ops`].
+    pub fn session_front_env(&self) -> Vec<(String, String)> {
+        let front = self
+            .front
+            .get_or_init(|| SessionFront::start(&self.server.url()));
+        let mock_url = self.server.url();
+        let mut env: Vec<(String, String)> = self
+            .sandbox
+            .env()
+            .into_iter()
+            .filter(|(_, value)| value.to_str() == Some(mock_url.as_str()))
+            .filter_map(|(key, _)| {
+                Some((key.to_str()?.to_owned(), front.configured_url().to_owned()))
+            })
+            .collect();
+        env.extend(
+            front
+                .child_env()
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value)),
+        );
+        env
     }
 
     /// Filesystem and environment used by content-backed spawns.

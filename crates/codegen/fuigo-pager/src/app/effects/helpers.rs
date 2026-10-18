@@ -1361,6 +1361,8 @@ pub(crate) async fn persist_setting(
 }
 /// Body for `Effect::PersistPermissionMode`. Factored out for testability.
 ///
+/// 0. For an existing session, ask whether this window may change it (with the shared leader only its owner may); a refused
+///    change is reported like a failed save and neither saved nor announced.
 /// 1. Persist `ui.permission_mode` to disk.
 /// 2. Fire ACP `fuigo/yolo_mode_changed` (gated on disk success for `WithRollback`; always for `BestEffort`).
 /// 3. Return the matching `TaskResult`.
@@ -1373,6 +1375,26 @@ pub(crate) async fn persist_permission_mode_and_notify(
     let enabled = canonical == "always-approve";
     let auto_mode = canonical == "auto";
     let config_str: &'static str = canonical;
+    // `ui.permission_mode` is the default every new window starts from: a change the leader refuses for this session (a
+    // window that does not own it) must not become that default (1.0.30 Windows check).
+    if let Some(sid) = session_id.as_ref() {
+        match session_owner_check(sid, &tx).await {
+            OwnerCheck::Allowed => {}
+            OwnerCheck::Refused(refusal) => {
+                tracing::warn!(%refusal, "permission mode change refused for this session; not saved as the default");
+                return match persist {
+                    PermissionModePersist::WithRollback(rollback) | PermissionModePersist::Cycle(rollback) => {
+                        TaskResult::PermissionModeRefused { session_id: sid.clone(), rollback, error: refusal }
+                    }
+                    PermissionModePersist::BestEffort => route_permission_mode_result(Err(refusal), persist, config_str),
+                };
+            }
+            OwnerCheck::OutOfDateLeader => {
+                tracing::warn!("the shared leader predates owner_check; permission mode not saved as the default");
+                return TaskResult::PermissionModeNotSavedOldLeader;
+            }
+        }
+    }
     let disk_result = fuigo_shell::util::config::update_config_as_user(|cfg| {
             cfg.ui.permission_mode = Some(config_str.to_string());
         })
@@ -1397,6 +1419,29 @@ pub(crate) async fn persist_permission_mode_and_notify(
     }
     route_permission_mode_result(disk_outcome, persist, config_str)
 }
+/// Whether this client may change `session_id`: [`fuigo_shell::leader::protocol::SESSION_OWNER_CHECK_METHOD`] (refused
+/// for a window that does not own the session under the shared leader; always allowed in direct mode).
+async fn session_owner_check(session_id: &acp::SessionId, tx: &AcpAgentTx) -> OwnerCheck {
+    let params = serde_json::json!({ "sessionId": session_id.0.to_string() });
+    let request = acp::ExtRequest::new(
+        fuigo_shell::leader::protocol::SESSION_OWNER_CHECK_METHOD,
+        serde_json::value::to_raw_value(&params)
+            .expect("serialize owner_check params")
+            .into(),
+    );
+    match acp_send(request, tx).await {
+        Ok(_) => OwnerCheck::Allowed,
+        // A leader older than the method (kept running after an upgrade) cannot say who owns the session.
+        Err(e) if e.code == acp::Error::method_not_found().code => OwnerCheck::OutOfDateLeader,
+        Err(e) => OwnerCheck::Refused(acp_error_text(&e)),
+    }
+}
+/// The answer to [`session_owner_check`].
+enum OwnerCheck {
+    Allowed,
+    Refused(String),
+    OutOfDateLeader,
+}
 /// Whether to fire the ACP `fuigo/yolo_mode_changed` notification.
 /// `WithRollback` suppresses on disk failure (the agent must not see the optimistic value); `BestEffort` always fires.
 pub(super) fn should_send_yolo_acp_notification(
@@ -1404,7 +1449,7 @@ pub(super) fn should_send_yolo_acp_notification(
     persist: PermissionModePersist,
 ) -> bool {
     match (disk_outcome, persist) {
-        (_, PermissionModePersist::BestEffort) => true,
+        (_, PermissionModePersist::BestEffort | PermissionModePersist::Cycle(_)) => true,
         (Ok(()), PermissionModePersist::WithRollback(_)) => true,
         (Err(_), PermissionModePersist::WithRollback(_)) => false,
     }
@@ -1489,7 +1534,7 @@ pub(super) fn route_permission_mode_result(
                 error: e,
             }
         }
-        (Err(e), PermissionModePersist::BestEffort) => {
+        (Err(e), PermissionModePersist::BestEffort | PermissionModePersist::Cycle(_)) => {
             tracing::warn!("failed to save permission mode preference (best-effort): {e}");
             TaskResult::SettingPersistFailedBestEffort {
                 key: "permission_mode",

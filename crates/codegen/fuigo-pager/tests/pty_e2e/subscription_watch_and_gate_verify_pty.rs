@@ -173,6 +173,10 @@ fn spawn_subscription_pager(
     seed_fake_oauth_local_issuer(content, oauth_user);
     let mut overrides = Vec::from(oauth_credential_ops());
     overrides.push(EnvOp::set("FUIGO_LOCAL_AUTH", "1"));
+    overrides.push(oauth_client_id_op());
+    // Session auth only reaches `/v1/settings`, `/v1/user` and models over a trusted HTTPS origin.
+    let front_env = content.session_front_env();
+    overrides.extend(front_env.iter().map(|(key, value)| EnvOp::set(key, value)));
     overrides.extend_from_slice(extra_env);
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -324,6 +328,8 @@ async fn startup_gate_shows_paywall_for_free_user_after_live_check() {
         .wait_for_text(GATE_MSG, Duration::from_secs(45))
         .expect("gate copy renders for a genuinely-free user");
 
+    // Strict ordering: the paywall is up, so the live check must already have reached the mock.
+    // A duplicate `check_subscription` awaits the in-flight check in the shell, so no stale-meta paint can precede it.
     assert!(
         user_check_count(&content) >= 1,
         "a live subscription check must run before the paywall is shown; requests: {:?}",

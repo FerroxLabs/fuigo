@@ -103,6 +103,8 @@ impl AccountingEvents {
         self.ledger.lock().expect("accounting ledger").snapshot()
     }
 
+    // Same signature as `mpsc::UnboundedSender::send`, which callers already match on.
+    #[allow(clippy::result_large_err)]
     fn send(&self, event: SamplingEvent) -> Result<(), mpsc::error::SendError<SamplingEvent>> {
         match event {
             SamplingEvent::AttemptAccounting {

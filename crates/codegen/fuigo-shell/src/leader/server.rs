@@ -53,6 +53,8 @@ enum LeaderServerPoll {
     RelayRefusalChanged,
     /// P142: this process recorded a one-off user notice (`fuigo_file_utils::destination_gate::subscribe_notices`).
     NoticeRecorded,
+    /// The ownership board has something to act on (a grace window or relay lease ended, or the relay dropped).
+    OwnerBoardWake,
 }
 /// A live notification buffered during an in-flight `session/load`: the shared payload plus its `event_seq`.
 /// The `event_seq` is computed at buffer time, when the message is already parsed, so the post-load flush never re-parses.
@@ -134,15 +136,29 @@ pub struct LeaderServerControlState {
     /// not operate that no opt-in names), or `None` while it has none. The IPC server tells every interactive client
     /// that registers, and every one already attached when it changes, so a TUI user sees the refusal.
     relay_refusal: RelayRefusalBoard,
+    /// Who owns each session (see [`super::drivers`]): the one authority for owner-gated session changes; shared with the relay path.
+    pub(crate) driver_board: super::drivers::OwnerBoard,
 }
 impl LeaderServerControlState {
     pub fn new(metadata: LeaderServerMetadata) -> Self {
+        let driver_board = super::drivers::OwnerBoard::default();
         Self {
             metadata,
             cpu_profile: Arc::new(Mutex::new(CpuProfileManager::new())),
             workspace: Arc::new(WorkspaceControl::new(None)),
-            relay_refusal: RelayRefusalBoard::detached(),
+            relay_refusal: RelayRefusalBoard::detached().with_owner_board(driver_board.clone()),
+            driver_board,
         }
+    }
+    /// The ownership board the relay path stamps its verdicts from.
+    pub(crate) fn driver_board(&self) -> super::drivers::OwnerBoard {
+        self.driver_board.clone()
+    }
+    /// How long a session whose owner disconnected waits for that owner's reconnect token.
+    #[cfg(test)]
+    pub(crate) fn with_driver_grace(self, grace: Duration) -> Self {
+        self.driver_board.set_grace(grace);
+        self
     }
     /// P125: a handle that publishes the leader's relay refusal (what the relay start decides with).
     pub(crate) fn relay_refusal_board(&self) -> RelayRefusalBoard {
@@ -167,15 +183,27 @@ impl LeaderServerControlState {
 /// P125: where the leader's relay start publishes whether it refused the relay
 /// ([`LeaderServerControlState::publish_relay_refusal`]).
 #[derive(Clone, Debug)]
-pub struct RelayRefusalBoard(Arc<tokio::sync::watch::Sender<Option<Arc<str>>>>);
+pub struct RelayRefusalBoard {
+    refusal: Arc<tokio::sync::watch::Sender<Option<Arc<str>>>>,
+    /// The leader's ownership board, so the relay start can tell it when the relay's socket drops.
+    owners: Option<super::drivers::OwnerBoard>,
+}
 impl RelayRefusalBoard {
     /// A board nobody listens to.
     pub fn detached() -> Self {
-        Self(Arc::new(tokio::sync::watch::channel(None).0))
+        Self { refusal: Arc::new(tokio::sync::watch::channel(None).0), owners: None }
+    }
+    pub(crate) fn with_owner_board(mut self, owners: super::drivers::OwnerBoard) -> Self {
+        self.owners = Some(owners);
+        self
+    }
+    /// The leader's ownership board, when this board belongs to a leader.
+    pub(crate) fn owner_board(&self) -> Option<super::drivers::OwnerBoard> {
+        self.owners.clone()
     }
     /// Publish (or, with `None`, clear) the refusal line; the same line again tells nobody again.
     pub fn publish(&self, payload: Option<String>) {
-        self.0.send_if_modified(|current| {
+        self.refusal.send_if_modified(|current| {
             let next: Option<Arc<str>> = payload.map(Arc::from);
             if *current == next {
                 return false;
@@ -186,10 +214,10 @@ impl RelayRefusalBoard {
     }
     /// The refusal line published now, if any.
     pub fn current(&self) -> Option<Arc<str>> {
-        self.0.borrow().clone()
+        self.refusal.borrow().clone()
     }
     fn subscribe(&self) -> tokio::sync::watch::Receiver<Option<Arc<str>>> {
-        self.0.subscribe()
+        self.refusal.subscribe()
     }
 }
 pub struct WorkspaceControl {
@@ -529,10 +557,13 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
 fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
     method_of(json) == Some("fuigo/scheduled_task_inject_prompt")
 }
-/// Whether a payload is a blocking *interaction* reverse-request: a tool permission, `ask_user_question`, or plan-approval.
-/// Unlike other reverse-requests (driver-only), these are **shared**.
-/// They broadcast to every subscriber so any client can render and answer the modal, first-answer-wins.
-/// See `SHARED_INTERACTIVE_MODALS.md`.
+/// Whether a payload is a blocking *interaction* reverse-request: a tool permission, `ask_user_question`, plan-approval
+/// (`exit_plan_mode`) or an MCP elicitation.
+/// Like every reverse-request it decides something for the session, so it is delivered to the session's OWNER only and
+/// only the owner's answer counts (1.0.30: it used to be shared with every attached window, first answer wins, so a
+/// window in always-approve could approve the owner's tool calls). With no owner (grace window, nobody yet) it waits for
+/// the next owner. Unlike other reverse-requests the leader also caches it by `tool_call_id`, so an owner that (re)loads
+/// the session or is promoted to owner gets the still-pending modal again.
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
@@ -1031,6 +1062,7 @@ pub(crate) fn stamp_inbound_client_identity(
 ) -> bool {
     let mut mutated = strip_client_supplied_connection_id(json);
     mutated |= stamp_connection_id_into_session_request(json, client_id);
+    mutated |= stamp_connection_id_into_session_change(json, client_id);
     mutated |= inject_client_identity_into_yolo_notification(json, client_type, client_id);
     mutated
 }
@@ -1040,12 +1072,29 @@ pub(crate) const RELAY_CONNECTION_ID: u64 = u64::MAX;
 /// Any client-supplied `fuigo/leaderConnectionId` / `clientIdentifier` is stripped, then `RELAY_CONNECTION_ID` is stamped so the relay client owns the sessions it creates or loads and can change only those.
 /// Unparseable lines are returned unchanged (the agent rejects them itself).
 pub(crate) fn stamp_relay_connection_identity(line: &str) -> String {
+    stamp_relay_connection_identity_with(line, &super::drivers::OwnerBoard::default())
+}
+/// As [`stamp_relay_connection_identity`], with the relay as a first-class owner on `board`:
+/// * a relay `session/load`/`resume` of a session somebody else owns (a live local client, or a departed owner within its
+///   reconnect grace) gets the foreign-driver flag; any flag or reconnect token the remote sent is removed first (the
+///   relay holds no token);
+/// * a relay load of a session nobody else owns makes the relay its owner; every other relay message for a session the
+///   relay owns refreshes its lease, and never creates a claim;
+/// * every owner-gated request carries the leader's ownership verdict for the relay (see [`stamp_owner_authority`]).
+pub(crate) fn stamp_relay_connection_identity_with(
+    line: &str,
+    board: &super::drivers::OwnerBoard,
+) -> String {
+    use super::drivers::{Claimer, Verdict};
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
         return line.to_string();
     };
     let mut changed = false;
     let mut visit = |json: &mut serde_json::Value| {
         changed |= strip_client_supplied_connection_id(json);
+        if take_reconnect_token(json).is_some() {
+            changed = true;
+        }
         if stamp_connection_id_into_session_request(json, ClientId(RELAY_CONNECTION_ID)) {
             // The replay-unicast target is a leader client slot; a relay has none.
             if let Some(meta) = json
@@ -1057,11 +1106,42 @@ pub(crate) fn stamp_relay_connection_identity(line: &str) -> String {
             }
             changed = true;
         }
+        changed |= stamp_connection_id_into_session_change(json, ClientId(RELAY_CONNECTION_ID));
         changed |= inject_client_identity_into_yolo_notification(
             json,
             "",
             ClientId(RELAY_CONNECTION_ID),
         );
+        let session_id = extract_session_id(json);
+        if is_session_attach_request(json) {
+            let foreign = session_id
+                .as_deref()
+                .is_some_and(|sid| board.classify(sid, Claimer::Relay, None) == Verdict::Foreign);
+            changed |= stamp_foreign_driver_flag(json, foreign);
+            if foreign {
+                warn!("relay session load of a session another connection owns: flagged foreign");
+            } else if let Some(sid) = session_id.as_deref() {
+                let claim = board.claim(sid, Claimer::Relay);
+                if let Some(id) = json.get("id").filter(|id| !id.is_null()) {
+                    // A failed load gives the claim back, as a local one does.
+                    board.note_relay_load(&id.to_string(), sid, claim.prev);
+                }
+            }
+        } else if let Some(sid) = session_id.as_deref() {
+            board.relay_message(sid);
+            if json.get("method").and_then(|m| m.as_str()) == Some("session/prompt")
+                && let Some(id) = json.get("id").filter(|id| !id.is_null())
+            {
+                board.relay_prompt_started(&id.to_string(), sid);
+            }
+        }
+        // The relay's answer to one of the agent's requests (a response has an id and no method).
+        if json.get("method").is_none()
+            && let Some(id) = json.get("id").filter(|id| !id.is_null())
+        {
+            board.relay_answered(&id.to_string());
+        }
+        changed |= stamp_owner_authority(json, super::drivers::Claimer::Relay, board);
     };
     match &mut value {
         serde_json::Value::Array(items) => items.iter_mut().for_each(&mut visit),
@@ -1072,6 +1152,110 @@ pub(crate) fn stamp_relay_connection_identity(line: &str) -> String {
     } else {
         line.to_string()
     }
+}
+/// Methods whose effect on a session only its owner may cause (`strict`: an unowned session is refused too).
+const OWNER_ONLY_TYPED: [&str; 3] = ["session/set_mode", "session/set_model", "session/set_config_option"];
+const OWNER_ONLY_EXT: [&str; 2] = ["fuigo/toggle_plan_mode", crate::leader::protocol::SESSION_OWNER_CHECK_METHOD];
+/// Methods anybody may send for a session, carrying the leader's verdict so the agent can tell the owner's apart: a prompt
+/// is never refused, but only the owner's may declare the session's mode (`_meta.mode`, which enters or leaves plan mode).
+const OWNER_VERDICT_TYPED: [&str; 1] = ["session/prompt"];
+/// Admin methods the owner may call, and anybody may call when the session has no owner (`session/close` is typed).
+const OWNER_OR_UNOWNED_TYPED: [&str; 1] = ["session/close"];
+const OWNER_OR_UNOWNED_EXT: [&str; 6] = [
+    "fuigo/session/rename",
+    "fuigo/session/delete",
+    "fuigo/session/update_mcp_servers",
+    "fuigo/session/close",
+    "fuigo/session/park",
+    "fuigo/session/unpark",
+];
+/// Remove every ownership key a client may have written, from `params` and `params._meta`, whatever the method.
+/// Only the leader writes them.
+fn strip_client_supplied_authority(json: &mut serde_json::Value) -> bool {
+    use crate::leader::protocol::{LEADER_FOREIGN_SESSIONS_KEY, LEADER_OWNED_SESSIONS_KEY, LEADER_OWNER_STATE_KEY};
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let mut mutated = false;
+    for key in [LEADER_OWNER_STATE_KEY, LEADER_OWNED_SESSIONS_KEY, LEADER_FOREIGN_SESSIONS_KEY] {
+        mutated |= params.remove(key).is_some();
+        if let Some(meta) = params.get_mut("_meta").and_then(|m| m.as_object_mut()) {
+            mutated |= meta.remove(key).is_some();
+        }
+    }
+    mutated
+}
+/// The leader's ownership decision, stamped on the owner-gated requests of `who`. The leader is the only authority on who
+/// owns a session ([`super::drivers::OwnerBoard`]); the agent keeps no copy and trusts only what is stamped here:
+/// * `session/set_mode`, `set_model`, `set_config_option`, `fuigo/toggle_plan_mode`, `fuigo/session/owner_check`, the
+///   session admin methods and `session/close`: `fuigo/leaderOwnerState` = `self` / `other` / `none` (typed requests in `_meta`, extensions in `params`);
+/// * `session/prompt`: the same verdict in `_meta` (a prompt is never refused; only the owner's may declare the mode);
+/// * `fuigo/yolo_mode_changed`: `fuigo/leaderOwnedSessions`, the sessions `who` owns;
+/// * `fuigo/permissions/reset`: `fuigo/leaderForeignSessions`, the sessions somebody else owns.
+/// Every client-supplied value of those keys is removed first, on every method. Returns `true` when `json` was mutated.
+pub(crate) fn stamp_owner_authority(
+    json: &mut serde_json::Value,
+    who: super::drivers::Claimer,
+    board: &super::drivers::OwnerBoard,
+) -> bool {
+    use crate::leader::protocol::{LEADER_FOREIGN_SESSIONS_KEY, LEADER_OWNED_SESSIONS_KEY, LEADER_OWNER_STATE_KEY};
+    let mut mutated = strip_client_supplied_authority(json);
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    // Typed ACP methods arrive bare; the protocol crate prefixes client extension methods with one `_`.
+    let ext_name = method.strip_prefix('_').unwrap_or(&method);
+    let typed_strict = OWNER_ONLY_TYPED.contains(&method.as_str());
+    let typed_lenient = OWNER_OR_UNOWNED_TYPED.contains(&method.as_str());
+    let typed_verdict = OWNER_VERDICT_TYPED.contains(&method.as_str());
+    let ext_strict = OWNER_ONLY_EXT.contains(&ext_name);
+    let ext_lenient = OWNER_OR_UNOWNED_EXT.contains(&ext_name);
+    let session_scoped = typed_strict || typed_lenient || typed_verdict || ext_strict || ext_lenient;
+    let owned_list = ext_name == "fuigo/yolo_mode_changed";
+    let foreign_list = ext_name == "fuigo/permissions/reset";
+    if !(session_scoped || owned_list || foreign_list) {
+        return mutated;
+    }
+    if (owned_list || foreign_list) && !json.get("params").is_some_and(|p| p.is_object()) {
+        json["params"] = serde_json::json!({});
+        mutated = true;
+    }
+    let state = if session_scoped {
+        let sid = extract_session_id(json);
+        // A request that names no session cannot be shown to be the owner's: fail closed.
+        let state = sid
+            .as_deref()
+            .map(|sid| board.owner_state(sid, who))
+            .unwrap_or(super::drivers::OwnerState::Other);
+        Some(state)
+    } else {
+        None
+    };
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return mutated;
+    };
+    if let Some(state) = state {
+        if typed_strict || typed_lenient || typed_verdict {
+            let meta = params.entry("_meta").or_insert_with(|| serde_json::json!({}));
+            if !meta.is_object() {
+                *meta = serde_json::json!({});
+            }
+            if let Some(meta) = meta.as_object_mut() {
+                meta.insert(LEADER_OWNER_STATE_KEY.to_string(), serde_json::json!(state.wire()));
+                mutated = true;
+            }
+        } else {
+            params.insert(LEADER_OWNER_STATE_KEY.to_string(), serde_json::json!(state.wire()));
+            mutated = true;
+        }
+    }
+    if owned_list {
+        params.insert(LEADER_OWNED_SESSIONS_KEY.to_string(), serde_json::json!(board.owned_sessions(who)));
+        mutated = true;
+    }
+    if foreign_list {
+        params.insert(LEADER_FOREIGN_SESSIONS_KEY.to_string(), serde_json::json!(board.foreign_owned_sessions(who)));
+        mutated = true;
+    }
+    mutated
 }
 /// Stamp the leader-minted connection id into a `session/new`, `session/load` or `session/resume` request's `_meta`, **in place**.
 /// The agent records it as the session's owner: a load or resume by another connection makes that connection the owner (it is the one now driving the session).
@@ -1105,6 +1289,42 @@ fn stamp_connection_id_into_session_request(
     // reconnecting client is a new connection with a new id), so a client-supplied value is always overwritten.
     meta_obj.insert(
         "fuigo/leaderClientId".to_string(),
+        serde_json::json!(client_id.0),
+    );
+    true
+}
+/// Take the client-supplied reconnect token out of a `session/load`/`session/resume` request (params and `_meta`), returning it.
+/// A token is only ever read from an attach request; on any other method it is just removed.
+fn take_reconnect_token(json: &mut serde_json::Value) -> Option<String> {
+    let key = crate::leader::protocol::LEADER_RECONNECT_TOKEN_KEY;
+    let params = json.get_mut("params")?.as_object_mut()?;
+    let from_params = params.remove(key);
+    let from_meta = params
+        .get_mut("_meta")
+        .and_then(|m| m.as_object_mut())
+        .and_then(|m| m.remove(key));
+    from_meta.or(from_params).and_then(|v| v.as_str().map(str::to_owned))
+}
+/// Stamp the leader-minted connection id into a `session/set_mode`, `session/set_model` or `session/set_config_option`
+/// request's `_meta`, in place, overwriting any client-supplied value. The agent lets only the session's owner connection
+/// change its mode, model or config. Returns `true` when `json` was mutated.
+fn stamp_connection_id_into_session_change(json: &mut serde_json::Value, client_id: ClientId) -> bool {
+    let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    if method != AGENT_METHOD_NAMES.session_set_mode
+        && method != AGENT_METHOD_NAMES.session_set_model
+        && method != AGENT_METHOD_NAMES.session_set_config_option
+    {
+        return false;
+    }
+    let Some(params) = json.get_mut("params").and_then(|p| p.as_object_mut()) else {
+        return false;
+    };
+    let meta = params.entry("_meta").or_insert_with(|| serde_json::json!({}));
+    let Some(meta_obj) = meta.as_object_mut() else {
+        return false;
+    };
+    meta_obj.insert(
+        crate::leader::protocol::LEADER_CONNECTION_ID_KEY.to_string(),
         serde_json::json!(client_id.0),
     );
     true
@@ -1223,6 +1443,223 @@ fn extract_model_id_from_set_model(json: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
+}
+/// A request whose response decides who owns a session.
+struct DriverReq {
+    client: ClientId,
+    kind: DriverReqKind,
+}
+enum DriverReqKind {
+    New,
+    /// `foreign`: the leader flagged the load because somebody else owns the session (a live client, the relay within its
+    /// lease, or a departed owner within its grace window). A load that is not foreign claimed the session when it was
+    /// forwarded (so a request pipelined right behind it already sees the owner); `claim` undoes that if the load fails.
+    Attach { session_id: String, foreign: bool, claim: Option<super::drivers::Claim> },
+    /// The owner (or anyone, for an unowned session) closed or deleted the session: once that succeeds nobody owns it.
+    End { session_id: String },
+}
+/// `session/close`, `fuigo/session/close` and `fuigo/session/delete` (client extension methods carry one leading `_`).
+fn is_session_end_method(method: &str) -> bool {
+    matches!(method.strip_prefix('_').unwrap_or(method), "session/close" | "fuigo/session/close" | "fuigo/session/delete")
+}
+/// Most driver-only messages held per session while it has no owner to take them (oldest dropped first).
+const MAX_BUFFERED_DRIVER_MESSAGES: usize = 64;
+/// The session whose owner decides for `session_id`: the root of its subagent chain (a subagent's session is owned through
+/// its parent, a grandchild's through the root), else itself. Bounded, so a cyclic registry cannot loop.
+fn owning_session<'a>(child_sessions: &'a HashMap<String, HashSet<String>>, session_id: &'a str) -> &'a str {
+    let mut current = session_id;
+    for _ in 0..=child_sessions.len() {
+        match child_sessions.iter().find(|(_, children)| children.contains(current)) {
+            Some((parent, _)) if parent.as_str() != session_id => current = parent.as_str(),
+            _ => break,
+        }
+    }
+    current
+}
+/// Hold a driver-only message (a reverse request or a scheduled-task prompt) for the session's next owner.
+pub(crate) fn hold_driver_message(
+    held: &mut HashMap<String, std::collections::VecDeque<Arc<str>>>,
+    session_id: &str,
+    payload: Arc<str>,
+) {
+    let queue = held.entry(session_id.to_string()).or_default();
+    if queue.len() >= MAX_BUFFERED_DRIVER_MESSAGES {
+        queue.pop_front();
+        warn!(session_id, "Driver-only message buffer full; dropped the oldest");
+    }
+    queue.push_back(payload);
+}
+/// Deliver everything held for `session_id` to its new owner `client`.
+fn flush_driver_messages(
+    held: &mut HashMap<String, std::collections::VecDeque<Arc<str>>>,
+    session_id: &str,
+    client: ClientId,
+    clients: &HashMap<ClientId, ClientState>,
+    board: &super::drivers::OwnerBoard,
+) {
+    let Some(queue) = held.remove(session_id) else { return };
+    let Some(target) = clients.get(&client) else {
+        warn!(session_id, dropped = queue.len(), "Owner left before held driver-only messages could be delivered");
+        return;
+    };
+    let count = queue.len();
+    for payload in queue {
+        let key = request_key_of(&payload);
+        if target.tx.send(ClientOutbound::Acp(payload)).is_err() {
+            warn!(client_id = client.0, session_id, "Failed to deliver a held driver-only message (channel closed)");
+            return;
+        }
+        if let Some(key) = key {
+            board.deliver_request(&key, session_id, super::drivers::Claimer::Client(client));
+        }
+    }
+    debug!(client_id = client.0, session_id, count, "Delivered held driver-only messages to the session's owner");
+}
+/// The key an answer to this agent request is tracked by (its JSON-RPC id, serialized), when the payload is a request.
+fn request_key_of(payload: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(payload).ok()?;
+    request_key(&json)
+}
+fn request_key(json: &serde_json::Value) -> Option<String> {
+    json.get("method")?;
+    json.get("id").filter(|id| !id.is_null()).map(|id| id.to_string())
+}
+/// The agent marks every request it sends for a session as not yet delivered, before the line is fanned out to the relay
+/// and the server loop, so no answer counts until the leader has delivered it to the session's owner.
+pub(crate) fn note_agent_request(line: &str, board: &super::drivers::OwnerBoard) {
+    if !(line.contains("\"method\"") && line.contains("\"id\"")) {
+        return;
+    }
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(line) else { return };
+    if let (Some(key), Some(session_id)) = (request_key(&json), extract_session_id(&json)) {
+        board.note_request(&key, &session_id);
+    }
+}
+/// What [`drop_unadmitted_answers`] did to a message.
+#[derive(Debug, PartialEq, Eq)]
+enum AnswerFilter {
+    Keep,
+    Changed,
+    DropAll,
+}
+/// A JSON-RPC response (an answer to one of the agent's requests).
+fn is_answer(json: &serde_json::Value) -> bool {
+    json.get("method").is_none()
+        && json.get("id").is_some_and(|id| !id.is_null())
+        && (json.get("result").is_some() || json.get("error").is_some())
+}
+/// Remove answers `who` may not give: a request for a session is answered only by the party the leader delivered it to.
+fn drop_unadmitted_answers(
+    json: &mut serde_json::Value,
+    board: &super::drivers::OwnerBoard,
+    who: super::drivers::Claimer,
+) -> AnswerFilter {
+    let refused = |item: &serde_json::Value| {
+        if !is_answer(item) {
+            return false;
+        }
+        let id = item.get("id").map(|id| id.to_string()).unwrap_or_default();
+        if board.admit_answer(&id, who) {
+            return false;
+        }
+        warn!(request_id = id.as_str(), answerer = ?who, "Dropped an answer to a session request from a connection it was not delivered to (only the session's owner answers)");
+        true
+    };
+    match json {
+        serde_json::Value::Array(items) => {
+            let before = items.len();
+            items.retain(|item| !refused(item));
+            match (items.len(), before) {
+                (0, b) if b > 0 => AnswerFilter::DropAll,
+                (n, b) if n != b => AnswerFilter::Changed,
+                _ => AnswerFilter::Keep,
+            }
+        }
+        other if refused(other) => AnswerFilter::DropAll,
+        _ => AnswerFilter::Keep,
+    }
+}
+/// The relay's answers follow the same rule as a local window's: `None` when nothing of the line may reach the agent.
+pub(crate) fn filter_relay_answers(line: &str, board: &super::drivers::OwnerBoard) -> Option<String> {
+    let Ok(mut json) = serde_json::from_str::<serde_json::Value>(line) else {
+        return Some(line.to_string());
+    };
+    match drop_unadmitted_answers(&mut json, board, super::drivers::Claimer::Relay) {
+        AnswerFilter::Keep => Some(line.to_string()),
+        AnswerFilter::Changed => Some(json.to_string()),
+        AnswerFilter::DropAll => None,
+    }
+}
+/// Put the reconnect token into a successful response's `result._meta`.
+fn insert_reconnect_token(json: &mut serde_json::Value, token: &str) {
+    let Some(result) = json.get_mut("result").and_then(|r| r.as_object_mut()) else {
+        return;
+    };
+    let meta = result.entry("_meta").or_insert_with(|| serde_json::json!({}));
+    if let Some(meta) = meta.as_object_mut() {
+        meta.insert(
+            crate::leader::protocol::LEADER_RECONNECT_TOKEN_KEY.to_string(),
+            serde_json::json!(token),
+        );
+    }
+}
+/// Act on what the ownership board decided on its own (a grace window or relay lease ended, the relay dropped).
+fn apply_board_events(
+    board: &super::drivers::OwnerBoard,
+    session_driver: &mut HashMap<String, ClientId>,
+    held: &mut HashMap<String, std::collections::VecDeque<Arc<str>>>,
+    clients: &HashMap<ClientId, ClientState>,
+    interactions: &HashMap<String, HashMap<String, Arc<str>>>,
+) {
+    for event in board.take_events() {
+        match event {
+            super::drivers::SettleEvent::Promoted { session_id, client, token } => {
+                // The first queued claimant owns now: it is handed its reconnect token (so a blip does not cost it the
+                // session), then gets what was held for the owner.
+                session_driver.insert(session_id.clone(), client);
+                debug!(client_id = client.0, session_id = %session_id, "Queued claimant took over the session");
+                if let Some(target) = clients.get(&client) {
+                    let notice = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": crate::leader::protocol::LEADER_OWNER_TOKEN_METHOD,
+                        "params": {
+                            "sessionId": session_id,
+                            "_meta": { crate::leader::protocol::LEADER_RECONNECT_TOKEN_KEY: token },
+                        },
+                    })
+                    .to_string();
+                    let _ = target.tx.send(ClientOutbound::Acp(notice.into()));
+                }
+                // What the relay was sent for this session and never answered goes to the new owner first.
+                for payload in board.take_relay_inflight(&session_id) {
+                    hold_driver_message(held, &session_id, payload);
+                }
+                // Still-pending interactions (permission, questions, plan approval) are the new owner's to answer now.
+                if let Some(cached) = interactions.get(&session_id) {
+                    let already: HashSet<String> = held
+                        .get(&session_id)
+                        .map(|q| q.iter().filter_map(|p| request_key_of(p)).collect())
+                        .unwrap_or_default();
+                    for payload in cached.values() {
+                        if request_key_of(payload).is_none_or(|k| !already.contains(&k)) {
+                            hold_driver_message(held, &session_id, payload.clone());
+                        }
+                    }
+                }
+                flush_driver_messages(held, &session_id, client, clients, board);
+            }
+            super::drivers::SettleEvent::Vacated { session_id } => {
+                drop(board.take_relay_inflight(&session_id));
+                if let Some(queue) = held.remove(&session_id) {
+                    warn!(
+                        session_id = %session_id,
+                        dropped = queue.len(),
+                        "Session has no owner and no claimant: dropping held driver-only messages"
+                    );
+                }
+            }
+        }
+    }
 }
 fn cpu_profile_status_payload(status: CpuProfileStatus) -> ControlPayload {
     match status {
@@ -1989,6 +2426,13 @@ pub async fn run_leader_server(
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
     let mut session_driver: HashMap<String, ClientId> = HashMap::new();
+    // Who owns each session: the one authority for owner-gated changes (see `super::drivers`). `session_driver` below is only
+    // where driver-only messages are routed when the session has no live owner; it grants nothing.
+    let driver_board = control_state.driver_board();
+    // Driver-only messages (reverse requests, scheduled-task prompts) held while a session has no owner to take them.
+    let mut held_driver_messages: HashMap<String, std::collections::VecDeque<Arc<str>>> = HashMap::new();
+    // Requests whose response decides who drives a session (`session/new`, `session/load`, `session/resume`), by leader request id.
+    let mut pending_driver_reqs: HashMap<String, DriverReq> = HashMap::new();
     let mut session_subscribers: HashMap<String, std::collections::HashSet<ClientId>> =
         HashMap::new();
     let mut child_sessions: HashMap<String, HashSet<String>> = HashMap::new();
@@ -2003,6 +2447,13 @@ pub async fn run_leader_server(
     let mut pending_requests: usize = 0;
     let relaunching = Arc::new(AtomicBool::new(false));
     loop {
+        apply_board_events(&driver_board, &mut session_driver, &mut held_driver_messages, &clients, &interaction_requests);
+        let board_deadline = async {
+            match driver_board.next_deadline() {
+                Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         let poll = tokio::select! {
             biased;
             _ = cancel.cancelled() => LeaderServerPoll::Cancelled,
@@ -2013,6 +2464,8 @@ pub async fn run_leader_server(
             Some(payload) = response_rx.recv() => LeaderServerPoll::Response(payload),
             Ok(()) = relay_refusal_rx.changed() => LeaderServerPoll::RelayRefusalChanged,
             Ok(()) = notice_rx.changed() => LeaderServerPoll::NoticeRecorded,
+            _ = driver_board.notified() => LeaderServerPoll::OwnerBoardWake,
+            _ = board_deadline => LeaderServerPoll::OwnerBoardWake,
         };
         match poll {
             LeaderServerPoll::Cancelled => {
@@ -2039,6 +2492,7 @@ pub async fn run_leader_server(
                     }
                 }
             }
+            LeaderServerPoll::OwnerBoardWake => {}
             LeaderServerPoll::NoticeRecorded => {
                 // `changed()` already marked the count seen; the list itself is read from this server's cursor.
                 forward_process_notices(&clients, &mut notices_forwarded);
@@ -2173,21 +2627,16 @@ pub async fn run_leader_server(
                             session_driver.remove(&sid);
                             detached_sessions.push(sid);
                         } else if session_driver.get(&sid) == Some(&id) {
-                            if let Some(&next) =
-                                session_subscribers.get(&sid).and_then(|s| s.iter().next())
-                            {
-                                session_driver.insert(sid.clone(), next);
-                                debug!(
-                                    session_id = %sid,
-                                    old_driver = id.0,
-                                    new_driver = next.0,
-                                    "Transferred session driver after disconnect"
-                                );
-                            } else {
-                                session_driver.remove(&sid);
-                            }
+                            // Routing is NOT handed to another subscriber (any local program could be one), and neither
+                            // is ownership: see `client_gone` below.
+                            session_driver.remove(&sid);
                         }
                     }
+                    // Sessions this client owned enter their grace window (its token reclaims them; this holds when it
+                    // was the last subscriber too), and it leaves every claimant queue. At the end of the window the
+                    // first still-connected claimant owns.
+                    driver_board.client_gone(id);
+                    pending_driver_reqs.retain(|_, req| req.client != id);
                     if last_active_client == Some(id) {
                         last_active_client = None;
                     }
@@ -2284,6 +2733,7 @@ pub async fn run_leader_server(
                     }
                 }
                 ServerEvent::Message(id, ClientMessage::Acp { payload }) => {
+                    apply_board_events(&driver_board, &mut session_driver, &mut held_driver_messages, &clients, &interaction_requests);
                     let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                     let mut payload_mutated = false;
                     if !*ready_rx.borrow() {
@@ -2307,17 +2757,42 @@ pub async fn run_leader_server(
                         }
                         continue;
                     }
+                    // An answer to one of the agent's requests for a session counts only from the client the leader delivered
+                    // it to (the session's owner). Another window's answer, e.g. an always-approve window's, never reaches the
+                    // agent.
+                    if let Some(j) = json.as_mut() {
+                        match drop_unadmitted_answers(j, &driver_board, super::drivers::Claimer::Client(id)) {
+                            AnswerFilter::DropAll => continue,
+                            AnswerFilter::Changed => payload_mutated = true,
+                            AnswerFilter::Keep => {}
+                        }
+                    }
                     if let Some(client) = clients.get(&id)
                         && client.mode == ClientMode::Stdio
                     {
                         last_active_client = Some(id);
                     }
-                    if let Some(session_id) = json.as_ref().and_then(extract_session_id) {
+                    // Who owns the session this message names. The token is removed from the request here, always, so
+                    // it never reaches the agent; it is only honoured on an attach request. Naming a session, by a
+                    // prompt or any other message, never changes its owner: only the events listed in `super::drivers` do.
+                    let me = super::drivers::Claimer::Client(id);
+                    let presented_token = json.as_mut().and_then(take_reconnect_token);
+                    payload_mutated |= presented_token.is_some();
+                    let msg_session = json.as_ref().and_then(extract_session_id);
+                    let msg_is_attach = json.as_ref().is_some_and(is_session_attach_request);
+                    let attach_verdict = match (msg_is_attach, msg_session.as_deref()) {
+                        (true, Some(sid)) => Some(driver_board.classify(sid, me, presented_token.as_deref())),
+                        _ => None,
+                    };
+                    if let Some(session_id) = msg_session.clone() {
                         session_subscribers
                             .entry(session_id.clone())
                             .or_default()
                             .insert(id);
-                        session_driver.entry(session_id.clone()).or_insert(id);
+                        // Routing only: where a driver-only message goes while the session has no live owner.
+                        if driver_board.owner_state(&session_id, me) != super::drivers::OwnerState::Other {
+                            session_driver.entry(session_id.clone()).or_insert(id);
+                        }
                         backfill_child_routes(
                             &session_id,
                             id,
@@ -2337,12 +2812,7 @@ pub async fn run_leader_server(
                             }
                         }
                     }
-                    let foreign_driver_live = json
-                        .as_ref()
-                        .filter(|j| is_session_attach_request(j))
-                        .and_then(extract_session_id)
-                        .and_then(|sid| session_driver.get(&sid).copied())
-                        .is_some_and(|d| d != id && clients.contains_key(&d));
+                    let foreign_driver_live = attach_verdict == Some(super::drivers::Verdict::Foreign);
                     if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
                         if let Some(yolo_mode) = extract_yolo_mode_change(json) {
                             client.capabilities.yolo_mode = yolo_mode;
@@ -2395,6 +2865,15 @@ pub async fn run_leader_server(
                         payload_mutated |=
                             inject_client_startup_hints(json, client.init_startup_hints.as_ref());
                         payload_mutated |= stamp_foreign_driver_flag(json, foreign_driver_live);
+                        payload_mutated |= stamp_owner_authority(json, me, &driver_board);
+                        // A JSON-RPC batch gets the identity and ownership pass per element, so a forged connection id or
+                        // verdict hidden in one is removed like any other.
+                        if let serde_json::Value::Array(items) = json {
+                            for item in items.iter_mut() {
+                                payload_mutated |= stamp_inbound_client_identity(item, &client.client_type, id);
+                                payload_mutated |= stamp_owner_authority(item, me, &driver_board);
+                            }
+                        }
                     } else if json.is_some() && !clients.contains_key(&id) {
                         // Fail closed: a message from a client that is no longer registered cannot be stamped with its
                         // connection identity, and forwarding it unstamped would bypass the ownership checks.
@@ -2411,6 +2890,43 @@ pub async fn run_leader_server(
                         pending_load_by_req.insert(ns_id.clone(), (id, load_sid.clone()));
                         load_live_buffer.entry((id, load_sid)).or_default();
                     }
+                    if let (Some(json), Some((ns_id, _))) = (json.as_ref(), rewritten.as_ref()) {
+                        let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                        if method == AGENT_METHOD_NAMES.session_new {
+                            pending_driver_reqs.insert(
+                                ns_id.clone(),
+                                DriverReq { client: id, kind: DriverReqKind::New },
+                            );
+                        } else if let (true, Some(sid)) = (is_session_end_method(method), msg_session.as_ref())
+                            && driver_board.owner_state(sid, me) != super::drivers::OwnerState::Other
+                        {
+                            pending_driver_reqs.insert(
+                                ns_id.clone(),
+                                DriverReq { client: id, kind: DriverReqKind::End { session_id: sid.clone() } },
+                            );
+                        } else if let (true, Some(sid)) = (msg_is_attach, msg_session.as_ref()) {
+                            // A load nobody else owns claims the session now, not at its response: a request pipelined
+                            // right behind it must already see its owner. A failed load undoes the claim.
+                            let claim = match attach_verdict {
+                                Some(super::drivers::Verdict::Owns { .. }) => {
+                                    session_driver.insert(sid.clone(), id);
+                                    Some(driver_board.claim(sid, me))
+                                }
+                                _ => None,
+                            };
+                            pending_driver_reqs.insert(
+                                ns_id.clone(),
+                                DriverReq {
+                                    client: id,
+                                    kind: DriverReqKind::Attach {
+                                        session_id: sid.clone(),
+                                        foreign: foreign_driver_live,
+                                        claim,
+                                    },
+                                },
+                            );
+                        }
+                    }
                     if rewritten.is_some() {
                         pending_requests += 1;
                         agent_busy.store(true, Ordering::Relaxed);
@@ -2421,8 +2937,12 @@ pub async fn run_leader_server(
                 ServerEvent::Message(_, _) => {}
             },
             LeaderServerPoll::Response(payload) => {
+                apply_board_events(&driver_board, &mut session_driver, &mut held_driver_messages, &clients, &interaction_requests);
                 let mut json: Option<serde_json::Value> = serde_json::from_str(&payload).ok();
                 let parsed_response = json.as_mut().and_then(parse_response_id);
+                let driver_req = parsed_response
+                    .as_ref()
+                    .and_then(|(_, rid)| pending_driver_reqs.remove(rid));
                 if parsed_response.is_some() {
                     pending_requests = pending_requests.saturating_sub(1);
                     agent_busy.store(pending_requests > 0, Ordering::Relaxed);
@@ -2453,9 +2973,13 @@ pub async fn run_leader_server(
                             .entry(session_id.clone())
                             .or_default()
                             .insert(client_id);
-                        session_driver
-                            .entry(session_id.clone())
-                            .or_insert(client_id);
+                        if driver_board.owner_state(&session_id, super::drivers::Claimer::Client(client_id))
+                            != super::drivers::OwnerState::Other
+                        {
+                            session_driver
+                                .entry(session_id.clone())
+                                .or_insert(client_id);
+                        }
                         backfill_child_routes(
                             &session_id,
                             client_id,
@@ -2467,6 +2991,49 @@ pub async fn run_leader_server(
                             client_id = client_id.0,
                             session_id, "Subscribed client to session from response"
                         );
+                    }
+                    // Ownership follows the response: a new session is owned by its creator, a load that claimed the
+                    // session keeps the claim (and its owner gets the token it presents after a leader reconnect), a
+                    // failed one gives the claim back, and a foreign one joins the queue to take the session over.
+                    let me = super::drivers::Claimer::Client(client_id);
+                    let succeeded = json.get("result").is_some_and(|r| r.is_object());
+                    let mut now_owned_session: Option<String> = None;
+                    if let Some(req) = driver_req {
+                        match req.kind {
+                            DriverReqKind::New if succeeded => {
+                                if let Some(sid) = extract_session_id_from_result(json) {
+                                    let claim = driver_board.claim(&sid, me);
+                                    session_driver.insert(sid.clone(), client_id);
+                                    if let Some(token) = claim.token.as_deref() {
+                                        insert_reconnect_token(json, token);
+                                    }
+                                    now_owned_session = Some(sid);
+                                }
+                            }
+                            DriverReqKind::New => {}
+                            DriverReqKind::Attach { session_id, foreign: false, claim: Some(claim) } => {
+                                if succeeded {
+                                    if let Some(token) = claim.token.as_deref() {
+                                        insert_reconnect_token(json, token);
+                                    }
+                                    now_owned_session = Some(session_id);
+                                } else {
+                                    driver_board.rollback(&session_id, me, claim.prev);
+                                }
+                            }
+                            DriverReqKind::Attach { session_id, foreign: true, .. } if succeeded => {
+                                driver_board.add_pending(&session_id, client_id);
+                            }
+                            DriverReqKind::Attach { .. } => {}
+                            DriverReqKind::End { session_id } => {
+                                if succeeded {
+                                    // The session is gone: nobody owns it any more, so the next window to load it is the owner.
+                                    driver_board.forget(&session_id);
+                                    session_driver.remove(&session_id);
+                                    held_driver_messages.remove(&session_id);
+                                }
+                            }
+                        }
                     }
                     if take_initialize_patch_if_matches(&mut client.patch_initialize_request_id, json) {
                         patch_initialize_response_model(json, &client.capabilities.default_model);
@@ -2528,8 +3095,11 @@ pub async fn run_leader_server(
                                 );
                             }
                         }
+                        // Pending modals go to the session's owner only: a window that loaded it as a non-owner neither sees
+                        // nor answers them.
                         if let Some(cached) = interaction_requests.get(buf_sid.as_str())
                             && let Some(target) = clients.get(&buf_client)
+                            && driver_board.owner_client(owning_session(&child_sessions, &buf_sid)) == Some(buf_client)
                         {
                             let count = cached.len();
                             for req in cached.values() {
@@ -2537,6 +3107,9 @@ pub async fn run_leader_server(
                                 {
                                     warn!(client_id = buf_client.0, error = %e, "Failed to replay interaction request after load (channel closed)");
                                     break;
+                                }
+                                if let Some(key) = request_key_of(req) {
+                                    driver_board.deliver_request(&key, &buf_sid, super::drivers::Claimer::Client(buf_client));
                                 }
                             }
                             if count > 0 {
@@ -2549,7 +3122,27 @@ pub async fn run_leader_server(
                             }
                         }
                     }
+                    if let Some(sid) = now_owned_session {
+                        // The owner was missing (grace, or nobody loaded yet): what was held for it arrives after its response.
+                        flush_driver_messages(&mut held_driver_messages, &sid, client_id, &clients, &driver_board);
+                    }
                     continue;
+                }
+                // The relay answered a `session/new` (its responses are not leader-routed): it owns the new session.
+                if parsed_response.is_none()
+                    && json.as_ref().is_some_and(|j| j.get("method").is_none())
+                    && let Some(sid) = json.as_ref().and_then(extract_session_id_from_result)
+                    && driver_board.claim_new_for_relay(&sid)
+                {
+                    debug!(session_id = %sid, "Relay created a session: it owns it");
+                }
+                // The relay's answer to a load that claimed a session: an error gives the claim back.
+                if parsed_response.is_none()
+                    && let Some(j) = json.as_ref()
+                    && j.get("method").is_none()
+                    && let Some(id) = j.get("id").filter(|id| !id.is_null())
+                {
+                    driver_board.relay_response(&id.to_string(), j.get("result").is_some_and(|r| r.is_object()));
                 }
                 let payload: Arc<str> = payload.into();
                 let json = json;
@@ -2568,6 +3161,7 @@ pub async fn run_leader_server(
                         match json.as_ref().and_then(extract_child_session_event) {
                             Some(ChildSessionEvent::Spawned(child_sid)) => {
                                 if let Some(parent) = json.as_ref().and_then(extract_session_id) {
+                                    driver_board.note_child(&child_sid, &parent);
                                     child_sessions
                                         .entry(parent)
                                         .or_default()
@@ -2648,6 +3242,10 @@ pub async fn run_leader_server(
                     json.as_ref()
                         .and_then(extract_session_id_from_prompt_complete)
                 });
+                // Output for a session the relay owns is the relay's turn running: it keeps the claim from lapsing.
+                if let Some(ref sid) = session_id {
+                    driver_board.relay_message(owning_session(&child_sessions, sid));
+                }
                 if let Some(ref sid) = session_id
                     && let Some(tcid) = json
                         .as_ref()
@@ -2665,6 +3263,9 @@ pub async fn run_leader_server(
                 let is_inject_prompt = json.as_ref().is_some_and(is_scheduled_task_inject_prompt);
                 let is_interaction =
                     is_reverse_request && json.as_ref().is_some_and(is_interaction_request);
+                let interaction_cached = is_interaction
+                    && session_id.is_some()
+                    && json.as_ref().and_then(extract_interaction_tool_call_id).is_some();
                 if is_interaction
                     && let Some(ref sid) = session_id
                     && let Some(tcid) = json.as_ref().and_then(extract_interaction_tool_call_id)
@@ -2674,40 +3275,81 @@ pub async fn run_leader_server(
                         .or_default()
                         .insert(tcid, payload.clone());
                 }
+                // Driver-only messages (every reverse request, the interaction modals included, and scheduled-task prompts)
+                // go to ONE client: the session's owner when it is connected, else (not for an interaction, and never while
+                // the owner's grace window is open: the owner is expected back) the activity-routed fallback. With no one to
+                // take it, it is held for the owner (bounded) and delivered when one is (re)established; a cached
+                // interaction is not held twice, the cache is replayed to that owner. Only the client a request was
+                // delivered to may answer it (`OwnerBoard::admit_answer`).
+                let driver_only = is_reverse_request || is_inject_prompt;
+                let request_key = if is_reverse_request { json.as_ref().and_then(request_key) } else { None };
+                if driver_only && let Some(ref sid) = session_id {
+                    // A subagent's session is owned through its parent.
+                    let owning = owning_session(&child_sessions, sid);
+                    let in_grace = driver_board.in_grace(owning);
+                    if let Some(key) = request_key.as_deref() {
+                        driver_board.note_request(key, sid);
+                    }
+                    // Another party (the relay) owns it: the prompt is theirs alone, never a local window's.
+                    if driver_board.relay_owns(owning) {
+                        trace!(session_id = sid.as_str(), is_inject = is_inject_prompt, "Driver-only message belongs to the relay, which owns the session; not routed to a local client");
+                        // The relay is sent every agent message on its own path; keep a request until it answers, in case
+                        // the relay's claim ends first and a promoted local owner has to take it over.
+                        if let Some(key) = request_key.as_deref() {
+                            driver_board.deliver_request(key, sid, super::drivers::Claimer::Relay);
+                            driver_board.hold_for_relay(owning, key, payload.clone());
+                        }
+                        continue;
+                    }
+                    let target = driver_board
+                        .owner_client(owning)
+                        .filter(|c| clients.contains_key(c))
+                        .or_else(|| {
+                            if in_grace || is_interaction {
+                                None
+                            } else {
+                                session_driver.get(sid.as_str()).copied().filter(|c| clients.contains_key(c))
+                            }
+                        });
+                    if let Some(target_id) = target {
+                        if let Some(client) = clients.get(&target_id) {
+                            if let Err(e) = client.tx.send(ClientOutbound::Acp(payload.clone())) {
+                                warn!(client_id = target_id.0, session_id = sid.as_str(), is_inject = is_inject_prompt, error = %e, "Failed to route driver-only message (channel closed)");
+                            } else {
+                                if let Some(key) = request_key.as_deref() {
+                                    driver_board.deliver_request(key, sid, super::drivers::Claimer::Client(target_id));
+                                }
+                                trace!(
+                                    client_id = target_id.0,
+                                    session_id = sid.as_str(),
+                                    is_inject = is_inject_prompt,
+                                    "Routed driver-only message to the session's owner"
+                                );
+                            }
+                        }
+                        continue;
+                    } else if in_grace || is_interaction {
+                        trace!(session_id = sid.as_str(), is_inject = is_inject_prompt, in_grace, "Holding driver-only message for the session's next owner");
+                        if !interaction_cached {
+                            hold_driver_message(&mut held_driver_messages, owning, payload.clone());
+                        }
+                        continue;
+                    } else if session_subscribers.contains_key(sid.as_str()) {
+                        warn!(
+                            session_id = sid.as_str(),
+                            is_inject = is_inject_prompt,
+                            "Dropping driver-only message: session has no owner and no live driver"
+                        );
+                        continue;
+                    }
+                }
                 if let Some(ref sid) = session_id
                     && session_subscribers.contains_key(sid.as_str())
                 {
                     let child_event = json.as_ref().and_then(extract_child_session_event);
                     let event_seq = json.as_ref().and_then(event_seq_of);
-                    if (is_reverse_request && !is_interaction) || is_inject_prompt {
-                        if let Some(&driver_id) = session_driver.get(sid.as_str()) {
-                            if let Some(client) = clients.get(&driver_id) {
-                                if let Err(e) =
-                                    client.tx.send(ClientOutbound::Acp(payload.clone()))
-                                {
-                                    warn!(client_id = driver_id.0, session_id = sid.as_str(), is_inject = is_inject_prompt, error = %e, "Failed to route driver-only message (channel closed)");
-                                } else {
-                                    trace!(
-                                        client_id = driver_id.0,
-                                        session_id = sid.as_str(),
-                                        is_inject = is_inject_prompt,
-                                        "Routed driver-only message to driver"
-                                    );
-                                }
-                            } else {
-                                trace!(
-                                    session_id = sid.as_str(),
-                                    is_inject = is_inject_prompt,
-                                    "Dropping driver-only message: no live driver"
-                                );
-                            }
-                        } else {
-                            trace!(
-                                session_id = sid.as_str(),
-                                is_inject = is_inject_prompt,
-                                "Dropping driver-only message: session has no driver"
-                            );
-                        }
+                    if driver_only {
+                        // Routed above.
                     } else if let Some(subs) = session_subscribers.get(sid.as_str()) {
                         for &cid in subs.iter() {
                             if let Some(buf) = load_live_buffer.get_mut(&(cid, sid.clone())) {
@@ -2752,6 +3394,7 @@ pub async fn run_leader_server(
                             if let Some(&driver_id) = session_driver.get(sid.as_str()) {
                                 session_driver.insert(child_sid.clone(), driver_id);
                             }
+                            driver_board.note_child(&child_sid, sid);
                             child_sessions
                                 .entry(sid.clone())
                                 .or_default()
@@ -3108,6 +3751,23 @@ fn default_test_control_state(socket_path: &Path) -> LeaderServerControlState {
     })
 }
 pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, ServerError> {
+    let control_state = default_test_control_state(&socket_path);
+    spawn_leader_server_with(socket_path, control_state).await
+}
+/// As [`spawn_leader_server`], with the reconnect grace window set to `grace` (tests cannot wait the default 30 s).
+#[cfg(test)]
+pub(crate) async fn spawn_leader_server_with_grace(
+    socket_path: PathBuf,
+    grace: Duration,
+) -> Result<ServerHandle, ServerError> {
+    let control_state = default_test_control_state(&socket_path).with_driver_grace(grace);
+    spawn_leader_server_with(socket_path, control_state).await
+}
+/// As [`spawn_leader_server`], with a caller-built control state (tests shorten the driver grace window with it).
+async fn spawn_leader_server_with(
+    socket_path: PathBuf,
+    control_state: LeaderServerControlState,
+) -> Result<ServerHandle, ServerError> {
     let (acp_tx, acp_rx) = mpsc::unbounded_channel();
     let (response_tx, response_rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
@@ -3117,7 +3777,6 @@ pub async fn spawn_leader_server(socket_path: PathBuf) -> Result<ServerHandle, S
     let (shutdown_tx, _shutdown_reason_rx) =
         watch::channel(super::protocol::ShutdownReason::Manual);
     let (relay_demand_tx, relay_demand_rx) = watch::channel(false);
-    let control_state = default_test_control_state(&socket_path);
     let cancel_clone = cancel.clone();
     let socket_path_clone = socket_path.clone();
     let client_count_clone = client_count.clone();

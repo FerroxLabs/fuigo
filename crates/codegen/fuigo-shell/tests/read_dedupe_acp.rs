@@ -43,7 +43,7 @@ fn tool_output(requests: &[LogEntry], session: &acp::SessionId, call_id: &str) -
         .flatten()
         .filter(|m| m["role"] == "tool" && m["tool_call_id"] == call_id)
         .filter_map(|m| m["content"].as_str().map(str::to_owned))
-        .last()
+        .next_back()
         .unwrap_or_else(|| panic!("no tool result for {call_id} in any request of {}", session.0))
 }
 

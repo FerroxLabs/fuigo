@@ -3683,6 +3683,25 @@ async fn load_session(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_i
         .unwrap();
 }
 
+/// As [`load_session`], presenting the reconnect token the leader issued to this session's owner (a reconnecting pager does).
+async fn load_session_with_token(writer: &mut tokio::io::WriteHalf<LeaderStream>, session_id: &str, token: &str) {
+    let msg = format!(
+        r#"{{"jsonrpc":"2.0","method":"session/load","id":1,"params":{{"sessionId":"{session_id}","_meta":{{"fuigo/leaderReconnectToken":"{token}"}}}}}}"#
+    );
+    write_message(writer, &ClientMessage::Acp { payload: msg })
+        .await
+        .unwrap();
+}
+
+/// The reconnect token in a load/new response the leader sent to the session's owner.
+fn reconnect_token_in(payload: &str) -> String {
+    let json: serde_json::Value = serde_json::from_str(payload).unwrap();
+    json["result"]["_meta"]["fuigo/leaderReconnectToken"]
+        .as_str()
+        .expect("the owner's response carries a reconnect token")
+        .to_string()
+}
+
 /// Regression for the race where live traffic beats replay.
 /// A live `session/notification` arriving WHILE a viewer's `session/load` is in flight must be BUFFERED, then flushed in order AFTER the response.
 /// Delivering it early would raise the client's highest-seen eventId, so the lower-eventId replay that follows would be deduped away.
@@ -3850,11 +3869,12 @@ async fn scheduled_task_inject_prompt_routes_to_driver_only() {
     cancel.cancel();
 }
 
-/// A blocking interaction reverse-request (permission / `ask_user_question` / plan-approval) is SHARED.
-/// It broadcasts to every subscriber so any client can render and answer the modal.
-/// Contrast with `two_clients_one_session_broadcast_and_driver`, where an ordinary reverse-request reaches the driver only.
+/// 1.0.30 (Windows check D1): every request a client answers on a session's behalf (permission, `ask_user_question`,
+/// plan approval, MCP elicitation, `fs/*`) goes to the session's OWNER only, and only the owner's answer reaches the agent.
+/// Before, the modals were shared (first answer wins): a second window attached in always-approve answered the owner's
+/// permission request itself.
 #[tokio::test]
-async fn interaction_request_broadcasts_to_all_subscribers() {
+async fn session_requests_go_to_the_owner_only_and_only_its_answer_counts() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx, mut acp_rx) =
         setup_persistent_server_with_agent(&temp).await;
@@ -3865,35 +3885,70 @@ async fn interaction_request_broadcasts_to_all_subscribers() {
     let _ = next_acp_payload(&mut reader_a).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
+    // B attaches the same session (foreign: A owns it).
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_b).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // The agent raises an `ask_user_question` reverse-request in the gateway-WRAPPED wire form (`_fuigo/...` top-level, nested method and params)
-    // This is the shape that previously fell through to driver-only.
-    let req = r#"{"jsonrpc":"2.0","id":501,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#;
-    response_tx.send(req.to_string()).unwrap();
-
-    let got_a = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
-    let got_b = next_acp_payload_matching(&mut reader_b, "ask_user_question").await;
-    assert!(
-        got_a.is_some(),
-        "driver A must receive the shared interaction"
-    );
-    assert!(
-        got_b.is_some(),
-        "subscriber B must ALSO receive the shared interaction (not driver-only)"
-    );
+    let requests = [
+        (501, "request_permission", r#"{"jsonrpc":"2.0","id":501,"method":"session/request_permission","params":{"sessionId":"sess-int","toolCall":{"toolCallId":"tc-p"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"}]}}"#),
+        (502, "ask_user_question", r#"{"jsonrpc":"2.0","id":502,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-q","questions":[]}}}"#),
+        (503, "exit_plan_mode", r#"{"jsonrpc":"2.0","id":503,"method":"_fuigo/exit_plan_mode","params":{"method":"fuigo/exit_plan_mode","params":{"sessionId":"sess-int","toolCallId":"tc-x"}}}"#),
+        (504, "mcp/elicit", r#"{"jsonrpc":"2.0","id":504,"method":"_fuigo/mcp/elicit","params":{"method":"fuigo/mcp/elicit","params":{"sessionId":"sess-int","message":"token?"}}}"#),
+        (505, "read_text_file", r#"{"jsonrpc":"2.0","id":505,"method":"fs/read_text_file","params":{"sessionId":"sess-int","path":"/tmp/x"}}"#),
+    ];
+    for (id, needle, req) in requests {
+        response_tx.send(req.to_string()).unwrap();
+        assert!(
+            next_acp_payload_matching(&mut reader_a, needle).await.is_some(),
+            "the owner A must receive {needle}"
+        );
+        assert!(
+            next_acp_payload_matching(&mut reader_b, needle).await.is_none(),
+            "non-owner B must NOT receive {needle}"
+        );
+        // B answers anyway (an always-approve window would): dropped, never reaches the agent.
+        send_answer(&mut writer_b, id, "B-ANSWER").await;
+        assert!(
+            forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_none(),
+            "a non-owner's answer to {needle} must never reach the agent"
+        );
+        // The owner's answer counts.
+        send_answer(&mut writer_a, id, "A-ANSWER").await;
+        assert!(
+            forwarded_matching(&mut acp_rx, "A-ANSWER").await.is_some(),
+            "the owner's answer to {needle} must reach the agent"
+        );
+    }
 
     cancel.cancel();
 }
 
-/// A client that attaches WHILE an interaction is pending must render it too.
-/// The leader caches the issued interaction and replays it to the new subscriber after its `session/load` completes.
+/// Answer the agent's request `id` from a client, with `marker` in the result.
+async fn send_answer(writer: &mut tokio::io::WriteHalf<LeaderStream>, id: u64, marker: &str) {
+    let msg = format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"outcome":{{"outcome":"selected","optionId":"allow"}},"marker":"{marker}"}}}}"#);
+    write_message(writer, &ClientMessage::Acp { payload: msg }).await.unwrap();
+}
+
+/// The next line the leader forwarded to the agent that contains `needle`, within a short deadline.
+async fn forwarded_matching(acp_rx: &mut mpsc::UnboundedReceiver<String>, needle: &str) -> Option<String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, acp_rx.recv()).await {
+            Ok(Some(line)) if line.contains(needle) => return Some(line),
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
+/// A window that attaches WHILE an interaction is pending gets it only when it is the session's owner: a non-owner
+/// late joiner neither sees nor answers it; the owner reloading the session gets the cached modal again.
 #[tokio::test]
-async fn pending_interaction_replayed_to_late_joiner() {
+async fn pending_interaction_replayed_to_the_owner_only() {
     let temp = TempDir::new().unwrap();
     let (sock_path, cancel, response_tx, mut acp_rx) =
         setup_persistent_server_with_agent(&temp).await;
@@ -3901,24 +3956,35 @@ async fn pending_interaction_replayed_to_late_joiner() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_a).await;
+    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // An interaction raised (wrapped wire form) while only A is attached is cached by the leader
-    let req = r#"{"jsonrpc":"2.0","id":601,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-late","questions":[]}}}"#;
+    let req = r#"{"jsonrpc":"2.0","id":601,"method":"session/request_permission","params":{"sessionId":"sess-int","toolCall":{"toolCallId":"tc-late"},"options":[]}}"#;
     response_tx.send(req.to_string()).unwrap();
-    let _ = next_acp_payload_matching(&mut reader_a, "ask_user_question").await;
+    let _ = next_acp_payload_matching(&mut reader_a, "request_permission").await;
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    // B attaches LATE and must receive the replayed cached interaction
+    // B attaches LATE as a non-owner: no replay, and its answer does not count.
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let replayed = next_acp_payload_matching(&mut reader_b, "ask_user_question").await;
     assert!(
-        replayed.is_some(),
-        "a late-joiner must receive the replayed still-pending interaction"
+        next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none(),
+        "a non-owner late joiner must not receive the pending permission request"
     );
+    send_answer(&mut writer_b, 601, "B-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_none());
+
+    // The owner reloads (same window): the pending modal is replayed to it and its answer counts.
+    load_session_with_token(&mut writer_a, "sess-int", &a_token).await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    assert!(
+        next_acp_payload_matching(&mut reader_a, "request_permission").await.is_some(),
+        "the owner's reload must replay the still-pending modal"
+    );
+    send_answer(&mut writer_a, 601, "A-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER").await.is_some());
 
     cancel.cancel();
 }
@@ -3965,7 +4031,8 @@ async fn reattached_client_backfilled_into_child_routes() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-sub").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_a).await;
+    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let spawned_live = r#"{"jsonrpc":"2.0","method":"fuigo/session_notification","params":{"sessionId":"sess-sub","update":{"sessionUpdate":"subagent_spawned","child_session_id":"child-sub"}}}"#;
@@ -3982,10 +4049,11 @@ async fn reattached_client_backfilled_into_child_routes() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // A2 reconnects and reloads the parent
+    // A2 reconnects and reloads the parent, presenting A's reconnect token (the departed owner is not replaced by a tokenless
+    // loader: it would be foreign for the grace window, even when A was the only subscriber)
     // No replayed spawn line is sent, so receiving child updates proves the response-time BACKFILL (not replay registration)
     let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
-    load_session(&mut writer_a2, "sess-sub").await;
+    load_session_with_token(&mut writer_a2, "sess-sub", &a_token).await;
     complete_load(&mut acp_rx, &response_tx).await;
     let _ = next_acp_payload(&mut reader_a2).await;
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -4574,11 +4642,11 @@ async fn mid_load_child_delta_reaches_loader_via_request_side_backfill() {
     cancel.cancel();
 }
 
-/// A pending interaction must SURVIVE a full client disconnect and be replayed on reconnect.
+/// A pending interaction must SURVIVE a full client disconnect and be replayed to the owner when it reconnects.
 /// A session with a pending interaction has a running turn (the tool awaits the answer).
 /// The agent therefore keeps it resident across the disconnect with the reverse-request still parked (`session_has_live_work`).
-/// The leader must NOT drop its interaction cache on detach, or the reconnecting client gets no modal while the agent is still waiting.
-/// Regression for the "modal vanishes on reconnect" bug.
+/// The leader must NOT drop its interaction cache on detach, or the reconnecting owner gets no modal while the agent is still
+/// waiting. A tokenless window that loads the session during the grace window is not the owner: it gets nothing.
 #[tokio::test]
 async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let temp = TempDir::new().unwrap();
@@ -4589,7 +4657,8 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
     load_session(&mut writer_a, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let _ = next_acp_payload(&mut reader_a).await;
+    let a_reply = next_acp_payload(&mut reader_a).await.expect("A's load response");
+    let a_token = reconnect_token_in(&a_reply);
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let req = r#"{"jsonrpc":"2.0","id":801,"method":"_fuigo/ask_user_question","params":{"method":"fuigo/ask_user_question","params":{"sessionId":"sess-int","toolCallId":"tc-reconnect","questions":[]}}}"#;
@@ -4603,17 +4672,151 @@ async fn pending_interaction_survives_disconnect_and_replays_on_reconnect() {
     drop(writer_a);
     tokio::time::sleep(Duration::from_millis(80)).await;
 
-    // Reconnect (B): the still-pending interaction must replay on its load
+    // A tokenless window during the grace window: not the owner, no modal.
     let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
     load_session(&mut writer_b, "sess-int").await;
     complete_load(&mut acp_rx, &response_tx).await;
-    let replayed = next_acp_payload_matching(&mut reader_b, "ask_user_question").await;
+    assert!(next_acp_payload_matching(&mut reader_b, "ask_user_question").await.is_none());
+
+    // The owner reconnects with its token: the still-pending interaction replays on its load, and its answer counts.
+    let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
+    load_session_with_token(&mut writer_a2, "sess-int", &a_token).await;
+    complete_load(&mut acp_rx, &response_tx).await;
     assert!(
-        replayed.is_some(),
-        "a still-pending interaction must survive a full disconnect and replay on reconnect"
+        next_acp_payload_matching(&mut reader_a2, "ask_user_question").await.is_some(),
+        "a still-pending interaction must survive a full disconnect and replay on the owner's reconnect"
     );
+    send_answer(&mut writer_b, 801, "B-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_none());
+    send_answer(&mut writer_a2, 801, "A-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER").await.is_some());
 
     cancel.cancel();
+}
+
+/// A permission request raised while the owner is in its grace window is held: no other window gets it; it is delivered
+/// to the owner when it reclaims the session, and only its answer counts. Without a `toolCallId` (not cached) it comes
+/// from the held set; with one, from the interaction cache: both reach the owner exactly once.
+#[tokio::test]
+async fn permission_request_during_grace_is_held_for_the_owner() {
+    let temp = TempDir::new().unwrap();
+    let (sock_path, cancel, response_tx, mut acp_rx) =
+        setup_persistent_server_with_agent(&temp).await;
+
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    load_session(&mut writer_a, "sess-g").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let a_token = reconnect_token_in(&next_acp_payload(&mut reader_a).await.expect("A's load response"));
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    load_session(&mut writer_b, "sess-g").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+    drop(reader_a);
+    drop(writer_a);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    let cached = r#"{"jsonrpc":"2.0","id":901,"method":"session/request_permission","params":{"sessionId":"sess-g","toolCall":{"toolCallId":"tc-g"},"options":[]}}"#;
+    let uncached = r#"{"jsonrpc":"2.0","id":902,"method":"session/request_permission","params":{"sessionId":"sess-g","options":[]}}"#;
+    response_tx.send(cached.to_string()).unwrap();
+    response_tx.send(uncached.to_string()).unwrap();
+    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none(), "B is not the owner");
+    send_answer(&mut writer_b, 901, "B-ANSWER").await;
+    send_answer(&mut writer_b, 902, "B-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_none());
+
+    let (mut reader_a2, mut writer_a2) = connect_and_register(&sock_path, "client-a").await;
+    load_session_with_token(&mut writer_a2, "sess-g", &a_token).await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let mut got = Vec::new();
+    while let Some(p) = next_acp_payload_matching(&mut reader_a2, "request_permission").await {
+        got.push(serde_json::from_str::<serde_json::Value>(&p).unwrap()["id"].as_u64().unwrap());
+    }
+    got.sort();
+    assert_eq!(got, vec![901, 902], "each held request reaches the reclaiming owner exactly once");
+    send_answer(&mut writer_a2, 901, "A-ANSWER-1").await;
+    send_answer(&mut writer_a2, 902, "A-ANSWER-2").await;
+    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER-1").await.is_some());
+    assert!(forwarded_matching(&mut acp_rx, "A-ANSWER-2").await.is_some());
+
+    cancel.cancel();
+}
+
+/// When the owner does not come back, the first queued window becomes owner at the end of the grace window and is handed
+/// the pending permission request; from then on only its answer counts (the departed owner's no longer would).
+#[tokio::test]
+async fn pending_permission_request_goes_to_the_promoted_owner() {
+    let temp = TempDir::new().unwrap();
+    let sock_path = temp.path().join("test.sock");
+    let (acp_tx, mut acp_rx) = mpsc::unbounded_channel();
+    let (response_tx, response_rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let control_state = default_test_control_state(&sock_path).with_driver_grace(Duration::from_millis(300));
+    let (sock_clone, cancel_clone) = (sock_path.clone(), cancel.clone());
+    tokio::spawn(async move {
+        let _ = run_leader_server(
+            sock_clone,
+            acp_tx,
+            response_rx,
+            cancel_clone,
+            true,
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(AtomicBool::new(false)),
+            AgentActivity::default(),
+            watch::channel(true).1,
+            watch::channel(false).0,
+            watch::channel(super::super::protocol::ShutdownReason::Manual).0,
+            None,
+            control_state,
+        )
+        .await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (mut reader_a, mut writer_a) = connect_and_register(&sock_path, "client-a").await;
+    load_session(&mut writer_a, "sess-p").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_a).await;
+    let (mut reader_b, mut writer_b) = connect_and_register(&sock_path, "client-b").await;
+    load_session(&mut writer_b, "sess-p").await;
+    complete_load(&mut acp_rx, &response_tx).await;
+    let _ = next_acp_payload(&mut reader_b).await;
+
+    let req = r#"{"jsonrpc":"2.0","id":951,"method":"session/request_permission","params":{"sessionId":"sess-p","toolCall":{"toolCallId":"tc-promo"},"options":[]}}"#;
+    response_tx.send(req.to_string()).unwrap();
+    assert!(next_acp_payload_matching(&mut reader_a, "request_permission").await.is_some());
+    assert!(next_acp_payload_matching(&mut reader_b, "request_permission").await.is_none());
+    drop(reader_a);
+    drop(writer_a);
+
+    // Grace ends: B is promoted and gets the pending request.
+    assert!(
+        next_acp_payload_matching(&mut reader_b, "request_permission").await.is_some(),
+        "the promoted owner must be handed the pending permission request"
+    );
+    send_answer(&mut writer_b, 951, "B-ANSWER").await;
+    assert!(forwarded_matching(&mut acp_rx, "B-ANSWER").await.is_some(), "the new owner's answer counts");
+
+    cancel.cancel();
+}
+
+/// The relay's answers follow the same rule: refused for a request delivered to a local owner, admitted for a session the
+/// relay owns (even ahead of the server loop), unchanged for anything that is not an answer.
+#[test]
+fn relay_answers_count_only_for_requests_the_relay_was_given() {
+    let board = super::super::drivers::OwnerBoard::default();
+    let _ = board.claim("local", super::super::drivers::Claimer::Client(ClientId(1)));
+    note_agent_request(r#"{"jsonrpc":"2.0","id":11,"method":"session/request_permission","params":{"sessionId":"local"}}"#, &board);
+    let answer = r#"{"jsonrpc":"2.0","id":11,"result":{"outcome":{"outcome":"selected","optionId":"allow"}}}"#;
+    assert!(filter_relay_answers(answer, &board).is_none(), "a local owner's request is not the relay's to answer");
+    let batch = r#"[{"jsonrpc":"2.0","id":11,"result":{}},{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"local"}}]"#;
+    let kept: serde_json::Value = serde_json::from_str(&filter_relay_answers(batch, &board).unwrap()).unwrap();
+    assert_eq!(kept.as_array().unwrap().len(), 1, "only the refused answer is removed from a batch");
+    assert!(board.claim_new_for_relay("remote"));
+    note_agent_request(r#"{"jsonrpc":"2.0","id":12,"method":"session/request_permission","params":{"sessionId":"remote"}}"#, &board);
+    let answer = r#"{"jsonrpc":"2.0","id":12,"result":{}}"#;
+    assert_eq!(filter_relay_answers(answer, &board).as_deref(), Some(answer));
+    let prompt = r#"{"jsonrpc":"2.0","id":13,"method":"session/prompt","params":{"sessionId":"local"}}"#;
+    assert_eq!(filter_relay_answers(prompt, &board).as_deref(), Some(prompt));
 }
 
 /// An interaction raised while the session has NO subscriber must still be cached, so the FIRST client to attach gets the modal replayed.
@@ -4681,9 +4884,11 @@ async fn resolved_interaction_not_replayed_to_late_joiner() {
     cancel.cancel();
 }
 
-/// When the driver disconnects but another subscriber remains, the session is NOT evicted and the driver role transfers to the remaining client.
+/// When the driver disconnects but another subscriber remains, the session is NOT evicted, and the driver role is NOT handed to the
+/// remaining subscriber (P30: any local program could be that subscriber). Driver-only messages are dropped until the driver's
+/// reconnect token reclaims the role within the grace window, or the window ends and the first loader owns.
 #[tokio::test]
-async fn driver_disconnect_transfers_not_evicts() {
+async fn driver_disconnect_does_not_hand_off_and_does_not_evict() {
     let temp = TempDir::new().unwrap();
     let sock_path = temp.path().join("test.sock");
     let (acp_tx, mut acp_rx) = mpsc::unbounded_channel();
@@ -4736,16 +4941,14 @@ async fn driver_disconnect_transfers_not_evicts() {
         "session must NOT be evicted while another subscriber remains"
     );
 
-    // A NON-interaction reverse-request now reaches B (driver transferred).
+    // A NON-interaction reverse-request is driver-only and the session now has no driver: it is dropped, NOT routed to B.
     // (A non-interaction method exercises the driver-only path; interaction reverse-requests broadcast instead, see the shared-interaction tests.)
     let req = r#"{"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"sessionId":"sess-xfer","path":"/tmp/x"}}"#;
     response_tx.send(req.to_string()).unwrap();
     let req_b = next_acp_payload(&mut reader_b).await;
     assert!(
-        req_b
-            .as_deref()
-            .is_some_and(|p| p.contains("read_text_file")),
-        "after driver disconnect, B should become driver and receive the reverse-request, got {req_b:?}"
+        req_b.is_none(),
+        "after the driver disconnects, B must NOT inherit the driver role, got {req_b:?}"
     );
 
     cancel.cancel();

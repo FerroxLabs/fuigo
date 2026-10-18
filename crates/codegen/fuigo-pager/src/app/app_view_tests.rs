@@ -133,6 +133,7 @@ pub(crate) fn test_app() -> AppView {
         cli_effort_token: None,
         default_yolo: false,
         permission_mode_from_soft_default: true,
+        out_of_date_leader_mode_notice_shown: false,
         auto_mode_gate: true,
         yolo_policy_block: None,
         yolo_launch_block_notice: None,
