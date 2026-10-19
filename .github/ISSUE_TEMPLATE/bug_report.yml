@@ -1,0 +1,75 @@
+name: Bug report
+description: Something in Fuigo does not behave as documented.
+title: "[Bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Security problems go through [SECURITY.md](https://github.com/FerroxLabs/fuigo/blob/main/SECURITY.md), not a public issue.
+        Before filing, run `fuigo update` (or `npm install -g fuigo@latest`) and check whether the problem is still there.
+  - type: input
+    id: version
+    attributes:
+      label: Fuigo version
+      description: Output of `fuigo --version`.
+      placeholder: "1.0.30"
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Where the problem shows up.
+      options:
+        - Terminal UI
+        - Headless CLI (`-p`)
+        - ACP agent (`fuigo agent`)
+        - Install or update (npm launcher)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and version, CPU architecture, terminal, and Node version (`node --version`).
+      placeholder: "macOS 15.1, arm64, Ghostty, Node 22.11"
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model route
+      description: Provider and backend, not the key. For example "Anthropic, messages", "ChatGPT subscription", "Ollama".
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what Fuigo did instead. Paste error text as text, not as a screenshot, where you can.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. `fuigo -p "..." --output-format json`
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and configuration
+      description: Relevant lines from `~/.fuigo/` logs and the `[model.*]` or `[memory]` sections you changed. Remove keys, tokens and anything private first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this is not a duplicate.
+          required: true
+        - label: This report contains no API keys, tokens or private data.
+          required: true

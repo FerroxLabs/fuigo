@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Fuigo mark">
+  <!-- Fuigo mark: the Lucide "wind" icon (https://lucide.dev/icons/wind), lucide-static 1.59.0, ISC licence.
+       Licence text: docs/assets/lucide-LICENSE.txt. Paths unchanged; stroke colour and weight are Fuigo's. -->
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FF9A4D"/>
+      <stop offset="0.6" stop-color="#FF6A1A"/>
+      <stop offset="1" stop-color="#C94A0A"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(32 32) scale(18.6667)" fill="none" stroke="url(#ember)" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12.8 19.6A2 2 0 1 0 14 16H2"/>
+    <path d="M17.5 8a2.5 2.5 0 1 1 2 4H2"/>
+    <path d="M9.8 4.4A2 2 0 1 1 11 8H2"/>
+  </g>
+</svg>
