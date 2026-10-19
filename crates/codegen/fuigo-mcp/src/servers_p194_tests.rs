@@ -62,6 +62,8 @@ async fn recording_service(
         server_name: "recording".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        progress: Default::default(),
+        progress_generation: 0,
     };
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
         client_read,
@@ -266,7 +268,8 @@ async fn a_dropped_agent_tool_call_tells_the_server_it_was_cancelled() {
     let raw = serde_json::json!({});
     let (mut reconnect, mut is_timeout) = (false, false);
     {
-        let mut call = Box::pin(tool.try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout, &ew));
+        let mut call =
+            Box::pin(tool.try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout, &ew));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(100), &mut call)
                 .await
@@ -278,7 +281,11 @@ async fn a_dropped_agent_tool_call_tells_the_server_it_was_cancelled() {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let ids = call_ids(&received);
     assert_eq!(ids.len(), 1, "{ids:?}");
-    assert_eq!(cancellations(&received), ids, "one cancel, for the dropped request");
+    assert_eq!(
+        cancellations(&received),
+        ids,
+        "one cancel, for the dropped request"
+    );
 }
 
 #[tokio::test]
@@ -287,15 +294,28 @@ async fn an_agent_tool_call_that_times_out_is_flagged_and_cancelled_once() {
     let ew = fuigo_session_events::EventWriter::noop();
     let (mut reconnect, mut is_timeout) = (false, false);
     let err = tool
-        .try_call_tool(&client, &serde_json::json!({}), &mut reconnect, &mut is_timeout, &ew)
+        .try_call_tool(
+            &client,
+            &serde_json::json!({}),
+            &mut reconnect,
+            &mut is_timeout,
+            &ew,
+        )
         .await
         .expect_err("the server never replies");
     assert!(is_timeout, "a timeout must be flagged");
-    assert!(err.to_string().contains("timed out after 1 seconds"), "{err}");
+    assert!(
+        err.to_string().contains("timed out after 1 seconds"),
+        "{err}"
+    );
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let ids = call_ids(&received);
     assert_eq!(ids.len(), 1, "{ids:?}");
-    assert_eq!(cancellations(&received), ids, "exactly one cancel for the timed-out request");
+    assert_eq!(
+        cancellations(&received),
+        ids,
+        "exactly one cancel for the timed-out request"
+    );
 }
 
 // ---- Round 2 (Grok r1, U16): a server that stops reading its stdin must not hold the call or the connection ----
@@ -347,6 +367,8 @@ async fn resilient_service(
         server_name: "stalling".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        progress: Default::default(),
+        progress_generation: 0,
     };
     let transport = ResilientRwTransport::new(
         client_read,
@@ -372,7 +394,10 @@ async fn a_timed_out_call_returns_at_the_deadline_when_the_server_stopped_readin
     )
     .await
     .expect("the call must return at its deadline, not wait for the cancel write");
-    assert!(matches!(round, Err(ServiceError::Timeout { .. })), "{round:?}");
+    assert!(
+        matches!(round, Err(ServiceError::Timeout { .. })),
+        "{round:?}"
+    );
     assert!(started.elapsed() < std::time::Duration::from_millis(1200));
 }
 
@@ -451,7 +476,11 @@ async fn dropping_a_call_as_it_times_out_still_sends_one_cancel() {
         let _ = tokio::time::timeout(std::time::Duration::from_millis(outer_ms), call).await;
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let ids = call_ids(&received);
-        assert_eq!(cancellations(&received), ids, "outer {outer_ms} ms: {ids:?}");
+        assert_eq!(
+            cancellations(&received),
+            ids,
+            "outer {outer_ms} ms: {ids:?}"
+        );
         assert_eq!(ids.len(), 1);
     }
 }

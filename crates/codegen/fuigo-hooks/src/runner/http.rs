@@ -1112,6 +1112,7 @@ mod tests {
         assert_eq!(info.source_url.as_deref(), Some(url_template));
     }
 
+    #[allow(clippy::disallowed_methods)] // local mock-server test; no TLS policy applies
     #[tokio::test]
     async fn hook_client_does_not_follow_redirects() {
         use std::sync::Arc;

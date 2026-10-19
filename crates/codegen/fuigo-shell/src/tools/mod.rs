@@ -3,6 +3,7 @@
 
 pub mod bridge;
 pub mod config;
+pub(crate) mod mcp_progress;
 pub mod notification_bridge;
 pub mod retry;
 pub(crate) mod task_completed_frame;

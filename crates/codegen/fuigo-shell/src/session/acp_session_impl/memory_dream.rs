@@ -915,19 +915,22 @@ impl SessionActor {
     /// and `/memory off|on` flips the storage handle synchronously on that same thread, so a toggle can never land between
     /// the check and the write: the note is written entirely before the toggle, or refused entirely after it. Do not
     /// move the append onto `spawn_blocking`: that would reopen the window.
-    pub(super) async fn save_memory_note(&self, text: &str) -> Result<(), acp::Error> {
+    pub(super) async fn save_memory_note(&self, text: &str) -> Result<String, acp::Error> {
         let Some(storage) = self.memory.storage() else {
             return Err(crate::acp_error::invalid_request(
                 "memory is not enabled for this session",
             ));
         };
-        storage
-            .append_to_memory(crate::session::memory::MemoryScope::Workspace, text)
-            .map_err(|e| crate::acp_error::internal_error(format!("memory note write failed: {e}")))?;
+        let path = storage.append_user_note(text).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::Unsupported {
+                crate::acp_error::invalid_request(e.to_string())
+            } else {
+                crate::acp_error::internal_error(format!("memory note write failed: {e}"))
+            }
+        })?;
         // Indexing re-reads the session's own state; if memory was turned off meanwhile it indexes nothing new
-        let path = storage.workspace_memory_file();
         self.reindex_and_embed(&path, storage.classify_source(&path)).await;
-        Ok(())
+        Ok(path.display().to_string())
     }
 
     pub(super) async fn handle_rewrite_memory_note(

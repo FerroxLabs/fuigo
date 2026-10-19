@@ -1,19 +1,20 @@
 pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
-pub mod cron_fire_tickets;
 pub(crate) mod compaction_config;
+pub mod cron_fire_tickets;
 pub(crate) mod doom_loop_telemetry;
 pub mod handle;
+pub(crate) mod human_rules;
 pub(crate) mod memory_state;
 pub mod merge;
 pub(crate) mod message_delivery;
-pub(crate) mod peer_message;
+pub mod notifications;
 pub mod peer_admission;
-pub(crate) mod peer_watch;
 pub(crate) mod peer_audit;
 pub(crate) mod peer_integrity;
-pub mod notifications;
+pub(crate) mod peer_message;
+pub(crate) mod peer_watch;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub(crate) mod quiesce;
@@ -378,12 +379,26 @@ mod tests {
     fn hook_origin_tag_is_none_only_for_a_typed_prompt() {
         let all = [
             PromptOrigin::User,
-            PromptOrigin::TaskCompleted { task_id: String::new() },
-            PromptOrigin::SubagentCompleted { subagent_id: String::new() },
-            PromptOrigin::ParentAgentMessage { message_id: String::new(), sender_session_id: String::new() },
-            PromptOrigin::PeerMessage { message_id: String::new(), from: String::new() },
-            PromptOrigin::WorkflowCompleted { completion_id: String::new() },
-            PromptOrigin::PeerNotice { message_id: String::new() },
+            PromptOrigin::TaskCompleted {
+                task_id: String::new(),
+            },
+            PromptOrigin::SubagentCompleted {
+                subagent_id: String::new(),
+            },
+            PromptOrigin::ParentAgentMessage {
+                message_id: String::new(),
+                sender_session_id: String::new(),
+            },
+            PromptOrigin::PeerMessage {
+                message_id: String::new(),
+                from: String::new(),
+            },
+            PromptOrigin::WorkflowCompleted {
+                completion_id: String::new(),
+            },
+            PromptOrigin::PeerNotice {
+                message_id: String::new(),
+            },
             PromptOrigin::NotificationDrain,
             PromptOrigin::GoalSummary,
             PromptOrigin::GoalClassifierNudge,
@@ -398,14 +413,24 @@ mod tests {
                 None => assert_eq!(origin, &PromptOrigin::User),
                 Some(tag) => {
                     assert!(seen.insert(tag), "duplicate tag {tag}");
-                    assert!(tag.chars().all(|c| c.is_ascii_lowercase() || c == '_'), "{tag}");
+                    assert!(
+                        tag.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                        "{tag}"
+                    );
                 }
             }
         }
         assert_eq!(seen.len(), all.len() - 1);
-        assert_eq!(PromptOrigin::SchedulerFired.hook_origin_tag(), Some("scheduled"));
         assert_eq!(
-            PromptOrigin::PeerMessage { message_id: String::new(), from: String::new() }.hook_origin_tag(),
+            PromptOrigin::SchedulerFired.hook_origin_tag(),
+            Some("scheduled")
+        );
+        assert_eq!(
+            PromptOrigin::PeerMessage {
+                message_id: String::new(),
+                from: String::new()
+            }
+            .hook_origin_tag(),
             Some("peer_message")
         );
     }
@@ -465,7 +490,10 @@ mod tests {
                 assert!(origin.policy().authority.is_human_intent(), "{id}");
             }
         }
-        assert_eq!(PromptOrigin::from_client_prompt_id("my-prompt"), PromptOrigin::User);
+        assert_eq!(
+            PromptOrigin::from_client_prompt_id("my-prompt"),
+            PromptOrigin::User
+        );
     }
 
     #[test]
@@ -559,7 +587,10 @@ mod tests {
         assert!(!origin.hide_user_echo_from_scrollback());
         assert_eq!(origin.completion_id(), None);
         // Never derived from an id: a client cannot claim it.
-        assert_eq!(PromptOrigin::from_client_prompt_id("subagent-task-x"), PromptOrigin::User);
+        assert_eq!(
+            PromptOrigin::from_client_prompt_id("subagent-task-x"),
+            PromptOrigin::User
+        );
     }
     /// An unverified scheduled prompt is model-authored for authority but keeps user turn mechanics and an ENFORCED prompt hook.
     #[test]
@@ -574,7 +605,10 @@ mod tests {
         assert!(PromptOrigin::User.enforces_prompt_block());
         assert!(!PromptOrigin::SchedulerFired.enforces_prompt_block());
         assert!(!PromptOrigin::SubagentTask.enforces_prompt_block());
-        assert_eq!(PromptOrigin::from_prompt_id("scheduler-fired-x"), PromptOrigin::SchedulerFired);
+        assert_eq!(
+            PromptOrigin::from_prompt_id("scheduler-fired-x"),
+            PromptOrigin::SchedulerFired
+        );
     }
     #[test]
     fn current_origin_queue_policies_are_preserved() {
@@ -617,7 +651,10 @@ mod tests {
             (PromptOrigin::GoalClassifierNudge, QueuePolicy::Hidden),
             (PromptOrigin::SchedulerFired, QueuePolicy::Hidden),
             (PromptOrigin::PlanResume, QueuePolicy::Hidden),
-            (PromptOrigin::UnverifiedScheduled, QueuePolicy::VisibleEditable),
+            (
+                PromptOrigin::UnverifiedScheduled,
+                QueuePolicy::VisibleEditable,
+            ),
         ];
         for (origin, queue) in cases {
             assert_eq!(origin.policy().queue, queue, "{origin:?}");
@@ -688,7 +725,6 @@ pub(crate) struct RegistryConfig {
 }
 pub mod acp_conversion;
 pub(crate) mod acp_mcp;
-pub(crate) mod reverse_ticket;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
 pub(crate) mod chat_persistence;
@@ -711,14 +747,16 @@ pub(crate) mod goal_summarizer;
 pub mod goal_tracker;
 pub mod helpers;
 pub(crate) mod image_describe;
-pub(crate) mod model_facing_reads;
 pub(crate) mod image_normalize;
 pub(crate) mod inference_metrics;
+pub(crate) mod model_facing_reads;
+pub(crate) mod reverse_ticket;
 pub use fuigo_shared::session::info;
-pub mod interrupted_turn;
-pub(crate) mod turn_owner_lock;
-pub mod session_writer_lock;
 pub mod admin_policy_watch;
+#[cfg(test)]
+mod compact_tool_catalog_tests;
+pub mod execution_state;
+pub mod interrupted_turn;
 pub mod managed_mcp;
 pub(crate) mod mcp_descriptors;
 pub(crate) mod mcp_dispatcher;
@@ -731,11 +769,10 @@ pub mod memory;
 pub(crate) mod memory_observation;
 pub(crate) mod normalize_cache;
 pub mod persistence;
-pub mod execution_state;
 pub(crate) mod read_dedupe;
+pub mod session_writer_lock;
 pub(crate) mod tool_presentation;
-#[cfg(test)]
-mod compact_tool_catalog_tests;
+pub(crate) mod turn_owner_lock;
 pub use fuigo_shared::placeholder_images;
 pub mod plan_mode;
 pub mod prompt_history;
@@ -745,8 +782,8 @@ pub(crate) mod replay_events;
 pub mod repo_changes;
 #[path = "restore_stub.rs"]
 pub mod restore;
-pub(crate) mod resume_status;
 pub mod result;
+pub(crate) mod resume_status;
 pub mod signals;
 pub(crate) mod slash_authority;
 pub(crate) mod slash_commands;
@@ -756,12 +793,12 @@ pub(crate) mod repo_status_prefix;
 pub mod storage;
 pub(crate) mod streaming_capture;
 pub(crate) mod summary;
-pub(crate) mod unaccepted_output;
 pub(crate) mod telemetry;
 #[cfg(feature = "test-support")]
 pub mod testkit;
 pub mod tool_index;
 pub(crate) mod turn_completion;
+pub(crate) mod unaccepted_output;
 pub mod unified_list;
 pub(crate) mod user_message;
 pub(crate) mod wire_tags;

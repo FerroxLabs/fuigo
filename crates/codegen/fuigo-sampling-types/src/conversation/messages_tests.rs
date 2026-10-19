@@ -540,3 +540,30 @@ fn last_reasoning_signature_is_the_last_block() {
     };
     assert_eq!(resp.last_reasoning_signature(), Some("sig-2"));
 }
+
+#[test]
+fn openai_origin_reasoning_is_not_replayed_to_messages() {
+    // An OpenAI reasoning item (rs_ id, OpenAI encrypted_content) carries no valid Anthropic signature
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("hi"),
+        reasoning_sibling("rs_abc", "thinking", Some("openai-encrypted")),
+        ConversationItem::assistant("hello"),
+    ])
+    .with_model("messages-compatible-model");
+    let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+    let text = json.to_string();
+    assert!(!text.contains("openai-encrypted"), "{json:#}");
+    assert!(!text.contains("\"thinking\":\"thinking\""), "{json:#}");
+}
+
+#[test]
+fn anthropic_origin_reasoning_still_replays_to_messages() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("hi"),
+        reasoning_sibling("", "thinking", Some("anthropic-sig")),
+        ConversationItem::assistant("hello"),
+    ])
+    .with_model("messages-compatible-model");
+    let json = serde_json::to_value(build_messages_request(&req)).unwrap();
+    assert!(json.to_string().contains("anthropic-sig"), "{json:#}");
+}

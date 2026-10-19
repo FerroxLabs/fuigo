@@ -51,6 +51,7 @@ pub mod mcp_http_client;
 pub mod oauth;
 pub mod oauth_config;
 pub mod owned_clients;
+pub mod progress;
 pub mod servers;
 /// Ported from upstream VERBATIM (module and its tests), so `tool_name.rs` and
 /// `tool_name_tests.rs` diff byte-for-byte against upstream's copies bar the crate rename.

@@ -1708,6 +1708,23 @@ pub(super) fn unregister_active_session_best_effort_in(
     }
 }
 
+/// Decode the `fuigo/memory/save_note` reply into the path written. Success needs `saved == true` and a non-empty
+/// `path`; anything else is a failure, so the UI never says "Memory saved" for a note that was not written.
+pub(crate) fn decode_memory_save_response(
+    result: Result<agent_client_protocol::ExtResponse, agent_client_protocol::Error>,
+) -> Result<String, String> {
+    let resp = result.map_err(|e| sanitize_user_error(&acp_error_text(&e)))?;
+    let not_saved = || "The shell did not confirm the note was saved, so it was not saved.".to_string();
+    let v: serde_json::Value = serde_json::from_str(resp.0.get()).map_err(|_| not_saved())?;
+    if v.get("saved").and_then(|s| s.as_bool()) != Some(true) {
+        return Err(not_saved());
+    }
+    match v.get("path").and_then(|p| p.as_str()) {
+        Some(p) if !p.is_empty() => Ok(p.to_owned()),
+        _ => Err(not_saved()),
+    }
+}
+
 #[cfg(test)]
 mod elapsed_tests {
     use super::format_restore_elapsed;

@@ -6,14 +6,14 @@ use crate::discovery::{SubagentEntry, SubagentSource};
 use crate::error::AgentBuildError;
 use crate::prompt::context::{PromptAudience, PromptContext};
 use crate::system_reminder::ReminderPolicy;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use fuigo_tools::bridge::ToolBridge;
 use fuigo_tools::computer::types::{AsyncFileSystem, TerminalBackend};
 use fuigo_tools::notification::ToolNotificationHandle;
 use fuigo_tools::registry::types::SessionContext;
 use fuigo_tools::types::tool::ToolKind;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 /// The Fuigo [`ToolKind`] a vendor-compat `tools:` allowlist entry resolves to, so a plugin's upstream allowlist still binds.
 /// Backed by the shared vendor-to-Fuigo tool registry in `fuigo-tools` (also used by the hook matcher).
 fn claude_tool_kind(name: &str) -> Option<ToolKind> {
@@ -599,10 +599,7 @@ impl AgentBuilder {
     /// Set the resolved vendor-compat config.
     /// Threaded into startup discovery (`list_skills_with_plugins` / `read_agents_config_with_paths`).
     /// Also threaded into the dynamic-discovery seeds (`SkillManager` / `AgentsMdTracker`).
-    pub fn with_compat_config(
-        mut self,
-        compat: fuigo_tools::types::compat::CompatConfig,
-    ) -> Self {
+    pub fn with_compat_config(mut self, compat: fuigo_tools::types::compat::CompatConfig) -> Self {
         self.compat = compat;
         self
     }
@@ -798,8 +795,12 @@ impl AgentBuilder {
                 .retain(|tool| !is_active_agent_message(tool));
         }
         // A subagent reaches only its own family, through `send_subagent_message`; the peer tools are not offered to it at all.
-        if self.peer_messaging_tools && self.prompt_audience != crate::prompt::context::PromptAudience::Subagent {
-            use fuigo_tools::implementations::fuigo_build::{ListAgentsTool, RefusePeerMessageTool, SendMessageTool};
+        if self.peer_messaging_tools
+            && self.prompt_audience != crate::prompt::context::PromptAudience::Subagent
+        {
+            use fuigo_tools::implementations::fuigo_build::{
+                ListAgentsTool, RefusePeerMessageTool, SendMessageTool,
+            };
             use fuigo_tools::registry::types::ToolConfig;
             for config in [
                 ToolConfig::for_tool::<ListAgentsTool>(),
@@ -1216,10 +1217,14 @@ impl AgentBuilder {
                     .seed_gitignore_filter(gi.clone(), root.clone())
                     .await;
             }
+            // Runtime (nested) AGENTS.md discovery walks up to the git root; without one the tracker discovers nothing.
+            // An untrusted project must not get instructions injected when a file under its tree is read.
+            let agents_md_discovery_root =
+                agents_md_discovery_root(self.project_trusted, git_root.as_deref());
             tool_bridge
                 .seed_agents_md(
                     initial_paths,
-                    git_root.clone(),
+                    agents_md_discovery_root,
                     chain,
                     gitignore,
                     self.compat,
@@ -1324,14 +1329,15 @@ impl AgentBuilder {
     }
 }
 /// CLI naming for the shared [`fuigo_tool_types::build_task_description`] builder.
-const TASK_TOOL_NAMING: fuigo_tool_types::TaskToolNaming<'static> = fuigo_tool_types::TaskToolNaming {
-    task_tool: "${{ tools.by_kind.task }}",
-    subagent_type_param: "${{ params.task.subagent_type }}",
-    run_in_background_param: "${{ params.task.run_in_background }}",
-    resume_from_param: "${{ params.task.resume_from }}",
-    background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
-    isolation_param: "${{ params.task.isolation }}",
-};
+const TASK_TOOL_NAMING: fuigo_tool_types::TaskToolNaming<'static> =
+    fuigo_tool_types::TaskToolNaming {
+        task_tool: "${{ tools.by_kind.task }}",
+        subagent_type_param: "${{ params.task.subagent_type }}",
+        run_in_background_param: "${{ params.task.run_in_background }}",
+        resume_from_param: "${{ params.task.resume_from }}",
+        background_retrieval_tool: "${{ tools.by_kind.background_task_action }}",
+        isolation_param: "${{ params.task.isolation }}",
+    };
 /// Concise task-tool description for child sessions.
 /// Delegation from a child is possible but discouraged; prefer doing the work directly.
 ///
@@ -2175,7 +2181,11 @@ mod tests {
             .expect("finalize must insert Params for the injected ask_user_question");
         assert_eq!(applied.0.non_interactive, Some(true));
     }
-    async fn tool_names(definition: crate::config::AgentDefinition, non_interactive: bool, mcp_configured: bool) -> Vec<String> {
+    async fn tool_names(
+        definition: crate::config::AgentDefinition,
+        non_interactive: bool,
+        mcp_configured: bool,
+    ) -> Vec<String> {
         use fuigo_tools::computer::local::LocalTerminalBackend;
         use fuigo_tools::notification::ToolNotificationHandle;
         let agent = AgentBuilder::new(
@@ -2200,45 +2210,100 @@ mod tests {
     /// tools (no keybind); an interactive session keeps all of them.
     #[tokio::test]
     async fn non_interactive_build_drops_todo_write_and_injected_plan_mode_tools() {
-        let headless = tool_names(crate::config::AgentDefinition::default_fuigo_build(), true, true).await;
+        let headless = tool_names(
+            crate::config::AgentDefinition::default_fuigo_build(),
+            true,
+            true,
+        )
+        .await;
         for dropped in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
-            assert!(!headless.contains(&dropped.to_string()), "headless must not advertise {dropped}; got {headless:?}");
+            assert!(
+                !headless.contains(&dropped.to_string()),
+                "headless must not advertise {dropped}; got {headless:?}"
+            );
         }
         assert!(headless.contains(&"read_file".to_string()));
-        let interactive = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        let interactive = tool_names(
+            crate::config::AgentDefinition::default_fuigo_build(),
+            false,
+            true,
+        )
+        .await;
         for kept in ["todo_write", "enter_plan_mode", "exit_plan_mode"] {
-            assert!(interactive.contains(&kept.to_string()), "interactive must keep {kept}; got {interactive:?}");
+            assert!(
+                interactive.contains(&kept.to_string()),
+                "interactive must keep {kept}; got {interactive:?}"
+            );
         }
     }
     /// An explicit plan profile carries the plan-mode tools in its own toolset, so a headless
     /// session that asked for it keeps them.
     #[tokio::test]
     async fn non_interactive_plan_profile_keeps_plan_mode_tools() {
-        let names = tool_names(crate::config::AgentDefinition::fuigo_build_plan(), true, true).await;
+        let names = tool_names(
+            crate::config::AgentDefinition::fuigo_build_plan(),
+            true,
+            true,
+        )
+        .await;
         for kept in ["enter_plan_mode", "exit_plan_mode"] {
-            assert!(names.contains(&kept.to_string()), "plan profile must keep {kept}; got {names:?}");
+            assert!(
+                names.contains(&kept.to_string()),
+                "plan profile must keep {kept}; got {names:?}"
+            );
         }
-        assert!(!names.contains(&"todo_write".to_string()), "headless still drops todo_write; got {names:?}");
+        assert!(
+            !names.contains(&"todo_write".to_string()),
+            "headless still drops todo_write; got {names:?}"
+        );
         // A curated non-plan profile that lists the plan tools itself (the pager's default
         // `fuigo -p` profile) is not an explicit plan request: headless strips them.
-        let ask_user = tool_names(crate::config::AgentDefinition::fuigo_build_ask_user(), true, true).await;
+        let ask_user = tool_names(
+            crate::config::AgentDefinition::fuigo_build_ask_user(),
+            true,
+            true,
+        )
+        .await;
         for dropped in ["enter_plan_mode", "exit_plan_mode", "todo_write"] {
-            assert!(!ask_user.contains(&dropped.to_string()), "headless ask-user profile must not advertise {dropped}; got {ask_user:?}");
+            assert!(
+                !ask_user.contains(&dropped.to_string()),
+                "headless ask-user profile must not advertise {dropped}; got {ask_user:?}"
+            );
         }
-        let ask_user_tui = tool_names(crate::config::AgentDefinition::fuigo_build_ask_user(), false, true).await;
+        let ask_user_tui = tool_names(
+            crate::config::AgentDefinition::fuigo_build_ask_user(),
+            false,
+            true,
+        )
+        .await;
         for kept in ["enter_plan_mode", "exit_plan_mode", "todo_write"] {
-            assert!(ask_user_tui.contains(&kept.to_string()), "interactive ask-user profile keeps {kept}; got {ask_user_tui:?}");
+            assert!(
+                ask_user_tui.contains(&kept.to_string()),
+                "interactive ask-user profile keeps {kept}; got {ask_user_tui:?}"
+            );
         }
     }
     /// With no MCP server configured the meta-tools are not advertised; with one they are.
     #[tokio::test]
     async fn mcp_meta_tools_follow_the_configured_signal() {
-        let without = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, false).await;
+        let without = tool_names(
+            crate::config::AgentDefinition::default_fuigo_build(),
+            false,
+            false,
+        )
+        .await;
         assert!(
-            !without.iter().any(|n| n == "search_tool" || n == "use_tool"),
+            !without
+                .iter()
+                .any(|n| n == "search_tool" || n == "use_tool"),
             "no MCP configured: search_tool/use_tool must be absent; got {without:?}"
         );
-        let with = tool_names(crate::config::AgentDefinition::default_fuigo_build(), false, true).await;
+        let with = tool_names(
+            crate::config::AgentDefinition::default_fuigo_build(),
+            false,
+            true,
+        )
+        .await;
         assert!(
             with.contains(&"search_tool".to_string()) && with.contains(&"use_tool".to_string()),
             "MCP configured: search_tool/use_tool must be present; got {with:?}"
@@ -3028,7 +3093,12 @@ mod skill_discovery_budget_tests {
         let base = peer_definitions(None).await;
         assert_eq!(base, peer_definitions(Some(false)).await);
         for name in ["list_agents", "send_message", "refuse_peer_message"] {
-            assert!(!base.iter().any(|d| d.contains(&format!("\"name\":\"{name}\""))), "{name}");
+            assert!(
+                !base
+                    .iter()
+                    .any(|d| d.contains(&format!("\"name\":\"{name}\""))),
+                "{name}"
+            );
         }
     }
     #[tokio::test]
@@ -3043,14 +3113,109 @@ mod skill_discovery_budget_tests {
         assert_eq!(added.len(), 3);
         // S2.5, S9.1: the send_message schema has exactly to, message, summary and notify_when_idle (packet 11) and rejects any
         // other field.
-        let send = added.iter().find(|d| d.contains("\"name\":\"send_message\"")).expect("send_message");
+        let send = added
+            .iter()
+            .find(|d| d.contains("\"name\":\"send_message\""))
+            .expect("send_message");
         let v: serde_json::Value = serde_json::from_str(send).unwrap();
         let params = v.pointer("/function/parameters").expect("parameters");
-        let mut keys: Vec<&str> = params["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = params["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(keys, ["message", "notify_when_idle", "summary", "to"]);
         assert_eq!(params["additionalProperties"], serde_json::json!(false));
-        let sub_off = base.iter().find(|d| d.contains("\"name\":\"send_subagent_message\"")).expect("subagent message tool");
+        let sub_off = base
+            .iter()
+            .find(|d| d.contains("\"name\":\"send_subagent_message\""))
+            .expect("subagent message tool");
         assert!(on.contains(sub_off));
+    }
+}
+
+/// Where runtime (nested) AGENTS.md discovery may walk up to.
+/// Only a trusted project gets one; without a root the tracker discovers nothing, mirroring the skill-discovery gate.
+fn agents_md_discovery_root(
+    project_trusted: bool,
+    git_root: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    git_root
+        .filter(|_| project_trusted)
+        .map(std::path::Path::to_path_buf)
+}
+
+/// #18: runtime (nested) AGENTS.md discovery is gated by folder trust the same way skill discovery is.
+#[cfg(test)]
+mod nested_agents_md_trust_tests {
+    use super::*;
+
+    #[test]
+    fn untrusted_project_gets_no_discovery_root() {
+        let root = std::path::Path::new("/repo");
+        assert_eq!(agents_md_discovery_root(false, Some(root)), None);
+        assert_eq!(agents_md_discovery_root(false, None), None);
+    }
+
+    #[test]
+    fn trusted_project_keeps_its_discovery_root() {
+        let root = std::path::Path::new("/repo");
+        assert_eq!(
+            agents_md_discovery_root(true, Some(root)),
+            Some(PathBuf::from("/repo"))
+        );
+        assert_eq!(agents_md_discovery_root(true, None), None);
+    }
+}
+
+/// #18: the real `build()` path passes `seed_agents_md` no discovery root for an untrusted folder, and the git root for a trusted one.
+#[cfg(test)]
+mod nested_agents_md_builder_gate_tests {
+    use super::*;
+    use fuigo_tools::computer::local::LocalTerminalBackend;
+    use fuigo_tools::notification::ToolNotificationHandle;
+
+    async fn seeded_root(trusted: bool) -> (Option<Option<PathBuf>>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        git2::Repository::init(tmp.path()).expect("git init");
+        std::fs::write(tmp.path().join("AGENTS.md"), "root rules\n").unwrap();
+        let sub = tmp.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("AGENTS.md"), "nested rules\n").unwrap();
+        let agent = AgentBuilder::new(
+            sub.clone(),
+            Arc::new(LocalTerminalBackend::new()),
+            ToolNotificationHandle::noop(),
+        )
+        .with_project_trusted(trusted)
+        .build()
+        .await
+        .expect("agent builds");
+        let root = agent.tool_bridge().agents_md_discovery_root().await;
+        (root, tmp)
+    }
+
+    #[tokio::test]
+    async fn untrusted_build_seeds_no_discovery_root() {
+        let (root, _) = seeded_root(false).await;
+        assert_eq!(
+            root,
+            Some(None),
+            "the builder must seed the tracker with no root"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_build_seeds_the_git_root() {
+        let (root, repo) = seeded_root(true).await;
+        let seeded = root
+            .expect("seeded")
+            .expect("a trusted git folder gets a root");
+        assert_eq!(
+            dunce::canonicalize(seeded).unwrap(),
+            dunce::canonicalize(repo.path()).unwrap()
+        );
     }
 }

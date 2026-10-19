@@ -77,7 +77,7 @@ Fuigo orders the files from the repo root to the current working directory, so f
 ### Auto-Loading Behavior
 
 - Fuigo loads the files from the repo root to the current working directory automatically at session start.
-- When Fuigo reads, lists, or edits files in directories outside that initial set, it detects any project instruction files there, notes their paths, and reads them when they apply to the task.
+- Fuigo does not look for project instruction files in other directories while it works, in trusted and untrusted folders alike. Files in folders below the working directory, or beside it, are not loaded. To get a subfolder's rules, start Fuigo in that subfolder.
 
 ---
 
@@ -142,11 +142,13 @@ Fuigo orders the files from the repo root to the current working directory, so f
 
 ## Scoping Rules to Subdirectories
 
-AGENTS.md files scope to the entire directory tree rooted at their folder. Use this to provide different instructions for different parts of your codebase:
+Fuigo loads rules only from the repo root down to the directory you start it in. It does not discover AGENTS.md files in subfolders below the working directory, and reading or editing a file there does not load that folder's AGENTS.md, whether or not the folder is trusted. A subfolder's AGENTS.md applies only when you start Fuigo in that subfolder (or in a folder below it).
+
+To give different instructions to different parts of a codebase, put an AGENTS.md in each part and start Fuigo in the part you are working on:
 
 ```
 my-monorepo/
-  AGENTS.md                    # Monorepo-wide rules
+  AGENTS.md                    # Monorepo-wide rules (always loaded)
   packages/
     frontend/
       AGENTS.md                # "Use React. Prefer CSS modules."
@@ -155,6 +157,8 @@ my-monorepo/
     shared/
       AGENTS.md                # "No framework-specific code in this package."
 ```
+
+Started in `my-monorepo/`, Fuigo loads only the root file. Started in `my-monorepo/packages/frontend/`, it loads the root file and then the frontend file, which takes precedence. It never loads the `backend` or `shared` files in that session.
 
 ---
 
@@ -228,7 +232,7 @@ This shows each project instruction file it finds, with its path and approximate
 
 3. **Keep it short.** Concise instructions are more likely to be followed than lengthy ones.
 
-4. **Use subdirectory scoping for large repos.** Different parts of a monorepo may have different conventions. Use per-directory AGENTS.md to scope rules appropriately.
+4. **Use subdirectory scoping for large repos.** Different parts of a monorepo may have different conventions. Use per-directory AGENTS.md to scope rules, and start Fuigo in the directory you are working on so that its rules load.
 
 5. **Version control your rules.** Commit AGENTS.md to the repository so the whole team benefits. User-specific overrides belong in `~/.fuigo/` (global rules).
 

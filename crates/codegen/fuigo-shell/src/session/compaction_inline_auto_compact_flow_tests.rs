@@ -24,35 +24,62 @@ async fn fork_reload_second_compaction_preserves_authority() {
         return;
     }
     let _home = fuigo_test_support::FuigoHome::new();
-    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
     use crate::session::execution_state::{Execution, TokenLimits};
+    use crate::session::fork::{ForkSessionRequest, fork_session};
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
     use fuigo_sampling_types::{ExecutionAdmission, RequestPurpose};
-    use crate::session::fork::{fork_session, ForkSessionRequest};
 
-    fn persistence(info: crate::session::info::Info) -> (mpsc::UnboundedSender<PersistenceMsg>, tokio::task::JoinHandle<()>) {
+    fn persistence(
+        info: crate::session::info::Info,
+    ) -> (
+        mpsc::UnboundedSender<PersistenceMsg>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let dir = crate::session::persistence::session_dir(&info);
         let storage = JsonlStorageAdapter::with_explicit_session_dir(dir.clone());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             while let Some(message) = rx.recv().await {
                 match message {
-                    PersistenceMsg::CommitCompactionAndAck { checkpoint, activation, cancel, respond_to } => {
+                    PersistenceMsg::CommitCompactionAndAck {
+                        checkpoint,
+                        activation,
+                        cancel,
+                        respond_to,
+                    } => {
                         use fuigo_chat_state::commands::CompactionCommitError;
                         let result = async {
                             if cancel.is_cancelled() {
-                                return Err(CompactionCommitError::NotCommitted(std::io::Error::other("cancelled")));
+                                return Err(CompactionCommitError::NotCommitted(
+                                    std::io::Error::other("cancelled"),
+                                ));
                             }
-                            storage.write_compaction_checkpoint(&info, &checkpoint).await.map_err(CompactionCommitError::NotCommitted)?;
-                            storage.append_update_durable_commit_aware(&info, &activation).await.map_err(|error| match error {
-                                crate::session::storage::AppendUpdateError::NotCommitted(e) => CompactionCommitError::NotCommitted(e),
-                                crate::session::storage::AppendUpdateError::Committed(e) => CompactionCommitError::Committed(e),
-                            })?;
+                            storage
+                                .write_compaction_checkpoint(&info, &checkpoint)
+                                .await
+                                .map_err(CompactionCommitError::NotCommitted)?;
+                            storage
+                                .append_update_durable_commit_aware(&info, &activation)
+                                .await
+                                .map_err(|error| match error {
+                                    crate::session::storage::AppendUpdateError::NotCommitted(e) => {
+                                        CompactionCommitError::NotCommitted(e)
+                                    }
+                                    crate::session::storage::AppendUpdateError::Committed(e) => {
+                                        CompactionCommitError::Committed(e)
+                                    }
+                                })?;
                             Ok(())
-                        }.await;
+                        }
+                        .await;
                         let _ = respond_to.send(result);
                     }
-                    PersistenceMsg::ExecutionState { mutation, respond_to } => {
-                        let _ = respond_to.send(crate::session::execution_state::apply(&dir, mutation).await);
+                    PersistenceMsg::ExecutionState {
+                        mutation,
+                        respond_to,
+                    } => {
+                        let _ = respond_to
+                            .send(crate::session::execution_state::apply(&dir, mutation).await);
                     }
                     _ => panic!("unexpected persistence message in bounded fixture"),
                 }
@@ -61,96 +88,221 @@ async fn fork_reload_second_compaction_preserves_authority() {
         (tx, task)
     }
 
-    tokio::task::LocalSet::new().run_until(async {
-        for release in [false, true] {
-            let (gateway, _gateway_rx) = mpsc::unbounded_channel();
-            let (unused, _unused_rx) = mpsc::unbounded_channel();
-            let mut actor = create_test_actor(0, 200_000, 80, gateway, unused).await;
-            actor.session_info.id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
-            actor.max_turns = Some(3); // Canonical host policy, never taken from a summary.
-            let original_info = actor.session_info.clone();
-            let storage = JsonlStorageAdapter::new();
-            storage.init_session(&original_info, crate::session::persistence::default_model_id()).await.unwrap();
-            let (tx, writer) = persistence(original_info.clone());
-            actor.notifications.persistence_tx = tx;
-            let full = vec![ConversationItem::system("canonical instructions"),
-                ConversationItem::user("inherited: preserve original files"),
-                ConversationItem::assistant("understood"), ConversationItem::user("current task")];
-            let mut snapshot = actor.chat_state_handle.snapshot().await.unwrap();
-            snapshot.conversation = full.clone();
-            actor.chat_state_handle.restore_snapshot(snapshot);
-            let config = serde_json::to_value(actor.chat_state_handle.get_sampling_config().await.unwrap()).unwrap();
-            let permission = actor.permissions.is_yolo_mode();
-            let (projection, released) = actor.resolve_forked_compacted_history(&full,
-                vec![ConversationItem::system("canonical instructions"), ConversationItem::user("summary")],
-                3, 100, if release { 1 } else { 200_000 });
-            assert_eq!(released, release);
-            let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
-            actor.persist_compaction_checkpoint(projection.clone(), epoch, 1, None, None,
-                tokio_util::sync::CancellationToken::new(), if release { 0 } else { 3 }).await.unwrap();
-            assert_eq!(serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(), serde_json::to_value(&projection).unwrap());
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for release in [false, true] {
+                let (gateway, _gateway_rx) = mpsc::unbounded_channel();
+                let (unused, _unused_rx) = mpsc::unbounded_channel();
+                let mut actor = create_test_actor(0, 200_000, 80, gateway, unused).await;
+                actor.session_info.id = acp::SessionId::new(uuid::Uuid::new_v4().to_string());
+                actor.max_turns = Some(3); // Canonical host policy, never taken from a summary.
+                let original_info = actor.session_info.clone();
+                let storage = JsonlStorageAdapter::new();
+                storage
+                    .init_session(
+                        &original_info,
+                        crate::session::persistence::default_model_id(),
+                    )
+                    .await
+                    .unwrap();
+                let (tx, writer) = persistence(original_info.clone());
+                actor.notifications.persistence_tx = tx;
+                let full = vec![
+                    ConversationItem::system("canonical instructions"),
+                    ConversationItem::user("inherited: preserve original files"),
+                    ConversationItem::assistant("understood"),
+                    ConversationItem::user("current task"),
+                ];
+                let mut snapshot = actor.chat_state_handle.snapshot().await.unwrap();
+                snapshot.conversation = full.clone();
+                actor.chat_state_handle.restore_snapshot(snapshot);
+                let config = serde_json::to_value(
+                    actor.chat_state_handle.get_sampling_config().await.unwrap(),
+                )
+                .unwrap();
+                let permission = actor.permissions.is_yolo_mode();
+                let (projection, released) = actor.resolve_forked_compacted_history(
+                    &full,
+                    vec![
+                        ConversationItem::system("canonical instructions"),
+                        ConversationItem::user("summary"),
+                    ],
+                    3,
+                    100,
+                    if release { 1 } else { 200_000 },
+                );
+                assert_eq!(released, release);
+                let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
+                actor
+                    .persist_compaction_checkpoint(
+                        projection.clone(),
+                        epoch,
+                        1,
+                        None,
+                        None,
+                        tokio_util::sync::CancellationToken::new(),
+                        if release { 0 } else { 3 },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
+                    serde_json::to_value(&projection).unwrap()
+                );
 
-            let fork_id = uuid::Uuid::new_v4().to_string();
-            fork_session(ForkSessionRequest {
-                source_session_id: original_info.id.to_string(), source_cwd: original_info.cwd.clone(),
-                new_cwd: original_info.cwd.clone(), new_session_id: Some(fork_id.clone()),
-                ..Default::default()
-            }, "fixture-agent", None).await.unwrap();
-            let mut fork_info = original_info.clone();
-            fork_info.id = acp::SessionId::new(fork_id.clone());
-            let fork_dir = crate::session::persistence::session_dir(&fork_info);
-            let reload = crate::session::helpers::replay::replay_to_prompt(&fork_dir.join("updates.jsonl"), &fork_dir, usize::MAX).unwrap();
-            assert_eq!(serde_json::to_value(&reload.conversation).unwrap(), serde_json::to_value(&projection).unwrap());
-            let (fork_tx, fork_writer) = persistence(fork_info.clone());
-            actor.notifications.persistence_tx = fork_tx.clone();
-            writer.await.unwrap();
-            actor.session_info = fork_info;
-            let mut snapshot = actor.chat_state_handle.snapshot().await.unwrap();
-            snapshot.conversation = reload.conversation;
-            actor.chat_state_handle.restore_snapshot(snapshot);
+                let fork_id = uuid::Uuid::new_v4().to_string();
+                fork_session(
+                    ForkSessionRequest {
+                        source_session_id: original_info.id.to_string(),
+                        source_cwd: original_info.cwd.clone(),
+                        new_cwd: original_info.cwd.clone(),
+                        new_session_id: Some(fork_id.clone()),
+                        ..Default::default()
+                    },
+                    "fixture-agent",
+                    None,
+                )
+                .await
+                .unwrap();
+                let mut fork_info = original_info.clone();
+                fork_info.id = acp::SessionId::new(fork_id.clone());
+                let fork_dir = crate::session::persistence::session_dir(&fork_info);
+                let reload = crate::session::helpers::replay::replay_to_prompt(
+                    &fork_dir.join("updates.jsonl"),
+                    &fork_dir,
+                    usize::MAX,
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&reload.conversation).unwrap(),
+                    serde_json::to_value(&projection).unwrap()
+                );
+                let (fork_tx, fork_writer) = persistence(fork_info.clone());
+                actor.notifications.persistence_tx = fork_tx.clone();
+                writer.await.unwrap();
+                actor.session_info = fork_info;
+                let mut snapshot = actor.chat_state_handle.snapshot().await.unwrap();
+                snapshot.conversation = reload.conversation;
+                actor.chat_state_handle.restore_snapshot(snapshot);
 
-            let execution = Execution::open(&fork_tx, &fork_id, "goal", "turn1", 4, None, Some(2), TokenLimits::default(), None).await.unwrap();
-            let attempt = uuid::Uuid::new_v4().to_string();
-            execution.admit(RequestPurpose::Work, attempt.clone()).await.unwrap();
-            execution.settle(attempt, Some(Default::default())).await.unwrap();
-            let before = execution.snapshot().await.unwrap();
-            let full = actor.chat_state_handle.get_conversation().await;
-            let summary = vec![ConversationItem::system("canonical instructions"), ConversationItem::user("second summary")];
-            let (second, _) = if release { (summary, true) } else {
-                actor.resolve_forked_compacted_history(&full, summary, 3, 100, 200_000)
-            };
-            let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
-            actor.persist_compaction_checkpoint(second.clone(), epoch, 2, None, None,
-                tokio_util::sync::CancellationToken::new(), if release { 0 } else { 3 }).await.unwrap();
-            let live = actor.chat_state_handle.get_conversation().await;
-            let reload = crate::session::helpers::replay::replay_to_prompt(&fork_dir.join("updates.jsonl"), &fork_dir, usize::MAX).unwrap();
-            assert_eq!(serde_json::to_value(&live).unwrap(), serde_json::to_value(&second).unwrap());
-            assert_eq!(serde_json::to_value(&reload.conversation).unwrap(), serde_json::to_value(&live).unwrap());
-            assert_eq!(serde_json::to_value(actor.chat_state_handle.get_sampling_config().await.unwrap()).unwrap(), config);
-            assert_eq!(actor.permissions.is_yolo_mode(), permission);
-            assert_eq!(actor.max_turns, Some(3));
-            execution.release(&fork_id);
-            let resumed = Execution::open(&fork_tx, &fork_id, "goal", "turn2", 99, None, Some(99), TokenLimits::default(), None).await.unwrap();
-            let after = resumed.snapshot().await.unwrap();
-            assert_eq!((after.execution_id, after.calls, after.max_calls, after.max_tool_rounds),
-                (before.execution_id, 1, 4, Some(2)));
-            resumed.release(&fork_id);
-            drop(actor);
-            drop(fork_tx);
-            fork_writer.await.unwrap();
-            std::fs::remove_dir_all(crate::session::persistence::session_dir(&original_info)).unwrap();
-            std::fs::remove_dir_all(fork_dir).unwrap();
-        }
-    }).await;
+                let execution = Execution::open(
+                    &fork_tx,
+                    &fork_id,
+                    "goal",
+                    "turn1",
+                    4,
+                    None,
+                    Some(2),
+                    TokenLimits::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let attempt = uuid::Uuid::new_v4().to_string();
+                execution
+                    .admit(RequestPurpose::Work, attempt.clone())
+                    .await
+                    .unwrap();
+                execution
+                    .settle(attempt, Some(Default::default()))
+                    .await
+                    .unwrap();
+                let before = execution.snapshot().await.unwrap();
+                let full = actor.chat_state_handle.get_conversation().await;
+                let summary = vec![
+                    ConversationItem::system("canonical instructions"),
+                    ConversationItem::user("second summary"),
+                ];
+                let (second, _) = if release {
+                    (summary, true)
+                } else {
+                    actor.resolve_forked_compacted_history(&full, summary, 3, 100, 200_000)
+                };
+                let (epoch, _, _) = actor.chat_state_handle.compaction_snapshot().await.unwrap();
+                actor
+                    .persist_compaction_checkpoint(
+                        second.clone(),
+                        epoch,
+                        2,
+                        None,
+                        None,
+                        tokio_util::sync::CancellationToken::new(),
+                        if release { 0 } else { 3 },
+                    )
+                    .await
+                    .unwrap();
+                let live = actor.chat_state_handle.get_conversation().await;
+                let reload = crate::session::helpers::replay::replay_to_prompt(
+                    &fork_dir.join("updates.jsonl"),
+                    &fork_dir,
+                    usize::MAX,
+                )
+                .unwrap();
+                assert_eq!(
+                    serde_json::to_value(&live).unwrap(),
+                    serde_json::to_value(&second).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(&reload.conversation).unwrap(),
+                    serde_json::to_value(&live).unwrap()
+                );
+                assert_eq!(
+                    serde_json::to_value(
+                        actor.chat_state_handle.get_sampling_config().await.unwrap()
+                    )
+                    .unwrap(),
+                    config
+                );
+                assert_eq!(actor.permissions.is_yolo_mode(), permission);
+                assert_eq!(actor.max_turns, Some(3));
+                execution.release(&fork_id);
+                let resumed = Execution::open(
+                    &fork_tx,
+                    &fork_id,
+                    "goal",
+                    "turn2",
+                    99,
+                    None,
+                    Some(99),
+                    TokenLimits::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+                let after = resumed.snapshot().await.unwrap();
+                assert_eq!(
+                    (
+                        after.execution_id,
+                        after.calls,
+                        after.max_calls,
+                        after.max_tool_rounds
+                    ),
+                    (before.execution_id, 1, 4, Some(2))
+                );
+                resumed.release(&fork_id);
+                drop(actor);
+                drop(fork_tx);
+                fork_writer.await.unwrap();
+                std::fs::remove_dir_all(crate::session::persistence::session_dir(&original_info))
+                    .unwrap();
+                std::fs::remove_dir_all(fork_dir).unwrap();
+            }
+        })
+        .await;
 }
 
 async fn await_fixture_observations(actor: &SessionActor) {
     let (respond_to, acknowledgment) = tokio::sync::oneshot::channel();
-    actor.notifications.persistence_tx
-        .send(PersistenceMsg::FlushAndAck { respond_to }).unwrap();
+    actor
+        .notifications
+        .persistence_tx
+        .send(PersistenceMsg::FlushAndAck { respond_to })
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), acknowledgment)
-        .await.expect("fixture observation barrier timed out")
-        .expect("fixture bridge closed").expect("fixture barrier failed");
+        .await
+        .expect("fixture observation barrier timed out")
+        .expect("fixture bridge closed")
+        .expect("fixture barrier failed");
 }
 
 async fn create_test_actor(
@@ -160,7 +312,8 @@ async fn create_test_actor(
     gateway_tx: mpsc::UnboundedSender<fuigo_acp_lib::AcpClientMessage>,
     persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
 ) -> SessionActor {
-    let persistence_tx = crate::session::persistence::compaction_fixture_persistence(persistence_tx).await;
+    let persistence_tx =
+        crate::session::persistence::compaction_fixture_persistence(persistence_tx).await;
     let cwd = AbsPathBuf::new(crate::test_support::abs_tmp()).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
@@ -218,7 +371,11 @@ async fn create_test_actor(
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
-        transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        system_prompt_override: Default::default(),
+        read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(
+            crate::session::read_dedupe::PruneMirror::disabled(),
+        )),
         transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
@@ -1701,17 +1858,33 @@ async fn compaction_validation_requires_observed_pressure_reduction() {
     }
     let _home = fuigo_test_support::FuigoHome::new();
     use crate::session::compaction_config::{SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_VALIDATING};
-    tokio::task::LocalSet::new().run_until(async {
-        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
-        let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-        let actor = create_test_actor(90_000, 100_000, 85, gateway_tx, persistence_tx).await;
-        for (usage, expected) in [(None, SUPPRESS_STICKY), (Some(91_000), SUPPRESS_STICKY), (Some(86_000), SUPPRESS_STICKY), (Some(40_000), SUPPRESS_NONE)] {
-            actor.compaction.validation_tokens_before.store(90_000, Relaxed);
-            actor.compaction.auto_compact_suppressed.store(SUPPRESS_VALIDATING, Relaxed);
-            actor.observe_compaction_validation(usage).await;
-            assert_eq!(actor.compaction.auto_compact_suppressed.load(Relaxed), expected);
-        }
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
+            let actor = create_test_actor(90_000, 100_000, 85, gateway_tx, persistence_tx).await;
+            for (usage, expected) in [
+                (None, SUPPRESS_STICKY),
+                (Some(91_000), SUPPRESS_STICKY),
+                (Some(86_000), SUPPRESS_STICKY),
+                (Some(40_000), SUPPRESS_NONE),
+            ] {
+                actor
+                    .compaction
+                    .validation_tokens_before
+                    .store(90_000, Relaxed);
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .store(SUPPRESS_VALIDATING, Relaxed);
+                actor.observe_compaction_validation(usage).await;
+                assert_eq!(
+                    actor.compaction.auto_compact_suppressed.load(Relaxed),
+                    expected
+                );
+            }
+        })
+        .await;
 }
 /// The pathological case: even the released (summarized) history exceeds the threshold because the system prompt alone is over budget.
 /// A forked session then sets sticky suppression instead of clearing it, WITHOUT a user-facing failure event.
@@ -2223,11 +2396,18 @@ async fn a_refused_manual_compaction_does_not_start_a_memory_flush() {
         .run_until(async {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
-            let actor = Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let actor =
+                Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
             owe_backup(&actor);
-            let error = actor.run_compact(None).await.expect_err("the compaction is refused");
+            let error = actor
+                .run_compact(None)
+                .await
+                .expect_err("the compaction is refused");
             let message = crate::sampling::error::acp_error_message(&error);
-            assert!(message.contains("could not be backed up"), "says why: {message}");
+            assert!(
+                message.contains("could not be backed up"),
+                "says why: {message}"
+            );
             assert_eq!(
                 actor.compaction.count.load(Relaxed),
                 0,
@@ -2251,26 +2431,48 @@ async fn an_auto_compaction_refused_for_the_backup_shows_its_note_once() {
         .run_until(async {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel();
-            let actor = Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
+            let actor =
+                Arc::new(create_test_actor(180_000, 200_000, 85, gateway_tx, persistence_tx).await);
             let (_chat, blocker) = owe_backup(&actor);
-            let trigger = || AutoCompactTriggerInfo { tokens_used: 180_000, context_window: 200_000, percentage: 90 };
+            let trigger = || AutoCompactTriggerInfo {
+                tokens_used: 180_000,
+                context_window: 200_000,
+                percentage: 90,
+            };
             for _ in 0..3 {
                 let error = actor
                     .run_compact_only(trigger(), false)
                     .await
                     .expect_err("an automatic compaction is refused while the backup is owed");
                 let message = crate::sampling::error::acp_error_message(&error);
-                assert!(message.contains("could not be backed up"), "says why: {message}");
+                assert!(
+                    message.contains("could not be backed up"),
+                    "says why: {message}"
+                );
             }
             let (started, failed, _) = compaction_notes(&actor, &mut persistence_rx).await;
-            assert_eq!(failed.len(), 1, "one failure note for three refused triggers: {failed:?}");
-            assert!(failed[0].contains("backup"), "the note names the cause: {}", failed[0]);
-            assert_eq!(started, 0, "a refused compaction never announces that it started");
+            assert_eq!(
+                failed.len(),
+                1,
+                "one failure note for three refused triggers: {failed:?}"
+            );
+            assert!(
+                failed[0].contains("backup"),
+                "the note names the cause: {}",
+                failed[0]
+            );
+            assert_eq!(
+                started, 0,
+                "a refused compaction never announces that it started"
+            );
             // Once the backup can be made the gate opens by itself.
             std::fs::remove_dir(&blocker).unwrap();
             assert!(
-                crate::session::storage::jsonl::load_repair::history_rewrite_refusal(&actor.session_info, "compact")
-                    .is_none(),
+                crate::session::storage::jsonl::load_repair::history_rewrite_refusal(
+                    &actor.session_info,
+                    "compact"
+                )
+                .is_none(),
                 "clearing the blocker lets the backup be made and opens the gate"
             );
         })
@@ -2291,7 +2493,10 @@ async fn the_prefire_pass_is_not_started_while_the_backup_is_owed() {
             let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
             let actor = create_test_actor(214_000, 200_000, 85, gateway_tx, persistence_tx).await;
-            assert!(actor.should_prefire_two_pass().await, "precondition: usage is past the prefire line");
+            assert!(
+                actor.should_prefire_two_pass().await,
+                "precondition: usage is past the prefire line"
+            );
             owe_backup(&actor);
             assert!(
                 !actor.should_prefire_two_pass().await,
@@ -2332,12 +2537,22 @@ async fn actor_with_prepared_client() -> (
     let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = mpsc::unbounded_channel();
     let actor = Arc::new(create_test_actor(10_000, 200_000, 85, gateway_tx, persistence_tx).await);
-    actor.chat_state_handle.replace_conversation(minted_history());
+    actor
+        .chat_state_handle
+        .replace_conversation(minted_history());
     let server = fuigo_test_support::MockInferenceServer::start()
         .await
         .expect("mock inference server");
     actor
-        .handle_set_session_model(switch_target_config("gate-model", server.url()), false, false, false, true, 85, Default::default())
+        .handle_set_session_model(
+            switch_target_config("gate-model", server.url()),
+            false,
+            false,
+            false,
+            true,
+            85,
+            Default::default(),
+        )
         .await
         .expect("switch");
     let client = actor.prepare_chat_completion(false).await.expect("client");
@@ -2379,10 +2594,17 @@ async fn compaction_request_prepared_before_a_park_is_not_sent_while_parked() {
                 }
             });
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            assert_eq!(server.requests().len(), 0, "a compaction request was sent while parked");
+            assert_eq!(
+                server.requests().len(),
+                0,
+                "a compaction request was sent while parked"
+            );
             drop(parked);
             let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
-            assert!(!server.requests().is_empty(), "the compaction request must go out after the unpark");
+            assert!(
+                !server.requests().is_empty(),
+                "the compaction request must go out after the unpark"
+            );
         })
         .await;
 }
@@ -2402,32 +2624,47 @@ async fn subagent_compaction_retry_is_not_sent_while_the_parent_is_parked() {
             let parent = format!("{child}-parent");
             let _link = crate::session::quiesce::SessionGuard::new(&child, Some(&parent));
             let sampling_config = actor.reconstruct_full_config().await;
-            let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
-                false,
-                None,
-                Vec::new(),
-                Vec::new(),
-                0,
-                client,
-                actor.session_info.id.clone(),
-                sampling_config,
-                std::time::Duration::from_secs(30),
-                0,
-                crate::util::config::CompactionToolChoice::Auto,
-                tokio_util::sync::CancellationToken::new(),
-            );
+            let sampler =
+                crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
+                    false,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    0,
+                    client,
+                    actor.session_info.id.clone(),
+                    sampling_config,
+                    std::time::Duration::from_secs(30),
+                    0,
+                    crate::util::config::CompactionToolChoice::Auto,
+                    tokio_util::sync::CancellationToken::new(),
+                );
             let parked = park_session(&parent);
             let run = tokio::task::spawn_local(async move {
-                let prompt = CompactionPrompt { system: String::new(), user: String::new() };
+                let prompt = CompactionPrompt {
+                    system: String::new(),
+                    user: String::new(),
+                };
                 let _ = sampler
-                    .sample_compaction(&minted_history()[1..], &prompt, std::time::Duration::from_secs(30))
+                    .sample_compaction(
+                        &minted_history()[1..],
+                        &prompt,
+                        std::time::Duration::from_secs(30),
+                    )
                     .await;
             });
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            assert_eq!(server.requests().len(), 0, "a subagent compaction attempt was sent under a parked parent");
+            assert_eq!(
+                server.requests().len(),
+                0,
+                "a subagent compaction attempt was sent under a parked parent"
+            );
             drop(parked);
             let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
-            assert!(!server.requests().is_empty(), "the attempt must go out after the unpark");
+            assert!(
+                !server.requests().is_empty(),
+                "the attempt must go out after the unpark"
+            );
         })
         .await;
 }
@@ -2449,7 +2686,11 @@ async fn prefire_pass1_dispatched_before_a_park_makes_no_model_call_while_parked
                 async move { actor.run_prefire_pass1().await }
             });
             tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-            assert_eq!(server.requests().len(), 0, "prefire pass-1 called the model while parked");
+            assert_eq!(
+                server.requests().len(),
+                0,
+                "prefire pass-1 called the model while parked"
+            );
             drop(parked);
             let _ = tokio::time::timeout(std::time::Duration::from_secs(20), run).await;
         })

@@ -175,6 +175,7 @@ mod tests {
 
     /// The evidence reads the child handle: no collection can be claimed
     /// until a `wait` has returned.
+    #[allow(clippy::disallowed_methods)] // test child is waited on below; no session to enroll it in
     #[cfg(unix)]
     #[tokio::test]
     async fn a_collection_claim_requires_the_child_to_have_been_waited_on() {

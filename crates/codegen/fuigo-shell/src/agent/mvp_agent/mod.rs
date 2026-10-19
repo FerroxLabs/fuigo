@@ -1127,8 +1127,9 @@ fn system_prompt_override_from_meta<'a>(
 }
 /// Compose the system prompt for a *fresh* session.
 /// A full `systemPromptOverride` wins verbatim; otherwise the agent template gets `_meta.rules` folded into `<human_rules>`.
-/// `rules` is applied at creation only, by design.
-/// Resumed sessions sync `systemPromptOverride` (see `enqueue_replace_system_prompt_override`) but not `rules`.
+/// `rules` is supplied at creation; later rewrites (model switch, harness rebuild) re-apply the block already in the System item
+/// through `crate::session::human_rules`, and the session actor remembers a `systemPromptOverride`.
+/// Resumed sessions sync `systemPromptOverride` (see `enqueue_replace_system_prompt_override`) but not new `rules`.
 fn build_spawn_system_prompt(
     session_meta: Option<&acp::Meta>,
     init_meta: Option<&acp::Meta>,
@@ -1146,9 +1147,7 @@ fn build_spawn_system_prompt(
             init_meta,
             "rules",
         ) {
-            prompt.push_str("\n\n<human_rules>\n");
-            prompt.push_str(rules);
-            prompt.push_str("\n</human_rules>");
+            crate::session::human_rules::append_human_rules(&mut prompt, rules);
         }
         prompt
     }

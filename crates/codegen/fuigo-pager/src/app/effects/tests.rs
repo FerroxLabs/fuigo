@@ -3055,3 +3055,34 @@ fn session_open_elsewhere_refusal_reaches_the_user_whole() {
     let err = fuigo_shell::session::session_writer_lock::held_elsewhere_error();
     assert_eq!(super::helpers::acp_error_user_text(&err), message);
 }
+
+fn save_reply(v: serde_json::Value) -> Result<acp::ExtResponse, acp::Error> {
+    Ok(acp::ExtResponse::new(serde_json::value::to_raw_value(&v).unwrap().into()))
+}
+#[test]
+fn decode_memory_save_response_returns_the_path_on_success() {
+    let ok = decode_memory_save_response(save_reply(serde_json::json!({ "saved": true, "path": "/h/MEMORY.md" })));
+    assert_eq!(ok, Ok("/h/MEMORY.md".to_string()));
+}
+#[test]
+fn decode_memory_save_response_rejects_saved_false_and_missing_or_empty_path() {
+    for payload in [
+        serde_json::json!({ "saved": false }),
+        serde_json::json!({ "saved": false, "path": "/h/MEMORY.md" }),
+        serde_json::json!({ "saved": true }),
+        serde_json::json!({ "saved": true, "path": "" }),
+        serde_json::json!({ "path": "/h/MEMORY.md" }),
+        serde_json::json!({}),
+        serde_json::json!("not an object"),
+    ] {
+        let r = decode_memory_save_response(save_reply(payload.clone()));
+        let err = r.expect_err(&format!("must fail for {payload}"));
+        assert!(err.contains("not saved"), "{payload}: {err}");
+    }
+}
+#[test]
+fn decode_memory_save_response_surfaces_an_error_response() {
+    let err = decode_memory_save_response(Err(acp::Error::invalid_params().data("memory is off for this session")))
+        .expect_err("an ACP error must fail");
+    assert!(err.contains("memory is off"), "{err}");
+}

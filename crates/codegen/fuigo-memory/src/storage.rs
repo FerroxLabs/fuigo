@@ -369,7 +369,10 @@ impl MemoryStorage {
     /// Creates parent directories as needed. Overwrites any existing content.
     pub fn write_long_term(&self, scope: MemoryScope, content: &str) -> std::io::Result<()> {
         if scope == MemoryScope::Global && !self.global_enabled {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "global memory is disabled; set memory.global_enabled = true to share"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "global memory is disabled; set memory.global_enabled = true to share",
+            ));
         }
         if self.ephemeral && scope == MemoryScope::Workspace {
             tracing::debug!("MEMORY_EPHEMERAL_SKIP: workspace long-term write skipped");
@@ -428,6 +431,28 @@ impl MemoryStorage {
         })
     }
 
+    /// Append an explicit, user-written note to the workspace `MEMORY.md` and return the file written.
+    ///
+    /// Unlike [`Self::append_to_memory`], which silently skips an ephemeral (temp-dir) workspace for the automatic
+    /// flush/dream callers, this fails with `ErrorKind::Unsupported` so the user is told the note was NOT saved.
+    pub fn append_user_note(&self, content: &str) -> std::io::Result<PathBuf> {
+        if self.ephemeral {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this folder is a temporary directory, so project memory is not kept here; the note was not saved",
+            ));
+        }
+        // `append_to_memory` silently skips content that normalizes to nothing; an explicit note must not claim success.
+        if normalize_memory_content(content).is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the note is empty after cleanup, so it was not saved",
+            ));
+        }
+        self.append_to_memory(MemoryScope::Workspace, content)?;
+        Ok(self.workspace_memory_file())
+    }
+
     /// Append content to the `MEMORY.md` for the given scope.
     ///
     /// The content is normalized via [`normalize_memory_content`], then appended with a blank-line separator from existing content.
@@ -435,7 +460,10 @@ impl MemoryStorage {
     /// Empty/whitespace-only content is silently ignored.
     pub fn append_to_memory(&self, scope: MemoryScope, content: &str) -> std::io::Result<()> {
         if scope == MemoryScope::Global && !self.global_enabled {
-            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "global memory is disabled; set memory.global_enabled = true to share"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "global memory is disabled; set memory.global_enabled = true to share",
+            ));
         }
         if self.ephemeral && scope == MemoryScope::Workspace {
             tracing::debug!("MEMORY_EPHEMERAL_SKIP: workspace memory append skipped");
@@ -989,7 +1017,9 @@ fn workspace_identity(cwd: &Path) -> WorkspaceIdentity {
         // Every URL form that maps to this identity had one of two pre-P91 keys:
         // `org/repo`, or `org/repo.git` for an origin ending in `.git/` (whose slug
         // was `repo-git`). Both are candidates, so equivalent clones agree on them.
-        let path = remote.split_once('/').map_or(remote.as_str(), |(_, path)| path);
+        let path = remote
+            .split_once('/')
+            .map_or(remote.as_str(), |(_, path)| path);
         let legacy_dir_names = [path.to_owned(), format!("{path}.git")]
             .iter()
             .map(|legacy| {
@@ -1017,7 +1047,11 @@ fn workspace_identity(cwd: &Path) -> WorkspaceIdentity {
         .and_then(|n| n.to_str())
         .unwrap_or("workspace");
     WorkspaceIdentity {
-        dir_name: dir_name(&slugify(dir, 40), &canonical.to_string_lossy(), PATH_HASH_HEX),
+        dir_name: dir_name(
+            &slugify(dir, 40),
+            &canonical.to_string_lossy(),
+            PATH_HASH_HEX,
+        ),
         remote: None,
         legacy_dir_names: Vec::new(),
     }
@@ -1058,7 +1092,9 @@ fn split_remote_url(url: &str) -> Option<(String, &str)> {
         }
         (&url[..colon], &url[colon + 1..])
     };
-    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
     let host = if let Some(bracketed) = host.strip_prefix('[') {
         // IPv6 literal, optionally followed by :port
         bracketed.split_once(']').map_or(bracketed, |(ip, _)| ip)
@@ -1090,7 +1126,6 @@ fn normalize_remote_url(url: &str) -> Option<String> {
     let (host, path) = split_remote_url(url)?;
     Some(format!("{host}/{}", clean_remote_path(path)?))
 }
-
 
 /// Bounds on the evidence read from a legacy directory, so startup stays cheap.
 /// Evidence beyond them is not skipped: it makes ownership unprovable.
@@ -1135,7 +1170,11 @@ fn recorded_workspace_paths(legacy_dir: &Path) -> Option<std::collections::BTree
             return None;
         }
         let text = std::fs::read_to_string(&file).ok()?;
-        if let Some(path) = text.lines().next().and_then(|line| line.strip_prefix(HEADER)) {
+        if let Some(path) = text
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix(HEADER))
+        {
             paths.insert(PathBuf::from(path.trim()));
         }
         for comment in text.split(PROVENANCE).skip(1) {
@@ -1210,10 +1249,9 @@ fn migrate_legacy_workspace_dirs(
         //
         // Not taken at all when no legacy folder holds notes (P124): then there is nothing to decide,
         // and a lingering template-only folder must not cost every start the lock.
-        if !candidates
-            .iter()
-            .any(|legacy| legacy.as_path() != workspace_dir && is_dir(legacy) && holds_notes(legacy))
-        {
+        if !candidates.iter().any(|legacy| {
+            legacy.as_path() != workspace_dir && is_dir(legacy) && holds_notes(legacy)
+        }) {
             return notices;
         }
         let _lock = migration_lock(root);
@@ -1276,13 +1314,19 @@ fn migration_lock(root: &Path) -> Option<std::fs::File> {
 /// destination) has been shown. True only the first time. If the marker cannot be written the
 /// notice is shown anyway: a repeated notice is better than a silent one.
 fn first_notice(root: &Path, legacy: &Path, workspace_dir: &Path) -> bool {
-    create_marker(&p97_marker(root, legacy, workspace_dir), &notes_fingerprint(legacy))
+    create_marker(
+        &p97_marker(root, legacy, workspace_dir),
+        &notes_fingerprint(legacy),
+    )
 }
 
 /// Marker of [`first_notice`] (P97; its name is unchanged so markers written by earlier versions count).
 fn p97_marker(root: &Path, legacy: &Path, workspace_dir: &Path) -> PathBuf {
     let key = format!("{}\n{}", legacy.display(), workspace_dir.display());
-    root.join(format!(".legacy-notice-{}", &blake3::hash(key.as_bytes()).to_hex()[..16]))
+    root.join(format!(
+        ".legacy-notice-{}",
+        &blake3::hash(key.as_bytes()).to_hex()[..16]
+    ))
 }
 
 /// R110 (M1): the host-qualified folder exists, so P91 adoption never runs again. A legacy folder
@@ -1290,10 +1334,16 @@ fn p97_marker(root: &Path, legacy: &Path, workspace_dir: &Path) -> PathBuf {
 /// sharing `~/.fuigo`) or was never adopted. When it holds notes, say so once, naming both folders;
 /// never merge or move anything (P91's adoption rule is unchanged). The caller removes the marker
 /// whenever the legacy folder is found absent, so a later recreation is announced again.
-fn stranded_legacy_notices(root: &Path, candidates: &[PathBuf], workspace_dir: &Path) -> Vec<LegacyMemoryNotice> {
+fn stranded_legacy_notices(
+    root: &Path,
+    candidates: &[PathBuf],
+    workspace_dir: &Path,
+) -> Vec<LegacyMemoryNotice> {
     let mut notices = Vec::new();
     for legacy in candidates {
-        if legacy.as_path() == workspace_dir || !legacy.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+        if legacy.as_path() == workspace_dir
+            || !legacy.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+        {
             continue;
         }
         // The cheap check first (P124, Fable phase 7 round 2 F3): a folder an older version only
@@ -1339,7 +1389,10 @@ thread_local! {
 /// Marker for [`stranded_legacy_notices`]; distinct from the P97 marker of [`first_notice`].
 fn stranded_marker(root: &Path, legacy: &Path, workspace_dir: &Path) -> PathBuf {
     let key = format!("{}\n{}", legacy.display(), workspace_dir.display());
-    root.join(format!(".legacy-stranded-notice-{}", &blake3::hash(key.as_bytes()).to_hex()[..16]))
+    root.join(format!(
+        ".legacy-stranded-notice-{}",
+        &blake3::hash(key.as_bytes()).to_hex()[..16]
+    ))
 }
 
 /// What a notice told the user about: a hash of every note in the legacy folder (each file's path
@@ -1360,7 +1413,9 @@ fn notes_fingerprint(dir: &Path) -> String {
         }
         #[cfg(windows)]
         {
-            std::os::windows::ffi::OsStrExt::encode_wide(name).flat_map(u16::to_le_bytes).collect()
+            std::os::windows::ffi::OsStrExt::encode_wide(name)
+                .flat_map(u16::to_le_bytes)
+                .collect()
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -1389,7 +1444,9 @@ fn notes_fingerprint(dir: &Path) -> String {
                 && (name.starts_with(".pre-p91-index-")
                     || match name.as_ref() {
                         "MEMORY.md" => is_memory_template(&path),
-                        ".memory-write.lock" => path.symlink_metadata().is_ok_and(|meta| meta.is_file()),
+                        ".memory-write.lock" => {
+                            path.symlink_metadata().is_ok_and(|meta| meta.is_file())
+                        }
                         other => is_index_file(other),
                     })
             {
@@ -1455,7 +1512,11 @@ fn marker_is_current(marker: &Path, notes: &str) -> bool {
 /// taken over (written to a temporary file and renamed into place, so it is never left empty). As in
 /// [`first_notice`], a marker that cannot be written means the notice is shown anyway.
 fn create_marker(marker: &Path, notes: &str) -> bool {
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(marker) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(marker)
+    {
         Ok(mut file) => {
             let _ = std::io::Write::write_all(&mut file, notes.as_bytes());
             true
@@ -1465,7 +1526,8 @@ fn create_marker(marker: &Path, notes: &str) -> bool {
                 return false;
             }
             let staged = marker.with_extension(format!("tmp-{}", std::process::id()));
-            if std::fs::write(&staged, notes).is_err() || std::fs::rename(&staged, marker).is_err() {
+            if std::fs::write(&staged, notes).is_err() || std::fs::rename(&staged, marker).is_err()
+            {
                 let _ = std::fs::remove_file(&staged);
             }
             true
@@ -1506,7 +1568,10 @@ fn holds_notes(dir: &Path) -> bool {
 fn is_memory_template(path: &Path) -> bool {
     const HEADER: &str = "# Project Memory \u{2014} ";
     const NOTE: &str = "> Auto-populated by dream consolidation. Edit freely.";
-    if !path.symlink_metadata().is_ok_and(|meta| meta.is_file() && meta.len() <= 4096) {
+    if !path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.is_file() && meta.len() <= 4096)
+    {
         return false;
     }
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -1534,7 +1599,9 @@ fn migrate_legacy_workspace_dir(
             "MEMORY_MIGRATE: legacy workspace memory was not adopted: it cannot be shown to belong to this \
              remote host only; move it to the new directory by hand if it is yours"
         );
-        LegacyMemoryOutcome::NotAdopted { reason: reason.to_owned() }
+        LegacyMemoryOutcome::NotAdopted {
+            reason: reason.to_owned(),
+        }
     };
     let Some(recorded) = recorded_workspace_paths(legacy_dir) else {
         return refuse("evidence could not be read completely", &[]);
@@ -1584,8 +1651,13 @@ fn migrate_legacy_workspace_dir(
             let moved = move_aside();
             if let Err(error) = moved {
                 // Never publish a directory whose stale index is still in place.
-                refuse(&format!("could not move index file {name} aside: {error}"), &[]);
-                return LegacyMemoryOutcome::MoveFailed { error: format!("index file {name}: {error}") };
+                refuse(
+                    &format!("could not move index file {name} aside: {error}"),
+                    &[],
+                );
+                return LegacyMemoryOutcome::MoveFailed {
+                    error: format!("index file {name}: {error}"),
+                };
             }
         }
     }
@@ -1596,7 +1668,9 @@ fn migrate_legacy_workspace_dir(
             %error,
             "MEMORY_MIGRATE: could not move legacy workspace memory"
         );
-        return LegacyMemoryOutcome::MoveFailed { error: error.to_string() };
+        return LegacyMemoryOutcome::MoveFailed {
+            error: error.to_string(),
+        };
     }
     tracing::info!(
         legacy = %legacy_dir.display(),
@@ -2352,6 +2426,72 @@ mod tests {
         assert!(hash.contains('-'), "should have slug-hash format: {hash}");
         let parts: Vec<&str> = hash.rsplitn(2, '-').collect();
         assert_eq!(parts[0].len(), 8, "hash suffix should be 8 hex chars");
+    }
+
+    #[test]
+    fn append_user_note_refuses_an_ephemeral_workspace_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("ephemeral-abc12345");
+        let storage = MemoryStorage {
+            global_enabled: true,
+            global_dir,
+            workspace_dir: workspace_dir.clone(),
+            workspace_path: PathBuf::from("/tmp/test"),
+            ephemeral: true,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
+        };
+        let err = storage.append_user_note("remember this").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        assert!(err.to_string().contains("not saved"), "{err}");
+        assert!(!workspace_dir.join("MEMORY.md").exists());
+    }
+
+    #[test]
+    fn append_user_note_rejects_a_note_that_normalizes_to_empty_and_writes_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("proj-abc12345");
+        let storage = MemoryStorage {
+            global_enabled: true,
+            global_dir,
+            workspace_dir: workspace_dir.clone(),
+            workspace_path: PathBuf::from("/home/user/proj"),
+            ephemeral: false,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
+        };
+        for blank in ["", "   ", "\n\t \r\n"] {
+            let err = storage
+                .append_user_note(blank)
+                .expect_err("an empty note must not report success");
+            assert!(err.to_string().contains("not saved"), "{err}");
+        }
+        assert!(!workspace_dir.join("MEMORY.md").exists());
+    }
+
+    #[test]
+    fn append_user_note_returns_the_path_it_wrote() {
+        let tmp = TempDir::new().unwrap();
+        let global_dir = tmp.path().join("memory");
+        let workspace_dir = global_dir.join("proj-abc12345");
+        let storage = MemoryStorage {
+            global_enabled: true,
+            global_dir,
+            workspace_dir: workspace_dir.clone(),
+            workspace_path: PathBuf::from("/home/user/proj"),
+            ephemeral: false,
+            legacy_notices: Vec::new(),
+            legacy_dirs: Vec::new(),
+        };
+        let path = storage.append_user_note("remember this").unwrap();
+        assert_eq!(path, workspace_dir.join("MEMORY.md"));
+        assert!(
+            std::fs::read_to_string(path)
+                .unwrap()
+                .contains("remember this")
+        );
     }
 
     // -----------------------------------------------------------------------

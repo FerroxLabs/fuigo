@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)] // this test drives the raw reqwest send path on purpose to exercise the TLS and egress policy
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::time::Duration;

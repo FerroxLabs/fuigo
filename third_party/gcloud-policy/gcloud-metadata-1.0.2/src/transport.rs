@@ -55,6 +55,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    #[allow(clippy::disallowed_methods)] // test client targets a local proxy; no TLS policy applies
     #[tokio::test]
     async fn policy_blocks_proxy_contact_and_allows_local_response() {
         install(Policy {

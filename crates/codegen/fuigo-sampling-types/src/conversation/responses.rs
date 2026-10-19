@@ -90,7 +90,9 @@ pub fn response_to_conversation_items(
                 let kind = super::responses_ptc::carrier_to_backend_kind(&ct)
                     .unwrap_or(BackendToolKind::XSearch(ct));
                 let item = BackendToolCallItem { kind };
-                order.push(OutputSlot::BackendToolCall { id: item.id().to_owned() });
+                order.push(OutputSlot::BackendToolCall {
+                    id: item.id().to_owned(),
+                });
                 items.push(ConversationItem::BackendToolCall(item));
             }
             rs::OutputItem::CodeInterpreterCall(ci) => {
@@ -265,7 +267,9 @@ fn flush_pending(pending: &mut Vec<&ConversationItem>, out: &mut Vec<rs::InputIt
 enum CallWire {
     Function,
     /// `custom_tool_call`; `id` is the recorded wire item id, empty when the call was stored as a function call
-    Custom { id: String },
+    Custom {
+        id: String,
+    },
 }
 
 /// The wire form of a tool call follows the tool's *current* declaration: a name the `tools` list declares as a
@@ -370,7 +374,12 @@ fn assistant_to_input_items(
             }
             OutputSlot::FunctionCall { call_id } => {
                 if let Some(tc) = take_tool_call(a, &mut call_used, call_id) {
-                    ordered.push(tool_call_input_item(req, tc, CallWire::Function, custom_call_ids));
+                    ordered.push(tool_call_input_item(
+                        req,
+                        tc,
+                        CallWire::Function,
+                        custom_call_ids,
+                    ));
                 }
             }
             OutputSlot::CustomToolCall { call_id, id } => {
@@ -400,7 +409,12 @@ fn assistant_to_input_items(
     out.extend(ordered);
     for (i, tc) in a.tool_calls.iter().enumerate() {
         if !call_used[i] {
-            out.push(tool_call_input_item(req, tc, CallWire::Function, custom_call_ids));
+            out.push(tool_call_input_item(
+                req,
+                tc,
+                CallWire::Function,
+                custom_call_ids,
+            ));
         }
     }
 }
@@ -429,15 +443,18 @@ fn assistant_message_input_item(text: &str) -> rs::InputItem {
 
 /// A function call's JSON arguments. A call recorded in the freeform form (`from_freeform`) carries raw text, which
 /// is wrapped under the tool's input key; anything else that is not JSON is sanitized to `{}` as before.
-fn function_call_input_item(req: &ConversationRequest, tc: &ToolCall, from_freeform: bool) -> rs::InputItem {
-    let arguments = if from_freeform
-        && serde_json::from_str::<serde::de::IgnoredAny>(&tc.arguments).is_err()
-    {
-        let key = input_key(req, &tc.name);
-        Arc::<str>::from(serde_json::json!({ key: tc.arguments.as_ref() }).to_string())
-    } else {
-        sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone())
-    };
+fn function_call_input_item(
+    req: &ConversationRequest,
+    tc: &ToolCall,
+    from_freeform: bool,
+) -> rs::InputItem {
+    let arguments =
+        if from_freeform && serde_json::from_str::<serde::de::IgnoredAny>(&tc.arguments).is_err() {
+            let key = input_key(req, &tc.name);
+            Arc::<str>::from(serde_json::json!({ key: tc.arguments.as_ref() }).to_string())
+        } else {
+            sanitize_tool_arguments(&tc.id, &tc.name, tc.arguments.clone())
+        };
     rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
         call_id: tc.id.as_ref().to_owned(),
         name: tc.name.clone(),
@@ -449,7 +466,11 @@ fn function_call_input_item(req: &ConversationRequest, tc: &ToolCall, from_freef
 
 /// A freeform tool call replays verbatim: the input is the raw text the model produced, never JSON-wrapped.
 /// A call stored in the JSON function form (`{"patch": text}`, or the `input` / `raw` envelopes) is unwrapped to its text.
-fn custom_tool_call_input_item(req: &ConversationRequest, tc: &ToolCall, id: &str) -> rs::InputItem {
+fn custom_tool_call_input_item(
+    req: &ConversationRequest,
+    tc: &ToolCall,
+    id: &str,
+) -> rs::InputItem {
     let text = freeform_text(&tc.arguments, &input_key(req, &tc.name));
     rs::InputItem::Item(rs::Item::CustomToolCall(custom_tool_call(
         &tc.id, &tc.name, &text, id,
@@ -459,7 +480,8 @@ fn custom_tool_call_input_item(req: &ConversationRequest, tc: &ToolCall, id: &st
 /// The freeform text behind stored arguments: the string under `key` (or `patch` / `input` / `raw`) of a JSON
 /// object, else the arguments themselves.
 fn freeform_text(arguments: &str, key: &str) -> String {
-    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(arguments) {
+    if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(arguments)
+    {
         for k in [key, "patch", "input", "raw"] {
             if let Some(serde_json::Value::String(text)) = obj.get(k) {
                 return text.clone();
@@ -482,9 +504,10 @@ pub fn custom_tool_call(call_id: &str, name: &str, input: &str, id: &str) -> rs:
 }
 
 fn tool_result_content_parts(t: &ToolResultItem) -> Vec<rs::InputContent> {
-    let mut parts: Vec<rs::InputContent> = vec![rs::InputContent::InputText(rs::InputTextContent {
-        text: t.content.as_ref().to_owned(),
-    })];
+    let mut parts: Vec<rs::InputContent> =
+        vec![rs::InputContent::InputText(rs::InputTextContent {
+            text: t.content.as_ref().to_owned(),
+        })];
     for img in &t.images {
         if let ContentPart::Image { url } = img {
             parts.push(rs::InputContent::InputImage(rs::InputImageContent {
@@ -528,20 +551,19 @@ fn tool_result_to_input_item(t: &ToolResultItem, custom: bool) -> rs::InputItem 
 /// Wire fixups `async-openai`'s input types cannot express:
 /// - inject the `type: "reasoning_text"` discriminator the API requires (`ReasoningTextContent` has no `type` field,
 ///   so it serializes to `{"text": ...}` and the API answers 400);
-/// - drop an empty `id` from a `custom_tool_call` (the field is mandatory on the struct but optional on input; it is
-///   empty when a JSON-era call replays in the custom form).
+/// - drop an empty `id` from any input item (e.g. a `custom_tool_call`, where the field is mandatory on the struct but
+///   optional on input; it is empty when a JSON-era call replays in the custom form).
 /// Delete the first once upstream grows the field.
 pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
     let Some(input) = body.get_mut("input").and_then(|v| v.as_array_mut()) else {
         return;
     };
     for item in input.iter_mut() {
-        if item.get("type").and_then(|t| t.as_str()) == Some("custom_tool_call")
-            && item.get("id").and_then(|i| i.as_str()) == Some("")
+        // The API rejects `"id": ""` on any input item; the field is optional on input, so drop it
+        if item.get("id").and_then(|i| i.as_str()) == Some("")
             && let Some(obj) = item.as_object_mut()
         {
             obj.remove("id");
-            continue;
         }
         if item.get("type").and_then(|t| t.as_str()) != Some("reasoning") {
             continue;
@@ -588,8 +610,14 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 content,
             })]
         }
+        // Rule: a reasoning item with an empty id is never sent to the Responses API (it 400s), encrypted or not.
         // An Anthropic `redacted_thinking` blob means nothing to this protocol
-        ConversationItem::Reasoning(r) if is_redacted_thinking_item(r) => Vec::new(),
+        // Also any reasoning with no Responses item id: it came from another protocol (Anthropic thinking,
+        // chat-completions, synthesized). The API requires a real `rs_...` id and would reject a foreign signature
+        // as `encrypted_content`, so it cannot be replayed.
+        ConversationItem::Reasoning(r) if is_redacted_thinking_item(r) || r.id.is_empty() => {
+            Vec::new()
+        }
         ConversationItem::Reasoning(r) => {
             vec![rs::InputItem::Item(rs::Item::Reasoning(
                 reasoning_item_for_input(r),

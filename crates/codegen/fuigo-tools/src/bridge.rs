@@ -18,11 +18,15 @@ use crate::registry::types::{
 use crate::types::TaskSnapshot;
 use crate::types::ToolInput;
 use crate::types::agents_md_tracker::AgentsMdTracker;
+
 use crate::types::definition::ToolDefinition;
 use crate::types::output::{ToolOutput, ToolRunResult};
 use crate::types::resources::{OwnerSessionId, State, Terminal};
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::ToolKind;
+
+/// The git root `seed_agents_md` was handed; recorded so the trust gate in front of it is observable.
+struct AgentsMdDiscoveryRoot(Option<std::path::PathBuf>);
 
 /// Result of executing a tool through the bridge.
 ///
@@ -236,12 +240,20 @@ impl ToolBridge {
     ) {
         let registry = &*self.registry;
         let mut res = registry.resources.lock().await;
+        res.insert(AgentsMdDiscoveryRoot(git_root.clone()));
         if let Some(tracker) = res.get_mut::<AgentsMdTracker>() {
             tracker.set_compat(compat);
             tracker
                 .seed(initial_paths, git_root, initial_chain, gitignore)
                 .await;
         }
+    }
+
+    /// The discovery root the session builder last passed to [`Self::seed_agents_md`]: `Some(None)` when it passed
+    /// none (an untrusted folder), `None` when it never seeded.
+    pub async fn agents_md_discovery_root(&self) -> Option<Option<std::path::PathBuf>> {
+        let res = self.registry.resources.lock().await;
+        res.get::<AgentsMdDiscoveryRoot>().map(|r| r.0.clone())
     }
 
     /// Restore announced skill names from persisted state.

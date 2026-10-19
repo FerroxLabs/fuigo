@@ -3824,10 +3824,7 @@ pub(crate) fn execute(
                         .into(),
                     );
                     // The shell decides, at write time, whether this session has memory on, and does the write.
-                    let result = acp_send(request, &tx)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| sanitize_user_error(&acp_error_text(&e)));
+                    let result = decode_memory_save_response(acp_send(request, &tx).await);
                     TaskResult::MemoryNoteSaved { agent_id, result }
                 });
         }

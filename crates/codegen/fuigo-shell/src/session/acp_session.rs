@@ -173,25 +173,25 @@ mod child_tool_projection;
 mod length_salvage;
 #[path = "acp_session_impl/sampler_turn.rs"]
 mod sampler_turn;
-use sampler_turn::*;
 pub(crate) use sampler_turn::ParkGate;
+use sampler_turn::*;
 #[path = "acp_session_impl/tool_dispatch.rs"]
 mod tool_dispatch;
 use tool_dispatch::*;
-#[path = "acp_session_impl/read_dedupe_hook.rs"]
-mod read_dedupe_hook;
 #[path = "acp_session_impl/mcp_snapshot.rs"]
 mod mcp_snapshot;
+#[path = "acp_session_impl/read_dedupe_hook.rs"]
+mod read_dedupe_hook;
 use mcp_snapshot::*;
 #[path = "acp_session_impl/turn_task.rs"]
 mod turn_task;
 use turn_task::*;
+#[path = "acp_session_impl/background_tasks.rs"]
+mod background_tasks;
 #[path = "acp_session_impl/cancel.rs"]
 mod cancel;
 #[path = "acp_session_impl/reminders.rs"]
 mod reminders;
-#[path = "acp_session_impl/background_tasks.rs"]
-mod background_tasks;
 use reminders::*;
 pub use reminders::{CollectedTodoGateInput, TodoGateInput, evaluate_todo_gate};
 #[path = "acp_session_impl/laziness_classifier.rs"]
@@ -224,6 +224,8 @@ mod stop_gate;
 pub use stop_gate::MAX_STOP_HOOK_CONTINUATIONS_PER_TURN;
 #[path = "acp_session_impl/context_snapshot.rs"]
 mod context_snapshot;
+#[path = "acp_session_impl/park.rs"]
+mod park;
 #[path = "acp_session_impl/recap.rs"]
 mod recap;
 #[path = "acp_session_impl/rewind.rs"]
@@ -236,8 +238,6 @@ mod session_setup;
 mod side_call;
 #[path = "acp_session_impl/status_line.rs"]
 pub(crate) mod status_line;
-#[path = "acp_session_impl/park.rs"]
-mod park;
 #[path = "acp_session_impl/title_refresh.rs"]
 mod title_refresh;
 #[path = "acp_session_impl/turn_end.rs"]
@@ -554,7 +554,8 @@ fn managed_gateway_error_to_tool_error(
         crate::session::managed_mcp::ManagedMcpFetchError::EgressPolicy(reason) => {
             fuigo_tool_runtime::ToolError::permission_denied(format!(
                 "Managed MCP gateway blocked by local egress policy: {reason}"
-            )).with_details(serde_json::json!({"reason": "egress_policy"}))
+            ))
+            .with_details(serde_json::json!({"reason": "egress_policy"}))
         }
     }
 }
@@ -568,9 +569,15 @@ mod managed_gateway_error_tests {
             crate::session::managed_mcp::ManagedMcpFetchError::EgressPolicy("blocked"),
             "use_tool",
         );
-        assert_eq!(error.kind, fuigo_tool_runtime::ToolErrorKind::PermissionDenied);
+        assert_eq!(
+            error.kind,
+            fuigo_tool_runtime::ToolErrorKind::PermissionDenied
+        );
         let details = error.details.unwrap();
-        assert_eq!(details.get("reason"), Some(&serde_json::json!("egress_policy")));
+        assert_eq!(
+            details.get("reason"),
+            Some(&serde_json::json!("egress_policy"))
+        );
         assert!(details.get(HTTP_STATUS_DETAILS_KEY).is_none());
     }
     fn status_error(code: u16, message: &str) -> crate::session::managed_mcp::ManagedMcpFetchError {
@@ -742,6 +749,9 @@ pub(crate) struct SessionActor {
     /// Prompt-scoped on the actor: auto-recovery, stop-hook continuations, and the goal loop re-enter the turn loop within one prompt.
     /// A loop-local counter would reset the cap (exhaustion itself triggers auto-recovery).
     pub(crate) transient_retries_prompt_total: std::cell::Cell<u32>,
+    /// The client's full `systemPromptOverride`, once applied.
+    /// A model switch or harness rebuild keeps it instead of re-rendering the agent template over it.
+    pub(crate) system_prompt_override: std::cell::RefCell<Option<String>>,
     /// Repeat reads of unchanged files whose earlier result is still in context return a short note.
     pub(crate) read_dedupe: std::cell::RefCell<crate::session::read_dedupe::ReadDedupeCache>,
     /// Start of the current transient-recovery episode (first failed attempt; cleared on a successful sample).
@@ -1037,7 +1047,8 @@ pub(crate) struct SessionActor {
     pub(crate) managed_mcp_handle: crate::session::managed_mcp::ManagedMcpStateHandle,
     /// Client-provided MCP servers as admitted at session creation, replaced by `update_mcp_servers` and a resident
     /// `session/load` ([`crate::session::SessionCommand::SetClientMcpSeed`]). Re-merged during plugin reload.
-    pub(crate) initial_client_mcp_servers: std::cell::RefCell<crate::session::managed_mcp::ClientMcpSeed>,
+    pub(crate) initial_client_mcp_servers:
+        std::cell::RefCell<crate::session::managed_mcp::ClientMcpSeed>,
     /// Shared MCP tool metadata for the BM25 search index. Updated after MCP init.
     pub(crate) tool_metadata_snapshot:
         Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,
@@ -1139,7 +1150,8 @@ pub(crate) struct SessionActor {
     /// Function tool specs the last main-turn request actually sent, after fork mirroring, child projection, per-step restrictions and presentation.
     /// Cache-aligned side calls replay this list so their tool prefix is byte-identical; see `side_call_tool_specs`.
     /// `None` until this actor sends its first main-turn request, and again after a model or agent switch.
-    pub(crate) last_sent_tool_specs: std::cell::RefCell<Option<Vec<fuigo_sampling_types::ToolSpec>>>,
+    pub(crate) last_sent_tool_specs:
+        std::cell::RefCell<Option<Vec<fuigo_sampling_types::ToolSpec>>>,
     /// The in-flight title-refresh side-call, if any.
     /// Only one runs at a time (a newer completion skips rather than aborts); aborted on rename, rewind, and shutdown.
     /// See `maybe_refresh_title`.
@@ -1534,7 +1546,10 @@ fn persist_chat_history_jsonl_sync(session_info: &SessionInfo, conversation: &[C
     })();
     match result {
         // The whole history was rewritten: a compaction rewrite that had not landed is superseded (P111).
-        Ok(()) => crate::session::storage::jsonl::compaction_witness::clear_after_chat_rewrite(&dir, Some(&buf)),
+        Ok(()) => crate::session::storage::jsonl::compaction_witness::clear_after_chat_rewrite(
+            &dir,
+            Some(&buf),
+        ),
         Err(e) => {
             tracing::warn!(session_id = %session_info.id.0, ?e,
                 "persist_chat_history_jsonl_sync: failed to persist chat_history.jsonl");
@@ -1561,6 +1576,35 @@ fn save_system_prompt(session_info: &SessionInfo, system_prompt: &str) {
 fn write_system_prompt_in(dir: &std::path::Path, system_prompt: &str) -> std::io::Result<()> {
     crate::session::storage::owner_only::write(&dir.join(SYSTEM_PROMPT_FILENAME), system_prompt)
 }
+const SYSTEM_PROMPT_OVERRIDE_FILENAME: &str = "system_prompt_override.txt";
+
+/// Persist the client `systemPromptOverride` to `{session_dir}/system_prompt_override.txt`.
+/// The `System` item alone cannot say whether its text was a client override or a rendered template, so a cold reload
+/// that is not handed the override again would otherwise forget it and let the next model switch replace it.
+fn save_system_prompt_override(session_info: &SessionInfo, system_prompt: &str) {
+    let dir = match crate::session::persistence::ensure_owner_only_session_dir(session_info) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(?e, "failed to create session dir for system_prompt_override.txt");
+            return;
+        }
+    };
+    if let Err(e) = crate::session::storage::owner_only::write(
+        &dir.join(SYSTEM_PROMPT_OVERRIDE_FILENAME),
+        system_prompt,
+    ) {
+        tracing::warn!(?e, "failed to write system_prompt_override.txt");
+    }
+}
+
+/// The `systemPromptOverride` this session was created or attached with, as persisted; `None` when it never had one.
+pub(crate) fn initial_system_prompt_override(session_info: &SessionInfo) -> Option<String> {
+    let dir = crate::session::persistence::session_dir(session_info);
+    std::fs::read_to_string(dir.join(SYSTEM_PROMPT_OVERRIDE_FILENAME))
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Load the canonical system prompt from `{session_dir}/system_prompt.txt`.
 ///
 /// Returns `None` for sessions created before this artifact existed.
@@ -1595,14 +1639,14 @@ fn load_prompt_context_from_dir(
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/compaction_agent_borrow_tests.rs"]
+mod compaction_agent_borrow_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/managed_hooks_tests.rs"]
 mod managed_hooks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/compaction_agent_borrow_tests.rs"]
-mod compaction_agent_borrow_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/support.rs"]
 pub(crate) mod support;
@@ -1794,6 +1838,9 @@ mod managed_gateway_descriptor_tests {
         assert!(!names.contains("slack__search"));
     }
 }
+#[cfg(test)]
+#[path = "acp_session_tests/bang_controls_tests.rs"]
+mod bang_controls_tests;
 /// ToolBridge must route file operations through the injected FileSystem, not direct disk I/O.
 /// When `.with_fs()` is dropped from the builder, tools fall back to LocalFs and ACP client-side enforcement stops working.
 #[cfg(test)]
@@ -1805,6 +1852,9 @@ mod interjection_actor_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/observability_bridge_mapping_tests.rs"]
 mod observability_bridge_mapping_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/p133_config_notice_tests.rs"]
+mod p133_config_notice_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/permission_auto_mode_tests.rs"]
 mod permission_auto_mode_tests;
@@ -1828,15 +1878,15 @@ mod plan_mode_edit_gate_tests;
 #[path = "acp_session_tests/plan_mode_midturn_tests.rs"]
 mod plan_mode_midturn_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/bang_controls_tests.rs"]
-mod bang_controls_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/pre_tool_use_decision_tests.rs"]
 mod pre_tool_use_decision_tests;
 /// Tests for [`conversation_has_project_instructions`], the idempotence helper that gates the spawn-time AGENTS.md / CLAUDE.md injector.
 #[cfg(test)]
 #[path = "acp_session_tests/project_instructions_idempotence_tests.rs"]
 mod project_instructions_idempotence_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/mcp_progress_order_tests.rs"]
+mod mcp_progress_order_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_gate_tests.rs"]
 mod prompt_gate_tests;
@@ -1846,9 +1896,6 @@ mod prompt_mode_transition_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_queue_actor_tests.rs"]
 mod prompt_queue_actor_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/p133_config_notice_tests.rs"]
-mod p133_config_notice_tests;
 /// Regression coverage for the per-turn `record_token_usage` path.
 #[cfg(test)]
 #[path = "acp_session_tests/record_response_token_usage_tests.rs"]
@@ -2100,10 +2147,8 @@ mod tool_meta_stamp_tests {
             .run_until(async {
                 let mut fixture = make_replay_send_update_fixture().await;
                 fixture.actor.agent = std::cell::RefCell::new(
-                    test_agent_with_tools(vec![ToolConfig::from_id(
-                        "Codex:read_file".to_string(),
-                    )])
-                    .await,
+                    test_agent_with_tools(vec![ToolConfig::from_id("Codex:read_file".to_string())])
+                        .await,
                 );
                 let (perm_tx, mut perm_rx) = mpsc::unbounded_channel();
                 fixture.actor.permissions = PermissionHandle::Actor {
@@ -2204,15 +2249,6 @@ impl Drop for TurnMetrics {
 #[path = "acp_session_tests/auth_error_no_retry_tests.rs"]
 mod auth_error_no_retry_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/context_window_switch_tests.rs"]
-mod context_window_switch_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/p42_session_delivery_wire_tests.rs"]
-mod p42_session_delivery_wire_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/p42_memory_embed_spawn_tests.rs"]
-mod p42_memory_embed_spawn_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/turn/auth_retry_budget_tests.rs"]
 mod auth_retry_budget_tests;
 /// Regression coverage for the auto-wake suppression sweep and shutdown drain.
@@ -2224,8 +2260,8 @@ mod auto_wake_suppression_tests;
 #[path = "acp_session_tests/between_turn_completion_tests.rs"]
 mod between_turn_completion_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/park_tests.rs"]
-mod park_tests;
+#[path = "acp_session_tests/turn/budget_denial_tests.rs"]
+mod budget_denial_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/build_tool_parse_error_message_tests.rs"]
 mod build_tool_parse_error_message_tests;
@@ -2233,41 +2269,26 @@ mod build_tool_parse_error_message_tests;
 #[path = "acp_session_tests/cancel_running_task_tests.rs"]
 mod cancel_running_task_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/turn/budget_denial_tests.rs"]
-mod budget_denial_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
 mod chat_history_integrity_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/context_window_switch_tests.rs"]
+mod context_window_switch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/disk_full_tests.rs"]
 mod disk_full_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/turn/limit_denial_tests.rs"]
-mod limit_denial_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/goal_latch_tests.rs"]
-mod goal_latch_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/turn/empty_response_retry_status_tests.rs"]
 mod empty_response_retry_status_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/stream_retry_discard_tests.rs"]
-mod stream_retry_discard_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/stream_retry_r3_pin_tests.rs"]
-mod stream_retry_r3_pin_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/goal_latch_tests.rs"]
+mod goal_latch_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/history_backup_owed_tests.rs"]
 mod history_backup_owed_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn_start_snapshot_tests.rs"]
-mod turn_start_snapshot_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/invalid_prompt_snapshot_tests.rs"]
-mod invalid_prompt_snapshot_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/idle_resume_tests.rs"]
 mod idle_resume_tests;
@@ -2277,6 +2298,9 @@ mod image_strip_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/inline_auto_compact_flow_tests.rs"]
 mod inline_auto_compact_flow_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/invalid_prompt_snapshot_tests.rs"]
+mod invalid_prompt_snapshot_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/laziness/laziness_debug_tests.rs"]
 mod laziness_debug_tests;
@@ -2290,20 +2314,20 @@ mod laziness_integration_tests;
 #[path = "acp_session_tests/turn/length_salvage_tests.rs"]
 mod length_salvage_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/limit_denial_tests.rs"]
+mod limit_denial_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/load_user_prompts_tests.rs"]
 mod load_user_prompts_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/max_turns_bound_tests.rs"]
+mod max_turns_bound_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/mcp_connecting_reminder_tests.rs"]
 mod mcp_connecting_reminder_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/resume_status_reminder_tests.rs"]
-mod resume_status_reminder_tests;
-#[cfg(test)]
 #[path = "acp_session_tests/mcp_failed_reminder_tests.rs"]
 mod mcp_failed_reminder_tests;
-#[cfg(test)]
-#[path = "acp_session_tests/turn/max_turns_bound_tests.rs"]
-mod max_turns_bound_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/media_gen_auth_retry_tests.rs"]
 mod media_gen_auth_retry_tests;
@@ -2314,8 +2338,17 @@ mod media_gen_batch_limit_tests;
 #[path = "acp_session_tests/memory_config_tests.rs"]
 mod memory_config_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/p42_memory_embed_spawn_tests.rs"]
+mod p42_memory_embed_spawn_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/p42_session_delivery_wire_tests.rs"]
+mod p42_session_delivery_wire_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/parallel_dispatch_tests.rs"]
 mod parallel_dispatch_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/park_tests.rs"]
+mod park_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
@@ -2323,14 +2356,23 @@ mod prompt_context_persistence_tests;
 #[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
 mod rate_limit_backoff_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/resume_status_reminder_tests.rs"]
+mod resume_status_reminder_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/startup_tasks_tests.rs"]
+mod startup_tasks_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/status_line_payload_tests.rs"]
 mod status_line_payload_tests;
 #[cfg(test)]
-#[path = "acp_session_tests/startup_tasks_tests.rs"]
-mod startup_tasks_tests;
+#[path = "acp_session_tests/turn/stream_retry_discard_tests.rs"]
+mod stream_retry_discard_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/stream_retry_r3_pin_tests.rs"]
+mod stream_retry_r3_pin_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;
@@ -2347,6 +2389,9 @@ mod turn_end_guard_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn_end_reporting_tests.rs"]
 mod turn_end_reporting_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn_start_snapshot_tests.rs"]
+mod turn_start_snapshot_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/wait_for_mcp_prefix_tests.rs"]
 mod wait_for_mcp_prefix_tests;

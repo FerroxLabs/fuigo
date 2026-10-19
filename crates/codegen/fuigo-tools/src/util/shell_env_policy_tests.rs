@@ -87,11 +87,7 @@ fn t05_deliberate_delivery() {
     assert!(!env.contains_key("ANTHROPIC_API_KEY"));
     assert!(!policy.allows("OPENAI_API_KEY"));
     policy.include_only = patterns(&["PATH"]);
-    assert!(
-        create_env_from_vars(Vec::new(), &policy)
-            .get("OPENAI_API_KEY")
-            .is_none()
-    );
+    assert!(!create_env_from_vars(Vec::new(), &policy).contains_key("OPENAI_API_KEY"));
 }
 
 #[test]

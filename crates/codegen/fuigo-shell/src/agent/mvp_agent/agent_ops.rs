@@ -4590,6 +4590,8 @@ impl MvpAgent {
                 });
             tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
         }
+        // The actor remembers the override so a later model switch keeps it (`enqueue_...` is idempotent on the head).
+        enqueue_replace_system_prompt_override(&handle.cmd_tx, session_meta, init_meta);
         let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
         if let Some(mut loc_rx) = loc_aggregate_rx {
             let signals = handle.signals_handle.clone();
