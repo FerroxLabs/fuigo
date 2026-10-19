@@ -94,11 +94,12 @@ Plain, precise, calm. Fuigo describes what it does and lets the screenshots prov
 
 | Candidate | Reads as | Notes |
 | --- | --- | --- |
-| **Act. Collaborate. Remember.** (pick) | The three things the engine does: tools, subagents and ACP, memory | Already in use on the hero; three verbs, three sections of the README, no claim to defend. |
-| One engine. Any model. Every surface. | The multi-provider, three-surface positioning | Accurate but says nothing about memory, which is the real differentiator. Use as a sub-line in long copy. |
+| **The model is the fire. Fuigo is the bellows.** (pick) | The name explained in one line: Fuigo is not the model, it is what makes any model work harder | Ties the brand to the bellows story and to the multi-provider position; the art (air into fire) illustrates it literally. |
+| Act. Collaborate. Remember. | The three things the engine does: tools, subagents and ACP, memory | The previous hero line. Three verbs, no claim to defend; keep for section-level copy and release posts. |
+| One engine. Any model. Every surface. | The multi-provider, three-surface positioning | Accurate but says nothing about memory. Use as a sub-line in long copy. |
 | The agent engine that remembers. | Memory-first | Strong single hook but narrows the product to one feature. |
 
-Pick: **Act. Collaborate. Remember.** It carries forward the existing brand, it is three verbs that map to the engine's three pillars, and nothing in it needs a benchmark to back it up. Descriptor line under it: *A multi-provider AI agent engine in Rust.*
+Pick: **The model is the fire. Fuigo is the bellows.** (approved 2026-10-19). Sub-line under it: *The open coding agent that holds its own with the best, on any model.* The sub-line is a positioning statement, not a benchmark claim; do not attach numbers to it.
 
 ## Assets index
 

@@ -3,18 +3,31 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/banner-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/banner-light.png">
-  <img alt="Fuigo. Act. Collaborate. Remember. A multi-provider AI agent engine in Rust." src="docs/assets/brand/banner-dark.png" width="900">
+  <img alt="Fuigo. The model is the fire. Fuigo is the bellows." src="docs/assets/brand/banner-dark.png" width="900">
 </picture>
 
-**A multi-provider AI agent engine in Rust: one runtime, used from the terminal, from scripts, or inside your own application.**
+# The open coding agent that holds its own with the best, on any model.
 
-[![npm version](https://img.shields.io/npm/v/fuigo?style=flat-square&color=FF6A1A&label=npm)](https://www.npmjs.com/package/fuigo)
-[![npm downloads](https://img.shields.io/npm/dw/fuigo?style=flat-square&color=C94A0A)](https://www.npmjs.com/package/fuigo)
-[![release build](https://img.shields.io/github/actions/workflow/status/FerroxLabs/fuigo/release.yml?style=flat-square&label=release)](https://github.com/FerroxLabs/fuigo/actions/workflows/release.yml)
-[![license](https://img.shields.io/github/license/FerroxLabs/fuigo?style=flat-square)](LICENSE)
-[![ACP](https://img.shields.io/badge/ACP-compatible-5B9CF6?style=flat-square)](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md)
+[![npm](https://img.shields.io/npm/v/fuigo?style=for-the-badge&labelColor=1B1B20&color=FF6A1A&label=npm)](https://www.npmjs.com/package/fuigo)
+[![downloads](https://img.shields.io/npm/dw/fuigo?style=for-the-badge&labelColor=1B1B20&color=FF6A1A&label=downloads)](https://www.npmjs.com/package/fuigo)
+[![any model](https://img.shields.io/badge/models-any%20model-FF6A1A?style=for-the-badge&labelColor=1B1B20)](docs/connect-a-model.md)
+[![runs on macOS, Linux, Windows](https://img.shields.io/badge/runs%20on-macOS%20%C2%B7%20Linux%20%C2%B7%20Windows-FF6A1A?style=for-the-badge&labelColor=1B1B20)](https://github.com/FerroxLabs/fuigo/releases)
+[![ACP compatible](https://img.shields.io/badge/ACP-compatible-FF6A1A?style=for-the-badge&labelColor=1B1B20)](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md)
+[![license](https://img.shields.io/github/license/FerroxLabs/fuigo?style=for-the-badge&labelColor=1B1B20&color=FF6A1A)](LICENSE)
 
-[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.30.md)
+</div>
+
+On 24 hard, real-world engineering tasks, with every agent on the same model, Fuigo solved **43 of 48** runs. Claude Code solved 41 and Grok Build 41. Fuigo did it for **18–27% less per solved task**, with no timeouts. ([How we tested](docs/benchmark.md))
+
+It isn't tied to one model company. Bring an OpenAI or Anthropic key, sign in with your ChatGPT subscription, or run a model on your own machine. It reads your code, edits it, runs your tests, and **asks before it changes a file or runs a command**. Kernel sandboxing, outbound destination checks and folder trust are built in, not bolted on. It remembers what it learned. And it is one engine: the same agent runs in your terminal, unattended in CI, or inside your product. It is the engine behind [Murage](https://github.com/FerroxLabs/murage)'s AI workforce.
+
+Apache-2.0. Yours to own.
+
+<div align="center">
+
+[![Install: npm i -g fuigo](https://img.shields.io/badge/install-npm%20i%20--g%20fuigo-FF6A1A?style=for-the-badge&labelColor=1B1B20&logo=npm&logoColor=white)](#install)
+
+[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Benchmark](docs/benchmark.md) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.30.md)
 
 </div>
 
