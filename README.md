@@ -1,207 +1,129 @@
 <div align="center">
 
-![Fuigo — Act. Collaborate. Remember. A general-purpose, multi-provider agent engine.](docs/assets/fuigo-hero.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/banner-light.png">
+  <img alt="Fuigo. Act. Collaborate. Remember. A multi-provider AI agent engine in Rust." src="docs/assets/brand/banner-dark.png" width="900">
+</picture>
 
-[Get started](#get-started) · [Headless CLI](#headless-cli) · [ACP integration](#acp-integration) · [Memory](#memory-that-carries-forward) · [Documentation](#documentation) · [Build from source](#build-from-source)
+**A multi-provider AI agent engine in Rust: one runtime, used from the terminal, from scripts, or inside your own application.**
+
+[![npm version](https://img.shields.io/npm/v/fuigo?style=flat-square&color=FF6A1A&label=npm)](https://www.npmjs.com/package/fuigo)
+[![npm downloads](https://img.shields.io/npm/dw/fuigo?style=flat-square&color=C94A0A)](https://www.npmjs.com/package/fuigo)
+[![release build](https://img.shields.io/github/actions/workflow/status/FerroxLabs/fuigo/release.yml?style=flat-square&label=release)](https://github.com/FerroxLabs/fuigo/actions/workflows/release.yml)
+[![license](https://img.shields.io/github/license/FerroxLabs/fuigo?style=flat-square)](LICENSE)
+[![ACP](https://img.shields.io/badge/ACP-compatible-5B9CF6?style=flat-square)](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md)
+
+[Install](#install) · [Why Fuigo](#why-fuigo) · [Three ways to work](#three-ways-to-work) · [Features](#features) · [Models](#model-routes) · [Memory](#memory) · [Docs](#documentation) · [Release notes](docs/release-notes-1.0.30.md)
 
 </div>
 
-Fuigo is a general-purpose, multi-provider AI agent engine. It gives models the machinery to work: tools, persistent sessions, permission controls, workspace memory, and other agents to collaborate with. Use it to research and analyze information, create documents and code, produce structured outputs, or coordinate work across connected systems.
+## Install
 
-The Rust runtime handles execution, context, and collaboration. Its built-in tools work with files, search, and terminal commands; MCP servers and other configured tools extend what it can do in external services. Run it directly in a terminal, call it from a script, or put an application in front of it through ACP.
+Requires Node.js 20 or newer. The npm launcher installs the native binary for macOS, Linux or Windows (arm64 and x64); you can also take the binaries straight from [Releases](https://github.com/FerroxLabs/fuigo/releases).
 
-Choose your model and authentication route: direct OpenAI and Anthropic API keys, Flux Router and compatible gateways, local OpenAI-compatible servers, or ChatGPT and Grok subscriptions. Switch models while keeping the conversation and tool history.
+```sh
+npm install -g fuigo
+```
 
-| Model route | Connection |
+Then, in a project:
+
+```sh
+fuigo login --provider chatgpt     # or set OPENAI_API_KEY / ANTHROPIC_API_KEY / FUIGO_API_KEY
+fuigo                              # opens the terminal UI in the current folder
+fuigo -p "Summarise this repo"     # same engine, one answer, no UI
+```
+
+On first launch Fuigo asks for a key, or offers one it finds in your environment. Every model route, including ChatGPT and Grok subscriptions, local servers and gateways, is in [Connect a model](docs/connect-a-model.md). Update later with `fuigo update` or `npm install -g fuigo@latest`.
+
+<div align="center">
+
+![A real Fuigo session, sped up: one prompt finds and fixes a failing test, adds an endpoint with tests, and runs the suite](docs/assets/screens/demo.gif)
+
+</div>
+
+## Why Fuigo
+
+- **Any model, one workflow.** OpenAI and Anthropic keys, ChatGPT and Grok subscriptions, Flux Router and other OpenAI-compatible gateways, and local servers such as Ollama. Switch models mid-session with `/model`.
+- **One engine, three surfaces.** The same runtime behind the full-screen terminal UI, the headless `-p` command for scripts and CI, and an ACP server that editors and your own applications drive over JSON-RPC.
+- **It asks before it acts.** Every command and edit goes through a permission step you control: approve one, approve a class for the session, or set allow and deny rules. Plan mode is read-only until you accept the plan. Optional kernel sandboxing on macOS and Linux.
+- **It remembers.** Local, workspace-scoped memory is on by default; sharing across workspaces and remote embeddings are explicit choices. Notes, decisions and session knowledge come back in later sessions, with their source attached.
+- **Built to be extended.** Subagents and personas, MCP servers, skills, plugins, hooks and project rules. A single Rust binary with no runtime to install beyond Node for the launcher.
+
+## Three ways to work
+
+### Terminal UI
+
+Open `fuigo` in a project. Fuigo reads files, runs commands and edits code, streaming each tool call into the scrollback. Attach files with `@path`, switch the permission mode with `Shift+Tab` (normal, plan, always-approve), and switch models with `/model <name>` or the model picker (`Ctrl+M` when the prompt is not focused).
+
+<img alt="Fuigo asking permission before editing a file, with the diff shown above the prompt" src="docs/assets/screens/permission.png" width="900">
+
+```sh
+fuigo                      # interactive session in the current folder
+fuigo -c                   # continue the most recent session
+fuigo --resume <ID>        # reopen a saved session
+```
+
+### Headless CLI
+
+The same engine without the UI: one prompt in, text or JSON out. Pipe it, call it from CI, chain calls on the same session. Tool access is bounded by `--tools`, `--disallowed-tools`, `--allow` and `--deny`; `--yolo` (alias `--always-approve`) approves tool calls automatically for unattended runs.
+
+<img alt="Headless Fuigo answering a one-shot prompt as JSON, with session ID and token usage" src="docs/assets/screens/headless.png" width="900">
+
+```sh
+fuigo -p "Review the staged changes for bugs" --output-format json | jq -r '.text'
+fuigo -p "Now check for security issues" --resume "$(fuigo -p 'hello' --output-format json | jq -r .sessionId)"
+fuigo -p "Run the tests and fix failures" --yolo --max-turns 8 --output-format streaming-json
+```
+
+Full flag reference, exit codes and the streaming event formats: [headless mode](crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md).
+
+### ACP agent
+
+Run Fuigo as a long-lived agent for an editor, an SDK or an application of your own. The client speaks [ACP](https://agentclientprotocol.com) (JSON-RPC) over stdio, or over WebSocket with `serve`, and receives sessions, streamed replies, tool updates and permission requests. Zed is a supported client.
+
+```sh
+fuigo agent stdio                                          # local process, prompts for permission through the client
+fuigo agent --always-approve --model <name> stdio          # unattended harness
+fuigo agent serve --bind 127.0.0.1:2419 --secret <token>   # WebSocket server you run yourself
+```
+
+Protocol details, error shapes and a client skeleton: [agent mode](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md). The npm package also ships per-platform binaries (`@fuigo/darwin-arm64` and friends) for bundling Fuigo with an application; see the [launcher sources](crates/codegen/fuigo-pager/npm/fuigo).
+
+## Features
+
+| | |
 | --- | --- |
-| **OpenAI directly** | Your API key with Chat Completions or Responses |
-| **Anthropic directly** | Your API key with the Messages API |
-| **Flux Router and compatible gateways** | A gateway endpoint, supported API protocol, and its credentials |
-| **Local models** | An OpenAI-compatible endpoint, such as Ollama |
-| **ChatGPT and Grok subscriptions** | Explicit provider login and a model your subscription grants access to |
+| **Tools** | File read and edit, search, shell, web search and fetch, Git and checkpoints. Read-only tools and read-only shell commands run without prompting. |
+| **Permissions** | Ask by default. Approve once, for the session, or always; allow and deny rules per tool and per command pattern; `.claude/settings.json` rules are honoured. [Guide](crates/codegen/fuigo-pager/docs/user-guide/22-permissions-and-safety.md) |
+| **Plan mode** | The agent explores and writes a plan; nothing but the plan file is editable until you approve it. [Guide](crates/codegen/fuigo-pager/docs/user-guide/19-plan-mode.md) |
+| **Sandbox** | Opt-in kernel sandboxing (Landlock on Linux, Seatbelt on macOS) with built-in and custom profiles. [Guide](crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md) |
+| **Subagents** | Parallel child sessions with their own context, agent types and personas, managed from `/agents`. [Guide](crates/codegen/fuigo-pager/docs/user-guide/16-subagents.md) |
+| **MCP** | Stdio and remote servers, OAuth, elicitation; manage them from `/mcps`. [Guide](crates/codegen/fuigo-pager/docs/user-guide/07-mcp-servers.md) |
+| **Skills, plugins, hooks** | Reusable instructions, a marketplace, and hooks that run around tool calls and sessions. [Skills](crates/codegen/fuigo-pager/docs/user-guide/08-skills.md) · [Plugins](crates/codegen/fuigo-pager/docs/user-guide/09-plugins.md) · [Hooks](crates/codegen/fuigo-pager/docs/user-guide/10-hooks.md) |
+| **Sessions** | Saved automatically, resumable, forkable; a dashboard of every running session; named sessions that can message each other; an optional shared leader for multi-window use. [Sessions](crates/codegen/fuigo-pager/docs/user-guide/17-sessions.md) · [Dashboard](crates/codegen/fuigo-pager/docs/user-guide/23-dashboard.md) |
+| **Background work** | Background tasks, scheduled prompts and follow-ups that survive compaction. [Guide](crates/codegen/fuigo-pager/docs/user-guide/20-background-tasks.md) |
+| **Project rules** | Per-project instructions and agent definitions under `.fuigo/`. [Guide](crates/codegen/fuigo-pager/docs/user-guide/12-project-rules.md) |
 
-![Fuigo terminal interface](docs/assets/fuigo-terminal.png)
+<p align="center"><img alt="Subagents running in parallel, each with its own context" src="docs/assets/screens/subagents.png" width="900"></p>
 
-*A captured Fuigo session showing tool activity, passing tests, and a model switch.*
+## Model routes
 
-## One engine, three ways to work
+| Route | How it connects | Setup |
+| --- | --- | --- |
+| **OpenAI** | Your API key, Chat Completions or Responses API | [`OPENAI_API_KEY` + a named model](docs/connect-a-model.md#openai-api-key) |
+| **Anthropic** | Your API key, Messages API | [`ANTHROPIC_API_KEY` + a named model](docs/connect-a-model.md#anthropic-api-key) |
+| **ChatGPT or Grok subscription** | `fuigo login --provider chatgpt` or `--provider xai`, then a model your plan grants | [Subscriptions](docs/connect-a-model.md#chatgpt-and-grok-subscriptions) |
+| **Flux Router and compatible gateways** | A gateway endpoint plus its credentials | [Gateways](docs/connect-a-model.md#flux-router-and-other-gateways) |
+| **Local models** | Any OpenAI-compatible server, such as Ollama | [Local servers](docs/connect-a-model.md#local-models) |
 
-| Surface | Use it for |
-| --- | --- |
-| **Interactive terminal** | Investigate a question, develop an idea, create and edit files, and review the agent's work in a full-screen TUI. |
-| **Headless CLI** | Submit a task from a script or pipeline, stream events, return JSON, and resume saved sessions. |
-| **ACP agent** | Connect an editor, application, or harness to sessions, streamed responses, tool updates, and permission requests over JSON-RPC. |
+Models are named entries in `~/.fuigo/config.toml`; pick one with `fuigo -m <name>` or `/model <name>` in the UI. Protocol compatibility does not mean every model supports every agent feature.
 
-## What you can build with it
+<p align="center"><img alt="The model picker with several configured routes" src="docs/assets/screens/models.png" width="900"></p>
 
-| Work | How Fuigo supports it |
-| --- | --- |
-| **Research and analysis** | Search available material, inspect source files, compare findings, and carry useful context through a session. Connected tools can supply additional sources. |
-| **Creation** | Draft reports, write code, transform data, and produce files or structured responses. Specialized formats depend on the tools available in the workspace. |
-| **Operations** | Run local commands and invoke connected services through configured tools, subject to the permissions you set. |
-| **Collaborative workflows** | Delegate parts of a task to subagents, exchange follow-ups, and coordinate background or scheduled work. |
-| **Agent-powered applications** | Use ACP to place your own interface or harness over the runtime's sessions, streaming, tools, and approval flow. |
+## Memory
 
-## What the engine provides
-
-- **Workspace tools:** file reading and editing, search, terminal execution, Git integration, and checkpoints.
-- **Model selection:** named model configurations, per-model authentication, and supported reasoning-effort controls.
-- **Delegation and workflows:** subagents, background tasks, follow-up messages, scheduled work, and workflow reminders that survive compaction.
-- **MCP integration:** external tools, OAuth authentication, elicitation, and configured servers attached during workspace binding.
-- **Persistent context:** resumable conversations, compaction, and workspace-scoped cross-session memory with source provenance.
-- **Extensibility and controls:** skills, plugins, hooks, project rules, tool permissions, and sandbox profiles.
-
-## Get started
-
-### Install
-
-Requires Node.js 20 or newer. The npm launcher selects the binary for your platform.
-
-```sh
-npm install -g fuigo@latest
-fuigo --version
-```
-
-Platform packages target macOS, Linux, and Windows on arm64 and x64. To update:
-
-```sh
-npm install -g fuigo@latest
-```
-
-### Connect a model
-
-Fuigo reads user configuration from `~/.fuigo/config.toml`, or `$FUIGO_HOME/config.toml` when you set a separate home. Choose a route below; model IDs and supported features depend on the provider and account.
-
-#### OpenAI API key
-
-Set `OPENAI_API_KEY` in your shell and add a named model to your user config:
-
-```sh
-export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
-```
-
-```toml
-[model.openai]
-model = "REPLACE_WITH_YOUR_OPENAI_MODEL_ID"
-base_url = "https://api.openai.com/v1"
-api_backend = "responses"
-env_key = "OPENAI_API_KEY"
-```
-
-```sh
-fuigo -m openai
-```
-
-For a model using Chat Completions, set `api_backend = "chat_completions"` instead.
-
-#### Anthropic API key
-
-```sh
-export ANTHROPIC_API_KEY="YOUR_ANTHROPIC_API_KEY"
-```
-
-```toml
-[model.anthropic]
-model = "REPLACE_WITH_YOUR_CLAUDE_MODEL_ID"
-base_url = "https://api.anthropic.com/v1"
-api_backend = "messages"
-auth_scheme = "x_api_key"
-env_key = "ANTHROPIC_API_KEY"
-extra_headers = { "anthropic-version" = "2023-06-01" }
-```
-
-```sh
-fuigo -m anthropic
-```
-
-`auth_scheme` sends the environment-supplied key as `x-api-key`; no key needs to be written into the config file. Set model-specific context and output limits to match the model you select. For gateway-specific secret headers, use `env_http_headers`.
-
-#### ChatGPT subscription
-
-Sign in and list the model IDs available to your account:
-
-```sh
-fuigo login --provider chatgpt
-fuigo models --provider chatgpt
-```
-
-Add this to your user config, replacing the model placeholder with an ID from the list:
-
-```toml
-[auth_provider.chatgpt-subscription]
-subscription = "chatgpt"
-
-[model.chatgpt-subscription]
-model = "REPLACE_WITH_MODEL_ID_FROM_LIST"
-base_url = "https://chatgpt.com/backend-api/codex"
-auth_provider = "chatgpt-subscription"
-```
-
-Then open your project:
-
-```sh
-cd /path/to/project
-fuigo -m chatgpt-subscription
-```
-
-Grok subscription login uses `fuigo login --provider xai`; list available models with `fuigo models --provider xai`. The [authentication guide](crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md#chatgpt-and-grok-subscriptions) includes its named-model configuration, account selection, status, and logout commands.
-
-Subscription credentials belong to Fuigo's own store; login does not import another application's session. Access depends on your account's entitlements. A subscription denial does not switch to a paid API key or Flux Router.
-
-#### Flux Router API key
-
-Set your Flux Router key in the shell, then define an explicit model route:
-
-```sh
-export FUIGO_API_KEY="YOUR_FLUX_ROUTER_API_KEY"
-```
-
-```toml
-[model.flux]
-model = "REPLACE_WITH_YOUR_FLUX_ROUTER_MODEL_ID"
-base_url = "https://api.fluxrouter.ai/v1"
-env_key = "FUIGO_API_KEY"
-```
-
-```sh
-fuigo -m flux
-```
-
-Flux Router uses API keys. For other compatible gateways, configure a separate named model with its own `base_url`, `api_backend`, and credentials. Local servers work through supported compatible protocols too; see the [Ollama example](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md#ollama-local-models) and [custom-model guide](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md). Protocol compatibility does not imply that every model supports every agent feature.
-
-## Headless CLI
-
-Use the same configured model for a single task and return structured output:
-
-```sh
-fuigo -m chatgpt-subscription -p "Compare the proposals in this folder and summarize the tradeoffs" --output-format json --max-turns 4
-```
-
-JSON output includes the response and session ID. Continue that session in a later call:
-
-```sh
-fuigo -m chatgpt-subscription --resume SESSION_ID -p "Turn the findings into a concise recommendation" --output-format json
-```
-
-Use `--output-format streaming-json` for an event stream. For an unattended task that should execute tools without interactive approval, add `--yolo`; it enables automatic tool approval. Tool allowlists, deny rules, and sandbox settings let you bound the task. See [headless mode](crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md).
-
-## ACP integration
-
-Run Fuigo as a local agent process for an ACP-capable client:
-
-```sh
-fuigo agent --model chatgpt-subscription stdio
-```
-
-The client exchanges JSON-RPC over stdin and stdout. It can create or load sessions, submit prompts, receive streamed replies and tool updates, and handle permission requests. Session configuration supports validated model and reasoning-effort selection.
-
-For an unattended harness, use `fuigo agent --model chatgpt-subscription --always-approve stdio`. Fuigo also provides a WebSocket server transport. Start with the [agent integration guide](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md) and [`fuigo-acp-lib`](crates/codegen/fuigo-acp-lib) when building an integration; the Rust workspace is implementation source, not a separately versioned public SDK.
-
-## Memory that carries forward
-
-Fuigo enables local workspace memory by default. Global sharing, remote
-embeddings, and background model processing remain explicit choices. Applications
-can choose their own policy. The local defaults are:
+Fuigo keeps workspace memory on your machine and turns it on by default. Global sharing, remote embeddings and background model processing stay off until you choose them.
 
 ```toml
 [memory]
@@ -209,79 +131,46 @@ enabled = true
 global_enabled = false
 ```
 
-![Terminal report from a Fuigo memory verification receipt](docs/assets/fuigo-memory.png)
+Save a note with `/remember`, capture what a session learned with `/flush`, consolidate logs into topics with `/dream`, and browse everything with `/memory`. Captured statements carry their session, workspace and time, and are treated as historical claims rather than facts. Retrieval respects workspace boundaries, checks that sources are still fresh, and screens out recognised secret and instruction-injection patterns. Lexical search works with no embedding service; configure one explicitly for semantic retrieval.
 
-*A verification report from an actual memory exercise; this is a terminal report, not the memory browser.*
+<p align="center"><img alt="Three subagents' findings merged into one answer, then saved to workspace memory" src="docs/assets/screens/memory.png" width="900"></p>
 
-Use `/remember` to save a note, `/flush` to capture useful session knowledge, `/dream` to consolidate it, and `/memory` to browse stored material.
-
-Memory combines workspace notes, session records, and a shared global `MEMORY.md`. Captured decisions and outcomes carry provenance and remain historical claims. Writes are serialized and atomic; consolidation retains raw sources and private recovery versions. Retrieval checks workspace boundaries and source freshness, excludes recognized secret and instruction-injection patterns, and removes stale injected context after source changes.
-
-Lexical retrieval works without an embedding service. An explicitly configured embedding route adds semantic retrieval, with cache identity tied to its endpoint, model, and dimensions. Subscription login does not imply embedding access, and Fuigo does not silently substitute a paid embedding route.
-
-See the [memory guide](crates/codegen/fuigo-pager/docs/user-guide/13-memory.md) for keyed corrections, retention, deletion, scoring, and the limits of automatic filtering.
+Keyed corrections, retention, deletion and scoring: [memory guide](crates/codegen/fuigo-pager/docs/user-guide/13-memory.md).
 
 ## Documentation
 
-The [user guide](crates/codegen/fuigo-pager/docs/user-guide/README.md) lives with the source and is available through `/docs` in the terminal.
+The [user guide](crates/codegen/fuigo-pager/docs/user-guide/README.md) ships with the source and opens inside the UI with `/docs`.
 
-| Topic | Guide |
+| Topic | Guides |
 | --- | --- |
-| Setup and configuration | [Getting started](crates/codegen/fuigo-pager/docs/user-guide/01-getting-started.md) · [Configuration](crates/codegen/fuigo-pager/docs/user-guide/05-configuration.md) · [Authentication](crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md) |
-| External tools and extensions | [MCP](crates/codegen/fuigo-pager/docs/user-guide/07-mcp-servers.md) · [Skills](crates/codegen/fuigo-pager/docs/user-guide/08-skills.md) · [Plugins](crates/codegen/fuigo-pager/docs/user-guide/09-plugins.md) · [Hooks](crates/codegen/fuigo-pager/docs/user-guide/10-hooks.md) |
-| Delegation and continuity | [Subagents](crates/codegen/fuigo-pager/docs/user-guide/16-subagents.md) · [Sessions](crates/codegen/fuigo-pager/docs/user-guide/17-sessions.md) · [Background tasks](crates/codegen/fuigo-pager/docs/user-guide/20-background-tasks.md) |
-| Execution controls | [Permissions](crates/codegen/fuigo-pager/docs/user-guide/22-permissions-and-safety.md) · [Sandboxing](crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md) · [Project rules](crates/codegen/fuigo-pager/docs/user-guide/12-project-rules.md) |
+| Start here | [Getting started](crates/codegen/fuigo-pager/docs/user-guide/01-getting-started.md) · [Authentication](crates/codegen/fuigo-pager/docs/user-guide/02-authentication.md) · [Keyboard shortcuts](crates/codegen/fuigo-pager/docs/user-guide/03-keyboard-shortcuts.md) · [Slash commands](crates/codegen/fuigo-pager/docs/user-guide/04-slash-commands.md) |
+| Configure | [Configuration](crates/codegen/fuigo-pager/docs/user-guide/05-configuration.md) · [Config reference](crates/codegen/fuigo-pager/docs/user-guide/26-config-reference.md) · [Custom models](crates/codegen/fuigo-pager/docs/user-guide/11-custom-models.md) · [Theming](crates/codegen/fuigo-pager/docs/user-guide/06-theming.md) · [Status line](crates/codegen/fuigo-pager/docs/user-guide/25-status-line.md) |
+| Automate | [Headless mode](crates/codegen/fuigo-pager/docs/user-guide/14-headless-mode.md) · [Agent mode (ACP)](crates/codegen/fuigo-pager/docs/user-guide/15-agent-mode.md) · [Background tasks](crates/codegen/fuigo-pager/docs/user-guide/20-background-tasks.md) · [Named sessions](crates/codegen/fuigo-pager/docs/user-guide/28-named-sessions.md) |
+| Control | [Permissions and safety](crates/codegen/fuigo-pager/docs/user-guide/22-permissions-and-safety.md) · [Sandbox](crates/codegen/fuigo-pager/docs/user-guide/18-sandbox.md) · [Plan mode](crates/codegen/fuigo-pager/docs/user-guide/19-plan-mode.md) · [Monitoring usage](crates/codegen/fuigo-pager/docs/user-guide/24-monitoring-usage.md) |
+| Extend | [MCP servers](crates/codegen/fuigo-pager/docs/user-guide/07-mcp-servers.md) · [Skills](crates/codegen/fuigo-pager/docs/user-guide/08-skills.md) · [Plugins](crates/codegen/fuigo-pager/docs/user-guide/09-plugins.md) · [Hooks](crates/codegen/fuigo-pager/docs/user-guide/10-hooks.md) · [Project rules](crates/codegen/fuigo-pager/docs/user-guide/12-project-rules.md) |
 
-## Inside the engine
-
-Fuigo is a Rust workspace with separate surfaces, runtime, tools, and storage components.
-
-| Source | Responsibility |
-| --- | --- |
-| [`fuigo-pager-bin`](crates/codegen/fuigo-pager-bin) | Composition root and executable |
-| [`fuigo-pager`](crates/codegen/fuigo-pager) | Terminal interface, rendering, and interaction |
-| [`fuigo-shell`](crates/codegen/fuigo-shell) | Agent/session runtime, authentication, and entry points |
-| [`fuigo-sampler`](crates/codegen/fuigo-sampler) | Model requests and streamed responses |
-| [`fuigo-tools`](crates/codegen/fuigo-tools) | Built-in tool implementations and delegation |
-| [`fuigo-workspace`](crates/codegen/fuigo-workspace) | Filesystem, command execution, VCS, and checkpoints |
-| [`fuigo-mcp`](crates/codegen/fuigo-mcp) | MCP transports, authentication, and tool integration |
-| [`fuigo-memory`](crates/codegen/fuigo-memory) | Memory storage, indexing, retrieval, and consolidation |
-| [`crates/common`](crates/common) | Shared protocols and runtime components |
-
-## Bundle Fuigo with your application
-
-The `fuigo` npm package provides the launcher and selects a matching versioned platform package: `@fuigo/darwin-arm64`, `@fuigo/darwin-x64`, `@fuigo/linux-arm64`, `@fuigo/linux-x64`, `@fuigo/win32-arm64`, or `@fuigo/win32-x64`.
-
-For a controlled distribution, pin the Fuigo version and include the package for your target platform. Your application can launch the engine as an ACP process and own the user interface. Preserve the included license and attribution files when redistributing it. The [npm package sources](crates/codegen/fuigo-pager/npm/fuigo) show the launcher and packaging layout.
+Release history: [CHANGELOG](CHANGELOG.md). Terminal compatibility notes: [terminal support](crates/codegen/fuigo-pager/docs/user-guide/21-terminal-support.md).
 
 ## Build from source
 
-Install Rust through rustup; [`rust-toolchain.toml`](rust-toolchain.toml) pins the toolchain. Install [DotSlash](https://dotslash-cli.com) for the hermetic tools under [`bin/`](bin/). Protocol code generation uses `bin/protoc`, with a system `protoc` or `$PROTOC` as fallback. Native build prerequisites also include a C/C++ toolchain and CMake.
+Rust via rustup ([`rust-toolchain.toml`](rust-toolchain.toml) pins the version), [DotSlash](https://dotslash-cli.com) for the hermetic tools in [`bin/`](bin/), a C/C++ toolchain and CMake.
 
 ```sh
-git clone https://github.com/FerroxLabs/fuigo.git
-cd fuigo
+git clone https://github.com/FerroxLabs/fuigo.git && cd fuigo
 cargo install dotslash
 cargo build --locked -p fuigo-pager-bin --release
 ```
 
-The binary is `target/release/fuigo-pager` (`fuigo-pager.exe` on Windows); the npm launcher exposes it as `fuigo`. Pass the same CLI arguments when running the source-built binary.
+The binary is `target/release/fuigo-pager` (`.exe` on Windows) and takes the same arguments as `fuigo`. The root [`Cargo.toml`](Cargo.toml) is generated; change dependencies in per-crate manifests. Crate layout: `fuigo-pager` (UI), `fuigo-shell` (runtime), `fuigo-sampler` (model requests), `fuigo-tools`, `fuigo-workspace`, `fuigo-mcp`, `fuigo-memory`, all under [`crates/codegen`](crates/codegen), with shared protocols in [`crates/common`](crates/common).
 
-For development, target the affected crates:
+## Contributing and community
 
-```sh
-cargo check --locked -p fuigo-pager-bin
-cargo test --locked -p fuigo-memory --lib
-cargo clippy --locked -p fuigo-memory
-cargo fmt --all --check
-```
-
-The root [`Cargo.toml`](Cargo.toml) is generated. Follow repository instructions and prefer per-crate manifests for dependency changes. See [contribution policy](CONTRIBUTING.md) and [security reporting](SECURITY.md).
+Ferrox Labs develops Fuigo internally and publishes the source for transparency and local builds; external pull requests are not accepted (see [CONTRIBUTING](CONTRIBUTING.md)). Bug reports and feature requests are welcome in [Issues](https://github.com/FerroxLabs/fuigo/issues) using the templates. Report security problems privately as described in [SECURITY](SECURITY.md). Please follow the [code of conduct](CODE_OF_CONDUCT.md).
 
 ## License and lineage
 
-Fuigo is independently maintained by Ferrox Labs under the [Apache License 2.0](LICENSE). It originated as a modified derivative of [Grok Build](https://github.com/xai-org/grok-build), with additional development and selectively integrated upstream changes. Fuigo is not affiliated with or endorsed by xAI or SpaceXAI.
+Fuigo is maintained by Ferrox Labs under the [Apache License 2.0](LICENSE). It originated as a modified derivative of [Grok Build](https://github.com/xai-org/grok-build), with substantial additional development and selectively integrated upstream changes. Fuigo is not affiliated with or endorsed by xAI or SpaceXAI.
 
 See [NOTICE](NOTICE) for lineage and modification notices, [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) for dependency and source-port attribution, and [`third_party/NOTICE`](third_party/NOTICE) for vendored components. Third-party code retains its original licenses.
 
-The hero’s galaxy mark is based on [Lucide Galaxy](https://lucide.dev/icons/galaxy); its [license is included](docs/assets/lucide-LICENSE.txt).
+The name is the Japanese word for a forge bellows (鞴, *fuigo*). The wind mark is the [Lucide Wind](https://lucide.dev/icons/wind) icon, used under the ISC licence ([included](docs/assets/lucide-LICENSE.txt)).

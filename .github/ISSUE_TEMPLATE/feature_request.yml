@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a change or an addition to Fuigo.
+title: "[Feature] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fuigo is developed internally by Ferrox Labs and does not accept external pull requests, so a clear description of the problem is the most useful thing you can give us. Check the [user guide](https://github.com/FerroxLabs/fuigo/blob/main/crates/codegen/fuigo-pager/docs/user-guide/README.md) first; the feature may already exist behind a setting.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what stops you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should Fuigo do? Include the command, flag, slash command or config key you would expect, if you have one in mind.
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      multiple: true
+      options:
+        - Terminal UI
+        - Headless CLI (`-p`)
+        - ACP agent (`fuigo agent`)
+        - Memory
+        - Models and authentication
+        - Tools, MCP, skills, plugins, hooks
+        - Permissions and sandbox
+        - Install and packaging
+        - Documentation
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds, other tools that do this, or why the existing settings do not cover it.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and this has not been requested already.
+          required: true
