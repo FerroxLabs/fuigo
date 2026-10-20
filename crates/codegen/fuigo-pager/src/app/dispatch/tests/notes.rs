@@ -2274,3 +2274,26 @@ fn send_feedback_preserves_composer_draft() {
         "composer draft must survive SendFeedback"
     );
 }
+
+#[test]
+fn memory_saved_message_names_the_path_the_shell_wrote() {
+    let msg = crate::app::dispatch::notes::memory_saved_message("/srv/work/.fuigo/memory/proj-abc12345/MEMORY.md");
+    assert!(msg.starts_with("Memory saved to "), "{msg}");
+    assert!(msg.contains("proj-abc12345/MEMORY.md"), "{msg}");
+    assert!(!msg.ends_with("memory/MEMORY.md"), "must not claim the global file: {msg}");
+}
+
+#[test]
+fn memory_note_saved_error_is_shown_as_not_saved() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let before = app.agents.get(&id).unwrap().scrollback.len();
+    let _ = crate::app::dispatch::notes::handle_memory_note_saved(
+        &mut app,
+        id,
+        Err("temporary folder, so the note was not saved".to_owned()),
+    );
+    assert!(app.agents.get(&id).unwrap().scrollback.len() > before);
+    let msg = crate::app::dispatch::notes::memory_save_failed_message("temporary folder, so the note was not saved");
+    assert!(msg.contains("not saved"), "{msg}");
+}

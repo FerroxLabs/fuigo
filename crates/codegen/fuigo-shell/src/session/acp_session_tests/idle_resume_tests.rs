@@ -141,7 +141,13 @@ async fn test_e2e_idle_resume_never_sends_the_session_to_a_loopback_models_v2() 
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
-                transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                system_prompt_override: Default::default(),
+                read_dedupe: std::cell::RefCell::new(
+                    crate::session::read_dedupe::ReadDedupeCache::new(
+                        crate::session::read_dedupe::PruneMirror::disabled(),
+                    ),
+                ),
                 transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info: SessionInfo {

@@ -447,6 +447,9 @@ pub struct McpState {
     /// Read access is via [`Self::client_event_tx`].
     client_event_tx: Option<tokio::sync::mpsc::UnboundedSender<McpClientEvent>>,
     elicitation_job_tx: Option<crate::elicitation::ElicitationInbox>,
+    /// Where throttled MCP `notifications/progress` for this session's tool calls go (see [`crate::progress`]).
+    /// `None` for sessions that forward no progress (tests, headless runs).
+    progress_sink: Option<crate::progress::McpProgressSink>,
 }
 
 impl McpState {
@@ -474,6 +477,7 @@ impl McpState {
             event_writer: fuigo_session_events::EventWriter::noop(),
             client_event_tx: None,
             elicitation_job_tx: None,
+            progress_sink: None,
         }
     }
 
@@ -512,6 +516,15 @@ impl McpState {
 
     pub fn elicitation_tx(&self) -> Option<crate::elicitation::ElicitationInbox> {
         self.elicitation_job_tx.clone()
+    }
+
+    /// Install the receiver of throttled tool-call progress (ACP `tool_call_update` in the shell).
+    pub fn set_progress_sink(&mut self, sink: Option<crate::progress::McpProgressSink>) {
+        self.progress_sink = sink;
+    }
+
+    pub fn progress_sink(&self) -> Option<crate::progress::McpProgressSink> {
+        self.progress_sink.clone()
     }
 
     pub fn set_event_writer(&mut self, writer: fuigo_session_events::EventWriter) {
@@ -1222,7 +1235,9 @@ impl McpError {
     pub fn failure_kind(&self) -> McpFailureKind {
         match self {
             Self::SpawnFailed { .. } => McpFailureKind::CommandNotStarted,
-            Self::Timeout { timeout_secs, .. } => McpFailureKind::Timeout { secs: *timeout_secs },
+            Self::Timeout { timeout_secs, .. } => McpFailureKind::Timeout {
+                secs: *timeout_secs,
+            },
             Self::Unreachable { .. } => McpFailureKind::Unreachable,
             Self::HandshakeFailed { source, .. } => handshake_failure_kind(source),
             Self::AuthRequired { .. } => McpFailureKind::NeedsAuth,
@@ -1335,16 +1350,22 @@ fn init_error_has_typed_auth_status(err: &ClientInitializeError) -> bool {
         .error
         .downcast_ref::<StreamableHttpError<reqwest::Error>>()
     {
-        Some(StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_)) => true,
-        Some(StreamableHttpError::Client(e)) => e
-            .status()
-            .is_some_and(|c| c == reqwest::StatusCode::UNAUTHORIZED || c == reqwest::StatusCode::FORBIDDEN),
+        Some(StreamableHttpError::AuthRequired(_) | StreamableHttpError::InsufficientScope(_)) => {
+            true
+        }
+        Some(StreamableHttpError::Client(e)) => e.status().is_some_and(|c| {
+            c == reqwest::StatusCode::UNAUTHORIZED || c == reqwest::StatusCode::FORBIDDEN
+        }),
         _ => false,
     }
 }
 
 /// The classification order for a failed start (shared by every push; see [`McpClient::start_failure_kind`]).
-fn classify_start_failure(error: &McpError, is_http: bool, oauth_needs_auth: bool) -> McpFailureKind {
+fn classify_start_failure(
+    error: &McpError,
+    is_http: bool,
+    oauth_needs_auth: bool,
+) -> McpFailureKind {
     // 1. Typed spawn-time sign-in gate.
     if matches!(error, McpError::AuthRequired { .. }) {
         return McpFailureKind::NeedsAuth;
@@ -1627,7 +1648,7 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
 
     async fn run(
         &self,
-        _ctx: fuigo_tool_runtime::ToolCallContext,
+        ctx: fuigo_tool_runtime::ToolCallContext,
         raw: serde_json::Value,
     ) -> Result<ToolOutput, fuigo_tool_runtime::ToolError> {
         let call_span = fuigo_telemetry::region::Region::from_span(tracing::info_span!(
@@ -1639,7 +1660,7 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
         ));
         let mcp_call_start = std::time::Instant::now();
         let state_lock_span = region!("mcp.state_lock", Parent::Explicit(call_span.span()));
-        let (client, event_writer) = {
+        let (client, event_writer, progress_sink) = {
             let state = self.tool.mcp_state.lock().await;
             let c = Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
                 fuigo_tool_runtime::ToolError::custom(
@@ -1647,7 +1668,7 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
                     format!("MCP server '{}' not found", self.tool.server_name),
                 )
             })?);
-            (c, state.event_writer().clone())
+            (c, state.event_writer().clone(), state.progress_sink())
         };
         state_lock_span.close();
 
@@ -1666,30 +1687,52 @@ impl fuigo_tool_runtime::Tool for McpErasedTool {
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
         let ew = &event_writer;
-        let dispatch_result = match self
-            .try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout, ew)
-            .await
-        {
-            Ok(result) => Ok(result),
-            Err(first_err) if client.has_auth() => {
-                auth_retry_attempted = true;
-                let reauth_ok = client.force_reauth(false).await;
-                ew.emit(fuigo_session_events::Event::McpAuthRetry {
-                    server_name: server.clone(),
-                    trigger: "tool_call_failed".to_string(),
-                    success: reauth_ok,
-                });
-                if reauth_ok {
-                    self.try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout, ew)
+        let progress_binding = progress_sink.map(|sink| crate::progress::ProgressBinding {
+            registry: Arc::clone(client.progress_registry()),
+            sink,
+            server: server.clone(),
+            tool_call_id: ctx.call_id.as_str().to_owned(),
+        });
+        let dispatch = async {
+            match self
+                .try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout, ew)
+                .await
+            {
+                Ok(result) => Ok(result),
+                Err(first_err) if client.has_auth() => {
+                    auth_retry_attempted = true;
+                    let reauth_ok = client.force_reauth(false).await;
+                    ew.emit(fuigo_session_events::Event::McpAuthRetry {
+                        server_name: server.clone(),
+                        trigger: "tool_call_failed".to_string(),
+                        success: reauth_ok,
+                    });
+                    if reauth_ok {
+                        self.try_call_tool(
+                            &client,
+                            &raw,
+                            &mut reconnect_attempted,
+                            &mut is_timeout,
+                            ew,
+                        )
                         .await
                         .map_err(|e| {
                             fuigo_tool_runtime::ToolError::custom("process_manager", e.to_string())
                         })
-                } else {
-                    Err(first_err)
+                    } else {
+                        Err(first_err)
+                    }
                 }
+                Err(e) => Err(e),
             }
-            Err(e) => Err(e),
+        };
+        let dispatch_result = match progress_binding {
+            Some(binding) => {
+                crate::progress::CURRENT_PROGRESS
+                    .scope(binding, dispatch)
+                    .await
+            }
+            None => dispatch.await,
         };
         call_span.span().record("reconnect", reconnect_attempted);
         call_span.span().record("auth_retry", auth_retry_attempted);
@@ -2169,6 +2212,15 @@ pub async fn call_tool_cancel_aware(
     use rmcp::model::{CallToolRequest, CallToolResponse, ClientRequest, ServerResult};
     use rmcp::service::PeerRequestOptions;
 
+    // Reserve progress ownership BEFORE the request is sent: rmcp picks the token while enqueueing, so progress
+    // that races ahead of `bind` is held by the registry and replayed rather than dropped.
+    let claim = crate::progress::CURRENT_PROGRESS
+        .try_with(|binding| {
+            binding
+                .registry
+                .claim(service.service().progress_generation(), binding)
+        })
+        .ok();
     let handle = service
         .peer()
         .send_cancellable_request(
@@ -2176,6 +2228,8 @@ pub async fn call_tool_cancel_aware(
             PeerRequestOptions::no_options(),
         )
         .await?;
+    // Map this request's progress token to the owning tool call until the call settles, however it ends.
+    let progress = claim.map(|claim| claim.bind(handle.progress_token.clone()));
     let mut guard = CancelOnDrop {
         service: service.clone(),
         request_id: Some(handle.id.clone()),
@@ -2195,7 +2249,14 @@ pub async fn call_tool_cancel_aware(
     };
     // Settled either way; a cancel now would be noise.
     guard.request_id = None;
-    match response? {
+    let response = response?;
+    if let Some(progress) = progress {
+        // rmcp runs each notification handler in its own task, so the last `notifications/progress` can still be
+        // queued when the reply resolves. The entry keeps accepting for a bounded grace period (see
+        // `crate::progress`); a cancelled, timed-out or failed call drops its guard and is removed at once.
+        progress.complete();
+    }
+    match response {
         ServerResult::CallToolResult(result) => Ok(CallToolResponse::Complete(result)),
         ServerResult::InputRequiredResult(result) => Ok(CallToolResponse::InputRequired(result)),
         ServerResult::CreateTaskResult(result) => Ok(CallToolResponse::Task(result)),
@@ -2405,7 +2466,10 @@ async fn stored_login_awaits_metadata(server_name: &str, server_url: &str) -> bo
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs();
-                lifetime.as_secs().saturating_sub(now.saturating_sub(received_at)) > 0
+                lifetime
+                    .as_secs()
+                    .saturating_sub(now.saturating_sub(received_at))
+                    > 0
             }
             _ => true,
         }
@@ -2552,7 +2616,10 @@ async fn decide_http_auth_over_network(
                         server = server_name,
                         "Stored OAuth login cannot be used or refreshed until the authorization server metadata validates; will retry"
                     );
-                    ("auth_challenged_login_awaiting_metadata", HttpAuthDecision::Unreachable)
+                    (
+                        "auth_challenged_login_awaiting_metadata",
+                        HttpAuthDecision::Unreachable,
+                    )
                 }
                 AnonymousAccess::AuthChallenged => {
                     tracing::warn!(
@@ -3449,6 +3516,10 @@ pub struct McpClient {
     /// `parking_lot::Mutex` is sufficient: the lock is never held across an `.await`, and the handler's `emit` path is short and allocation-free.
     notify_tx: SharedEventTx,
     elicitation_tx: crate::elicitation::SharedElicitationTx,
+    /// In-flight progress tokens of this client's tool calls; shared with its [`FuigoClientHandler`].
+    progress: Arc<crate::progress::ProgressRegistry>,
+    /// Source of [`crate::progress::Generation`]s: one per handler built, i.e. one per connection.
+    progress_generations: std::sync::atomic::AtomicU64,
     /// RAII handle for the per-client transport-liveness poller.
     ///
     /// `Some` after [`Self::arm_liveness_watcher`] succeeds; `None` initially.
@@ -3593,6 +3664,8 @@ impl McpClient {
             reconnect,
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+            progress: Arc::default(),
+            progress_generations: std::sync::atomic::AtomicU64::new(0),
             liveness_handle: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
@@ -3768,7 +3841,10 @@ impl McpClient {
                 // A refused token endpoint is permanent until the metadata changes: not a network blip.
                 Err(ref e)
                     if !force
-                        && mcp_refresh_failure_is_transient_unless_refused(e, refusal.as_deref()) =>
+                        && mcp_refresh_failure_is_transient_unless_refused(
+                            e,
+                            refusal.as_deref(),
+                        ) =>
                 {
                     tracing::warn!(
                         server = self.server_name.as_str(),
@@ -4232,7 +4308,8 @@ impl McpClient {
                     // authorization server metadata could not be fetched.
                     let refreshed = {
                         let mut mgr = auth_mgr.lock().await;
-                        let ready = crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr).await;
+                        let ready =
+                            crate::oauth::ensure_oauth_ready(&self.server_name, &mut mgr).await;
                         if ready.hydrated {
                             Some(crate::http_policy::refresh_logged(&mgr, &self.server_name).await)
                         } else if ready
@@ -4250,7 +4327,9 @@ impl McpClient {
                         Some(false) => return None,
                         // P151 (B33): a saved login that only waits for metadata is a connection problem to retry,
                         // not a request to sign in again. Nothing was refreshed and the login is kept.
-                        None if stored_login_awaits_metadata(&self.server_name, &config.url).await => {
+                        None if stored_login_awaits_metadata(&self.server_name, &config.url)
+                            .await =>
+                        {
                             tracing::warn!(
                                 server = %self.server_name,
                                 "Saved OAuth login kept; the authorization server metadata could not be fetched, will retry"
@@ -4917,7 +4996,17 @@ impl McpClient {
             server_name: self.server_name.clone(),
             notify_tx: Arc::clone(&self.notify_tx),
             elicitation_tx: Arc::clone(&self.elicitation_tx),
+            progress: Arc::clone(&self.progress),
+            // rmcp numbers progress tokens per connection; a new generation keeps them unique across reconnects.
+            progress_generation: self
+                .progress_generations
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    /// Progress-token registry shared with this client's handler.
+    pub fn progress_registry(&self) -> &Arc<crate::progress::ProgressRegistry> {
+        &self.progress
     }
 
     /// Wire a sender for [`McpClientEvent`]s emitted by this client.
@@ -5454,7 +5543,9 @@ fn http_headers_for_server(
     first_party_key: Option<&str>,
 ) -> Vec<(String, String)> {
     for header in headers.iter_mut() {
-        if let std::borrow::Cow::Owned(resolved) = send_first_party_key_references(&header.value, first_party_key) {
+        if let std::borrow::Cow::Owned(resolved) =
+            send_first_party_key_references(&header.value, first_party_key)
+        {
             header.value = resolved;
         }
     }
@@ -5604,7 +5695,10 @@ fn first_party_key_snapshot() -> Option<String> {
 /// P113 (Astra r2 #1): the key is recorded whenever the text handed to the server holds it, not only when a reference
 /// was resolved here: an exported `FUIGO_API_KEY` is expanded when the config is loaded, so the text arrives here
 /// already holding the key.
-fn send_first_party_key_references<'a>(text: &'a str, first_party_key: Option<&str>) -> std::borrow::Cow<'a, str> {
+fn send_first_party_key_references<'a>(
+    text: &'a str,
+    first_party_key: Option<&str>,
+) -> std::borrow::Cow<'a, str> {
     let resolved = fuigo_config::read_first_party_key_references(text, first_party_key);
     if let Some(key) = first_party_key
         && resolved.contains(key)
@@ -5669,13 +5763,23 @@ fn bearer_token_file_for_server(
     meta: Option<&acp::Meta>,
 ) -> Result<Option<crate::bearer_token_file::BearerTokenFile>, McpError> {
     use crate::bearer_token_file::{BearerTokenFile, BearerTokenFileError, BearerTokenPath};
-    let refuse = |reason: BearerTokenFileError| McpError::ClientError(format!("MCP server '{name}': {reason}"));
-    let Some(configured) = crate::bearer_token_file::configured_from_meta(meta).map_err(refuse)? else {
+    let refuse = |reason: BearerTokenFileError| {
+        McpError::ClientError(format!("MCP server '{name}': {reason}"))
+    };
+    let Some(configured) = crate::bearer_token_file::configured_from_meta(meta).map_err(refuse)?
+    else {
         return Ok(None);
     };
-    let path = BearerTokenPath::parse(&configured, fuigo_config::mcp_bearer_file::home_dir().as_deref()).map_err(refuse)?;
+    let path = BearerTokenPath::parse(
+        &configured,
+        fuigo_config::mcp_bearer_file::home_dir().as_deref(),
+    )
+    .map_err(refuse)?;
     crate::bearer_token_file::check_url_may_carry_token(url).map_err(refuse)?;
-    if headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
+    if headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+    {
         return Err(refuse(BearerTokenFileError::ConflictsWithAuthorization));
     }
     Ok(Some(BearerTokenFile::new(path)))
@@ -5805,7 +5909,10 @@ pub async fn start_mcp_server(
                 let first_party_key = first_party_key_snapshot();
                 let args: Vec<String> = args
                     .iter()
-                    .map(|arg| send_first_party_key_references(arg, first_party_key.as_deref()).into_owned())
+                    .map(|arg| {
+                        send_first_party_key_references(arg, first_party_key.as_deref())
+                            .into_owned()
+                    })
                     .collect();
                 let (program, spawn_args) =
                     plan_stdio_spawn(&command_str, &args, cfg!(windows), |c| {
@@ -5860,10 +5967,18 @@ pub async fn start_mcp_server(
             ))
         }
         acp::McpServer::Http(acp::McpServerHttp {
-            name, url, headers, meta, ..
+            name,
+            url,
+            headers,
+            meta,
+            ..
         })
         | acp::McpServer::Sse(acp::McpServerSse {
-            name, url, headers, meta, ..
+            name,
+            url,
+            headers,
+            meta,
+            ..
         }) => {
             if let Some(mc) = meta_config {
                 tracing::info!(server = %name, %url, ?mc, "MCP http: meta config override");
@@ -5874,11 +5989,15 @@ pub async fn start_mcp_server(
             // reference. The URL is NOT resolved: it is an identifier that is logged, persisted and listed.
             // One snapshot of the key store for all of this server's headers (Astra f11).
             // The key, once sent, is recorded for P70b's scrub of echoed credentials.
-            let mut headers =
-                http_headers_for_server(headers, ctx.session_id, first_party_key_snapshot().as_deref());
+            let mut headers = http_headers_for_server(
+                headers,
+                ctx.session_id,
+                first_party_key_snapshot().as_deref(),
+            );
             let local_agent_endpoint =
                 apply_agent_id_header(&mut headers, name.as_str(), url.as_str(), ctx)?;
-            let bearer_token_file = bearer_token_file_for_server(&name, &url, &headers, meta.as_ref())?;
+            let bearer_token_file =
+                bearer_token_file_for_server(&name, &url, &headers, meta.as_ref())?;
             let http_config = HttpConfig {
                 url: url.clone(),
                 headers,
@@ -5952,7 +6071,9 @@ pub async fn start_mcp_server(
 /// classified error, naming only origins: never a query string, a provider's error text or a credential (Astra r1).
 pub async fn explain_missing_oauth(server_url: &str) -> Option<String> {
     let Ok(manager) = crate::http_policy::auth_manager(server_url).await else {
-        return Some("its address is not allowed for OAuth sign-in by the network policy".to_string());
+        return Some(
+            "its address is not allowed for OAuth sign-in by the network policy".to_string(),
+        );
     };
     use rmcp::transport::auth::AuthError;
     let error = match crate::oauth::discover_metadata_bounded(&manager).await {
@@ -6212,9 +6333,18 @@ pub struct FuigoClientHandler {
     /// So wiring the sender post-handshake works without restarting the rmcp service loop.
     notify_tx: SharedEventTx,
     elicitation_tx: crate::elicitation::SharedElicitationTx,
+    /// Token -> owning tool call, for `notifications/progress`.
+    progress: Arc<crate::progress::ProgressRegistry>,
+    /// Which connection this handler serves; keys its progress tokens in the shared registry.
+    progress_generation: crate::progress::Generation,
 }
 
 impl FuigoClientHandler {
+    /// The connection generation this handler's progress tokens belong to.
+    pub(crate) fn progress_generation(&self) -> crate::progress::Generation {
+        self.progress_generation
+    }
+
     /// Best-effort event emit.
     /// Reads the shared `notify_tx` slot on every call (so the handler picks up any post-handshake wiring done by [`McpClient::set_event_tx`]).
     /// Drops the send error: if the receiver is gone, the consumer has shut down and there's nothing useful to do here.
@@ -6243,6 +6373,14 @@ impl ClientHandler for FuigoClientHandler {
         self.emit(McpClientEvent::ResourcesChanged {
             server: self.server_name.clone(),
         });
+    }
+
+    async fn on_progress(
+        &self,
+        params: rmcp::model::ProgressNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) {
+        self.progress.deliver(self.progress_generation, params);
     }
 
     async fn create_elicitation(
@@ -6335,6 +6473,10 @@ mod p133_tests;
 #[cfg(test)]
 #[path = "servers_p91_tests.rs"]
 mod p91_tests;
+
+#[cfg(test)]
+#[path = "servers_p31_progress_tests.rs"]
+mod p31_progress_tests;
 
 #[cfg(test)]
 #[path = "servers_p194_tests.rs"]

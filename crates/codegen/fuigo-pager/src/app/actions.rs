@@ -2936,7 +2936,8 @@ pub enum TaskResult {
     /// Memory note saved to workspace MEMORY.md.
     MemoryNoteSaved {
         agent_id: AgentId,
-        result: Result<(), String>,
+        /// `Ok(path)`: the file the shell wrote (empty if the shell did not say). `Err`: why nothing was saved.
+        result: Result<String, String>,
     },
     /// LLM-rewritten memory note ready for inline review.
     /// `Ok(text)` carries the rewritten markdown; `Err(error)` means the rewrite failed.

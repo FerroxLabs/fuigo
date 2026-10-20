@@ -80,6 +80,7 @@ fn headers_fingerprint(headers: &reqwest::header::HeaderMap) -> String {
     format!("{:016x}", hasher.finish())
 }
 
+#[allow(clippy::disallowed_methods)] // cache tests store placeholder clients that never touch the network
 #[cfg(test)]
 mod tests {
     use super::*;

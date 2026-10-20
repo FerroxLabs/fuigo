@@ -103,6 +103,7 @@ mod tests {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_methods)] // test client targets a local server; no TLS policy applies
     #[tokio::test]
     async fn test_oauth2_token_source() -> Result<(), Error> {
         use std::io::{Read, Write};

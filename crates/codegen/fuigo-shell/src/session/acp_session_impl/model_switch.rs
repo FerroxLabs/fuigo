@@ -2,6 +2,19 @@ use super::*;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use fuigo_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
+    /// The one place a rewritten system prompt is composed after spawn (model switch, harness rebuild).
+    /// A client `systemPromptOverride` wins verbatim, as at spawn.
+    /// Otherwise the freshly rendered `template` gets back the `<human_rules>` block (`_meta.rules`) of `current_system`.
+    pub(super) fn recompose_system_prompt(
+        &self,
+        template: &str,
+        current_system: Option<&str>,
+    ) -> String {
+        if let Some(override_prompt) = self.system_prompt_override.borrow().as_ref() {
+            return override_prompt.clone();
+        }
+        crate::session::human_rules::recompose_with_rules(template, current_system)
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_set_session_model(
         self: &std::sync::Arc<Self>,
@@ -125,14 +138,14 @@ impl SessionActor {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
-                    if use_concise {
-                        sys.content = std::sync::Arc::<str>::from(
-                            fuigo_agent::prompt::template::COMPACT_SYSTEM_PROMPT,
-                        );
+                    let template = if use_concise {
+                        fuigo_agent::prompt::template::COMPACT_SYSTEM_PROMPT.to_owned()
                     } else {
-                        sys.content =
-                            std::sync::Arc::<str>::from(self.agent.borrow().system_prompt());
-                    }
+                        self.agent.borrow().system_prompt().to_owned()
+                    };
+                    sys.content = std::sync::Arc::<str>::from(
+                        self.recompose_system_prompt(&template, Some(&sys.content)),
+                    );
                     break;
                 }
             }
@@ -178,7 +191,8 @@ impl SessionActor {
         };
         let arriving = identity_of(&sampling_config.model);
         let leaving = old_model.as_deref().map(identity_of);
-        let minted = is_family_switch && !turn_in_flight && self.history_has_model_minted_items().await;
+        let minted =
+            is_family_switch && !turn_in_flight && self.history_has_model_minted_items().await;
         let parked = crate::session::quiesce::owe(&self.session_info.id.0, |o| {
             o.note_model_switch(minted, leaving.clone(), &arriving);
         });
@@ -186,13 +200,17 @@ impl SessionActor {
             tracing::info!("Family-switch compact: session is parked; owed state updated");
         } else if minted {
             tracing::info!("Family-switch compact: -> {}", sampling_config.model);
-            self.run_family_switch_compact(Some(new_context_window.get())).await;
+            self.run_family_switch_compact(Some(new_context_window.get()))
+                .await;
         }
         Ok(model_id)
     }
     /// Compacts the model-minted history after a family switch; a failure is logged and the switch stands.
     /// `context_window` is `None` for an owed compaction: the window is the session's CURRENT one, read here.
-    pub(super) async fn run_family_switch_compact(self: &std::sync::Arc<Self>, context_window: Option<u64>) {
+    pub(super) async fn run_family_switch_compact(
+        self: &std::sync::Arc<Self>,
+        context_window: Option<u64>,
+    ) {
         let context_window = match (context_window, self.compaction.context_window_override) {
             (Some(window), _) => window,
             (None, Some(window)) => window.get(),
@@ -309,7 +327,17 @@ impl SessionActor {
                     "rebuild_agent: build failed for agent_type={new_agent_name}: {e}"
                 ))
             })?;
-        let new_system_prompt = new_agent.system_prompt().to_string();
+        let current_system = self
+            .chat_state_handle
+            .get_conversation_for_model()
+            .await
+            .into_iter()
+            .find_map(|item| match item {
+                ConversationItem::System(sys) => Some(sys.content.to_string()),
+                _ => None,
+            });
+        let new_system_prompt =
+            self.recompose_system_prompt(new_agent.system_prompt(), current_system.as_deref());
         let mut new_prompt_context = new_agent.prompt_context().clone();
         new_prompt_context.normalize_for_persistence();
         self.abort_and_clear_prefire().await;
@@ -467,6 +495,8 @@ impl SessionActor {
             );
             return;
         }
+        *self.system_prompt_override.borrow_mut() = Some(system_prompt.clone());
+        save_system_prompt_override(&self.session_info, &system_prompt);
         let Some(changed) = self
             .chat_state_handle
             .replace_system_head(&system_prompt)
@@ -485,7 +515,8 @@ impl SessionActor {
                 prompt_len = system_prompt.len(),
                 "handle_replace_system_prompt: client override applied"
             );
-            self.note_history_not_rewritten("the client's system prompt override").await;
+            self.note_history_not_rewritten("the client's system prompt override")
+                .await;
         } else {
             tracing::debug!(
                 session_id = %self.session_info.id.0,

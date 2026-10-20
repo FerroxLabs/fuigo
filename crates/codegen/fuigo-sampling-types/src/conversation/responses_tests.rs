@@ -705,7 +705,7 @@ fn test_only_encrypted_reasoning_included_in_request() {
     let req = ConversationRequest::from_items(vec![
         ConversationItem::user("Hello"),
         ConversationItem::Reasoning(rs::ReasoningItem {
-            id: String::new(),
+            id: "rs_enc_only".to_string(),
             summary: vec![],
             content: None,
             encrypted_content: Some("enc_hidden_thoughts".to_string()),
@@ -746,6 +746,66 @@ fn test_only_encrypted_reasoning_included_in_request() {
     );
 
     assert!(reasoning.summary.is_empty());
+}
+
+/// An encrypted reasoning item with an empty id is never sent (the API rejects an empty id with a 400); the
+/// surrounding messages and tool calls must come through intact.
+#[test]
+fn test_encrypted_reasoning_with_empty_id_is_omitted_and_neighbours_survive() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("Hello"),
+        ConversationItem::Reasoning(rs::ReasoningItem {
+            id: String::new(),
+            summary: vec![],
+            content: None,
+            encrypted_content: Some("enc_foreign_signature".to_string()),
+            status: None,
+        }),
+        ConversationItem::Assistant(AssistantItem {
+            content: "Calling a tool".into(),
+            tool_calls: vec![ToolCall {
+                id: "call_empty_id_1".into(),
+                name: "read_file".to_string(),
+                arguments: "{}".into(),
+            }],
+            model_id: None,
+            model_fingerprint: None,
+            reasoning_effort: None,
+            output_order: None,
+        }),
+    ]);
+
+    let responses_req: rs::CreateResponse = (&req).into();
+    let rs::InputParam::Items(items) = responses_req.input else {
+        panic!("Expected Items input");
+    };
+
+    assert!(
+        !items
+            .iter()
+            .any(|i| matches!(i, rs::InputItem::Item(rs::Item::Reasoning(_)))),
+        "an empty-id reasoning item must not be sent: {items:?}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, rs::InputItem::EasyMessage(m) if m.role == rs::Role::User))
+    );
+    assert!(
+        items
+            .iter()
+            .any(|i| matches!(i, rs::InputItem::EasyMessage(m) if m.role == rs::Role::Assistant))
+    );
+    let calls: Vec<_> = items
+        .iter()
+        .filter_map(|i| match i {
+            rs::InputItem::Item(rs::Item::FunctionCall(c)) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].call_id, "call_empty_id_1");
+    assert_eq!(calls[0].name, "read_file");
 }
 
 #[test]
@@ -1689,11 +1749,13 @@ fn wire_reasoning(id: &str) -> rs::OutputItem {
 
 fn wire_message(id: &str, text: &str) -> rs::OutputItem {
     rs::OutputItem::Message(rs::OutputMessage {
-        content: vec![rs::OutputMessageContent::OutputText(rs::OutputTextContent {
-            text: text.to_string(),
-            annotations: vec![],
-            logprobs: None,
-        })],
+        content: vec![rs::OutputMessageContent::OutputText(
+            rs::OutputTextContent {
+                text: text.to_string(),
+                annotations: vec![],
+                logprobs: None,
+            },
+        )],
         id: id.to_string(),
         role: rs::AssistantRole::Assistant,
         status: rs::OutputStatus::Completed,
@@ -1745,15 +1807,24 @@ fn interleaved_reasoning_message_and_calls_replay_in_emission_order() {
         Some(
             &[
                 OutputSlot::Reasoning { id: "rs_1".into() },
-                OutputSlot::Message { text: "Listing.".into() },
-                OutputSlot::FunctionCall { call_id: "call_1".into() },
+                OutputSlot::Message {
+                    text: "Listing.".into()
+                },
+                OutputSlot::FunctionCall {
+                    call_id: "call_1".into()
+                },
                 OutputSlot::Reasoning { id: "rs_2".into() },
-                OutputSlot::FunctionCall { call_id: "call_2".into() },
+                OutputSlot::FunctionCall {
+                    call_id: "call_2".into()
+                },
             ][..]
         )
     );
 
-    let mut items = vec![ConversationItem::system("sys"), ConversationItem::user("u1")];
+    let mut items = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("u1"),
+    ];
     items.extend(turn);
     items.push(ConversationItem::tool_result("call_1", "a.txt"));
     items.push(ConversationItem::tool_result("call_2", "main.rs"));
@@ -1789,7 +1860,10 @@ fn interleaved_reasoning_message_and_calls_replay_in_emission_order() {
 /// Two consecutive interleaved turns: every reasoning item directly precedes the item it produced in both turns.
 #[test]
 fn build_responses_input_multi_turn_interleaved_ordering() {
-    let mut items = vec![ConversationItem::system("sys"), ConversationItem::user("u1")];
+    let mut items = vec![
+        ConversationItem::system("sys"),
+        ConversationItem::user("u1"),
+    ];
     for turn in 1..=2 {
         let response = response_with_output(vec![
             wire_reasoning(&format!("rs_{turn}a")),
@@ -1803,23 +1877,40 @@ fn build_responses_input_multi_turn_interleaved_ordering() {
         items.push(ConversationItem::tool_result(format!("call_{turn}b"), "y"));
     }
     items.extend(response_to_conversation_items(
-        response_with_output(vec![wire_reasoning("rs_final"), wire_message("msg_final", "done")]),
+        response_with_output(vec![
+            wire_reasoning("rs_final"),
+            wire_message("msg_final", "done"),
+        ]),
         |_| false,
     ));
     let summary = summarise_input(&input_items_json(&ConversationRequest::from_items(items)));
     for (i, entry) in summary.iter().enumerate() {
         if entry.starts_with("reasoning:") {
-            let next = summary.get(i + 1).unwrap_or_else(|| panic!("{entry} is trailing: {summary:?}"));
+            let next = summary
+                .get(i + 1)
+                .unwrap_or_else(|| panic!("{entry} is trailing: {summary:?}"));
             assert!(
                 next.starts_with("assistant:") || next.starts_with("function_call:"),
                 "{entry} must directly precede the item it produced, got {next}: {summary:?}"
             );
         }
     }
-    assert_eq!(summary.iter().filter(|s| s.starts_with("reasoning:")).count(), 5);
+    assert_eq!(
+        summary
+            .iter()
+            .filter(|s| s.starts_with("reasoning:"))
+            .count(),
+        5
+    );
     assert_eq!(
         &summary[2..7],
-        &["reasoning:rs_1a", "assistant:preamble 1", "function_call:call_1a", "reasoning:rs_1b", "function_call:call_1b"]
+        &[
+            "reasoning:rs_1a",
+            "assistant:preamble 1",
+            "function_call:call_1a",
+            "reasoning:rs_1b",
+            "function_call:call_1b"
+        ]
     );
 }
 
@@ -1829,21 +1920,36 @@ fn build_responses_input_multi_turn_interleaved_ordering() {
 fn legacy_equivalent_output_records_no_order() {
     for output in [
         vec![wire_reasoning("rs_1"), wire_message("m", "hi")],
-        vec![wire_reasoning("rs_1"), wire_function_call("c1", "t", "{}"), wire_function_call("c2", "t", "{}")],
-        vec![wire_reasoning("rs_1"), wire_message("m", "hi"), wire_function_call("c1", "t", "{}")],
+        vec![
+            wire_reasoning("rs_1"),
+            wire_function_call("c1", "t", "{}"),
+            wire_function_call("c2", "t", "{}"),
+        ],
+        vec![
+            wire_reasoning("rs_1"),
+            wire_message("m", "hi"),
+            wire_function_call("c1", "t", "{}"),
+        ],
         vec![wire_message("m", "hi")],
     ] {
         let turn = response_to_conversation_items(response_with_output(output), |_| false);
-        let ConversationItem::Assistant(a) = turn.last().unwrap() else { panic!() };
+        let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+            panic!()
+        };
         assert_eq!(a.output_order, None, "{turn:?}");
         assert!(!serde_json::to_string(a).unwrap().contains("output_order"));
     }
     // A message after a call is not legacy-equivalent
     let turn = response_to_conversation_items(
-        response_with_output(vec![wire_function_call("c1", "t", "{}"), wire_message("m", "after")]),
+        response_with_output(vec![
+            wire_function_call("c1", "t", "{}"),
+            wire_message("m", "after"),
+        ]),
         |_| false,
     );
-    let ConversationItem::Assistant(a) = turn.last().unwrap() else { panic!() };
+    let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+        panic!()
+    };
     assert!(a.output_order.is_some());
     let summary = summarise_input(&input_items_json(&ConversationRequest::from_items(turn)));
     assert_eq!(summary, vec!["function_call:c1", "assistant:after"]);
@@ -1862,12 +1968,20 @@ fn multiple_messages_replay_per_slot() {
         ]),
         |_| false,
     );
-    let ConversationItem::Assistant(a) = turn.last().unwrap() else { panic!() };
+    let ConversationItem::Assistant(a) = turn.last().unwrap() else {
+        panic!()
+    };
     assert_eq!(a.content.as_ref(), "first\nsecond");
     let summary = summarise_input(&input_items_json(&ConversationRequest::from_items(turn)));
     assert_eq!(
         summary,
-        vec!["reasoning:rs_1", "assistant:first", "function_call:c1", "reasoning:rs_2", "assistant:second"]
+        vec![
+            "reasoning:rs_1",
+            "assistant:first",
+            "function_call:c1",
+            "reasoning:rs_2",
+            "assistant:second"
+        ]
     );
 }
 
@@ -1878,19 +1992,39 @@ fn recorded_order_tolerates_missing_siblings_and_extra_calls() {
     let assistant = AssistantItem {
         content: "Listing.".into(),
         tool_calls: vec![
-            ToolCall { id: "call_1".into(), name: "t".into(), arguments: "{}".into() },
-            ToolCall { id: "call_2".into(), name: "t".into(), arguments: "{}".into() },
-            ToolCall { id: "call_extra".into(), name: "t".into(), arguments: "{}".into() },
+            ToolCall {
+                id: "call_1".into(),
+                name: "t".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "call_2".into(),
+                name: "t".into(),
+                arguments: "{}".into(),
+            },
+            ToolCall {
+                id: "call_extra".into(),
+                name: "t".into(),
+                arguments: "{}".into(),
+            },
         ],
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
         output_order: Some(vec![
-            OutputSlot::Reasoning { id: "rs_gone".into() },
-            OutputSlot::Message { text: "Listing.".into() },
-            OutputSlot::FunctionCall { call_id: "call_1".into() },
+            OutputSlot::Reasoning {
+                id: "rs_gone".into(),
+            },
+            OutputSlot::Message {
+                text: "Listing.".into(),
+            },
+            OutputSlot::FunctionCall {
+                call_id: "call_1".into(),
+            },
             OutputSlot::Reasoning { id: "rs_2".into() },
-            OutputSlot::FunctionCall { call_id: "call_2".into() },
+            OutputSlot::FunctionCall {
+                call_id: "call_2".into(),
+            },
         ]),
     };
     let req = ConversationRequest::from_items(vec![
@@ -1928,14 +2062,20 @@ fn request_sets_parallel_tool_calls_verbosity_and_summary() {
     req.reasoning_effort = Some(crate::ReasoningEffort::High);
     let body = serde_json::to_value(rs::CreateResponse::from(&req)).unwrap();
     assert_eq!(body["parallel_tool_calls"], true);
-    assert!(body.get("text").is_none(), "no verbosity, no schema: no text block");
+    assert!(
+        body.get("text").is_none(),
+        "no verbosity, no schema: no text block"
+    );
     assert_eq!(body["reasoning"]["summary"], "concise");
     assert_eq!(body["reasoning"]["effort"], "high");
 
     req.text_verbosity = Some(crate::TextVerbosity::Low);
     req.suppress_reasoning_summary = true;
     let body = serde_json::to_value(rs::CreateResponse::from(&req)).unwrap();
-    assert_eq!(body["text"], serde_json::json!({"format": {"type": "text"}, "verbosity": "low"}));
+    assert_eq!(
+        body["text"],
+        serde_json::json!({"format": {"type": "text"}, "verbosity": "low"})
+    );
     assert_eq!(body["reasoning"], serde_json::json!({"effort": "high"}));
     assert_eq!(body["parallel_tool_calls"], true);
 
@@ -1984,24 +2124,36 @@ fn custom_tool_call_for_client_tool_round_trips_as_custom_items() {
     ]);
     let turn = response_to_conversation_items(response, |name| name == "apply_patch");
     assert_eq!(turn.len(), 2, "{turn:?}");
-    let ConversationItem::Assistant(a) = &turn[1] else { panic!("{turn:?}") };
+    let ConversationItem::Assistant(a) = &turn[1] else {
+        panic!("{turn:?}")
+    };
     assert_eq!(a.tool_calls.len(), 1);
     assert_eq!(a.tool_calls[0].name, "apply_patch");
     assert_eq!(a.tool_calls[0].id.as_ref(), "call_1");
-    assert_eq!(a.tool_calls[0].arguments.as_ref(), patch, "the raw text, never JSON-wrapped");
+    assert_eq!(
+        a.tool_calls[0].arguments.as_ref(),
+        patch,
+        "the raw text, never JSON-wrapped"
+    );
     assert_eq!(
         a.output_order.as_deref(),
         Some(
             &[
                 OutputSlot::Reasoning { id: "rs_1".into() },
-                OutputSlot::CustomToolCall { call_id: "call_1".into(), id: "ctc_1".into() },
+                OutputSlot::CustomToolCall {
+                    call_id: "call_1".into(),
+                    id: "ctc_1".into()
+                },
             ][..]
         )
     );
 
     let mut items = vec![ConversationItem::user("edit a.txt")];
     items.extend(turn);
-    items.push(ConversationItem::tool_result("call_1", "Success. Updated the following files:\nA a.txt"));
+    items.push(ConversationItem::tool_result(
+        "call_1",
+        "Success. Updated the following files:\nA a.txt",
+    ));
     let req = ConversationRequest::from_items(items).with_tools(vec![freeform_apply_patch_spec()]);
     let input = input_items_json(&req);
     assert_eq!(input[1]["type"], "reasoning");
@@ -2014,7 +2166,10 @@ fn custom_tool_call_for_client_tool_round_trips_as_custom_items() {
         serde_json::json!({"type": "custom_tool_call_output", "call_id": "call_1", "output": "Success. Updated the following files:\nA a.txt"})
     );
     let body = serde_json::to_string(&rs::CreateResponse::from(&req)).unwrap();
-    assert!(!body.contains("function_call"), "no function_call items for a freeform call: {body}");
+    assert!(
+        !body.contains("function_call"),
+        "no function_call items for a freeform call: {body}"
+    );
 
     // Not a client tool: the hosted x_search path, kept as a backend tool call sibling
     let response = response_with_output(vec![rs::OutputItem::CustomToolCall(custom_tool_call(
@@ -2024,8 +2179,13 @@ fn custom_tool_call_for_client_tool_round_trips_as_custom_items() {
         "ctc_x",
     ))]);
     let turn = response_to_conversation_items(response, |name| name == "apply_patch");
-    assert!(matches!(&turn[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_x"), "{turn:?}");
-    let ConversationItem::Assistant(a) = &turn[1] else { panic!("{turn:?}") };
+    assert!(
+        matches!(&turn[0], ConversationItem::BackendToolCall(b) if b.id() == "ctc_x"),
+        "{turn:?}"
+    );
+    let ConversationItem::Assistant(a) = &turn[1] else {
+        panic!("{turn:?}")
+    };
     assert!(a.tool_calls.is_empty());
     assert_eq!(a.output_order, None);
 }
@@ -2037,8 +2197,12 @@ fn reasoning_replay_drops_plaintext_content_when_encrypted() {
     let reasoning = |encrypted: Option<&str>| {
         ConversationItem::Reasoning(rs::ReasoningItem {
             id: "rs_1".to_string(),
-            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent { text: "sum".into() })],
-            content: Some(vec![rs::ReasoningTextContent { text: "raw thought".into() }]),
+            summary: vec![rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                text: "sum".into(),
+            })],
+            content: Some(vec![rs::ReasoningTextContent {
+                text: "raw thought".into(),
+            }]),
             encrypted_content: encrypted.map(str::to_owned),
             status: Some(rs::OutputStatus::Completed),
         })
@@ -2075,13 +2239,22 @@ fn output_order_serde_round_trip() {
         output_order: Some(vec![
             OutputSlot::Reasoning { id: "r".into() },
             OutputSlot::Message { text: "x".into() },
-            OutputSlot::CustomToolCall { call_id: "c".into(), id: "i".into() },
+            OutputSlot::CustomToolCall {
+                call_id: "c".into(),
+                id: "i".into(),
+            },
             OutputSlot::BackendToolCall { id: "ws".into() },
         ]),
     };
     let json = serde_json::to_value(&a).unwrap();
-    assert_eq!(json["output_order"][0], serde_json::json!({"kind": "reasoning", "id": "r"}));
-    assert_eq!(json["output_order"][2], serde_json::json!({"kind": "custom_tool_call", "call_id": "c", "id": "i"}));
+    assert_eq!(
+        json["output_order"][0],
+        serde_json::json!({"kind": "reasoning", "id": "r"})
+    );
+    assert_eq!(
+        json["output_order"][2],
+        serde_json::json!({"kind": "custom_tool_call", "call_id": "c", "id": "i"})
+    );
     let back: AssistantItem = serde_json::from_value(json).unwrap();
     assert_eq!(back.output_order, a.output_order);
     // An older row without the field still loads
@@ -2110,13 +2283,20 @@ fn tool_call_wire_form_follows_the_current_tool_declaration() {
     };
     let freeform_era = AssistantItem {
         content: "".into(),
-        tool_calls: vec![ToolCall { id: "call_f".into(), name: "apply_patch".into(), arguments: patch.into() }],
+        tool_calls: vec![ToolCall {
+            id: "call_f".into(),
+            name: "apply_patch".into(),
+            arguments: patch.into(),
+        }],
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
         output_order: Some(vec![
             OutputSlot::Reasoning { id: "rs_f".into() },
-            OutputSlot::CustomToolCall { call_id: "call_f".into(), id: "ctc_f".into() },
+            OutputSlot::CustomToolCall {
+                call_id: "call_f".into(),
+                id: "ctc_f".into(),
+            },
         ]),
     };
     let items = vec![
@@ -2136,13 +2316,17 @@ fn tool_call_wire_form_follows_the_current_tool_declaration() {
     };
 
     // Tool declared custom now: both calls go back as custom_tool_call, the JSON-era one without an id
-    let req = ConversationRequest::from_items(items.clone()).with_tools(vec![freeform_apply_patch_spec()]);
+    let req = ConversationRequest::from_items(items.clone())
+        .with_tools(vec![freeform_apply_patch_spec()]);
     let input = input_items_json(&req);
     assert_eq!(
         input[2],
         serde_json::json!({"type": "custom_tool_call", "call_id": "call_j", "name": "apply_patch", "input": patch})
     );
-    assert_eq!(input[3], serde_json::json!({"type": "custom_tool_call_output", "call_id": "call_j", "output": "ok j"}));
+    assert_eq!(
+        input[3],
+        serde_json::json!({"type": "custom_tool_call_output", "call_id": "call_j", "output": "ok j"})
+    );
     assert_eq!(
         input[5],
         serde_json::json!({"type": "custom_tool_call", "call_id": "call_f", "name": "apply_patch", "input": patch, "id": "ctc_f"})
@@ -2164,4 +2348,66 @@ fn tool_call_wire_form_follows_the_current_tool_declaration() {
     }
     let body = serde_json::to_string(&input).unwrap();
     assert!(!body.contains("custom_tool_call"), "{body}");
+}
+
+#[test]
+fn foreign_empty_id_reasoning_is_not_replayed_to_responses() {
+    // Anthropic thinking blocks are stored with id "" and an Anthropic signature as encrypted_content
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("hi"),
+        reasoning_sibling("", "thinking", Some("anthropic-signature")),
+        assistant_with_calls(&[("toolu_01", "read_file")]),
+        ConversationItem::tool_result("toolu_01", "ok"),
+        ConversationItem::user("next"),
+    ]);
+    let input = input_items_json(&req);
+    for v in &input {
+        assert_ne!(
+            v.get("id").and_then(|i| i.as_str()),
+            Some(""),
+            "empty id in {v}"
+        );
+        assert_ne!(
+            v.get("type").and_then(|t| t.as_str()),
+            Some("reasoning"),
+            "foreign reasoning in {v}"
+        );
+    }
+    let call = input
+        .iter()
+        .find(|v| v["type"] == "function_call")
+        .expect("function_call kept");
+    assert_eq!(call["call_id"], "toolu_01");
+    assert!(input.iter().any(|v| v["type"] == "function_call_output"));
+}
+
+#[test]
+fn real_id_reasoning_is_still_replayed_to_responses() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::user("hi"),
+        reasoning_sibling("rs_abc", "thinking", Some("enc")),
+        assistant_with_calls(&[("call_1", "read_file")]),
+        ConversationItem::tool_result("call_1", "ok"),
+    ]);
+    let input = input_items_json(&req);
+    let r = input
+        .iter()
+        .find(|v| v["type"] == "reasoning")
+        .expect("rs_ reasoning kept");
+    assert_eq!(r["id"], "rs_abc");
+    assert_eq!(r["encrypted_content"], "enc");
+}
+
+#[test]
+fn patch_removes_any_empty_id_key() {
+    let mut body = serde_json::json!({"input": [
+        {"type": "message", "id": "", "role": "user", "content": "x"},
+        {"type": "reasoning", "id": "", "summary": []},
+        {"type": "reasoning", "id": "rs_1", "summary": []},
+    ]});
+    patch_reasoning_text_types(&mut body);
+    let input = body["input"].as_array().unwrap();
+    assert!(input[0].get("id").is_none());
+    assert!(input[1].get("id").is_none());
+    assert_eq!(input[2]["id"], "rs_1");
 }

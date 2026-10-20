@@ -124,7 +124,13 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
-                transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                system_prompt_override: Default::default(),
+                read_dedupe: std::cell::RefCell::new(
+                    crate::session::read_dedupe::ReadDedupeCache::new(
+                        crate::session::read_dedupe::PruneMirror::disabled(),
+                    ),
+                ),
                 transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info,
@@ -731,7 +737,13 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
-                transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                system_prompt_override: Default::default(),
+                read_dedupe: std::cell::RefCell::new(
+                    crate::session::read_dedupe::ReadDedupeCache::new(
+                        crate::session::read_dedupe::PruneMirror::disabled(),
+                    ),
+                ),
                 transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info: session_info.clone(),
@@ -1048,7 +1060,13 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
-                transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                system_prompt_override: Default::default(),
+                read_dedupe: std::cell::RefCell::new(
+                    crate::session::read_dedupe::ReadDedupeCache::new(
+                        crate::session::read_dedupe::PruneMirror::disabled(),
+                    ),
+                ),
                 transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info: SessionInfo {
@@ -2605,7 +2623,13 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 repo_status_prefetch:
                     crate::session::repo_status_prefix::RepoStatusPrefetchState::default(),
                 transient_retry_enabled: true,
-                transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+                transient_retries_prompt_total: std::cell::Cell::new(0),
+                system_prompt_override: Default::default(),
+                read_dedupe: std::cell::RefCell::new(
+                    crate::session::read_dedupe::ReadDedupeCache::new(
+                        crate::session::read_dedupe::PruneMirror::disabled(),
+                    ),
+                ),
                 transient_episode_start: std::cell::Cell::new(None),
                 status_wake: Default::default(),
                 session_info: SessionInfo {

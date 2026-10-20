@@ -1,5 +1,7 @@
 //! Proxy observers never forward traffic. Rejection is proved by zero receipt,
 //! with raw-client and allowed-destination controls proving the observer works.
+#![allow(clippy::disallowed_methods)] // this test drives the raw reqwest send path on purpose to exercise the TLS and egress policy
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

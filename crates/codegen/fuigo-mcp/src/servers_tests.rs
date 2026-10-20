@@ -3588,6 +3588,8 @@ async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error(
             server_name: "dead".to_string(),
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
             elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+            progress: Default::default(),
+            progress_generation: 0,
         };
         let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
             client_read,
@@ -3702,6 +3704,8 @@ async fn watched_live_client(name: &str) -> Arc<McpClient> {
         server_name: name.to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        progress: Default::default(),
+        progress_generation: 0,
     };
     let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
         client_read,
@@ -4408,6 +4412,8 @@ async fn client_handler_routes_tools_changed() {
         server_name: "test".to_string(),
         notify_tx: Arc::new(parking_lot::Mutex::new(Some(tx))),
         elicitation_tx: Arc::new(parking_lot::Mutex::new(None)),
+        progress: Default::default(),
+        progress_generation: 0,
     };
     handler.emit(McpClientEvent::ToolsChanged {
         server: handler.server_name.clone(),
@@ -4734,7 +4740,11 @@ fn store_token(name: &str, url: &str, expires_in: u64, age_secs: u64, refresh: b
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let refresh = if refresh { r#","refresh_token":"rt-stored""# } else { "" };
+    let refresh = if refresh {
+        r#","refresh_token":"rt-stored""#
+    } else {
+        ""
+    };
     let creds: crate::rmcp::transport::auth::StoredCredentials = serde_json::from_str(&format!(
         r#"{{"client_id":"c","token_response":{{"access_token":"at-stored","token_type":"bearer","expires_in":{expires_in}{refresh}}},"token_received_at":{}}}"#,
         now - age_secs
@@ -4769,20 +4779,26 @@ fn tokens(rig: &MetadataRig) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn p134_stored_valid_token_is_used_when_metadata_fetch_fails_and_token_endpoint_is_never_called() {
+async fn p134_stored_valid_token_is_used_when_metadata_fetch_fails_and_token_endpoint_is_never_called()
+ {
     for (mode, name) in [
         (OauthInteractivity::NonInteractive, "p134-nonint"),
         (OauthInteractivity::Interactive, "p134-int"),
     ] {
         let rig = spawn_metadata_rig().await;
         store_token(name, &rig.url, 3600, 0, true);
-        let HttpAuthDecision::ManagerReady { manager, .. } = p134_decide(name, &rig.url, mode).await
+        let HttpAuthDecision::ManagerReady { manager, .. } =
+            p134_decide(name, &rig.url, mode).await
         else {
             panic!("{mode:?}: a valid stored token must connect while metadata is down");
         };
         let token = manager.lock().await.get_access_token().await;
         assert_eq!(token.as_deref().ok(), Some("at-stored"), "{mode:?}");
-        assert_eq!(tokens(&rig), 0, "{mode:?}: nothing may be sent to a guessed {{base}}/token");
+        assert_eq!(
+            tokens(&rig),
+            0,
+            "{mode:?}: nothing may be sent to a guessed {{base}}/token"
+        );
     }
 }
 
@@ -4792,7 +4808,12 @@ async fn p134_stored_valid_token_is_used_when_metadata_fetch_fails_and_token_end
 async fn p134_token_in_the_refresh_window_defers_instead_of_asking_for_a_login() {
     let rig = spawn_metadata_rig().await;
     store_token("p134-win-nonint", &rig.url, 3600, 3600 - 10, true);
-    let decision = p134_decide("p134-win-nonint", &rig.url, OauthInteractivity::NonInteractive).await;
+    let decision = p134_decide(
+        "p134-win-nonint",
+        &rig.url,
+        OauthInteractivity::NonInteractive,
+    )
+    .await;
     assert!(
         matches!(decision, HttpAuthDecision::Unreachable),
         "a stored login that only awaits metadata must be retryable"
@@ -4817,15 +4838,32 @@ async fn p134_expired_token_waits_for_validated_metadata_then_refreshes() {
         matches!(decision, HttpAuthDecision::Unreachable),
         "expired token with a refresh token, metadata down: retryable"
     );
-    assert_eq!(tokens(&rig), 0, "the refresh token must not reach a guessed {{base}}/token");
+    assert_eq!(
+        tokens(&rig),
+        0,
+        "the refresh token must not reach a guessed {{base}}/token"
+    );
 
     rig.healthy.store(true, std::sync::atomic::Ordering::SeqCst);
     let decision = p134_decide("p134-exp", &rig.url, OauthInteractivity::NonInteractive).await;
     let HttpAuthDecision::ManagerReady { manager, .. } = decision else {
         panic!("with validated metadata the next attempt must refresh and connect");
     };
-    assert_eq!(tokens(&rig), 1, "exactly one refresh, to the validated token endpoint");
-    assert_eq!(manager.lock().await.get_access_token().await.as_deref().ok(), Some("at-new"));
+    assert_eq!(
+        tokens(&rig),
+        1,
+        "exactly one refresh, to the validated token endpoint"
+    );
+    assert_eq!(
+        manager
+            .lock()
+            .await
+            .get_access_token()
+            .await
+            .as_deref()
+            .ok(),
+        Some("at-new")
+    );
 }
 
 /// The deferral must not hide a server that stopped needing auth: discovery fails, the stored login awaits metadata,
@@ -4833,7 +4871,8 @@ async fn p134_expired_token_waits_for_validated_metadata_then_refreshes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn p134_server_that_accepts_anonymous_requests_still_connects_plain_with_a_stored_login() {
     let rig = spawn_metadata_rig().await;
-    rig.anonymous_ok.store(true, std::sync::atomic::Ordering::SeqCst);
+    rig.anonymous_ok
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     store_token("p134-anon", &rig.url, 60, 3600, true);
     let decision = p134_decide("p134-anon", &rig.url, OauthInteractivity::NonInteractive).await;
     assert!(matches!(decision, HttpAuthDecision::NoOauthSupport));
@@ -4932,7 +4971,12 @@ fn apply_stdio_env_resolves_first_party_references_with_the_callers_one_snapshot
         apply_stdio_env(&mut cmd, &env, None, key);
         cmd.as_std()
             .get_envs()
-            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
             .filter(|(k, _)| k == "FUIGO_API_KEY" || k.starts_with("P70A_"))
             .collect()
     };
@@ -4957,10 +5001,23 @@ fn a_first_party_key_handed_to_an_mcp_server_is_recorded_as_sent() {
     let scrubbed = |key: &str| scrub(&echoed(key)).into_owned();
 
     const UNSENT: &str = "p70a-p70b-unsent-FAKE-0000";
-    assert_eq!(send_first_party_key_references("plain value", Some(UNSENT)), "plain value");
-    assert_eq!(send_first_party_key_references("$${FUIGO_API_KEY}", Some(UNSENT)), "${FUIGO_API_KEY}");
-    assert_eq!(send_first_party_key_references("${FUIGO_API_KEY}", None), "${FUIGO_API_KEY}");
-    assert_eq!(scrubbed(UNSENT), echoed(UNSENT), "a key that was not handed over was recorded");
+    assert_eq!(
+        send_first_party_key_references("plain value", Some(UNSENT)),
+        "plain value"
+    );
+    assert_eq!(
+        send_first_party_key_references("$${FUIGO_API_KEY}", Some(UNSENT)),
+        "${FUIGO_API_KEY}"
+    );
+    assert_eq!(
+        send_first_party_key_references("${FUIGO_API_KEY}", None),
+        "${FUIGO_API_KEY}"
+    );
+    assert_eq!(
+        scrubbed(UNSENT),
+        echoed(UNSENT),
+        "a key that was not handed over was recorded"
+    );
 
     const HEADER: &str = "p70a-p70b-header-FAKE-0001";
     let headers = http_headers_for_server(
@@ -4973,16 +5030,36 @@ fn a_first_party_key_handed_to_an_mcp_server_is_recorded_as_sent() {
     );
     assert_eq!(headers[0].1, format!("Bearer {HEADER}"));
     assert_eq!(headers[1].1, "plain");
-    assert_eq!(scrubbed(HEADER), echoed("<redacted>"), "a key sent in an MCP header was not recorded");
+    assert_eq!(
+        scrubbed(HEADER),
+        echoed("<redacted>"),
+        "a key sent in an MCP header was not recorded"
+    );
 
     const ENV: &str = "p70a-p70b-stdio-env-FAKE-0002";
     let mut cmd = Command::new("true");
-    apply_stdio_env(&mut cmd, &[acp::EnvVariable::new("TOKEN", "${FUIGO_API_KEY}")], None, Some(ENV));
-    assert_eq!(scrubbed(ENV), echoed("<redacted>"), "a key sent in a stdio env value was not recorded");
+    apply_stdio_env(
+        &mut cmd,
+        &[acp::EnvVariable::new("TOKEN", "${FUIGO_API_KEY}")],
+        None,
+        Some(ENV),
+    );
+    assert_eq!(
+        scrubbed(ENV),
+        echoed("<redacted>"),
+        "a key sent in a stdio env value was not recorded"
+    );
 
     const ARG: &str = "p70a-p70b-stdio-arg-FAKE-0003";
-    assert_eq!(send_first_party_key_references("--key=$FUIGO_API_KEY", Some(ARG)), format!("--key={ARG}"));
-    assert_eq!(scrubbed(ARG), echoed("<redacted>"), "a key sent in a stdio arg was not recorded");
+    assert_eq!(
+        send_first_party_key_references("--key=$FUIGO_API_KEY", Some(ARG)),
+        format!("--key={ARG}")
+    );
+    assert_eq!(
+        scrubbed(ARG),
+        echoed("<redacted>"),
+        "a key sent in a stdio arg was not recorded"
+    );
 }
 
 #[test]
@@ -5764,7 +5841,11 @@ mod server_name_sanitizing {
 async fn p113_decode_error_sample_with_a_sent_key_is_persisted_redacted() {
     const KEY: &str = "p113-FAKE-explicit-mcp-key-7f3c9a1e5b";
     let resolved = send_first_party_key_references("--key=${FUIGO_API_KEY}", Some(KEY));
-    assert_eq!(resolved, format!("--key={KEY}"), "control: the server is handed the key");
+    assert_eq!(
+        resolved,
+        format!("--key={KEY}"),
+        "control: the server is handed the key"
+    );
     // Astra r2 #1: an exported key is expanded at config load, so the text arrives already holding it.
     const EXPORTED: &str = "p113-FAKE-exported-mcp-key-3b9d0c";
     let expanded = format!("--key={EXPORTED}");
@@ -5774,18 +5855,25 @@ async fn p113_decode_error_sample_with_a_sent_key_is_persisted_redacted() {
     let dir = tempfile::tempdir().unwrap();
     let events = fuigo_session_events::EventWriter::open(dir.path());
     let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
-    let mut transport = ResilientRwTransport::new(client_in, tokio::io::sink(), "p113".to_string(), events);
+    let mut transport =
+        ResilientRwTransport::new(client_in, tokio::io::sink(), "p113".to_string(), events);
 
     let valid = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
     let whole = format!("debug: starting with key {KEY} on stdio, and also {EXPORTED}");
     // The cap (DECODE_ERROR_SAMPLE_LEN chars) falls ten characters into the key.
-    let straddling = format!("{}{KEY} trailing text", "x".repeat(DECODE_ERROR_SAMPLE_LEN - 10));
+    let straddling = format!(
+        "{}{KEY} trailing text",
+        "x".repeat(DECODE_ERROR_SAMPLE_LEN - 10)
+    );
     server_out
         .write_all(format!("{whole}\n{straddling}\n{valid}\n").as_bytes())
         .await
         .unwrap();
     drop(server_out);
-    assert!(transport.receive().await.is_some(), "both undecodable lines are skipped");
+    assert!(
+        transport.receive().await.is_some(),
+        "both undecodable lines are skipped"
+    );
 
     let persisted = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
     let samples: Vec<String> = persisted
@@ -5795,13 +5883,20 @@ async fn p113_decode_error_sample_with_a_sent_key_is_persisted_redacted() {
         .map(|v| v["sample"].as_str().unwrap_or_default().to_owned())
         .collect();
     assert_eq!(samples.len(), 2, "two decode-error events: {persisted}");
-    assert!(samples[0].contains("<redacted>"), "control: the whole key is replaced: {}", samples[0]);
+    assert!(
+        samples[0].contains("<redacted>"),
+        "control: the whole key is replaced: {}",
+        samples[0]
+    );
     // No eight-character run of either key survives anywhere in the file.
     for key in [KEY, EXPORTED] {
         let chars: Vec<char> = key.chars().collect();
         for window in chars.windows(8) {
             let fragment: String = window.iter().collect();
-            assert!(!persisted.contains(&fragment), "events.jsonl holds {fragment:?} of a key");
+            assert!(
+                !persisted.contains(&fragment),
+                "events.jsonl holds {fragment:?} of a key"
+            );
         }
     }
 }
@@ -5864,8 +5959,14 @@ fn p113_parent_env(test_name: &str) -> bool {
         String::from_utf8_lossy(&output.stderr)
     )
     .replace("fake-p113-", "[redacted]-");
-    assert!(output.status.success(), "isolated P113 probe failed: {diagnostics}");
-    assert!(diagnostics.contains("test result: ok. 1 passed"), "the P113 child must run exactly one test: {diagnostics}");
+    assert!(
+        output.status.success(),
+        "isolated P113 probe failed: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("test result: ok. 1 passed"),
+        "the P113 child must run exactly one test: {diagnostics}"
+    );
     true
 }
 
@@ -5882,14 +5983,22 @@ async fn p113_stdio_mcp_servers_never_see_fuigo_internal_secrets() {
     let events = fuigo_session_events::EventWriter::noop();
     let ctx = session_test_ctx(&events);
     for explicit in [false, true] {
-        let marker = dir.path().join(if explicit { "explicit" } else { "default" });
+        let marker = dir
+            .path()
+            .join(if explicit { "explicit" } else { "default" });
         let check = p113_child_check(explicit);
         let script = format!("{check} && /bin/sh -c '{check}' && printf 1 > \"$P113_MARKER\"");
         let mut server = acp::McpServerStdio::new("p113", PathBuf::from("/bin/sh"));
         server.args = vec!["-c".into(), script];
-        server.env = vec![acp::EnvVariable::new("P113_MARKER", marker.to_string_lossy().into_owned())];
+        server.env = vec![acp::EnvVariable::new(
+            "P113_MARKER",
+            marker.to_string_lossy().into_owned(),
+        )];
         if explicit {
-            server.env.push(acp::EnvVariable::new("FUIGO_AGENT_SECRET", "fake-p113-explicit"));
+            server.env.push(acp::EnvVariable::new(
+                "FUIGO_AGENT_SECRET",
+                "fake-p113-explicit",
+            ));
         }
         let client = start_mcp_server(acp::McpServer::Stdio(server), None, None, None, &ctx)
             .await
@@ -5901,7 +6010,9 @@ async fn p113_stdio_mcp_servers_never_see_fuigo_internal_secrets() {
         })
         .await
         .unwrap_or_else(|_| {
-            panic!("explicit={explicit}: the MCP child saw a Fuigo secret, or missed the explicit one")
+            panic!(
+                "explicit={explicit}: the MCP child saw a Fuigo secret, or missed the explicit one"
+            )
         });
         drop(client);
     }
@@ -5911,7 +6022,9 @@ async fn p113_stdio_mcp_servers_never_see_fuigo_internal_secrets() {
 
 fn stored_credentials_json(name: &str, url: &str) -> String {
     let store = crate::credentials::McpCredentialStore::load_default().unwrap_or_default();
-    let creds = store.get(name, &url::Url::parse(url).unwrap()).expect("stored login");
+    let creds = store
+        .get(name, &url::Url::parse(url).unwrap())
+        .expect("stored login");
     serde_json::to_string(&creds.token_response).unwrap()
 }
 
@@ -5922,7 +6035,12 @@ fn stored_credentials_json(name: &str, url: &str) -> String {
 async fn p151_session_login_awaiting_metadata_is_retryable_not_a_sign_in_request() {
     for (label, expires_in, age, mode) in [
         ("near", 3600, 3600 - 20, OauthInteractivity::Interactive),
-        ("near-ni", 3600, 3600 - 20, OauthInteractivity::NonInteractive),
+        (
+            "near-ni",
+            3600,
+            3600 - 20,
+            OauthInteractivity::NonInteractive,
+        ),
         ("expired", 60, 3600, OauthInteractivity::Interactive),
         ("expired-ni", 60, 3600, OauthInteractivity::NonInteractive),
     ] {
@@ -5941,7 +6059,9 @@ async fn p151_session_login_awaiting_metadata_is_retryable_not_a_sign_in_request
             .get_tool_registrations(state)
             .await
             .err()
-            .unwrap_or_else(|| panic!("{label}: the handshake cannot succeed while the metadata is down"));
+            .unwrap_or_else(|| {
+                panic!("{label}: the handshake cannot succeed while the metadata is down")
+            });
         assert!(
             error.is_transient_connectivity() && !error.is_auth_rejection(),
             "{label}: a retryable connection problem, got {error}"
@@ -5950,7 +6070,11 @@ async fn p151_session_login_awaiting_metadata_is_retryable_not_a_sign_in_request
             !client.init_failure_needs_auth(&error),
             "{label}: must not ask the user to sign in again ({error})"
         );
-        assert_eq!(tokens(&rig), 0, "{label}: no refresh may be sent without validated metadata");
+        assert_eq!(
+            tokens(&rig),
+            0,
+            "{label}: no refresh may be sent without validated metadata"
+        );
         assert_eq!(
             stored_credentials_json(&name, &rig.url),
             before,
@@ -5967,9 +6091,15 @@ async fn p151_auth_client_without_a_login_still_needs_auth() {
     rig.healthy.store(true, std::sync::atomic::Ordering::SeqCst);
     let event_writer = fuigo_session_events::EventWriter::noop();
     let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
-    let client = start_mcp_server(make_http_server("p151-nologin", &rig.url), None, None, None, &ctx)
-        .await
-        .unwrap();
+    let client = start_mcp_server(
+        make_http_server("p151-nologin", &rig.url),
+        None,
+        None,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
     assert!(client.has_auth());
     let error = client
         .get_tool_registrations(Arc::new(Mutex::new(McpState::new(vec![]))))
@@ -6003,7 +6133,11 @@ async fn http_401_from_mock_without_oauth_is_classified_by_evidence() {
     let typed = error.has_typed_http_auth_status();
     let kind = client.start_failure_kind(&error);
     eprintln!("HTTP401-RESULT typed={typed} kind={kind:?} error={error}");
-    let want = if typed { McpFailureKind::NeedsAuth } else { McpFailureKind::ServerRejected };
+    let want = if typed {
+        McpFailureKind::NeedsAuth
+    } else {
+        McpFailureKind::ServerRejected
+    };
     assert_eq!(kind, want, "{error}");
 }
 
@@ -6029,7 +6163,10 @@ async fn stdio_server_with_auth_words_is_not_needs_auth() {
         .expect("the handshake cannot succeed");
     let kind = client.start_failure_kind(&error);
     assert!(
-        !matches!(kind, McpFailureKind::NeedsAuth | McpFailureKind::ServerRejected),
+        !matches!(
+            kind,
+            McpFailureKind::NeedsAuth | McpFailureKind::ServerRejected
+        ),
         "stdio failure must not be classified as sign-in: {kind:?} ({error})"
     );
 }
@@ -6042,7 +6179,10 @@ async fn spawn_issuer_mismatch_rig() -> String {
     let base = format!("http://{}", listener.local_addr().unwrap());
     let doc_base = base.clone();
     let app = axum::Router::new()
-        .route("/mcp", axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+        .route(
+            "/mcp",
+            axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        )
         .fallback(move |uri: axum::http::Uri| {
             let doc_base = doc_base.clone();
             async move {
@@ -6208,7 +6348,11 @@ fn install_consenting_browser() {
         use std::os::unix::fs::PermissionsExt as _;
         let dir = tempfile::TempDir::new().unwrap().keep();
         let script = dir.join("p151-browser.sh");
-        std::fs::write(&script, "#!/bin/sh\nexec curl -s -L -o /dev/null --max-time 20 \"$1\"\n").unwrap();
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nexec curl -s -L -o /dev/null --max-time 20 \"$1\"\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         // SAFETY: OnceLock-guarded single set; only this module's consent test opens a browser.
         unsafe { std::env::set_var("BROWSER", &script) };
@@ -6223,9 +6367,15 @@ async fn p151_a_sign_in_refused_by_policy_returns_the_reason() {
     let rig = spawn_split_origin_rig().await;
     let event_writer = fuigo_session_events::EventWriter::noop();
     let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
-    let client = start_mcp_server(make_http_server("p151-split", &rig.url), None, None, None, &ctx)
-        .await
-        .unwrap();
+    let client = start_mcp_server(
+        make_http_server("p151-split", &rig.url),
+        None,
+        None,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
     assert!(client.has_auth());
     let reason = tokio::time::timeout(
         std::time::Duration::from_secs(60),
@@ -6239,9 +6389,15 @@ async fn p151_a_sign_in_refused_by_policy_returns_the_reason() {
         0,
         "nothing may reach the other origin"
     );
-    assert!(reason.contains("different origin"), "the reason must say why: {reason}");
+    assert!(
+        reason.contains("different origin"),
+        "the reason must say why: {reason}"
+    );
     for secret in ["p151-SYNCODE", "p151-SYNSEC", "p151-SYNAT"] {
-        assert!(!reason.contains(secret), "the reason must not carry {secret}: {reason}");
+        assert!(
+            !reason.contains(secret),
+            "the reason must not carry {secret}: {reason}"
+        );
     }
 }
 
@@ -6255,9 +6411,15 @@ async fn p151_a_provider_error_echoing_the_request_never_reaches_the_reason() {
     let rig = spawn_oauth_rig(false).await;
     let event_writer = fuigo_session_events::EventWriter::noop();
     let ctx = probe_ctx(&event_writer, OauthInteractivity::Interactive);
-    let client = start_mcp_server(make_http_server("p151-echo", &rig.url), None, None, None, &ctx)
-        .await
-        .unwrap();
+    let client = start_mcp_server(
+        make_http_server("p151-echo", &rig.url),
+        None,
+        None,
+        None,
+        &ctx,
+    )
+    .await
+    .unwrap();
     let reason = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         client.force_reauth_with_reason(true),
@@ -6265,8 +6427,18 @@ async fn p151_a_provider_error_echoing_the_request_never_reaches_the_reason() {
     .await
     .expect("the consent run finishes")
     .expect_err("the provider rejects the code");
-    for secret in ["p151-SYNCODE", "p151-SYNSEC", "code_verifier", "client_secret", "p151-SYNAT-x", "refusing"] {
-        assert!(!reason.contains(secret), "the reason must not carry {secret}: {reason}");
+    for secret in [
+        "p151-SYNCODE",
+        "p151-SYNSEC",
+        "code_verifier",
+        "client_secret",
+        "p151-SYNAT-x",
+        "refusing",
+    ] {
+        assert!(
+            !reason.contains(secret),
+            "the reason must not carry {secret}: {reason}"
+        );
     }
 }
 
@@ -6286,9 +6458,15 @@ async fn spawn_redirecting_discovery_rig() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
     let app = axum::Router::new()
-        .route("/mcp", axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }))
+        .route(
+            "/mcp",
+            axum::routing::post(|| async { axum::http::StatusCode::UNAUTHORIZED }),
+        )
         .fallback(|| async {
-            (axum::http::StatusCode::FOUND, [("location", "http://127.0.0.1:9/elsewhere")])
+            (
+                axum::http::StatusCode::FOUND,
+                [("location", "http://127.0.0.1:9/elsewhere")],
+            )
         });
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
@@ -6303,7 +6481,12 @@ async fn p151_a_refused_discovery_is_not_retryable() {
     let url = spawn_redirecting_discovery_rig().await;
     store_token("p151-redir", &url, 3600, 3600 - 20, true);
     let event_writer = fuigo_session_events::EventWriter::noop();
-    let ctx = McpSpawnCtx::for_session("p151-sess", &event_writer, OauthInteractivity::Interactive, None);
+    let ctx = McpSpawnCtx::for_session(
+        "p151-sess",
+        &event_writer,
+        OauthInteractivity::Interactive,
+        None,
+    );
     let client = start_mcp_server(make_http_server("p151-redir", &url), None, None, None, &ctx)
         .await
         .unwrap();
@@ -6373,7 +6556,10 @@ fn failure_kind_is_decided_from_the_error_type() {
         .failure_kind(),
         McpFailureKind::Other
     );
-    assert_eq!(McpError::ClientError("x".into()).failure_kind(), McpFailureKind::Other);
+    assert_eq!(
+        McpError::ClientError("x".into()).failure_kind(),
+        McpFailureKind::Other
+    );
 }
 
 /// Classification order (`classify_start_failure`): typed sign-in only; words never silence a server.
@@ -6398,18 +6584,32 @@ fn failure_kind_marks_sign_in_servers_only_on_typed_evidence() {
         );
     }
     // 2. stdio is never needs_auth, whatever the text or OAuth flag says
-    assert_eq!(classify_start_failure(&words(), false, false), McpFailureKind::ExitedBeforeAnswer);
     assert_eq!(
-        classify_start_failure(&McpError::ClientError("Auth required 401 unauthorized".into()), false, false),
+        classify_start_failure(&words(), false, false),
+        McpFailureKind::ExitedBeforeAnswer
+    );
+    assert_eq!(
+        classify_start_failure(
+            &McpError::ClientError("Auth required 401 unauthorized".into()),
+            false,
+            false
+        ),
         McpFailureKind::Other
     );
     // 3. OAuth-configured HTTP failure (e.g. a timeout) is needs_auth
     assert_eq!(
-        classify_start_failure(&McpError::timeout("s", std::time::Duration::from_secs(5)), true, true),
+        classify_start_failure(
+            &McpError::timeout("s", std::time::Duration::from_secs(5)),
+            true,
+            true
+        ),
         McpFailureKind::NeedsAuth
     );
     // 4. HTTP, words only, no typed evidence: the sixth reason, a line is printed
-    assert_eq!(classify_start_failure(&words(), true, false), McpFailureKind::ServerRejected);
+    assert_eq!(
+        classify_start_failure(&words(), true, false),
+        McpFailureKind::ServerRejected
+    );
     assert_eq!(
         classify_start_failure(&McpError::ClientError("HTTP 401".into()), true, false),
         McpFailureKind::ServerRejected
@@ -6440,9 +6640,17 @@ fn typed_http_status_is_needs_auth_but_a_string_is_not() {
         rmcp::transport::streamable_http_client::AuthRequiredError::new("Bearer".into()),
     ));
     assert!(ua.has_typed_http_auth_status());
-    assert_eq!(classify_start_failure(&ua, true, false), McpFailureKind::NeedsAuth);
-    let stringy = typed(StreamableHttpError::UnexpectedServerResponse("HTTP 401 Unauthorized".into()));
+    assert_eq!(
+        classify_start_failure(&ua, true, false),
+        McpFailureKind::NeedsAuth
+    );
+    let stringy = typed(StreamableHttpError::UnexpectedServerResponse(
+        "HTTP 401 Unauthorized".into(),
+    ));
     assert!(!stringy.has_typed_http_auth_status());
     assert!(stringy.is_auth_rejection());
-    assert_eq!(classify_start_failure(&stringy, true, false), McpFailureKind::ServerRejected);
+    assert_eq!(
+        classify_start_failure(&stringy, true, false),
+        McpFailureKind::ServerRejected
+    );
 }

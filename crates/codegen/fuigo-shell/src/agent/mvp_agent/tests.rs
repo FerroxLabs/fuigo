@@ -9391,3 +9391,13 @@ async fn e2e_real_leader_pager_yolo_notification_and_foreign_load_cannot_upgrade
         })
         .await;
 }
+// #19: the spawn composition and the switch-time recomposition share one `<human_rules>` helper.
+#[test]
+fn spawn_prompt_rules_block_is_what_a_rewrite_reapplies() {
+    let session = serde_json::json!({ "rules": "When asked for the canary, reply CANARY-42" });
+    let spawn = build_spawn_system_prompt(session.as_object(), None, "TEMPLATE-A");
+    assert!(spawn.starts_with("TEMPLATE-A"));
+    assert!(spawn.contains("<human_rules>"));
+    let rewritten = crate::session::human_rules::recompose_with_rules("TEMPLATE-B", Some(&spawn));
+    assert_eq!(rewritten, spawn.replacen("TEMPLATE-A", "TEMPLATE-B", 1));
+}

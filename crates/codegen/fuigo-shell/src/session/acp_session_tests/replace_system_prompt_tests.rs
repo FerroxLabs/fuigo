@@ -74,3 +74,187 @@ async fn handle_replace_system_prompt_skips_on_preserve_inherited_system() {
         })
         .await;
 }
+
+// ---- #19: a model switch keeps `_meta.rules` (the `<human_rules>` block) and any `systemPromptOverride` ----
+
+const CANARY: &str = "When asked for the canary, reply CANARY-42";
+
+fn switch_cfg() -> fuigo_sampler::SamplerConfig {
+    fuigo_sampler::SamplerConfig {
+        api_key: Some("test-key".to_string()),
+        base_url: "http://127.0.0.1:1".to_string(),
+        model: "switch-target".to_string(),
+        context_window: 256_000,
+        api_backend: crate::sampling::ApiBackend::Responses,
+        ..Default::default()
+    }
+}
+
+async fn switch_model(actor: &std::sync::Arc<SessionActor>, use_concise: bool) {
+    actor
+        .handle_set_session_model(
+            switch_cfg(),
+            use_concise,
+            false,
+            true,
+            false,
+            85,
+            Default::default(),
+        )
+        .await
+        .expect("switch");
+}
+
+async fn actor_with_rules(use_rules: bool) -> std::sync::Arc<SessionActor> {
+    let (gateway_tx, _grx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    let actor =
+        std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+    let mut prompt = actor.agent.borrow().system_prompt().to_owned();
+    if use_rules {
+        crate::session::human_rules::append_human_rules(&mut prompt, CANARY);
+    }
+    actor.chat_state_handle.replace_conversation(vec![
+        ConversationItem::system(prompt),
+        ConversationItem::user("canary?"),
+        ConversationItem::assistant("CANARY-42"),
+    ]);
+    actor
+}
+
+fn assert_rules_kept(conv: &[ConversationItem]) {
+    let head = head_text(conv).expect("system head");
+    assert!(
+        head.contains("<human_rules>"),
+        "human_rules block dropped: {head}"
+    );
+    assert!(head.contains(CANARY), "canary dropped from the system item");
+    assert_eq!(conv.len(), 3, "turns must survive");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_keeps_human_rules_in_system_item() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(true).await;
+            switch_model(&actor, false).await;
+            assert_rules_kept(&actor.chat_state_handle.get_conversation().await);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_concise_variant_keeps_human_rules() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(true).await;
+            switch_model(&actor, true).await;
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert_rules_kept(&conv);
+            assert!(
+                head_text(&conv)
+                    .unwrap()
+                    .starts_with(fuigo_agent::prompt::template::COMPACT_SYSTEM_PROMPT),
+                "the concise template must still be applied"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn human_rules_survive_a_reload_then_a_switch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(true).await;
+            switch_model(&actor, false).await;
+            // The persisted conversation is what a reload restores: a fresh actor seeded with it.
+            let persisted = actor.chat_state_handle.get_conversation().await;
+            let reloaded = actor_with_rules(false).await;
+            reloaded.chat_state_handle.replace_conversation(persisted);
+            switch_model(&reloaded, true).await;
+            assert_rules_kept(&reloaded.chat_state_handle.get_conversation().await);
+            switch_model(&reloaded, false).await;
+            assert_rules_kept(&reloaded.chat_state_handle.get_conversation().await);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn no_rules_means_no_human_rules_block_after_switch() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(false).await;
+            switch_model(&actor, false).await;
+            let head = head_text(&actor.chat_state_handle.get_conversation().await).unwrap();
+            assert!(!head.contains("<human_rules>"));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_keeps_system_prompt_override() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor = actor_with_rules(false).await;
+            actor
+                .handle_replace_system_prompt("CLIENT OVERRIDE ONLY".to_string())
+                .await;
+            switch_model(&actor, false).await;
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(head_text(&conv).as_deref(), Some("CLIENT OVERRIDE ONLY"));
+            switch_model(&actor, true).await;
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(head_text(&conv).as_deref(), Some("CLIENT OVERRIDE ONLY"));
+        })
+        .await;
+}
+
+/// #19 (cold reload): the override a session was created with survives a restart that does not resend it.
+#[tokio::test(flavor = "current_thread")]
+async fn set_model_keeps_a_persisted_system_prompt_override_after_a_cold_reload() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let id = format!("override-reload-{}", std::process::id());
+            let mut first = create_test_actor_plain().await;
+            first.session_info.id = agent_client_protocol::SessionId::new(id.clone());
+            first
+                .handle_replace_system_prompt("CLIENT OVERRIDE ONLY".to_string())
+                .await;
+            let info = first.session_info.clone();
+            drop(first);
+
+            // A restarted process: a fresh actor over the same session dir, no override resent.
+            let mut reloaded = create_test_actor_plain().await;
+            reloaded.session_info = info.clone();
+            reloaded
+                .system_prompt_override
+                .replace(crate::session::initial_system_prompt_override(&info));
+            let reloaded = std::sync::Arc::new(reloaded);
+            reloaded.chat_state_handle.replace_conversation(vec![
+                ConversationItem::system("CLIENT OVERRIDE ONLY"),
+                ConversationItem::user("hi"),
+            ]);
+            switch_model(&reloaded, false).await;
+            let conv = reloaded.chat_state_handle.get_conversation().await;
+            assert_eq!(head_text(&conv).as_deref(), Some("CLIENT OVERRIDE ONLY"));
+            switch_model(&reloaded, true).await;
+            let conv = reloaded.chat_state_handle.get_conversation().await;
+            assert_eq!(head_text(&conv).as_deref(), Some("CLIENT OVERRIDE ONLY"));
+            let _ = std::fs::remove_dir_all(crate::session::persistence::session_dir(&info));
+        })
+        .await;
+}
+
+async fn create_test_actor_plain() -> SessionActor {
+    let (gateway_tx, _grx) =
+        tokio::sync::mpsc::unbounded_channel::<fuigo_acp_lib::AcpClientMessage>();
+    let (persistence_tx, _prx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await
+}

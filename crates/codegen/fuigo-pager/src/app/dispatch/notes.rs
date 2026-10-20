@@ -905,27 +905,38 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
 
 // TaskResult handlers.
 
+/// Confirmation for a saved note: the file the shell actually wrote (the workspace `MEMORY.md`, not the global one).
+pub(super) fn memory_saved_message(path: &str) -> String {
+    if path.is_empty() {
+        return "Memory saved".to_owned();
+    }
+    format!("Memory saved to {}", crate::util::abbreviate_path(path))
+}
+
+pub(super) fn memory_save_failed_message(error: &str) -> String {
+    format!("Memory note NOT saved: {error}")
+}
+
 pub(super) fn handle_memory_note_saved(
     app: &mut AppView,
     agent_id: AgentId,
-    result: Result<(), String>,
+    result: Result<String, String>,
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         match result {
-            Ok(()) => {
+            Ok(path) => {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Memory saved to {}",
-                        crate::util::display_user_fuigo_path("memory/MEMORY.md")
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        memory_saved_message(&path),
+                    ));
             }
             Err(error) => {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't save memory note: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(
+                        memory_save_failed_message(&error),
+                    ));
             }
         }
     }

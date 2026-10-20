@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // this test drives the raw reqwest send path on purpose to exercise the TLS and egress policy
+
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
 use std::io::{Read, Write};
 

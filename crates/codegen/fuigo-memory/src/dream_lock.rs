@@ -233,6 +233,7 @@ mod tests {
         }
     }
     #[test]
+    #[allow(clippy::disallowed_methods)] // test child is killed and reaped below; no session to enroll it in
     fn cross_process_lock_released_after_exit() {
         let dir = TempDir::new().unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())

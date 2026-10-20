@@ -76,6 +76,7 @@ impl TokenSource for UserAccountTokenSource {
 mod transport_tests {
     use super::*;
 
+    #[allow(clippy::disallowed_methods)] // test client targets a local proxy; no TLS policy applies
     #[tokio::test]
     async fn refresh_policy_is_checked_on_every_attempt() {
         use google_cloud_metadata::transport::{self, Policy};

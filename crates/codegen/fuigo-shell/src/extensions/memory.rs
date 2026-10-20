@@ -115,7 +115,8 @@ async fn handle_save_note(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult
         text: req.text,
         respond_to: tx,
     });
-    rx.await
+    let path = rx
+        .await
         .map_err(|_| crate::acp_error::session_unavailable("session failed to respond"))??;
-    to_raw_response(&serde_json::json!({ "saved": true }))
+    to_raw_response(&serde_json::json!({ "saved": true, "path": path }))
 }

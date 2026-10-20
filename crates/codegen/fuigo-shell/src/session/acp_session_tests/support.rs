@@ -299,14 +299,20 @@ pub(crate) async fn create_test_actor_with_terminal(
         nudges_used_this_session: 0,
     });
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-    let chat_state_handle =
-        spawn_test_chat_state(context_window, Box::new(fuigo_chat_state::NullChatPersistence));
+    let chat_state_handle = spawn_test_chat_state(
+        context_window,
+        Box::new(fuigo_chat_state::NullChatPersistence),
+    );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,
-        transient_retries_prompt_total: std::cell::Cell::new(0), read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::disabled())),
+        transient_retries_prompt_total: std::cell::Cell::new(0),
+        system_prompt_override: Default::default(),
+        read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(
+            crate::session::read_dedupe::PruneMirror::disabled(),
+        )),
         transient_episode_start: std::cell::Cell::new(None),
         status_wake: Default::default(),
         session_info: SessionInfo {
@@ -516,7 +522,10 @@ pub(crate) async fn create_test_actor_with_terminal(
         trace_config_template: std::cell::RefCell::new(None),
     };
     if let Some(reservations) = actor.tool_context.task_completion_reservations.clone() {
-        actor.tool_bridge_handle().update_resource(reservations).await;
+        actor
+            .tool_bridge_handle()
+            .update_resource(reservations)
+            .await;
     }
     if let Some(gate) = actor.tool_context.task_wake_suppressed.clone() {
         actor.tool_bridge_handle().update_resource(gate).await;
@@ -1060,14 +1069,17 @@ pub(crate) fn transient_state(step_attempts: u32, enabled: bool) -> TransientRet
 }
 
 /// The prompt index from which `message` asks persistence to drop rewind snapshots (`rewind_points.jsonl`), if it does.
-pub(crate) fn truncation_of(message: &crate::session::persistence::PersistenceMsg) -> Option<usize> {
+pub(crate) fn truncation_of(
+    message: &crate::session::persistence::PersistenceMsg,
+) -> Option<usize> {
     use crate::session::persistence::PersistenceMsg;
     use crate::session::storage::RewindPointsRewrite;
     match message {
         PersistenceMsg::TruncateRewindPoints { from_index } => Some(*from_index),
-        PersistenceMsg::RewriteRewindPointsAndAck { rewrite: RewindPointsRewrite::TruncateFrom(from_index), .. } => {
-            Some(*from_index)
-        }
+        PersistenceMsg::RewriteRewindPointsAndAck {
+            rewrite: RewindPointsRewrite::TruncateFrom(from_index),
+            ..
+        } => Some(*from_index),
         _ => None,
     }
 }
@@ -1093,10 +1105,14 @@ pub(crate) fn answering_persistence() -> (
                 PersistenceMsg::LockRewindPointsRewrite { gate, respond_to } if gate.start() => {
                     let _ = respond_to.send(Ok(Default::default()));
                 }
-                PersistenceMsg::RewriteRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                PersistenceMsg::RewriteRewindPointsAndAck {
+                    gate, respond_to, ..
+                } if gate.start() => {
                     let _ = respond_to.send(Ok(Default::default()));
                 }
-                PersistenceMsg::EndRewindPointsAndAck { gate, respond_to, .. } if gate.start() => {
+                PersistenceMsg::EndRewindPointsAndAck {
+                    gate, respond_to, ..
+                } if gate.start() => {
                     let _ = respond_to.send(Ok(()));
                 }
                 _ => {}

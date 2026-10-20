@@ -37,12 +37,8 @@ impl Debug for ExternalAccountTokenSource {
 
 impl ExternalAccountTokenSource {
     pub(crate) async fn new(scopes: String, credentials: CredentialsFile) -> Result<ExternalAccountTokenSource, Error> {
-        let auth_header = if credentials.client_id.is_some() && credentials.client_secret.is_some() {
-            let plain_text = format!(
-                "{}:{}",
-                credentials.client_id.as_ref().unwrap(),
-                credentials.client_secret.as_ref().unwrap()
-            );
+        let auth_header = if let (Some(client_id), Some(client_secret)) = (credentials.client_id.as_ref(), credentials.client_secret.as_ref()) {
+            let plain_text = format!("{}:{}", client_id, client_secret);
             Some(format!("Basic: {}", BASE64_STANDARD.encode(plain_text)))
         } else {
             None
@@ -106,7 +102,7 @@ async fn subject_token_source(
         }
         let ts = aws_subject_token_source::AWSSubjectTokenSource::new(audience, source).await?;
         Ok(Box::new(ts))
-    } else if let Some(_) = source.url {
+    } else if source.url.is_some() {
         let ts = url_subject_token_source::UrlSubjectTokenSource::new(source).await?;
         Ok(Box::new(ts))
     } else if let Some(file) = source.file {

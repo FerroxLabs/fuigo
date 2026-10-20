@@ -2521,7 +2521,7 @@ fn npm_entry_is_recognized_by_the_binary_location() {
     std::fs::create_dir_all(path_entry.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&native, &path_entry).unwrap();
 
-    let resolved = std::fs::canonicalize(&path_entry).unwrap();
+    let resolved = dunce::canonicalize(&path_entry).unwrap();
     assert!(super::is_under_node_modules(&resolved));
     assert!(!super::is_under_node_modules(&root.join("home/bin/fuigo")));
 }

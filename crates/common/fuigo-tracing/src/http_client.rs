@@ -93,6 +93,7 @@ mod tests {
         assert_eq!(injected_span_id, span_id);
     }
 
+    #[allow(clippy::disallowed_methods)] // localhost-only mock server test; no TLS policy applies
     #[tokio::test]
     async fn traced_client_injects_client_span_not_parent_on_wire() {
         let _env = OtelTestEnv::install();

@@ -418,9 +418,13 @@ pub(crate) async fn spawn_session_actor(
     // Item 3 (S6.1 + feature off): a stored peer-influenced session resumed with the feature off keeps its guard.
     let mut guard_kept_feature_off = false;
     // S6.6: the integrity hold stored in the history (read here, before the history moves into the chat state).
-    let integrity_hold_from_history = super::peer_admit::peer_integrity_hold_from_history(startup_hints.is_subagent, &conversation);
+    let integrity_hold_from_history = super::peer_admit::peer_integrity_hold_from_history(
+        startup_hints.is_subagent,
+        &conversation,
+    );
     // S7: the carried denials and the sender's denial ring stored in the history (applied where the admission state is built).
-    let peer_stored_state = super::peer_admit::PeerStoredState::from_history(startup_hints.is_subagent, &conversation);
+    let peer_stored_state =
+        super::peer_admit::PeerStoredState::from_history(startup_hints.is_subagent, &conversation);
     let peer_denial_log = tool_context.peer_influence.denials().clone();
     let (permissions, permission_events_rx, deny_read_globs) = if let Some(handle) =
         inherited_permission_handle
@@ -453,7 +457,10 @@ pub(crate) async fn spawn_session_actor(
                 "CLI --allow catch-all ignored: always-approve disabled by managed policy"
             );
             if startup_hints.non_interactive {
-                fuigo_tty_utils::cli_eprintln!("fuigo: --allow catch-all ignored: {}", fuigo_tty_utils::untrusted(&reason));
+                fuigo_tty_utils::cli_eprintln!(
+                    "fuigo: --allow catch-all ignored: {}",
+                    fuigo_tty_utils::untrusted(&reason)
+                );
             }
         }
         if !cli_permission_rules.is_empty() {
@@ -545,11 +552,14 @@ pub(crate) async fn spawn_session_actor(
     };
     let initial_prompt_index = conversation
         .iter()
-        .filter(|item| matches!(item, ConversationItem::User(_)) && !item.is_peer_influence_marker())
+        .filter(|item| {
+            matches!(item, ConversationItem::User(_)) && !item.is_peer_influence_marker()
+        })
         .count();
     let initial_conversation_len = conversation.len();
     let title_session_dir = crate::session::persistence::session_dir(&session_info);
-    let initial_native_presentation = crate::session::tool_presentation::NativePresentation::load(&title_session_dir);
+    let initial_native_presentation =
+        crate::session::tool_presentation::NativePresentation::load(&title_session_dir);
     let title_refresh_watermark =
         crate::session::helpers::session_summary::load_title_refresh_watermark(&title_session_dir);
     let title_refresh_turns_at_spawn =
@@ -903,12 +913,14 @@ pub(crate) async fn spawn_session_actor(
             return crate::session::memory::MemoryStorage::new_flat(
                 tool_context.cwd.as_path(),
                 root,
-            ).with_global_enabled(mc.global_enabled);
+            )
+            .with_global_enabled(mc.global_enabled);
         }
         crate::session::memory::MemoryStorage::new(
             tool_context.cwd.as_path(),
             mc.root_dir_override.as_deref(),
-        ).with_global_enabled(mc.global_enabled)
+        )
+        .with_global_enabled(mc.global_enabled)
     });
     let memory_initial_injection_config = memory_config
         .as_ref()
@@ -1024,7 +1036,8 @@ pub(crate) async fn spawn_session_actor(
                 embedding_dimensions: mc.map_or(1024, |c| c.embedding.dimensions),
                 total_chunks,
                 total_files: storage.list_memory_files().map_or(0, |f| f.len()),
-                has_global_memory_md: storage.global_enabled() && storage.global_memory_file().exists(),
+                has_global_memory_md: storage.global_enabled()
+                    && storage.global_memory_file().exists(),
                 has_workspace_memory_md: storage.workspace_memory_file().exists(),
             },
         );
@@ -1058,8 +1071,15 @@ pub(crate) async fn spawn_session_actor(
         parent_mcp_pool.as_ref().map_or(0, |pool| pool.len()),
         &initial_native_presentation.mode(),
     );
+    // Created before the MCP state so tool progress can ride the same ordered queue as the tool-call announcement.
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let mcp_state = {
         let mut state = McpState::new_with_meta(mcp_servers.clone(), mcp_meta_config_map);
+        state.set_progress_sink(Some(crate::tools::mcp_progress::progress_sink(
+            event_tx.clone(),
+            session_info.id.clone(),
+            gateway_enabled.clone(),
+        )));
         if let Some(ref pool) = parent_mcp_pool {
             state.import_shared_clients(pool);
             tracing::info!(
@@ -1416,7 +1436,6 @@ pub(crate) async fn spawn_session_actor(
     let pending_interactions: crate::session::pending_interaction::PendingInteractions =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let permissions_for_handle = permissions.clone();
-    let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     // The persistence actor's disk-full `retry_state` mirror is the one produced outside this
     // actor; give it the ordered queue so it cannot overtake answer text already generated.
     persistence.install_retry_status_mirror(event_tx.clone());
@@ -1886,7 +1905,11 @@ pub(crate) async fn spawn_session_actor(
                     .and_then(|r| r.turn_transient_retry),
             ),
         transient_retries_prompt_total: std::cell::Cell::new(0),
-        read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(crate::session::read_dedupe::PruneMirror::from(&session_pruning_config))),
+        // A cold reload recovers the override the session was created with, even when the client does not resend it.
+        system_prompt_override: std::cell::RefCell::new(initial_system_prompt_override(&session_info)),
+        read_dedupe: std::cell::RefCell::new(crate::session::read_dedupe::ReadDedupeCache::new(
+            crate::session::read_dedupe::PruneMirror::from(&session_pruning_config),
+        )),
         transient_episode_start: std::cell::Cell::new(None),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
@@ -2064,12 +2087,16 @@ pub(crate) async fn spawn_session_actor(
         pending_classifier_completions: parking_lot::Mutex::new(VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle,
-        tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(crate::session::tool_index::ToolMetadataSnapshot {
-            native_presentation: initial_native_presentation,
-            ..Default::default()
-        })),
+        tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(
+            crate::session::tool_index::ToolMetadataSnapshot {
+                native_presentation: initial_native_presentation,
+                ..Default::default()
+            },
+        )),
         peer_admission: {
-            let admission = crate::session::peer_admission::PeerAdmissionState::for_session(&session_info.id.to_string());
+            let admission = crate::session::peer_admission::PeerAdmissionState::for_session(
+                &session_info.id.to_string(),
+            );
             if guard_kept_feature_off {
                 admission.note_guard_kept_feature_off();
             }
@@ -2239,15 +2266,21 @@ pub(crate) async fn spawn_session_actor(
     }
     session.peer_admission.set_admin_tx(&cmd_tx);
     // A subagent is not offered the peer tools (builder), so it gets no host handle either.
-    if crate::session::peer_message::peer_messaging_enabled() && !session.startup_hints.is_subagent {
+    if crate::session::peer_message::peer_messaging_enabled() && !session.startup_hints.is_subagent
+    {
         session
             .tool_bridge_handle()
             .update_resource(fuigo_peer::host::PeerHostHandle(session.peer_host()))
             .await;
         {
-            session.tool_bridge_handle().update_resource(session.spawn_peer_refuse_pump()).await;
+            session
+                .tool_bridge_handle()
+                .update_resource(session.spawn_peer_refuse_pump())
+                .await;
             // Default inbound (DESIGN line 290): an interactive (TUI) host opts its main sessions in; ACP and headless stay out.
-            if let Some(config) = crate::peer_inbox::driver::default_admission(session.startup_hints.is_subagent) {
+            if let Some(config) =
+                crate::peer_inbox::driver::default_admission(session.startup_hints.is_subagent)
+            {
                 session.peer_admission.configure(config);
             }
         }
@@ -2690,9 +2723,11 @@ pub(crate) async fn spawn_session_on_thread(
     // message instead of waiting forever, and no actor is started.
     // 1.0.30 P30-DIRECT: the actor holds the session's writer lock for its whole life (moved into its thread below), so
     // no other process opens the session while this one can write it. Re-entrant within this process.
-    let writer_lock = crate::session::session_writer_lock::acquire(&crate::session::persistence::session_dir(&session_info))
-        .await
-        .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
+    let writer_lock = crate::session::session_writer_lock::acquire(
+        &crate::session::persistence::session_dir(&session_info),
+    )
+    .await
+    .map_err(crate::session::session_writer_lock::HeldElsewhere::into_acp_error)?;
     #[cfg(test)]
     crate::session::persistence::test_seam::run_before_turn_owner_lock(
         &session_info.id.0,

@@ -13,7 +13,7 @@ body:
     attributes:
       label: Fuigo version
       description: Output of `fuigo --version`.
-      placeholder: "1.0.30"
+      placeholder: "1.0.31"
     validations:
       required: true
   - type: dropdown

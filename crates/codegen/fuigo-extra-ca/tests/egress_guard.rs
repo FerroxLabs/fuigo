@@ -10,6 +10,8 @@
 //! No network is required: a blocked host fails at name resolution, before any
 //! socket is opened.
 
+#![allow(clippy::disallowed_methods)] // this test drives the raw reqwest send path on purpose to exercise the TLS and egress policy
+
 use std::time::Duration;
 
 /// A request to an upstream vendor host must fail, and must fail for OUR

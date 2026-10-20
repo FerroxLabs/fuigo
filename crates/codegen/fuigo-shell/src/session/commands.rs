@@ -937,7 +937,7 @@ pub enum SessionCommand {
     /// turned memory off), so the write is decided here, at write time.
     SaveMemoryNote {
         text: String,
-        respond_to: oneshot::Sender<Result<(), acp::Error>>,
+        respond_to: oneshot::Sender<Result<String, acp::Error>>,
     },
     /// Inject a user message into the active turn without canceling it.
     /// The text is queued in `pending_interjections` and drained at the next safe point in `process_conversation_turn`.

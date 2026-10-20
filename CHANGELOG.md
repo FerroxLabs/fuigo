@@ -4,6 +4,7 @@ Each release has its own notes under `docs/`. Binaries and npm platform packages
 
 | Version | Notes | Highlights |
 | --- | --- | --- |
+| 1.0.31 | [release notes](docs/release-notes-1.0.31.md) | Fix: switching provider with `/model` no longer replays reasoning the new provider rejects; `/remember` reports the real file it wrote or that the note was not saved; session rules survive a model switch; MCP tool progress reaches the client; untrusted-folder tests; project-rules guide corrected; new README, brand and community files. |
 | 1.0.30 | [release notes](docs/release-notes-1.0.30.md) | Shared leader: one owner per session, prompts go only to the owner; project and `npx` copies no longer update the global install; more global-install layouts recognised. |
 | 1.0.29 | [release notes](docs/release-notes-1.0.29.md) | Shared leader: only the window that owns a session can change its permission mode; npm 11 install and upgrade fixes; two fixes for messages between sessions. |
 | 1.0.28 | [release notes](docs/release-notes-1.0.28.md) | Fixes for messages between sessions: refusals are reported, text-only replies are no longer treated as refusals. |
